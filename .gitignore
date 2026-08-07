@@ -1,0 +1,50 @@
+# --- Zig Cache & Build Output ---
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# --- C/C++ & Native Libraries Cache ---
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# --- Operating System Files ---
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux / Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Editors & IDEs ---
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# JetBrains (CLion, IntelliJ, etc.)
+.idea/
+*.iml
+
+# Vim / Emacs
+*.swp
+*.swo
+*~
+\#*\#
+
+# --- Environment & API Keys ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
