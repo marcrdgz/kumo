@@ -24,6 +24,7 @@ export interface PaneOutput {
 export interface SpawnRequest {
   name?: string;
   shell?: string;
+  cwd?: string;
   cols: number;
   rows: number;
 }
@@ -31,6 +32,9 @@ export interface SpawnRequest {
 export interface SplitRequest {
   sessionId: number;
   shell?: string;
+  program?: string;
+  args?: string[];
+  cwd?: string;
   cols: number;
   rows: number;
   direction: string;
@@ -118,8 +122,28 @@ export async function aiCommand(): Promise<string> {
   return invoke<string>("ai_command");
 }
 
+export async function aiCommandLine(): Promise<[string, string[]]> {
+  return invoke<[string, string[]]>("ai_command_line");
+}
+
 export async function editorContext(req: PaneRequest): Promise<EditorContext | null> {
   return invoke<EditorContext | null>("editor_context", { request: req });
+}
+
+export async function paneCwd(req: PaneRequest): Promise<string | null> {
+  return invoke<string | null>("pane_cwd", { request: req });
+}
+
+export async function paneShell(req: PaneRequest): Promise<string> {
+  return invoke<string>("pane_shell", { request: req });
+}
+
+export async function saveLayout(layout: string): Promise<void> {
+  await invoke("save_layout", { layout });
+}
+
+export async function loadLayout(): Promise<string | null> {
+  return invoke<string | null>("load_layout");
 }
 
 export function onPaneOutput(cb: (evt: PaneOutput) => void): Promise<UnlistenFn> {

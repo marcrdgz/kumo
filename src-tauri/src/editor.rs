@@ -121,7 +121,8 @@ fn resolve_cwd(pid: u32, file: String) -> String {
     file
 }
 
-fn process_cwd(pid: u32) -> Option<PathBuf> {
+/// Working directory of a process, via `lsof -a -p <pid> -d cwd -Fn`.
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     let out = Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()

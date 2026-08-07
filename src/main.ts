@@ -1,5 +1,6 @@
 import { Multiplexer } from "./multiplexer";
 import { aiCommand, type SessionInfo } from "./api";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "@xterm/xterm/css/xterm.css";
 
 const statusLeft = document.getElementById("status-left")!;
@@ -94,3 +95,14 @@ window.addEventListener(
 );
 
 void mux.init();
+
+// Persist the layout before the window closes. We don't preventDefault: the
+// onCloseRequested wrapper destroys the window automatically once the handler
+// resolves. `destroy` needs the `core:window:allow-destroy` capability.
+void getCurrentWindow().onCloseRequested(async () => {
+  try {
+    await mux.saveLayout();
+  } catch (err) {
+    console.error("failed to save layout on close", err);
+  }
+});

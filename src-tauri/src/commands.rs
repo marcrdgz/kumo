@@ -30,7 +30,13 @@ pub fn create_session(
 ) -> Result<SessionInfo, String> {
     let shell = request.shell.filter(|s| !s.is_empty()).unwrap_or_else(default_shell);
     state
-        .create_session(request.name.as_deref().unwrap_or(""), &shell, request.cols, request.rows)
+        .create_session(
+            request.name.as_deref().unwrap_or(""),
+            &shell,
+            request.cwd.as_deref(),
+            request.cols,
+            request.rows,
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -41,6 +47,7 @@ pub fn split_pane(
     state: State<AppState>,
     request: SplitRequest,
 ) -> Result<crate::session::PaneInfo, String> {
+    let program = request.program.map(|p| (p, request.args.unwrap_or_default()));
     let shell = request
         .shell
         .filter(|s| !s.is_empty())
@@ -49,6 +56,8 @@ pub fn split_pane(
         .split_pane(
             request.session_id,
             &shell,
+            program,
+            request.cwd.as_deref(),
             request.cols,
             request.rows,
             &request.direction,
@@ -155,6 +164,12 @@ pub fn ai_command() -> String {
     crate::config::ai_command().0
 }
 
+/// Return the full AI CLI command line (program + args) for restoring AI panes.
+#[tauri::command]
+pub fn ai_command_line() -> (String, Vec<String>) {
+    crate::config::ai_command()
+}
+
 /// Detect the editor (vim/nvim) running in a pane and return the file it is
 /// editing. Used to send `@file:line:col` references to the AI pane.
 #[tauri::command]
@@ -172,6 +187,48 @@ pub fn editor_context(
 #[tauri::command]
 pub fn debug_log(msg: String) {
     crate::debug::log(&msg);
+}
+
+/// Return the working directory of a pane's child process (best effort).
+#[tauri::command]
+pub fn pane_cwd(state: State<AppState>, request: PaneRequest) -> Result<Option<String>, String> {
+    let pid = state
+        .pane_child_pid(request.session_id, request.pane_id)
+        .map_err(|e| e.to_string())?;
+    Ok(crate::editor::process_cwd(pid).map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Return the shell/program used to spawn a pane.
+#[tauri::command]
+pub fn pane_shell(state: State<AppState>, request: PaneRequest) -> Result<String, String> {
+    state
+        .pane_shell(request.session_id, request.pane_id)
+        .map_err(|e| e.to_string())
+}
+
+fn layout_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(home).join(".neomux").join("layout.json")
+}
+
+/// Persist the session layout (JSON) to ~/.neomux/layout.json.
+#[tauri::command]
+pub fn save_layout(layout: String) -> Result<(), String> {
+    let path = layout_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, layout).map_err(|e| e.to_string())
+}
+
+/// Load a previously persisted session layout, if any.
+#[tauri::command]
+pub fn load_layout() -> Result<Option<String>, String> {
+    let path = layout_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Start reading output from a pane and emitting it to the frontend as

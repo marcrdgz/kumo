@@ -2,13 +2,18 @@ import {
   attachPane,
   createSession,
   closePane,
+  aiCommandLine,
   editorContext,
   focusPane,
   defaultShell,
+  loadLayout,
   onPaneClosed,
   onPaneOutput,
   openAiPane,
+  paneCwd,
+  paneShell,
   resizePane,
+  saveLayout,
   splitPane,
   writePane,
   type PaneInfo,
@@ -31,6 +36,15 @@ type Node =
       divider: HTMLDivElement;
       ratio: number;
     };
+
+type SplitNode = Extract<Node, { kind: "split" }>;
+
+/** Serializable layout node persisted to disk. */
+type LayoutSpec =
+  | { kind: "leaf"; shell: string; cwd: string | null; ai: boolean }
+  | { kind: "split"; dir: "h" | "v"; ratio: number; a: LayoutSpec; b: LayoutSpec };
+
+type LayoutLeaf = Extract<LayoutSpec, { kind: "leaf" }>;
 
 function mkLeafEl(): { el: HTMLDivElement; host: HTMLDivElement; header: HTMLDivElement } {
   const el = document.createElement("div");
@@ -72,6 +86,7 @@ export class Multiplexer {
   private shell = "/bin/zsh";
   private onSessionChange: (session: SessionInfo) => void;
   private aiPaneIds: Set<number> = new Set();
+  private saveTimer: number | null = null;
 
   constructor(workspace: HTMLDivElement, onSessionChange: (s: SessionInfo) => void) {
     this.workspace = workspace;
@@ -94,9 +109,13 @@ export class Multiplexer {
       this.handlePaneClosed(evt.paneId);
     });
 
-    // Start the PTY at xterm's default size (80x24). The terminal will fit
-    // immediately and relayout() will resize the PTY to match the real cell
-    // dimensions, avoiding prompt-wrap artifacts.
+    const saved = await loadLayout();
+    if (saved) {
+      const restored = await this.restoreLayout(saved);
+      if (restored) return;
+    }
+
+    // Fresh session (no layout or restore failed).
     const session = await createSession({
       name: "main",
       cols: 80,
@@ -123,6 +142,130 @@ export class Multiplexer {
     this.onSessionChange(session);
     window.addEventListener("resize", () => this.relayout());
     this.relayout();
+  }
+
+  // ----- layout persistence -----
+
+  /** Debounced auto-save: persist the layout ~400ms after the last change so
+   *  closing the window never blocks on slow `lsof` IPC round-trips. */
+  private scheduleSave(): void {
+    if (this.saveTimer !== null) return;
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.saveLayout();
+    }, 400);
+  }
+
+  /** Serialize the current layout tree, annotating each leaf with its real
+   *  working directory and whether it is an AI pane. */
+  async saveLayout(): Promise<void> {
+    if (!this.root) return;
+    const spec = await this.serializeNode(this.root);
+    await saveLayout(
+      JSON.stringify({ version: 1, name: "main", root: spec }),
+    );
+  }
+
+  private async serializeNode(n: Node): Promise<LayoutSpec> {
+    if (n.kind === "leaf") {
+      const ai = this.aiPaneIds.has(n.id);
+      const cwd = await paneCwd({ sessionId: this.sessionId, paneId: n.id });
+      const shell = await paneShell({ sessionId: this.sessionId, paneId: n.id });
+      return { kind: "leaf", shell, cwd, ai };
+    }
+    const a = await this.serializeNode(n.a);
+    const b = await this.serializeNode(n.b);
+    return { kind: "split", dir: n.dir, ratio: n.ratio, a, b };
+  }
+
+  /** Restore a previously saved layout. Returns true on success. */
+  private async restoreLayout(raw: string): Promise<boolean> {
+    try {
+      return await this.doRestoreLayout(raw);
+    } catch (err) {
+      console.warn("layout restore failed, starting fresh session", err);
+      return false;
+    }
+  }
+
+  private async doRestoreLayout(raw: string): Promise<boolean> {
+    let parsed: { version?: number; name?: string; root: LayoutSpec };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    const spec = parsed.root;
+    if (!spec) return false;
+
+    const leaves: LayoutLeaf[] = [];
+    const collect = (n: LayoutSpec): void => {
+      if (n.kind === "leaf") leaves.push(n);
+      else {
+        collect(n.a);
+        collect(n.b);
+      }
+    };
+    collect(spec);
+    if (leaves.length === 0) return false;
+
+    // Spawn the first pane with the root leaf's shell/cwd; every other pane
+    // is created as a split (the backend ignores direction; the frontend owns
+    // geometry, so order doesn't matter for layout).
+    const session = await createSession({
+      name: parsed.name || "main",
+      shell: leaves[0].shell || this.shell,
+      cwd: leaves[0].cwd ?? undefined,
+      cols: 80,
+      rows: 24,
+    });
+    this.sessionId = session.sessionId;
+    const infos: PaneInfo[] = [session.panes[0]];
+
+    const [aiProg, aiArgs] = await aiCommandLine();
+    for (let i = 1; i < leaves.length; i++) {
+      const leaf = leaves[i];
+      const info = await splitPane({
+        sessionId: this.sessionId,
+        cols: 80,
+        rows: 24,
+        direction: "v",
+        shell: leaf.ai ? undefined : leaf.shell || this.shell,
+        program: leaf.ai ? aiProg : undefined,
+        args: leaf.ai ? aiArgs : undefined,
+        cwd: leaf.cwd ?? undefined,
+      });
+      infos.push(info);
+      if (leaf.ai) this.aiPaneIds.add(info.paneId);
+      await attachPane({ sessionId: this.sessionId, paneId: info.paneId });
+    }
+
+    // Rebuild the DOM tree from the spec, consuming PaneInfos in leaf order.
+    this.root = null;
+    let idx = 0;
+    const build = (n: LayoutSpec): Node => {
+      if (n.kind === "leaf") {
+        return this.addLeaf(infos[idx++]);
+      }
+      const a = build(n.a);
+      const b = build(n.b);
+      const split = this.makeSplit(n.dir, a, b);
+      split.ratio = n.ratio;
+      this.applyRatio(split);
+      return split;
+    };
+    const root = build(spec);
+    this.root = root;
+    if (!root.el.isConnected) {
+      this.workspace.append(root.el);
+    }
+
+    await attachPane({ sessionId: this.sessionId, paneId: session.panes[0].paneId });
+    await this.focusLeaf(session.activePane);
+    this.onSessionChange(session);
+    window.addEventListener("resize", () => this.relayout());
+    this.relayout();
+    return true;
   }
 
   // ----- tree helpers -----
@@ -179,9 +322,8 @@ export class Multiplexer {
     this.workspace.append(el);
     return leaf;
   }
-
   /** Build a split node. The given `a` and `b` node elements are moved into slots. */
-  private makeSplit(dir: "h" | "v", a: Node, b: Node): Node {
+  private makeSplit(dir: "h" | "v", a: Node, b: Node): SplitNode {
     const el = document.createElement("div");
     el.className = dir === "h" ? "split-h" : "split-v";
 
@@ -232,6 +374,7 @@ export class Multiplexer {
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
         this.relayout();
+        this.scheduleSave();
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
@@ -271,11 +414,13 @@ export class Multiplexer {
     const active = this.focusedLeaf();
     if (!active) return;
 
+    const cwd = (await paneCwd({ sessionId: this.sessionId, paneId: active.id })) ?? undefined;
     const info = await splitPane({
       sessionId: this.sessionId,
       cols: active.term.cols(),
       rows: active.term.rows(),
       direction: dir,
+      cwd,
     });
 
     const newLeaf = this.addLeaf(info);
@@ -291,6 +436,7 @@ export class Multiplexer {
     await attachPane({ sessionId: this.sessionId, paneId: info.paneId });
     await this.focusLeaf(info.paneId);
     this.relayout();
+    this.scheduleSave();
   }
 
   /** Open an AI CLI pane (opencode/claude/...) splitting the active pane. */
@@ -316,6 +462,7 @@ export class Multiplexer {
     this.aiPaneIds.add(info.paneId);
     await this.focusLeaf(info.paneId);
     this.relayout();
+    this.scheduleSave();
   }
 
   /**
@@ -408,6 +555,7 @@ export class Multiplexer {
       this.root = null;
       this.onSessionChange({ sessionId: this.sessionId, name: "", panes: [], activePane: 0 });
     }
+    this.scheduleSave();
   }
 
   /** Toggle zoom of the focused pane (fills the whole workspace). */

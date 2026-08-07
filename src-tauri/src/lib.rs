@@ -26,7 +26,12 @@ pub fn run() {
             commands::default_shell_command,
             commands::open_ai_pane,
             commands::ai_command,
+            commands::ai_command_line,
             commands::editor_context,
+            commands::pane_cwd,
+            commands::pane_shell,
+            commands::save_layout,
+            commands::load_layout,
             commands::debug_log,
         ])
         .setup(|app| {

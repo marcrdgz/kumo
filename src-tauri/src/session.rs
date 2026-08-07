@@ -58,14 +58,14 @@ impl AppState {
         current
     }
 
-    pub fn create_session(&self, name: &str, shell: &str, cols: u16, rows: u16) -> anyhow::Result<SessionInfo> {
+    pub fn create_session(&self, name: &str, shell: &str, cwd: Option<&str>, cols: u16, rows: u16) -> anyhow::Result<SessionInfo> {
         let id = self.alloc_session_id();
         let pane_id = Pty::next_pane_id();
 
         let mut pty = Pty::spawn(&PtySpec {
             shell: shell.to_string(),
             program: None,
-            cwd: None,
+            cwd: cwd.map(std::path::PathBuf::from),
             cols,
             rows,
         })?;
@@ -113,6 +113,8 @@ impl AppState {
         &self,
         session_id: u64,
         shell: &str,
+        program: Option<(String, Vec<String>)>,
+        cwd: Option<&str>,
         cols: u16,
         rows: u16,
         direction: &str,
@@ -126,8 +128,8 @@ impl AppState {
         let pane_id = Pty::next_pane_id();
         let mut pty = Pty::spawn(&PtySpec {
             shell: shell.to_string(),
-            program: None,
-            cwd: None,
+            program,
+            cwd: cwd.map(std::path::PathBuf::from),
             cols,
             rows,
         })?;
@@ -300,6 +302,19 @@ impl AppState {
             .ok_or_else(|| anyhow::anyhow!("no child process"))
     }
 
+    /// The shell program used to spawn a pane, or the AI program for AI panes.
+    pub fn pane_shell(&self, session_id: u64, pane_id: u64) -> anyhow::Result<String> {
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+        let pane = session
+            .panes
+            .get(&pane_id)
+            .ok_or_else(|| anyhow::anyhow!("pane not found"))?;
+        Ok(pane.pty.shell.clone())
+    }
+
     /// Detach a pane's read loop onto a background thread. The callback fires
     /// for each chunk of output with the pane id.
     pub fn detach_read_loop(&self, session_id: u64, pane_id: u64, cb: impl Fn(u64, Vec<u8>) + Send + 'static) -> anyhow::Result<()> {
@@ -342,6 +357,7 @@ impl AppState {
 pub struct SpawnRequest {
     pub name: Option<String>,
     pub shell: Option<String>,
+    pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -351,6 +367,9 @@ pub struct SpawnRequest {
 pub struct SplitRequest {
     pub session_id: u64,
     pub shell: Option<String>,
+    pub program: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
     pub direction: String,
@@ -391,7 +410,7 @@ mod tests {
     fn spawn_ai_pane_runs_program() {
         let state = AppState::new();
         state
-            .create_session("test", "/bin/sh", 80, 24)
+            .create_session("test", "/bin/sh", None, 80, 24)
             .expect("create session");
         let info = state
             .spawn_ai_pane(
