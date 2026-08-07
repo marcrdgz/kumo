@@ -4,25 +4,26 @@ import { FitAddon } from "@xterm/addon-fit";
 import { decodeBase64, writePane } from "./api";
 
 const BASE_THEME = {
-  background: "#1a1b26",
-  foreground: "#c0caf5",
-  cursor: "#7aa2f7",
-  selectionBackground: "#3b4261",
-  black: "#1d202f",
-  brightBlack: "#565f89",
-  red: "#f7768e",
-  brightRed: "#ff7a93",
-  green: "#9ece6a",
-  brightGreen: "#b9f27c",
-  yellow: "#e0af68",
-  brightYellow: "#ff9e64",
-  blue: "#7aa2f7",
-  brightBlue: "#7da6ff",
-  magenta: "#bb9af7",
-  brightMagenta: "#bb9af7",
-  cyan: "#7dcfff",
-  brightCyan: "#89ddff",
-  white: "#c0caf5",
+  background: "#1e1e2e",
+  foreground: "#cdd6f4",
+  cursor: "#f5e0dc",
+  cursorAccent: "#1e1e2e",
+  selectionBackground: "#585b70",
+  black: "#45475a",
+  brightBlack: "#585b70",
+  red: "#f38ba8",
+  brightRed: "#f38ba8",
+  green: "#a6e3a1",
+  brightGreen: "#a6e3a1",
+  yellow: "#f9e2af",
+  brightYellow: "#f9e2af",
+  blue: "#89b4fa",
+  brightBlue: "#89b4fa",
+  magenta: "#cba6f7",
+  brightMagenta: "#cba6f7",
+  cyan: "#94e2d5",
+  brightCyan: "#94e2d5",
+  white: "#cdd6f4",
   brightWhite: "#ffffff",
 };
 
@@ -90,6 +91,25 @@ export class PaneTerminal {
 
   rows(): number {
     return this.term.rows;
+  }
+
+  /** Extract recent scrollback text (walking up from the cursor). */
+  contextText(maxChars = 4000): string {
+    const buffer = this.term.buffer.active;
+    const endY = buffer.baseY + buffer.cursorY;
+    const lines: string[] = [];
+    let total = 0;
+    for (let y = endY; y >= 0 && total < maxChars; y--) {
+      const line = buffer.getLine(y);
+      if (!line) break;
+      const text = line.translateToString(true);
+      total += text.length + 1;
+      lines.push(text);
+    }
+    lines.reverse();
+    let out = lines.join("\n");
+    if (out.length > maxChars) out = out.slice(out.length - maxChars);
+    return out;
   }
 
   focus(): void {

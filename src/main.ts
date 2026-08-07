@@ -36,8 +36,8 @@ function hint(msg: string): void {
 window.addEventListener(
   "keydown",
   async (e) => {
-    // Ctrl+A arms the leader.
-    if (e.ctrlKey && e.key.toLowerCase() === "a" && !leaderArmed) {
+    // Ctrl+Space arms the leader.
+    if (e.ctrlKey && e.code === "Space" && !leaderArmed) {
       e.preventDefault();
       e.stopPropagation();
       leaderArmed = true;
@@ -74,6 +74,12 @@ window.addEventListener(
           e.preventDefault();
           e.stopPropagation();
           await mux.openAiPane();
+          return;
+        case "x":
+          e.preventDefault();
+          e.stopPropagation();
+          const sent = await mux.sendContextToAi();
+          hint(sent > 0 ? `sent ${sent} chars to AI pane` : "no AI pane open");
           return;
         case "escape":
           e.preventDefault();

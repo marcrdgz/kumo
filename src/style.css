@@ -1,11 +1,11 @@
 :root {
-  --bg: #1a1b26;
-  --bg-light: #24283b;
-  --fg: #c0caf5;
-  --accent: #7aa2f7;
-  --green: #9ece6a;
-  --red: #f7768e;
-  --border: #16161e;
+  --bg: #1e1e2e;
+  --bg-light: #313244;
+  --fg: #cdd6f4;
+  --accent: #b4befe;
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --border: #181825;
 }
 
 * {
@@ -57,6 +57,8 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  padding: 4px;
+  gap: 6px;
 }
 
 .pane {
@@ -67,17 +69,22 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .pane.focused {
+  border-color: var(--accent);
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 
 .pane .pane-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
+  gap: 8px;
   padding: 0 10px;
   height: 24px;
   font-size: 11px;
@@ -95,6 +102,51 @@ body {
   font-weight: bold;
 }
 
+.pane .pane-close {
+  display: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--red);
+  font-size: 13px;
+  line-height: 16px;
+  text-align: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.pane .pane-header:hover .pane-close {
+  display: block;
+}
+
+.pane .pane-close:hover {
+  background: var(--red);
+  color: #1a1b26;
+}
+
+.pane .pane-title {
+  transition:
+    transform 120ms ease-out,
+    font-weight 120ms ease-out;
+}
+
+.pane .pane-header:hover .pane-title {
+  transform: translateX(4px);
+  font-weight: 600;
+}
+
+.pane.focused .pane-header .pane-title {
+  transform: none;
+  font-weight: bold;
+}
+
+.pane-idx {
+  margin-left: auto;
+}
+
 .pane .terminal-host {
   flex: 1;
   min-height: 0;
@@ -109,6 +161,8 @@ body {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  padding: 4px;
+  gap: 6px;
 }
 
 .split-v {
@@ -117,20 +171,22 @@ body {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  padding: 4px;
+  gap: 6px;
 }
 
 .split-h > .divider {
   cursor: col-resize;
-  width: 4px;
-  margin: 0 -2px;
+  width: 6px;
+  margin: 0 -6px;
   z-index: 10;
   background: transparent;
 }
 
 .split-v > .divider {
   cursor: row-resize;
-  height: 4px;
-  margin: -2px 0;
+  height: 6px;
+  margin: -6px 0;
   z-index: 10;
   background: transparent;
 }

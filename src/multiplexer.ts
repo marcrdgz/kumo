@@ -37,11 +37,18 @@ function mkLeafEl(): { el: HTMLDivElement; host: HTMLDivElement; header: HTMLDiv
 
   const header = document.createElement("div");
   header.className = "pane-header";
+
+  const close = document.createElement("button");
+  close.className = "pane-close";
+  close.type = "button";
+  close.title = "close pane";
+  close.textContent = "×";
+
   const title = document.createElement("span");
   title.className = "pane-title";
   const idx = document.createElement("span");
   idx.className = "pane-idx";
-  header.append(title, idx);
+  header.append(close, title, idx);
 
   const host = document.createElement("div");
   host.className = "terminal-host";
@@ -63,6 +70,7 @@ export class Multiplexer {
   private sessionId = 0;
   private shell = "/bin/zsh";
   private onSessionChange: (session: SessionInfo) => void;
+  private aiPaneIds: Set<number> = new Set();
 
   constructor(workspace: HTMLDivElement, onSessionChange: (s: SessionInfo) => void) {
     this.workspace = workspace;
@@ -159,6 +167,12 @@ export class Multiplexer {
     const term = new PaneTerminal(this.sessionId, info.paneId, host);
     header.querySelector(".pane-title")!.textContent = `${info.shell}`;
     header.querySelector(".pane-idx")!.textContent = `#${info.paneId}`;
+    header
+      .querySelector(".pane-close")!
+      .addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.closePaneById(info.paneId);
+      });
     el.addEventListener("mousedown", () => void this.focusLeaf(info.paneId));
     const leaf: Leaf = { kind: "leaf", id: info.paneId, term, el };
     this.workspace.append(el);
@@ -298,8 +312,37 @@ export class Multiplexer {
     }
 
     await attachPane({ sessionId: this.sessionId, paneId: info.paneId });
+    this.aiPaneIds.add(info.paneId);
     await this.focusLeaf(info.paneId);
     this.relayout();
+  }
+
+  /**
+   * Send the focused pane's recent output to the AI pane as a paste.
+   * Returns the number of characters sent, or 0 if there is no AI pane.
+   */
+  async sendContextToAi(): Promise<number> {
+    const active = this.focusedLeaf();
+    if (!active) return 0;
+
+    let aiPaneId: number | null = null;
+    for (const id of this.aiPaneIds) {
+      if (this.findLeaf(id)) {
+        aiPaneId = id;
+        break;
+      }
+    }
+    if (aiPaneId === null) return 0;
+
+    const context = active.term.contextText(4000);
+    // Bracketed paste so the AI TUI treats it as a single paste.
+    const payload = `\x1b[200~[context from pane #${active.id}]\n\n${context}\x1b[201~`;
+    await writePane(
+      { sessionId: this.sessionId, paneId: aiPaneId },
+      payload,
+    );
+    await this.focusLeaf(aiPaneId);
+    return context.length;
   }
 
   async focusLeaf(paneId: number): Promise<void> {
@@ -323,8 +366,12 @@ export class Multiplexer {
   async closeActive(): Promise<void> {
     const active = this.focusedLeaf();
     if (!active) return;
-    const removed = await closePane({ sessionId: this.sessionId, paneId: active.id });
-    this.handlePaneClosed(active.id);
+    await this.closePaneById(active.id);
+  }
+
+  async closePaneById(paneId: number): Promise<void> {
+    const removed = await closePane({ sessionId: this.sessionId, paneId });
+    this.handlePaneClosed(paneId);
     if (removed) {
       this.root = null;
       this.onSessionChange({ sessionId: this.sessionId, name: "", panes: [], activePane: 0 });
@@ -361,14 +408,19 @@ export class Multiplexer {
     const leaf = this.findLeaf(paneId);
     if (leaf) {
       leaf.term.dispose();
-      leaf.el.remove();
     }
+    this.aiPaneIds.delete(paneId);
     // Clear any zoom state from the whole workspace so promoted siblings
     // don't stay hidden/zoomed after a pane is removed.
     this.workspace.querySelectorAll(".pane").forEach((el) => {
       el.classList.remove("zoomed", "hidden");
     });
-    this.collapseTree();
+    // Remove the leaf from the tree (collapsing splits) and the DOM.
+    this.root = this.removeLeafFromTree(this.root, paneId);
+    // The surviving node was inside the removed split's slot; re-attach it.
+    if (this.root && !this.root.el.isConnected) {
+      this.workspace.append(this.root.el);
+    }
     const leaves: Node[] = [];
     this.collectLeaves(this.root, leaves);
     for (const l of leaves) {
@@ -380,27 +432,32 @@ export class Multiplexer {
     this.relayout();
   }
 
-  /** Remove splits that lost a child (promote the surviving child). */
-  private collapseTree(): void {
-    const collapse = (n: Node): Node | null => {
-      if (n.kind === "leaf") return n;
-      const a = collapse(n.a);
-      const b = collapse(n.b);
-      if (a && !b) {
+  /**
+   * Remove a leaf from the tree, collapsing any split that loses a child.
+   * Removed split/leaf elements are detached from the DOM; the surviving
+   * child is promoted to the parent's position.
+   */
+  private removeLeafFromTree(n: Node | null, paneId: number): Node | null {
+    if (!n) return null;
+    if (n.kind === "leaf") {
+      if (n.id === paneId) {
         n.el.remove();
-        return a;
+        return null;
       }
-      if (!a && b) {
-        n.el.remove();
-        return b;
-      }
-      if (!a || !b) return null;
+      return n;
+    }
+    const a = this.removeLeafFromTree(n.a, paneId);
+    const b = this.removeLeafFromTree(n.b, paneId);
+    if (a && b) {
       n.a = a;
       n.b = b;
       this.rebuildSplitEl(n);
       return n;
-    };
-    this.root = this.root ? collapse(this.root) : null;
+    }
+    n.el.remove();
+    if (a) return a;
+    if (b) return b;
+    return null;
   }
 
   relayout(): void {
