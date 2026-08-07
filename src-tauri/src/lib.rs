@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod debug;
+mod editor;
 mod pty;
 mod session;
 
@@ -25,6 +26,7 @@ pub fn run() {
             commands::default_shell_command,
             commands::open_ai_pane,
             commands::ai_command,
+            commands::editor_context,
             commands::debug_log,
         ])
         .setup(|app| {

@@ -2,6 +2,7 @@ import {
   attachPane,
   createSession,
   closePane,
+  editorContext,
   focusPane,
   defaultShell,
   onPaneClosed,
@@ -318,7 +319,10 @@ export class Multiplexer {
   }
 
   /**
-   * Send the focused pane's recent output to the AI pane as a paste.
+   * Send context from the focused pane to the AI pane. Prefers, in order:
+   * the xterm mouse selection, then vim's visual-mode selection, then a
+   * `@file:line:col` reference when a fullscreen editor is active, and falls
+   * back to a scrollback paste.
    * Returns the number of characters sent, or 0 if there is no AI pane.
    */
   async sendContextToAi(): Promise<number> {
@@ -334,15 +338,43 @@ export class Multiplexer {
     }
     if (aiPaneId === null) return 0;
 
-    const context = active.term.contextText(4000);
-    // Bracketed paste so the AI TUI treats it as a single paste.
-    const payload = `\x1b[200~[context from pane #${active.id}]\n\n${context}\x1b[201~`;
+    let payload: string;
+    const mouse = active.term.mouseSelection();
+    if (mouse) {
+      payload = `\x1b[200~[selection from pane #${active.id}]\n\n${mouse}\x1b[201~`;
+    } else if (active.term.inAlternateScreen()) {
+      const visual = active.term.visualSelection();
+      if (visual) {
+        payload = `\x1b[200~[visual selection from pane #${active.id}]\n\n${visual}\x1b[201~`;
+      } else {
+        const ctx = await editorContext({
+          sessionId: this.sessionId,
+          paneId: active.id,
+        });
+        if (ctx?.file) {
+          const pos = active.term.statusPosition();
+          const ref = pos ? `${ctx.file}:${pos.line}:${pos.col}` : ctx.file;
+          payload = `\x1b[200~[editing ${ctx.editor}: ${ref}]\n\n@${ref}\x1b[201~`;
+        } else {
+          payload = this.scrollbackPayload(active);
+        }
+      }
+    } else {
+      payload = this.scrollbackPayload(active);
+    }
+
     await writePane(
       { sessionId: this.sessionId, paneId: aiPaneId },
       payload,
     );
     await this.focusLeaf(aiPaneId);
-    return context.length;
+    return payload.length;
+  }
+
+  private scrollbackPayload(active: Leaf): string {
+    const context = active.term.contextText(4000);
+    // Bracketed paste so the AI TUI treats it as a single paste.
+    return `\x1b[200~[context from pane #${active.id}]\n\n${context}\x1b[201~`;
   }
 
   async focusLeaf(paneId: number): Promise<void> {

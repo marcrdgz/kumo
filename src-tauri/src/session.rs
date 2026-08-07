@@ -283,6 +283,23 @@ impl AppState {
         Ok(())
     }
 
+    /// Return the PID of the child process running inside a pane (the shell,
+    /// or the AI CLI for AI panes).
+    pub fn pane_child_pid(&self, session_id: u64, pane_id: u64) -> anyhow::Result<u32> {
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+        let pane = session
+            .panes
+            .get(&pane_id)
+            .ok_or_else(|| anyhow::anyhow!("pane not found"))?;
+        pane.pty
+            .child
+            .process_id()
+            .ok_or_else(|| anyhow::anyhow!("no child process"))
+    }
+
     /// Detach a pane's read loop onto a background thread. The callback fires
     /// for each chunk of output with the pane id.
     pub fn detach_read_loop(&self, session_id: u64, pane_id: u64, cb: impl Fn(u64, Vec<u8>) + Send + 'static) -> anyhow::Result<()> {

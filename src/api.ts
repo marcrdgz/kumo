@@ -54,6 +54,11 @@ export interface AiPaneRequest {
   rows: number;
 }
 
+export interface EditorContext {
+  editor: string;
+  file: string | null;
+}
+
 function decodeBase64(b64: string): Uint8Array {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -111,6 +116,10 @@ export async function openAiPane(req: AiPaneRequest): Promise<PaneInfo> {
 
 export async function aiCommand(): Promise<string> {
   return invoke<string>("ai_command");
+}
+
+export async function editorContext(req: PaneRequest): Promise<EditorContext | null> {
+  return invoke<EditorContext | null>("editor_context", { request: req });
 }
 
 export function onPaneOutput(cb: (evt: PaneOutput) => void): Promise<UnlistenFn> {

@@ -155,6 +155,19 @@ pub fn ai_command() -> String {
     crate::config::ai_command().0
 }
 
+/// Detect the editor (vim/nvim) running in a pane and return the file it is
+/// editing. Used to send `@file:line:col` references to the AI pane.
+#[tauri::command]
+pub fn editor_context(
+    state: State<AppState>,
+    request: PaneRequest,
+) -> Result<Option<crate::editor::EditorContext>, String> {
+    let pid = state
+        .pane_child_pid(request.session_id, request.pane_id)
+        .map_err(|e| e.to_string())?;
+    Ok(crate::editor::editor_context(pid))
+}
+
 /// Append a diagnostics line to /tmp/neomux_debug.log (dev aid).
 #[tauri::command]
 pub fn debug_log(msg: String) {
