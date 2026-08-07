@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
         .name = "neomux",
         .root_module = exe_mod,
     });
+    exe.linkLibC();
+    exe.linkFramework("AppKit");
+    exe.linkFramework("Cocoa");
+    exe.linkFramework("QuartzCore");
+    exe.linkFramework("Metal");
 
     b.installArtifact(exe);
 
@@ -26,13 +31,18 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the Neomux terminal multiplexer");
+    const run_step = b.step("run", "Run the Neomux terminal multiplexer GUI");
     run_step.dependOn(&run_cmd.step);
 
     // `zig build test`
     const exe_tests = b.addTest(.{
         .root_module = exe_mod,
     });
+    exe_tests.linkLibC();
+    exe_tests.linkFramework("AppKit");
+    exe_tests.linkFramework("Cocoa");
+    exe_tests.linkFramework("QuartzCore");
+    exe_tests.linkFramework("Metal");
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -43,6 +53,12 @@ pub fn build(b: *std.Build) void {
         .name = "neomux-check",
         .root_module = exe_mod,
     });
+    check_exe.linkLibC();
+    check_exe.linkFramework("AppKit");
+    check_exe.linkFramework("Cocoa");
+    check_exe.linkFramework("QuartzCore");
+    check_exe.linkFramework("Metal");
+
     const check_step = b.step("check", "Check if code compiles without emitting binary");
     check_step.dependOn(&check_exe.step);
 }
