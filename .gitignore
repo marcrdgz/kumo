@@ -1,7 +1,11 @@
-# --- Zig Cache & Build Output ---
-.zig-cache/
-zig-out/
-zig-pkg/
+# --- Rust / Tauri ---
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# --- Node / Frontend ---
+node_modules/
+dist/
+*.tsbuildinfo
 
 # --- C/C++ & Native Libraries Cache ---
 *.o

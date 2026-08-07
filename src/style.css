@@ -1,0 +1,163 @@
+:root {
+  --bg: #1a1b26;
+  --bg-light: #24283b;
+  --fg: #c0caf5;
+  --accent: #7aa2f7;
+  --green: #9ece6a;
+  --red: #f7768e;
+  --border: #16161e;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 10px;
+  height: 26px;
+  background: var(--bg-light);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+#statusbar .mode {
+  color: var(--green);
+  font-weight: bold;
+  margin-right: 12px;
+}
+
+#statusbar .leader-hint {
+  color: var(--accent);
+}
+
+#workspace {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pane {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.pane.focused {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.pane .pane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 10px;
+  height: 24px;
+  font-size: 11px;
+  background: var(--bg-light);
+  color: var(--fg);
+  opacity: 0.8;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.pane.focused .pane-header {
+  opacity: 1;
+  background: var(--accent);
+  color: #1a1b26;
+  font-weight: bold;
+}
+
+.pane .terminal-host {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.split-h {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.split-v {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.split-h > .divider {
+  cursor: col-resize;
+  width: 4px;
+  margin: 0 -2px;
+  z-index: 10;
+  background: transparent;
+}
+
+.split-v > .divider {
+  cursor: row-resize;
+  height: 4px;
+  margin: -2px 0;
+  z-index: 10;
+  background: transparent;
+}
+
+.divider:hover,
+.divider.dragging {
+  background: var(--accent);
+}
+
+.pane-slot {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.pane-slot.hidden {
+  display: none !important;
+}
+
+.pane.zoomed {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg);
+}
+
+.pane.hidden {
+  display: none !important;
+}

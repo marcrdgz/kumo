@@ -1,18 +1,20 @@
-.PHONY: all run test check clean
+.PHONY: all dev build test run clean
 
 all: build
 
-build:
-	zig build
+dev:
+	npm run tauri dev
 
-run:
-	zig build run
+build:
+	npm run build
+	cd src-tauri && cargo build
 
 test:
-	zig build test
+	cd src-tauri && cargo test
 
-check:
-	zig build check
+run:
+	npm run tauri dev
 
 clean:
-	rm -rf .zig-cache zig-out
+	rm -rf dist
+	cd src-tauri && cargo clean
