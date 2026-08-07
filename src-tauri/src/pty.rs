@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -20,8 +21,14 @@ pub struct Pty {
     pub shell: String,
 }
 
+/// Program to execute inside the PTY. When `program` is set it takes
+/// precedence over `shell` (used for AI CLI panes). If neither is set,
+/// the shell is used.
+#[derive(Default)]
 pub struct PtySpec {
     pub shell: String,
+    pub program: Option<(String, Vec<String>)>,
+    pub cwd: Option<PathBuf>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -31,7 +38,7 @@ impl Pty {
         next_id()
     }
 
-    /// Spawn a new PTY running `shell`.
+    /// Spawn a new PTY running `shell` (or `program` when set).
     pub fn spawn(spec: &PtySpec) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let size = PtySize {
@@ -42,8 +49,20 @@ impl Pty {
         };
 
         let pair = pty_system.openpty(size)?;
-        let mut cmd = CommandBuilder::new(&spec.shell);
-        cmd.cwd(std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+        let mut cmd = match &spec.program {
+            Some((program, args)) => {
+                let mut c = CommandBuilder::new(program);
+                for a in args {
+                    c.arg(a);
+                }
+                c
+            }
+            None => CommandBuilder::new(&spec.shell),
+        };
+        let cwd = spec.cwd.clone().unwrap_or_else(|| {
+            std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+        });
+        cmd.cwd(cwd);
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -57,7 +76,7 @@ impl Pty {
             child,
             cols: spec.cols,
             rows: spec.rows,
-            shell: spec.shell.clone(),
+            shell: spec.program.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| spec.shell.clone()),
         })
     }
 

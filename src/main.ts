@@ -1,10 +1,15 @@
 import { Multiplexer } from "./multiplexer";
-import type { SessionInfo } from "./api";
+import { aiCommand, type SessionInfo } from "./api";
 import "@xterm/xterm/css/xterm.css";
 
 const statusLeft = document.getElementById("status-left")!;
 const statusRight = document.getElementById("status-right")!;
 const workspace = document.getElementById("workspace") as HTMLDivElement;
+
+let aiCmd = "ai";
+void aiCommand().then((c) => {
+  aiCmd = c;
+});
 
 const mux = new Multiplexer(workspace, (s: SessionInfo) => {
   if (s.panes.length === 0) {
@@ -27,46 +32,59 @@ function hint(msg: string): void {
   statusRight.append(span);
 }
 
-window.addEventListener("keydown", async (e) => {
-  // Ctrl+A arms the leader.
-  if (e.ctrlKey && e.key.toLowerCase() === "a" && !leaderArmed) {
-    e.preventDefault();
-    leaderArmed = true;
-    hint("LEADER: h=v-split · v=h-split · z=zoom · q=close · c=claude · Esc=exit");
-    return;
-  }
-
-  if (leaderArmed) {
-    leaderArmed = false;
-    hint("");
-    const key = e.key.toLowerCase();
-    switch (key) {
-      case "h":
-        e.preventDefault();
-        await mux.splitActive("v");
-        return;
-      case "v":
-        e.preventDefault();
-        await mux.splitActive("h");
-        return;
-      case "z":
-        e.preventDefault();
-        await mux.toggleZoom();
-        return;
-      case "q":
-        e.preventDefault();
-        await mux.closeActive();
-        return;
-      case "c":
-        e.preventDefault();
-        await mux.write("\r\n[neomux] Claude AI pane coming in next phase\r\n");
-        return;
-      case "escape":
-        return;
-      default:
-        return;
+// Capture phase so the leader key is seen before xterm.js consumes it.
+window.addEventListener(
+  "keydown",
+  async (e) => {
+    // Ctrl+A arms the leader.
+    if (e.ctrlKey && e.key.toLowerCase() === "a" && !leaderArmed) {
+      e.preventDefault();
+      e.stopPropagation();
+      leaderArmed = true;
+      hint(`LEADER: h=v-split · v=h-split · z=zoom · q=close · c=${aiCmd} · Esc=exit`);
+      return;
     }
-  }
-});
+
+    if (leaderArmed) {
+      leaderArmed = false;
+      hint("");
+      const key = e.key.toLowerCase();
+      switch (key) {
+        case "h":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.splitActive("v");
+          return;
+        case "v":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.splitActive("h");
+          return;
+        case "z":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.toggleZoom();
+          return;
+        case "q":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.closeActive();
+          return;
+        case "c":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.openAiPane();
+          return;
+        case "escape":
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        default:
+          return;
+      }
+    }
+  },
+  true,
+);
 
 void mux.init();

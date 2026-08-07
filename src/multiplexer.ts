@@ -6,6 +6,7 @@ import {
   defaultShell,
   onPaneClosed,
   onPaneOutput,
+  openAiPane,
   resizePane,
   splitPane,
   writePane,
@@ -268,6 +269,30 @@ export class Multiplexer {
     if (!this.replaceInTree(this.root!, active, split)) {
       // Active was the root itself: makeSplit already re-parented it into
       // split.aSlot, so the split element becomes the new workspace root.
+      this.workspace.append(split.el);
+      this.root = split;
+    }
+
+    await attachPane({ sessionId: this.sessionId, paneId: info.paneId });
+    await this.focusLeaf(info.paneId);
+    this.relayout();
+  }
+
+  /** Open an AI CLI pane (opencode/claude/...) splitting the active pane. */
+  async openAiPane(): Promise<void> {
+    const active = this.focusedLeaf();
+    if (!active) return;
+
+    const info = await openAiPane({
+      sessionId: this.sessionId,
+      cols: active.term.cols(),
+      rows: active.term.rows(),
+    });
+
+    const newLeaf = this.addLeaf(info);
+    const split = this.makeSplit("h", active, newLeaf);
+
+    if (!this.replaceInTree(this.root!, active, split)) {
       this.workspace.append(split.el);
       this.root = split;
     }

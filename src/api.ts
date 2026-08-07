@@ -48,6 +48,12 @@ export interface ResizeRequest {
   rows: number;
 }
 
+export interface AiPaneRequest {
+  sessionId: number;
+  cols: number;
+  rows: number;
+}
+
 function decodeBase64(b64: string): Uint8Array {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -97,6 +103,14 @@ export async function closeSession(sessionId: number): Promise<void> {
 
 export async function defaultShell(): Promise<string> {
   return invoke<string>("default_shell_command");
+}
+
+export async function openAiPane(req: AiPaneRequest): Promise<PaneInfo> {
+  return invoke<PaneInfo>("open_ai_pane", { request: req });
+}
+
+export async function aiCommand(): Promise<string> {
+  return invoke<string>("ai_command");
 }
 
 export function onPaneOutput(cb: (evt: PaneOutput) => void): Promise<UnlistenFn> {

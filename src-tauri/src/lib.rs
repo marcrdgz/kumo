@@ -1,4 +1,5 @@
 mod commands;
+mod config;
 mod debug;
 mod pty;
 mod session;
@@ -22,6 +23,8 @@ pub fn run() {
             commands::close_pane,
             commands::close_session,
             commands::default_shell_command,
+            commands::open_ai_pane,
+            commands::ai_command,
             commands::debug_log,
         ])
         .setup(|app| {

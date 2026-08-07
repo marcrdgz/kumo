@@ -128,6 +128,33 @@ pub fn default_shell_command() -> String {
     default_shell()
 }
 
+/// Open an AI pane in the given session: splits the active pane and spawns
+/// the configured AI CLI inside it.
+#[tauri::command]
+pub fn open_ai_pane(
+    state: State<AppState>,
+    request: crate::session::AiPaneRequest,
+) -> Result<crate::session::PaneInfo, String> {
+    let (program, args) = crate::config::ai_command();
+    let cwd = crate::config::ai_cwd();
+    state
+        .spawn_ai_pane(
+            request.session_id,
+            &program,
+            &args,
+            cwd,
+            request.cols,
+            request.rows,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Return the resolved AI CLI command (program only) for display in the UI.
+#[tauri::command]
+pub fn ai_command() -> String {
+    crate::config::ai_command().0
+}
+
 /// Append a diagnostics line to /tmp/neomux_debug.log (dev aid).
 #[tauri::command]
 pub fn debug_log(msg: String) {

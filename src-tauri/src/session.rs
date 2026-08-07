@@ -64,6 +64,8 @@ impl AppState {
 
         let mut pty = Pty::spawn(&PtySpec {
             shell: shell.to_string(),
+            program: None,
+            cwd: None,
             cols,
             rows,
         })?;
@@ -124,6 +126,8 @@ impl AppState {
         let pane_id = Pty::next_pane_id();
         let mut pty = Pty::spawn(&PtySpec {
             shell: shell.to_string(),
+            program: None,
+            cwd: None,
             cols,
             rows,
         })?;
@@ -138,6 +142,49 @@ impl AppState {
         };
 
         // Wire up tree relationship to the parent pane.
+        if let Some(parent_pane) = session.panes.get_mut(&parent) {
+            parent_pane.children.push(pane_id);
+        }
+
+        session.panes.insert(pane_id, pane);
+        session.active_pane = pane_id;
+
+        Ok(Self::pane_info(&session.panes[&pane_id]))
+    }
+
+    /// Spawn a new pane running an AI CLI program (e.g. `opencode`).
+    pub fn spawn_ai_pane(
+        &self,
+        session_id: u64,
+        program: &str,
+        args: &[String],
+        cwd: std::path::PathBuf,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<PaneInfo> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+
+        let pane_id = Pty::next_pane_id();
+        let mut pty = Pty::spawn(&PtySpec {
+            shell: String::new(),
+            program: Some((program.to_string(), args.to_vec())),
+            cwd: Some(cwd),
+            cols,
+            rows,
+        })?;
+        pty.id = pane_id;
+
+        let parent = session.active_pane;
+        let pane = Pane {
+            id: pane_id,
+            pty,
+            parent: Some(parent),
+            children: Vec::new(),
+        };
+
         if let Some(parent_pane) = session.panes.get_mut(&parent) {
             parent_pane.children.push(pane_id);
         }
@@ -301,9 +348,59 @@ pub struct PaneRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiPaneRequest {
+    pub session_id: u64,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResizeRequest {
     pub session_id: u64,
     pub pane_id: u64,
     pub cols: u16,
     pub rows: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn spawn_ai_pane_runs_program() {
+        let state = AppState::new();
+        state
+            .create_session("test", "/bin/sh", 80, 24)
+            .expect("create session");
+        let info = state
+            .spawn_ai_pane(
+                1,
+                "/bin/sh",
+                &["-c".into(), "echo AI_PANE_OK".into()],
+                std::path::PathBuf::from("/tmp"),
+                80,
+                24,
+            )
+            .expect("spawn ai pane");
+        assert_eq!(info.shell, "/bin/sh");
+
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&1).unwrap();
+        let pane = session.panes.get_mut(&info.pane_id).unwrap();
+        let reader = pane.pty.master.try_clone_reader().expect("clone reader");
+        let (tx, rx) = mpsc::channel();
+        Pty::read_loop(reader, move |data| {
+            let _ = tx.send(data);
+        });
+        let got = rx.recv_timeout(Duration::from_secs(5)).expect("output");
+        let text = String::from_utf8_lossy(&got);
+        assert!(
+            text.contains("AI_PANE_OK"),
+            "unexpected output: {text:?}"
+        );
+    }
 }
