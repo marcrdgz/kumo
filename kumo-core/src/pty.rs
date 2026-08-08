@@ -63,6 +63,13 @@ impl Pty {
             std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
         });
         cmd.cwd(cwd);
+        // Present the pane as a plain xterm instead of inheriting the host
+        // TERM (e.g. `xterm-ghostty`): host terminfo entries advertise mouse
+        // capabilities (XM/kmous) that make vim/less/opencode enable mouse
+        // reporting, which would steal mouse events from kumo's text
+        // selection.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);

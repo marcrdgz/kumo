@@ -3,6 +3,7 @@ mod keys;
 mod layout;
 mod pane;
 mod vt;
+mod xtgettcap;
 
 use anyhow::Result;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};

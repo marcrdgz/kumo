@@ -31,6 +31,8 @@ const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
 
 /// How often the sidebar re-reads the git branch of each session's workspace.
 const BRANCH_REFRESH: Duration = Duration::from_secs(3);
+/// How often to re-scan pane process trees for an AI CLI (opencode/claude).
+const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 struct Session {
     id: u64,
@@ -95,6 +97,8 @@ pub struct App {
     sidebar_width: u16,
     /// Cached git branch per workspace, refreshed periodically.
     branch_cache: HashMap<PathBuf, (Option<String>, Instant)>,
+    /// When the pane process tree was last scanned for an AI CLI.
+    last_ai_scan: Instant,
     quit: bool,
 }
 
@@ -148,6 +152,7 @@ impl App {
             sidebar_open: true,
             sidebar_width: 26,
             branch_cache: HashMap::new(),
+            last_ai_scan: Instant::now(),
             quit: false,
         };
         app.new_session()?;
@@ -603,6 +608,22 @@ impl App {
         self.branch_cache.get(ws).and_then(|(b, _)| b.clone())
     }
 
+    /// Mark plain shell panes as AI CLI panes when opencode/claude is running
+    /// inside them, and clear the flag once the process exits. Runs at most
+    /// every `AI_SCAN_INTERVAL`.
+    fn refresh_ai_cli(&mut self) {
+        if self.last_ai_scan.elapsed() < AI_SCAN_INTERVAL {
+            return;
+        }
+        self.last_ai_scan = Instant::now();
+        for pane in self.panes.values_mut() {
+            if pane.is_ai {
+                continue;
+            }
+            pane.detected_ai = pane.ai_cli_running();
+        }
+    }
+
     /// Static rows of the sidebar (shared by render + mouse hit-testing).
     ///
     /// Top half: sessions with their git branch. Bottom half (starting at the
@@ -633,7 +654,7 @@ impl App {
         let mut ay = agents_y + 1;
         for (i, s) in self.sessions.iter().enumerate() {
             for pid in s.tree.pane_ids() {
-                if self.panes.get(&pid).map(|p| p.is_ai).unwrap_or(false) {
+                if self.panes.get(&pid).map(|p| p.is_ai_cli()).unwrap_or(false) {
                     if ay >= footer_y {
                         break;
                     }
@@ -681,6 +702,7 @@ impl App {
         let size = terminal.size()?;
         self.term_size = (size.width, size.height);
         self.refresh_branches();
+        self.refresh_ai_cli();
         let area = Rect::new(0, 0, size.width, size.height);
         let geom = self.active_geom();
 
@@ -755,7 +777,7 @@ impl App {
 
     fn pane_title(&self, pid: u64, focused: bool) -> String {
         let base = match self.panes.get(&pid) {
-            Some(p) if p.is_ai => " AI CLI ".to_string(),
+            Some(p) if p.is_ai_cli() => " AI CLI ".to_string(),
             Some(_) => {
                 if self.sessions[self.active].tree.pane_count() > 1 {
                     format!(" shell {} ", pid)

@@ -373,35 +373,6 @@ unsafe extern "C" fn write_pty_cb(
     let _ = writer.write_all(bytes);
 }
 
-/// Device attributes callback: respond to DA1/DA2/DA3 queries so interactive
-/// shells stop blocking on the response.
-unsafe extern "C" fn device_attributes_cb(
-    _term: TerminalHandle,
-    _userdata: *mut c_void,
-    out_attrs: *mut DeviceAttributes,
-) -> bool {
-    if out_attrs.is_null() {
-        return false;
-    }
-    let attrs = &mut *out_attrs;
-    let mut features = [0u16; 64];
-    features[0] = 1; // 132-column mode
-    features[1] = 6; // selective erase
-    features[2] = 22; // ANSI color
-    attrs.primary = DeviceAttributesPrimary {
-        conformance_level: 62, // VT220 / level 2
-        features,
-        num_features: 3,
-    };
-    attrs.secondary = DeviceAttributesSecondary {
-        device_type: 1, // VT220
-        firmware_version: 1,
-        rom_cartridge: 0,
-    };
-    attrs.tertiary = DeviceAttributesTertiary { unit_id: 0 };
-    true
-}
-
 /// Size callback: report the current terminal geometry for XTWINOPS queries.
 unsafe extern "C" fn size_cb(
     term: TerminalHandle,
@@ -433,16 +404,6 @@ unsafe extern "C" fn color_scheme_cb(
     }
     *out_scheme = COLOR_SCHEME_DARK;
     true
-}
-
-static XTVERSION: &[u8] = b"kumo-tui 0.1.0";
-
-/// XTVERSION callback: report the terminal emulator version.
-unsafe extern "C" fn xtversion_cb(
-    _term: TerminalHandle,
-    _userdata: *mut c_void,
-) -> StringSlice {
-    StringSlice { ptr: XTVERSION.as_ptr(), len: XTVERSION.len() }
 }
 
 /// ENQ callback: no response.
@@ -539,10 +500,8 @@ impl Terminal {
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_DEVICE_ATTRIBUTES, device_attributes_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_XTVERSION, xtversion_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const c_void);
         }
 

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -10,6 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
 
 use crate::vt::{self, ColorRgb};
+use crate::xtgettcap::XtgettcapTracker;
 
 /// Catppuccin mocha ANSI 16-color palette.
 const PALETTE: [ColorRgb; 16] = [
@@ -40,6 +42,9 @@ pub struct Pane {
     pub id: u64,
     pub session_id: u64,
     pub is_ai: bool,
+    /// Whether an AI CLI (opencode/claude) was detected running inside the
+    /// pane, even though it was spawned as a plain shell.
+    pub detected_ai: bool,
     pub pty: Pty,
     pub vt: vt::Terminal,
     pub dead: bool,
@@ -47,6 +52,8 @@ pub struct Pane {
     last_output: Instant,
     /// Rolling tail of recent output, scanned for blocked (approval) markers.
     recent: Vec<u8>,
+    /// Answers terminal capability probes as a plain xterm (no mouse caps).
+    xtgettcap: XtgettcapTracker,
 }
 
 /// Lifecycle state of an AI (opencode) agent, inferred from its output.
@@ -114,11 +121,13 @@ impl Pane {
             id,
             session_id,
             is_ai,
+            detected_ai: false,
             pty,
             vt,
             dead: false,
             last_output: Instant::now(),
             recent: Vec::with_capacity(256),
+            xtgettcap: XtgettcapTracker::new(),
         };
 
         // Route query responses (DA, size reports, etc.) back to the PTY.
@@ -142,6 +151,12 @@ impl Pane {
                 let drop = self.recent.len() - RECENT_BYTES;
                 self.recent.drain(..drop);
             }
+            // Answer XTGETTCAP capability probes as a plain xterm so apps
+            // don't enable mouse reporting and steal text selection.
+            self.xtgettcap.observe(data);
+            for response in self.xtgettcap.drain_pending() {
+                let _ = self.pty.write(&response);
+            }
         }
         self.vt.write(data);
     }
@@ -162,6 +177,23 @@ impl Pane {
             return AgentStatus::Working;
         }
         AgentStatus::Idle
+    }
+
+    /// Whether this pane counts as an AI CLI pane: either spawned as one, or
+    /// an AI CLI (opencode/claude) was detected running inside a plain shell.
+    pub fn is_ai_cli(&self) -> bool {
+        self.is_ai || self.detected_ai
+    }
+
+    /// Whether an AI CLI (opencode/claude) is currently running in this
+    /// pane's process tree.
+    pub fn ai_cli_running(&self) -> bool {
+        let Some(root) = self.pty.child.process_id() else {
+            return false;
+        };
+        ProcessSnapshot::capture()
+            .map(|snapshot| snapshot.contains_ai_cli(root))
+            .unwrap_or(false)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -322,6 +354,76 @@ pub fn sgr_mouse(button: u8, col: u16, row: u16, release: bool) -> Vec<u8> {
     format!("\x1b[<{b};{col};{row}{}\x1b[0m", if release { "m" } else { "M" }).into_bytes()
 }
 
+/// Snapshot of the process table (parent/child map + executable names), used
+/// to detect whether an AI CLI process runs inside a pane's process tree.
+pub struct ProcessSnapshot {
+    children: HashMap<u32, Vec<u32>>,
+    names: HashMap<u32, String>,
+}
+
+impl ProcessSnapshot {
+    /// Capture the current process table, or `None` when unavailable.
+    pub fn capture() -> Option<ProcessSnapshot> {
+        #[cfg(target_os = "windows")]
+        {
+            None
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let out = std::process::Command::new("ps")
+                .args(["-axo", "pid=,ppid=,comm="])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+            let mut names: HashMap<u32, String> = HashMap::new();
+            for line in out.stdout.split(|&b| b == b'\n') {
+                let mut fields = line.split(|&b| b == b' ').filter(|f| !f.is_empty());
+                let (Some(pid), Some(ppid)) = (fields.next(), fields.next()) else {
+                    continue;
+                };
+                let (Some(pid), Some(ppid)) = (
+                    std::str::from_utf8(pid).ok().and_then(|s| s.parse().ok()),
+                    std::str::from_utf8(ppid).ok().and_then(|s| s.parse().ok()),
+                ) else {
+                    continue;
+                };
+                let name = fields
+                    .map(|f| String::from_utf8_lossy(f).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                children.entry(ppid).or_default().push(pid);
+                names.insert(pid, name);
+            }
+            Some(ProcessSnapshot { children, names })
+        }
+    }
+
+    /// True when any process reachable from `root` (including `root` itself)
+    /// is an AI CLI (opencode/claude).
+    pub fn contains_ai_cli(&self, root: u32) -> bool {
+        let mut stack = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(pid) = stack.pop() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            if let Some(name) = self.names.get(&pid) {
+                let base = name.rsplit('/').next().unwrap_or(name);
+                if base == "opencode" || base == "claude" {
+                    return true;
+                }
+            }
+            if let Some(kids) = self.children.get(&pid) {
+                stack.extend(kids);
+            }
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +489,41 @@ mod tests {
         p.dead = true;
         p.last_output = Instant::now();
         assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn process_snapshot_finds_ai_cli_in_subtree() {
+        let snap = ProcessSnapshot {
+            children: HashMap::from([(1, vec![2, 3]), (2, vec![4])]),
+            names: HashMap::from([
+                (1, "zsh".to_string()),
+                (2, "bash".to_string()),
+                (3, "other".to_string()),
+                (4, "opencode".to_string()),
+            ]),
+        };
+        assert!(snap.contains_ai_cli(1));
+        assert!(snap.contains_ai_cli(4));
+        assert!(!snap.contains_ai_cli(3));
+    }
+
+    #[test]
+    fn process_snapshot_matches_comm_basename() {
+        let snap = ProcessSnapshot {
+            children: HashMap::from([(1, vec![2])]),
+            names: HashMap::from([
+                (1, "zsh".to_string()),
+                (2, "/Users/x/.opencode/bin/opencode".to_string()),
+            ]),
+        };
+        assert!(snap.contains_ai_cli(1));
+    }
+
+    #[test]
+    fn process_snapshot_capture_parses_real_ps() {
+        let snap = ProcessSnapshot::capture();
+        let snap = snap.expect("ps should run on this platform");
+        assert!(!snap.children.is_empty());
+        assert!(!snap.names.is_empty());
     }
 }
