@@ -1,0 +1,9 @@
+[package]
+name = "neomux-core"
+version.workspace = true
+edition.workspace = true
+description = "PTY and config layer shared by the neomux GUI and TUI"
+
+[dependencies]
+portable-pty = "0.8"
+anyhow = "1"

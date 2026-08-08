@@ -47,7 +47,10 @@ pub fn split_pane(
     state: State<AppState>,
     request: SplitRequest,
 ) -> Result<crate::session::PaneInfo, String> {
-    let program = request.program.map(|p| (p, request.args.unwrap_or_default()));
+    let program = request.program.map(|p| {
+        let resolved = crate::config::resolve_program(&p);
+        (resolved, request.args.unwrap_or_default())
+    });
     let shell = request
         .shell
         .filter(|s| !s.is_empty())
@@ -146,6 +149,7 @@ pub fn open_ai_pane(
     request: crate::session::AiPaneRequest,
 ) -> Result<crate::session::PaneInfo, String> {
     let (program, args) = crate::config::ai_command();
+    let program = crate::config::resolve_program(&program);
     let cwd = crate::config::ai_cwd();
     state
         .spawn_ai_pane(

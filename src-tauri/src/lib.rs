@@ -1,11 +1,11 @@
 mod commands;
-mod config;
 mod debug;
 mod editor;
 mod git;
 mod menu;
-mod pty;
 mod session;
+
+pub use neomux_core::{config, pty};
 
 use tauri::Manager;
 

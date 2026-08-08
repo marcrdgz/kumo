@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 /// Resolve the AI CLI command line to run inside the AI pane.
 ///
 /// Precedence: `NEOMUX_AI_CMD` env var, then a `~/.neomux` line config,
 /// then a built-in default.
-pub fn ai_command() -> (String, Vec<String>) {
-    if let Ok(raw) = std::env::var("NEOMUX_AI_CMD") {
+pub fn ai_command() -> (String, Vec<String>) {    if let Ok(raw) = std::env::var("NEOMUX_AI_CMD") {
         if !raw.trim().is_empty() {
             return split_cmd(&raw);
         }
@@ -59,6 +60,73 @@ fn split_cmd(raw: &str) -> (String, Vec<String>) {
     (program, args)
 }
 
+/// The user's login shell, falling back to zsh.
+pub fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+static RESOLVE_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+
+fn resolve_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
+    RESOLVE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve a program name to an absolute path. GUI-launched apps (Spotlight /
+/// Finder) get a minimal `PATH`, so `opencode` would otherwise fail to spawn;
+/// the login shell is asked for its PATH as a fallback. Falls back to the
+/// original program when it cannot be resolved. Results are cached.
+pub fn resolve_program(program: &str) -> String {
+    if program.is_empty() {
+        return program.to_string();
+    }
+    if let Some(cached) = resolve_cache().lock().unwrap().get(program) {
+        return cached.clone().unwrap_or_else(|| program.to_string());
+    }
+    let resolved = resolve_program_uncached(program);
+    let result = resolved.clone().unwrap_or_else(|| program.to_string());
+    resolve_cache().lock().unwrap().insert(program.to_string(), resolved);
+    result
+}
+
+fn resolve_program_uncached(program: &str) -> Option<String> {
+    let pb = PathBuf::from(program);
+    if pb.is_absolute() {
+        return pb.is_file().then(|| program.to_string());
+    }
+    if let Some(found) = which_in_path(program) {
+        return Some(found);
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let out = std::process::Command::new(&shell)
+        .arg("-l")
+        .arg("-c")
+        .arg(format!("command -v {}", program))
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let pb = PathBuf::from(&path);
+        if pb.is_absolute() && pb.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn which_in_path(program: &str) -> Option<String> {
+    let path = std::env::var("PATH").ok()?;
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(dir).join(program);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +158,19 @@ mod tests {
         let (prog, args) = split_cmd("opencode");
         assert_eq!(prog, "opencode");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_program_keeps_existing_absolute_paths() {
+        let abs = std::env::current_dir().unwrap().join("Cargo.toml");
+        let abs_str = abs.to_string_lossy().to_string();
+        assert_eq!(resolve_program(&abs_str), abs_str);
+    }
+
+    #[test]
+    fn resolve_program_falls_back_when_not_found() {
+        let name = "definitely-not-a-real-cmd-xyz-123";
+        assert_eq!(resolve_program(name), name);
     }
 }
 
