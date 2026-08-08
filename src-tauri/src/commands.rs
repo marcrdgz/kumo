@@ -216,12 +216,94 @@ pub fn pane_title(state: State<AppState>, request: PaneRequest) -> Result<Option
     Ok(crate::editor::pane_title(pid))
 }
 
-fn layout_path() -> std::path::PathBuf {
+fn neomux_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home).join(".neomux").join("layout.json")
+    std::path::PathBuf::from(home).join(".neomux")
 }
 
-/// Persist the session layout (JSON) to ~/.neomux/layout.json.
+/// Stable per-workspace layout path: `~/.neomux/layouts/<hash>/layout.json`.
+/// Hash is derived from the workspace path so each folder keeps its own grid.
+fn layout_path() -> std::path::PathBuf {
+    let current = get_workspace().ok().flatten();
+    let dir = match current {
+        Some(ws) => neomux_dir().join("layouts").join(&workspace_hash(&ws)),
+        None => neomux_dir(),
+    };
+    dir.join("layout.json")
+}
+
+/// Deterministic short hash of a path (FNV-1a, hex) for subdirectory names.
+fn workspace_hash(path: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in path.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
+}
+
+fn workspace_path() -> std::path::PathBuf {
+    neomux_dir().join("workspace.json")
+}
+
+fn recent_path() -> std::path::PathBuf {
+    neomux_dir().join("workspaces.json")
+}
+
+/// Persist the active workspace folder (~/.neomux/workspace.json) and push it
+/// to the front of the recent list (~/.neomux/workspaces.json, max 5). All
+/// panes and the AI pane spawn relative to it so `@file` references resolve.
+#[tauri::command]
+pub fn set_workspace(app: AppHandle, path: String) -> Result<(), String> {
+    write_workspace(&path)?;
+    if let Ok(menu) = crate::menu::build_menu(&app) {
+        let _ = app.set_menu(menu);
+    }
+    Ok(())
+}
+
+/// Persist the workspace and update the recent list. Shared by the command and
+/// tests (the command additionally rebuilds the native menu).
+pub(crate) fn write_workspace(path: &str) -> Result<(), String> {
+    let path_buf = std::path::PathBuf::from(path);
+    if !path_buf.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    std::fs::create_dir_all(neomux_dir()).map_err(|e| e.to_string())?;
+    std::fs::write(workspace_path(), path).map_err(|e| e.to_string())?;
+
+    let mut recents = read_recents();
+    recents.retain(|w| w != path);
+    recents.insert(0, path.to_string());
+    recents.truncate(5);
+    std::fs::write(recent_path(), serde_json::to_string(&recents).unwrap_or_else(|_| "[]".into()))
+        .map_err(|e| e.to_string())
+}
+
+/// Return the persisted workspace folder, if any.
+#[tauri::command]
+pub fn get_workspace() -> Result<Option<String>, String> {
+    match std::fs::read_to_string(workspace_path()) {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Return the most recently opened workspaces (most recent first, max 5).
+#[tauri::command]
+pub fn get_recent_workspaces() -> Result<Vec<String>, String> {
+    Ok(read_recents())
+}
+
+/// Read the recent-workspaces list, tolerating a missing/corrupt file.
+pub(crate) fn read_recents() -> Vec<String> {
+    match std::fs::read_to_string(recent_path()) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Persist the session layout (JSON) to the current workspace's layout dir.
 #[tauri::command]
 pub fn save_layout(layout: String) -> Result<(), String> {
     let path = layout_path();
@@ -231,11 +313,10 @@ pub fn save_layout(layout: String) -> Result<(), String> {
     std::fs::write(path, layout).map_err(|e| e.to_string())
 }
 
-/// Load a previously persisted session layout, if any.
+/// Load a previously persisted session layout for the current workspace, if any.
 #[tauri::command]
 pub fn load_layout() -> Result<Option<String>, String> {
-    let path = layout_path();
-    match std::fs::read_to_string(&path) {
+    match std::fs::read_to_string(layout_path()) {
         Ok(s) => Ok(Some(s)),
         Err(_) => Ok(None),
     }
@@ -255,4 +336,96 @@ fn attach_read_loop(app: &AppHandle, state: &AppState, session_id: u64, pane_id:
             },
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_hash_is_deterministic() {
+        let a = workspace_hash("/Users/x/project");
+        let b = workspace_hash("/Users/x/project");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn workspace_hash_differs_by_path() {
+        let a = workspace_hash("/Users/x/project-a");
+        let b = workspace_hash("/Users/x/project-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn recents_keeps_most_recent_first_and_caps() {
+        let mut recents = vec!["b".to_string(), "c".to_string()];
+        let path = "a".to_string();
+        recents.retain(|w| w != &path);
+        recents.insert(0, path);
+        recents.truncate(5);
+        assert_eq!(recents, vec!["a", "b", "c"]);
+
+        // Full list, new item pushes oldest out.
+        let mut full: Vec<String> = vec!["1", "2", "3", "4", "5"].into_iter().map(String::from).collect();
+        let path = "0".to_string();
+        full.retain(|w| w != &path);
+        full.insert(0, path);
+        full.truncate(5);
+        assert_eq!(full, vec!["0", "1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn recents_moves_existing_to_front() {
+        let mut recents = vec!["a".to_string(), "b".to_string()];
+        let path = "a".to_string();
+        recents.retain(|w| w != &path);
+        recents.insert(0, path);
+        assert_eq!(recents, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn layout_path_is_per_workspace() {
+        // Redirect HOME to a temp dir so we don't touch the real config, and
+        // restore it afterwards since other tests share the process env.
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!("neomux-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("HOME", &tmp);
+
+        // No workspace set -> legacy flat path.
+        let _ = std::fs::remove_file(workspace_path());
+        let flat = layout_path();
+        assert_eq!(flat.file_name().unwrap(), "layout.json");
+        assert_eq!(flat.parent().unwrap().file_name().unwrap(), ".neomux");
+
+        // Real dirs so set_workspace's is_dir() check passes.
+        let ws_a = tmp.join("project-a");
+        let ws_b = tmp.join("project-b");
+        std::fs::create_dir_all(&ws_a).unwrap();
+        std::fs::create_dir_all(&ws_b).unwrap();
+
+        // Workspace set -> per-folder hash dir.
+        write_workspace(&ws_a.to_string_lossy()).unwrap();
+        let per = layout_path();
+        assert_eq!(per.file_name().unwrap(), "layout.json");
+        let hash_dir = per.parent().unwrap();
+        let expected_hash = workspace_hash(&ws_a.to_string_lossy());
+        assert_eq!(hash_dir.file_name().unwrap().to_string_lossy(), expected_hash);
+
+        // Different workspace -> different dir.
+        write_workspace(&ws_b.to_string_lossy()).unwrap();
+        let per_b = layout_path();
+        assert_ne!(per_b, per);
+
+        // Same workspace again -> same dir (stable).
+        write_workspace(&ws_a.to_string_lossy()).unwrap();
+        assert_eq!(layout_path(), per);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        match orig_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }

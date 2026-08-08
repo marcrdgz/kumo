@@ -1,6 +1,8 @@
 import { Multiplexer } from "./multiplexer";
-import { aiCommand, type SessionInfo } from "./api";
+import { aiCommand, getRecentWorkspaces, getWorkspace, setWorkspace, type SessionInfo } from "./api";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import "@xterm/xterm/css/xterm.css";
 
 const statusLeft = document.getElementById("status-left")!;
@@ -14,13 +16,36 @@ void aiCommand().then((c) => {
   aiCmd = c;
 });
 
+let currentWorkspace: string | null = null;
+
+function basename(path: string): string {
+  return path.split("/").filter(Boolean).pop() || path;
+}
+
+function renderStatus(): void {
+  const panes = currentPanes;
+  if (currentWorkspace) {
+    statusLeft.innerHTML = `<span class="mode">●</span> <span class="session-name">${basename(currentWorkspace)}</span>`;
+  } else {
+    statusLeft.innerHTML = `<span class="mode">●</span> <span class="session-name">${currentSessionName}</span>`;
+  }
+  statusRight.textContent = `${panes} panes${currentWorkspace ? "" : ` · ${currentSessionName}`}`;
+}
+
+let currentPanes = 0;
+let currentSessionName = "";
+
 const mux = new Multiplexer(workspace, (s: SessionInfo) => {
   if (s.panes.length === 0) {
     statusLeft.textContent = "session closed";
+    statusRight.textContent = "";
+    currentPanes = 0;
+    currentSessionName = "";
     return;
   }
-  statusLeft.innerHTML = `<span class="mode">neomux</span>${s.name} · ${s.panes.length} pane(s)`;
-  statusRight.textContent = `session ${s.sessionId}`;
+  currentPanes = s.panes.length;
+  currentSessionName = s.name;
+  renderStatus();
 });
 
 // Leader key state machine (Ctrl+A prefix).
@@ -112,7 +137,7 @@ window.addEventListener(
       e.preventDefault();
       e.stopPropagation();
       leaderArmed = true;
-      hint(`LEADER: h=v-split · v=h-split · z=zoom · q=close · /=search · c=${aiCmd} · Esc=exit`);
+      hint(`LEADER · h=v-split · v=h-split · z=zoom · q=close · /=search · o=open · c=${aiCmd} · esc=exit`);
       return;
     }
 
@@ -157,6 +182,11 @@ window.addEventListener(
           e.stopPropagation();
           openSearch();
           return;
+        case "o":
+          e.preventDefault();
+          e.stopPropagation();
+          await changeWorkspace();
+          return;
         case "escape":
           e.preventDefault();
           e.stopPropagation();
@@ -169,8 +199,6 @@ window.addEventListener(
   true,
 );
 
-void mux.init();
-
 // Persist the layout before the window closes. We don't preventDefault: the
 // onCloseRequested wrapper destroys the window automatically once the handler
 // resolves. `destroy` needs the `core:window:allow-destroy` capability.
@@ -181,3 +209,137 @@ void getCurrentWindow().onCloseRequested(async () => {
     console.error("failed to save layout on close", err);
   }
 });
+
+// ----- workspace bootstrap -----
+
+const welcome = document.getElementById("welcome") as HTMLDivElement;
+const openFolderBtn = document.getElementById("open-folder-btn") as HTMLButtonElement;
+const recentList = document.getElementById("recent-list") as HTMLDivElement;
+const recentItems = document.getElementById("recent-items") as HTMLDivElement;
+
+/** Start a session rooted at `path`, hiding the welcome screen. If a session
+ *  is already running (e.g. picked from the native "Open Recent" menu) reload
+ *  so everything spawns cleanly relative to the new root. */
+async function openWorkspace(path: string): Promise<void> {
+  await setWorkspace(path);
+  if (currentPanes > 0) {
+    window.location.reload();
+    return;
+  }
+  mux.setWorkspaceRoot(path);
+  hideWelcome();
+  setCurrentWorkspace(path);
+  await mux.init();
+}
+
+/** Populate the "Recent" list on the welcome screen (most recent first). */
+async function renderRecents(): Promise<void> {
+  const recents = await getRecentWorkspaces();
+  if (recents.length === 0) return;
+  recentItems.innerHTML = "";
+  for (const path of recents) {
+    const item = document.createElement("button");
+    item.className = "recent-item";
+    item.title = path;
+    const label = document.createElement("span");
+    label.className = "recent-name";
+    label.textContent = basename(path);
+    const full = document.createElement("span");
+    full.className = "recent-path";
+    full.textContent = path;
+    item.append(label, full);
+    item.addEventListener("click", () => {
+      void openWorkspace(path);
+    });
+    recentItems.append(item);
+  }
+  recentList.classList.remove("hidden");
+}
+
+/** Show the "Open Folder…" welcome screen and wait for a selection. */
+function showWelcome(): void {
+  welcome.classList.remove("hidden");
+  void renderRecents();
+}
+
+/** Hide the welcome screen once a session has started. */
+function hideWelcome(): void {
+  welcome.classList.add("hidden");
+}
+
+function setCurrentWorkspace(path: string): void {
+  currentWorkspace = path;
+  renderStatus();
+}
+
+async function boot(): Promise<void> {
+  const saved = await getWorkspace();
+  if (saved) {
+    mux.setWorkspaceRoot(saved);
+    hideWelcome();
+    setCurrentWorkspace(saved);
+    await mux.init();
+    return;
+  }
+  showWelcome();
+}
+
+openFolderBtn.addEventListener("click", async () => {
+  try {
+    const picked = await open({ directory: true, multiple: false, title: "Open Folder" });
+    if (typeof picked === "string" && picked) {
+      await openWorkspace(picked);
+    }
+  } catch (err) {
+    console.error("failed to pick folder", err);
+  }
+});
+
+/** Change the workspace at runtime: pick a folder, persist it, and reload so
+ *  the whole session (and opencode) spawns relative to the new root. */
+async function changeWorkspace(): Promise<void> {
+  try {
+    const picked = await open({ directory: true, multiple: false, title: "Open Folder" });
+    if (typeof picked !== "string" || !picked) return;
+    await setWorkspace(picked);
+    window.location.reload();
+  } catch (err) {
+    console.error("failed to change workspace", err);
+  }
+}
+
+// ----- native macOS menu -----
+// The Rust backend builds the app menu bar and emits `menu-*` events when an
+// item is clicked. Forward them to the matching action here.
+
+void listen("menu-open-folder", () => {
+  void openFolderBtn.click();
+});
+
+void listen("menu-open-recent", (e) => {
+  if (typeof e.payload === "string" && e.payload) {
+    void openWorkspace(e.payload);
+  }
+});
+
+void listen("menu-split-h", () => {
+  void mux.splitActive("h");
+});
+
+void listen("menu-split-v", () => {
+  void mux.splitActive("v");
+});
+
+void listen("menu-zoom", () => {
+  void mux.toggleZoom();
+});
+
+void listen("menu-close-pane", () => {
+  void mux.closeActive();
+});
+
+void listen("menu-search", () => {
+  openSearch();
+});
+
+void boot();

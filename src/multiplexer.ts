@@ -89,16 +89,22 @@ function mkSlot(): HTMLDivElement {
 
 export class Multiplexer {
   private root: Node | null = null;
-  private workspace: HTMLDivElement;
+  private workspaceEl: HTMLDivElement;
   private sessionId = 0;
   private shell = "/bin/zsh";
+  private workspace: string | null = null;
   private onSessionChange: (session: SessionInfo) => void;
   private aiPaneIds: Set<number> = new Set();
   private saveTimer: number | null = null;
 
   constructor(workspace: HTMLDivElement, onSessionChange: (s: SessionInfo) => void) {
-    this.workspace = workspace;
+    this.workspaceEl = workspace;
     this.onSessionChange = onSessionChange;
+  }
+
+  /** Root folder of the current workspace (all panes spawn relative to it). */
+  setWorkspaceRoot(path: string | null): void {
+    this.workspace = path;
   }
 
   getSessionId(): number {
@@ -129,6 +135,7 @@ export class Multiplexer {
       cols: 80,
       rows: 24,
       shell: this.shell,
+      cwd: this.workspace ?? undefined,
     });
     this.sessionId = session.sessionId;
     this.root = null;
@@ -224,7 +231,7 @@ export class Multiplexer {
     const session = await createSession({
       name: parsed.name || "main",
       shell: leaves[0].shell || this.shell,
-      cwd: leaves[0].cwd ?? undefined,
+      cwd: leaves[0].cwd ?? this.workspace ?? undefined,
       cols: 80,
       rows: 24,
     });
@@ -242,7 +249,7 @@ export class Multiplexer {
         shell: leaf.ai ? undefined : leaf.shell || this.shell,
         program: leaf.ai ? aiProg : undefined,
         args: leaf.ai ? aiArgs : undefined,
-        cwd: leaf.cwd ?? undefined,
+        cwd: leaf.cwd ?? this.workspace ?? undefined,
       });
       infos.push(info);
       if (leaf.ai) this.aiPaneIds.add(info.paneId);
@@ -266,7 +273,7 @@ export class Multiplexer {
     const root = build(spec);
     this.root = root;
     if (!root.el.isConnected) {
-      this.workspace.append(root.el);
+      this.workspaceEl.append(root.el);
     }
 
     await attachPane({ sessionId: this.sessionId, paneId: session.panes[0].paneId });
@@ -330,7 +337,7 @@ export class Multiplexer {
       });
     el.addEventListener("mousedown", () => void this.focusLeaf(info.paneId));
     const leaf: Leaf = { kind: "leaf", id: info.paneId, term, el, titleEl };
-    this.workspace.append(el);
+    this.workspaceEl.append(el);
     return leaf;
   }
   /** Build a split node. The given `a` and `b` node elements are moved into slots. */
@@ -440,7 +447,7 @@ export class Multiplexer {
     if (!this.replaceInTree(this.root!, active, split)) {
       // Active was the root itself: makeSplit already re-parented it into
       // split.aSlot, so the split element becomes the new workspace root.
-      this.workspace.append(split.el);
+      this.workspaceEl.append(split.el);
       this.root = split;
     }
 
@@ -465,7 +472,7 @@ export class Multiplexer {
     const split = this.makeSplit("h", active, newLeaf);
 
     if (!this.replaceInTree(this.root!, active, split)) {
-      this.workspace.append(split.el);
+      this.workspaceEl.append(split.el);
       this.root = split;
     }
 
@@ -645,14 +652,14 @@ export class Multiplexer {
     this.aiPaneIds.delete(paneId);
     // Clear any zoom state from the whole workspace so promoted siblings
     // don't stay hidden/zoomed after a pane is removed.
-    this.workspace.querySelectorAll(".pane").forEach((el) => {
+    this.workspaceEl.querySelectorAll(".pane").forEach((el) => {
       el.classList.remove("zoomed", "hidden");
     });
     // Remove the leaf from the tree (collapsing splits) and the DOM.
     this.root = this.removeLeafFromTree(this.root, paneId);
     // The surviving node was inside the removed split's slot; re-attach it.
     if (this.root && !this.root.el.isConnected) {
-      this.workspace.append(this.root.el);
+      this.workspaceEl.append(this.root.el);
     }
     const leaves: Node[] = [];
     this.collectLeaves(this.root, leaves);

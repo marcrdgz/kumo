@@ -150,6 +150,18 @@ export async function loadLayout(): Promise<string | null> {
   return invoke<string | null>("load_layout");
 }
 
+export async function setWorkspace(path: string): Promise<void> {
+  await invoke("set_workspace", { path });
+}
+
+export async function getWorkspace(): Promise<string | null> {
+  return invoke<string | null>("get_workspace");
+}
+
+export async function getRecentWorkspaces(): Promise<string[]> {
+  return invoke<string[]>("get_recent_workspaces");
+}
+
 export function onPaneOutput(cb: (evt: PaneOutput) => void): Promise<UnlistenFn> {
   return listen<PaneOutput>("pane-output", (e) => cb(e.payload));
 }

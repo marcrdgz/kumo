@@ -32,9 +32,22 @@ pub fn ai_command() -> (String, Vec<String>) {
     (String::from("opencode"), Vec::new())
 }
 
-/// Working directory for the AI pane. Defaults to `$HOME` so the CLI
-/// has a sensible repo-relative start.
+/// Working directory for the AI pane. Prefers the persisted workspace
+/// (`~/.neomux/workspace.json`) so opencode runs inside the project and
+/// `@file` references resolve; falls back to `$HOME`.
 pub fn ai_cwd() -> PathBuf {
+    if let Some(home) = std::env::var("HOME").ok() {
+        let wp = PathBuf::from(&home).join(".neomux").join("workspace.json");
+        if let Ok(ws) = std::fs::read_to_string(&wp) {
+            let ws = ws.trim();
+            if !ws.is_empty() {
+                let pb = PathBuf::from(ws);
+                if pb.is_dir() {
+                    return pb;
+                }
+            }
+        }
+    }
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
 }
 
