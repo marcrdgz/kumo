@@ -21,6 +21,7 @@ import {
   type SessionInfo,
 } from "./api";
 import { PaneTerminal } from "./terminal";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 
 type Leaf = {
   kind: "leaf";
@@ -546,10 +547,52 @@ export class Multiplexer {
     await focusPane({ sessionId: this.sessionId, paneId });
   }
 
+  /** Refocus the currently focused pane (used after closing the search bar). */
+  async refocus(): Promise<void> {
+    const leaf = this.focusedLeaf();
+    if (leaf) leaf.term.focus();
+  }
+
   async write(data: string): Promise<void> {
     const active = this.focusedLeaf();
     if (!active) return;
     await writePane({ sessionId: this.sessionId, paneId: active.id }, data);
+  }
+
+  /** Copy the focused pane's selection to the OS clipboard. */
+  async copySelection(): Promise<boolean> {
+    const active = this.focusedLeaf();
+    if (!active) return false;
+    const copied = await active.term.copySelection();
+    return copied !== null;
+  }
+
+  /** Paste the OS clipboard into the focused pane using bracketed paste. */
+  async pasteClipboard(): Promise<void> {
+    const active = this.focusedLeaf();
+    if (!active) return;
+    const text = await readText();
+    if (!text) return;
+    await writePane(
+      { sessionId: this.sessionId, paneId: active.id },
+      `\x1b[200~${text}\x1b[201~`,
+    );
+  }
+
+  /** Focus a pane and run a search query over its scrollback. */
+  searchFocused(query: string, backwards = false): boolean {
+    const active = this.focusedLeaf();
+    if (!active) return false;
+    return backwards
+      ? active.term.findPrevious(query)
+      : active.term.findNext(query);
+  }
+
+  /** Clear search highlights on the focused pane. */
+  clearSearchFocused(): void {
+    const active = this.focusedLeaf();
+    if (!active) return;
+    active.term.clearSearch();
   }
 
   async closeActive(): Promise<void> {

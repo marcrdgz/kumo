@@ -9,6 +9,17 @@
   <body>
     <div id="statusbar">
       <span id="status-left"></span>
+      <div id="search-bar">
+        <span class="search-prefix">/</span>
+        <input
+          id="search-input"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="search scrollback…"
+        />
+        <span class="search-hint">↵ next · ⇧↵ prev · esc close</span>
+      </div>
       <span id="status-right"></span>
     </div>
     <div id="workspace"></div>

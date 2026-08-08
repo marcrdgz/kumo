@@ -1,7 +1,9 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 
 import { decodeBase64, writePane } from "./api";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 export const DEFAULT_THEME: Record<string, string> = {
   background: "#1e1e2e",
@@ -33,6 +35,7 @@ export class PaneTerminal {
   readonly host: HTMLDivElement;
   private term: Terminal;
   private fit: FitAddon;
+  private search: SearchAddon;
   private disposed = false;
 
   constructor(sessionId: number, paneId: number, host: HTMLDivElement) {
@@ -41,6 +44,7 @@ export class PaneTerminal {
     this.host = host;
 
     this.fit = new FitAddon();
+    this.search = new SearchAddon();
     this.term = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
@@ -52,6 +56,7 @@ export class PaneTerminal {
     });
 
     this.term.loadAddon(this.fit);
+    this.term.loadAddon(this.search);
     this.term.open(host);
 
     this.term.onData((data) => {
@@ -122,6 +127,54 @@ export class PaneTerminal {
     if (!this.term.hasSelection()) return null;
     const text = this.term.getSelection();
     return text.length > 0 ? text : null;
+  }
+
+  /** Clear the current xterm selection, if any. */
+  clearSelection(): void {
+    this.term.clearSelection();
+  }
+
+  /** Copy the current xterm selection (if any) to the OS clipboard. */
+  async copySelection(): Promise<string | null> {
+    const text = this.mouseSelection();
+    if (text === null) return null;
+    await writeText(text);
+    this.clearSelection();
+    return text;
+  }
+
+  /** Search the scrollback buffer, moving to the next match (wrap around). */
+  findNext(query: string): boolean {
+    if (!query) return false;
+    return this.search.findNext(query, {
+      incremental: true,
+      decorations: {
+        matchBackground: "#45475a",
+        matchOverviewRuler: "#45475a",
+        activeMatchBackground: "#b4befe",
+        activeMatchBorder: "#b4befe",
+        activeMatchColorOverviewRuler: "#b4befe",
+      },
+    });
+  }
+
+  /** Search the scrollback buffer, moving to the previous match. */
+  findPrevious(query: string): boolean {
+    if (!query) return false;
+    return this.search.findPrevious(query, {
+      decorations: {
+        matchBackground: "#45475a",
+        matchOverviewRuler: "#45475a",
+        activeMatchBackground: "#b4befe",
+        activeMatchBorder: "#b4befe",
+        activeMatchColorOverviewRuler: "#b4befe",
+      },
+    });
+  }
+
+  /** Remove all search highlights and reset the search state. */
+  clearSearch(): void {
+    this.search.clearDecorations();
   }
 
   /**

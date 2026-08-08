@@ -51,6 +51,45 @@ body {
   color: var(--accent);
 }
 
+#search-bar {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  max-width: 420px;
+  margin: 0 12px;
+  padding: 2px 8px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+}
+
+#search-bar.open {
+  display: flex;
+}
+
+#search-bar .search-prefix {
+  color: var(--accent);
+  font-weight: bold;
+}
+
+#search-bar input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+#search-bar .search-hint {
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 #workspace {
   flex: 1;
   position: relative;
