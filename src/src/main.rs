@@ -14,7 +14,12 @@ use ratatui::Terminal;
 use std::io::stdout;
 
 fn main() -> Result<()> {
-    let workspace = std::env::args().nth(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-v" || a == "--version") {
+        println!("kumo {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let workspace = args.first().map(|s| s.as_str());
 
     enable_raw_mode()?;
     let mut stdout = stdout();
