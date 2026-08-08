@@ -113,7 +113,8 @@ window.addEventListener(
 
     // Cmd+C copies the selection to the OS clipboard; Cmd+V pastes it into
     // the focused pane (bracketed paste). xterm.js consumes both by default,
-    // so intercept them here.
+    // so intercept them here. Cmd+Backspace deletes the whole line (Ctrl+U,
+    // the macOS convention) — xterm would otherwise send a plain DEL.
     if (e.metaKey && !e.ctrlKey) {
       if (e.code === "KeyC") {
         const copied = await mux.copySelection();
@@ -128,6 +129,12 @@ window.addEventListener(
         e.preventDefault();
         e.stopPropagation();
         await mux.pasteClipboard();
+        return;
+      }
+      if (e.code === "Backspace") {
+        e.preventDefault();
+        e.stopPropagation();
+        await mux.write("\x15");
         return;
       }
     }
