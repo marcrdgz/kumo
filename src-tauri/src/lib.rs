@@ -37,6 +37,8 @@ pub fn run() {
             commands::pane_title,
             commands::git_status,
             commands::git_diff,
+            commands::git_create_worktree,
+            commands::git_remove_worktree,
             commands::save_layout,
             commands::load_layout,
             commands::set_workspace,

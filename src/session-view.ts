@@ -86,7 +86,10 @@ export interface SessionViewOptions {
   name: string;
   containerEl: HTMLDivElement;
   shell: string;
+  /** Spawn root for panes: the workspace path, or the session's worktree dir. */
   workspace: string | null;
+  /** Git worktree name for this session, or null for the main session. */
+  worktree: string | null;
   onChanged: () => void;
   onEmpty: () => void;
 }
@@ -98,6 +101,7 @@ export class SessionView {
   root: Node | null = null;
   aiPaneIds = new Set<number>();
   containerEl: HTMLDivElement;
+  worktree: string | null;
   private onChanged: () => void;
   private onEmpty: () => void;
 
@@ -105,6 +109,7 @@ export class SessionView {
     this.sessionId = opts.sessionId;
     this.name = opts.name;
     this.containerEl = opts.containerEl;
+    this.worktree = opts.worktree;
     this.onChanged = opts.onChanged;
     this.onEmpty = opts.onEmpty;
   }
@@ -114,6 +119,7 @@ export class SessionView {
     name: string;
     shell: string;
     workspace: string | null;
+    worktree: string | null;
     containerEl: HTMLDivElement;
     onChanged: () => void;
     onEmpty: () => void;
@@ -131,6 +137,7 @@ export class SessionView {
       containerEl: opts.containerEl,
       shell: opts.shell,
       workspace: opts.workspace,
+      worktree: opts.worktree,
       onChanged: opts.onChanged,
       onEmpty: opts.onEmpty,
     });
@@ -154,6 +161,7 @@ export class SessionView {
     spec: LayoutSpec;
     shell: string;
     workspace: string | null;
+    worktree: string | null;
     containerEl: HTMLDivElement;
     onChanged: () => void;
     onEmpty: () => void;
@@ -185,6 +193,7 @@ export class SessionView {
       containerEl: opts.containerEl,
       shell,
       workspace,
+      worktree: opts.worktree,
       onChanged: opts.onChanged,
       onEmpty: opts.onEmpty,
     });

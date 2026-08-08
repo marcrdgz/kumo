@@ -34,21 +34,19 @@
       </div>
       <span id="status-right"></span>
     </div>
-    <div id="tabbar">
-      <div id="tabs"></div>
-      <div id="tab-actions">
-        <button id="new-session-btn" class="tab-action" title="new session">＋</button>
-      </div>
-    </div>
-    <div id="workspace">
-      <div id="git-view" class="hidden">
-        <div id="git-header">
-          <span id="git-branch">—</span>
-          <span id="git-meta"></span>
-          <button id="git-refresh">↻</button>
+    <div id="app">
+      <aside id="sidebar">
+        <div id="session-list"></div>
+        <div id="git-section">
+          <div id="git-header">
+            <span id="git-branch">—</span>
+            <span id="git-meta"></span>
+            <button id="git-refresh">↻</button>
+          </div>
+          <div id="git-body"></div>
         </div>
-        <div id="git-body"></div>
-      </div>
+      </aside>
+      <div id="workspace"></div>
     </div>
     <div id="welcome" class="hidden">
       <div class="welcome-card">

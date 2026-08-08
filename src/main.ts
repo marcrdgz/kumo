@@ -15,8 +15,7 @@ import "@xterm/xterm/css/xterm.css";
 const statusLeft = document.getElementById("status-left")!;
 const statusRight = document.getElementById("status-right")!;
 const workspace = document.getElementById("workspace") as HTMLDivElement;
-const tabbar = document.getElementById("tabs") as HTMLDivElement;
-const gitView = document.getElementById("git-view") as HTMLDivElement;
+const sessionList = document.getElementById("session-list") as HTMLDivElement;
 const gitBranch = document.getElementById("git-branch")!;
 const gitMeta = document.getElementById("git-meta")!;
 const gitBody = document.getElementById("git-body")!;
@@ -54,8 +53,6 @@ let currentSessions = 0;
 
 const mux = new Multiplexer(
   workspace,
-  tabbar,
-  gitView,
   (s: { sessionId: number; name: string; panes: unknown[]; activePane: number }) => {
     currentPanes = s.panes.length;
     currentSessionName = s.name;
@@ -63,40 +60,58 @@ const mux = new Multiplexer(
   },
   (list) => {
     currentSessions = list.sessions.length;
-    renderTabs(list);
+    renderSessions(list);
   },
   renderGitPanel,
 );
 
-// ----- session tabs -----
+// ----- sidebar sessions -----
 
-function renderTabs(list: { activeId: number; sessions: { id: number; name: string; agentCount: number }[] }): void {
-  tabbar.innerHTML = "";
+function renderSessions(list: { activeId: number; sessions: { id: number; name: string; agentCount: number; branch: string | null }[] }): void {
+  sessionList.innerHTML = "";
+
+  const heading = document.createElement("div");
+  heading.className = "sidebar-heading";
+  const hLabel = document.createElement("span");
+  hLabel.textContent = "Sessions";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "sidebar-add";
+  addBtn.title = "new session";
+  addBtn.textContent = "＋";
+  addBtn.addEventListener("click", () => void mux.createSession());
+  heading.append(hLabel, addBtn);
+  sessionList.append(heading);
+
+  if (list.sessions.length === 0) return;
   for (const s of list.sessions) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "tab" + (s.id === list.activeId ? " active" : "");
-    btn.title = s.name;
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "session-item" + (s.id === list.activeId ? " active" : "");
+    item.title = s.branch ? `${s.name} · ${s.branch}` : s.name;
+
     const label = document.createElement("span");
+    label.className = "session-item-name";
     label.textContent = s.name;
-    btn.append(label);
+    item.append(label);
+
+    if (s.branch) {
+      const branch = document.createElement("span");
+      branch.className = "session-item-branch";
+      branch.textContent = s.branch.replace(/^nmx\//, "");
+      item.append(branch);
+    }
+
     if (s.agentCount > 0) {
       const badge = document.createElement("span");
-      badge.className = "tab-badge";
+      badge.className = "session-item-badge";
       badge.textContent = `⚡${s.agentCount}`;
-      btn.append(badge);
+      item.append(badge);
     }
-    btn.addEventListener("click", () => void mux.switchSession(s.id));
-    tabbar.append(btn);
-  }
 
-  const gitBtn = document.createElement("button");
-  gitBtn.type = "button";
-  gitBtn.className = "tab git-tab" + (mux.isGitActive() ? " active" : "");
-  gitBtn.title = "git changes";
-  gitBtn.textContent = "git";
-  gitBtn.addEventListener("click", () => void mux.toggleGit());
-  tabbar.append(gitBtn);
+    item.addEventListener("click", () => void mux.switchSession(s.id));
+    sessionList.append(item);
+  }
 }
 
 // ----- git panel -----
@@ -283,7 +298,7 @@ window.addEventListener(
       e.preventDefault();
       e.stopPropagation();
       leaderArmed = true;
-      hint(`LEADER · h=v-split · v=h-split · z=zoom · q=close · /=search · o=open · c=${aiCmd} · n=new · t/g=git · tab=next · esc=exit`);
+      hint(`LEADER · h=v-split · v=h-split · z=zoom · q=close · /=search · o=open · c=${aiCmd} · n=new · tab=next · esc=exit`);
       return;
     }
 
@@ -321,12 +336,6 @@ window.addEventListener(
           e.preventDefault();
           e.stopPropagation();
           await mux.createSession();
-          return;
-        case "g":
-        case "t":
-          e.preventDefault();
-          e.stopPropagation();
-          await mux.toggleGit();
           return;
         case "tab":
           e.preventDefault();
@@ -502,10 +511,6 @@ void listen("menu-close-pane", () => {
 
 void listen("menu-search", () => {
   openSearch();
-});
-
-document.getElementById("new-session-btn")!.addEventListener("click", () => {
-  void mux.createSession();
 });
 
 document.getElementById("git-refresh")!.addEventListener("click", () => {

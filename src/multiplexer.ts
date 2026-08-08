@@ -2,6 +2,8 @@ import {
   closeSession,
   defaultShell,
   getWorkspace,
+  gitCreateWorktree,
+  gitRemoveWorktree,
   gitStatus,
   loadLayout,
   onPaneClosed,
@@ -16,6 +18,8 @@ export interface SessionTab {
   id: number;
   name: string;
   agentCount: number;
+  /** Git branch this session is checked out on (worktree sessions). */
+  branch: string | null;
 }
 
 export interface SessionList {
@@ -36,29 +40,24 @@ export interface GitPanelData {
  */
 export class Multiplexer {
   private workspaceEl: HTMLDivElement;
-  private gitViewEl: HTMLDivElement;
   private sessions = new Map<number, SessionView>();
   private activeId = 0;
   private shell = "/bin/zsh";
   private workspace: string | null = null;
   private onSessionChange: (s: SessionInfo) => void;
-  private onTabsChange: (s: SessionList) => void;
+  private onSessionsChange: (s: SessionList) => void;
   private onGitPanel: (d: GitPanelData) => void;
   private saveTimer: number | null = null;
-  private gitActive = false;
 
   constructor(
     workspace: HTMLDivElement,
-    _tabbar: HTMLDivElement,
-    gitView: HTMLDivElement,
     onSessionChange: (s: SessionInfo) => void,
-    onTabsChange: (s: SessionList) => void,
+    onSessionsChange: (s: SessionList) => void,
     onGitPanel: (d: GitPanelData) => void,
   ) {
     this.workspaceEl = workspace;
-    this.gitViewEl = gitView;
     this.onSessionChange = onSessionChange;
-    this.onTabsChange = onTabsChange;
+    this.onSessionsChange = onSessionsChange;
     this.onGitPanel = onGitPanel;
   }
 
@@ -91,15 +90,33 @@ export class Multiplexer {
 
     await this.createSession("main");
 
+    void this.refreshGit();
     window.addEventListener("resize", () => this.relayout());
     this.startTitlePolling();
   }
 
   // ----- session lifecycle -----
 
-  /** Create a new session (fresh single pane) and make it active. */
+  /**
+   * Create a new session (fresh single pane) and make it active. The first
+   * session uses the workspace root; every further session gets its own git
+   * worktree (`<workspace>.worktrees/<name>`) so it is fully independent.
+   */
   async createSession(name?: string): Promise<void> {
     const sessionName = name ?? `session-${this.sessions.size + 1}`;
+    let spawnRoot: string | null = this.workspace;
+    let worktree: string | null = null;
+    if (this.sessions.size > 0 && this.workspace) {
+      try {
+        spawnRoot = await gitCreateWorktree(sessionName);
+        worktree = sessionName;
+      } catch (err) {
+        console.warn(`worktree create failed for ${sessionName}, using workspace root`, err);
+        spawnRoot = this.workspace;
+        worktree = null;
+      }
+    }
+
     const container = this.mkSessionContainer();
     let viewRef: SessionView | null = null;
     const onChanged = () => this.scheduleSave();
@@ -109,17 +126,17 @@ export class Multiplexer {
     viewRef = await SessionView.createFresh({
       name: sessionName,
       shell: this.shell,
-      workspace: this.workspace,
+      workspace: spawnRoot,
+      worktree,
       containerEl: container,
       onChanged,
       onEmpty,
     });
     this.sessions.set(viewRef.sessionId, viewRef);
     this.activeId = viewRef.sessionId;
-    this.gitActive = false;
     this.updateVisibility();
     this.emitSessionChange(viewRef);
-    this.emitTabs();
+    this.emitSessions();
     this.relayout();
   }
 
@@ -128,10 +145,9 @@ export class Multiplexer {
     const view = this.sessions.get(sessionId);
     if (!view) return;
     this.activeId = sessionId;
-    this.gitActive = false;
     this.updateVisibility();
     this.emitSessionChange(view);
-    this.emitTabs();
+    this.emitSessions();
     this.relayout();
   }
 
@@ -160,8 +176,15 @@ export class Multiplexer {
   private handleSessionRemoved(sessionId: number): void {
     const view = this.sessions.get(sessionId);
     if (!view) return;
+    const worktree = view.worktree;
     view.dispose();
     this.sessions.delete(sessionId);
+
+    if (worktree) {
+      void gitRemoveWorktree(worktree).catch((err) =>
+        console.warn(`worktree remove failed for ${worktree}`, err),
+      );
+    }
 
     if (this.sessions.size === 0) {
       void this.createSession();
@@ -170,11 +193,10 @@ export class Multiplexer {
     if (this.activeId === sessionId) {
       this.activeId = this.sessions.keys().next().value!;
     }
-    this.gitActive = false;
     this.updateVisibility();
     const active = this.sessions.get(this.activeId)!;
     this.emitSessionChange(active);
-    this.emitTabs();
+    this.emitSessions();
     this.relayout();
     this.scheduleSave();
   }
@@ -192,23 +214,7 @@ export class Multiplexer {
 
   // ----- git panel -----
 
-  /** Toggle between the git panel and the active session view. */
-  async toggleGit(): Promise<void> {
-    this.gitActive = !this.gitActive;
-    this.updateVisibility();
-    if (this.gitActive) {
-      await this.refreshGit();
-    } else {
-      const active = this.activeView();
-      if (active) {
-        this.emitSessionChange(active);
-        this.relayout();
-      }
-    }
-    this.emitTabs();
-  }
-
-  /** Re-fetch the workspace git status and render it into the panel. */
+  /** Re-fetch the workspace git status and render it into the sidebar. */
   async refreshGit(): Promise<void> {
     try {
       const status = await gitStatus();
@@ -218,15 +224,10 @@ export class Multiplexer {
     }
   }
 
-  isGitActive(): boolean {
-    return this.gitActive;
-  }
-
   private updateVisibility(): void {
     for (const [id, view] of this.sessions) {
-      view.containerEl.classList.toggle("hidden", this.gitActive || id !== this.activeId);
+      view.containerEl.classList.toggle("hidden", id !== this.activeId);
     }
-    this.gitViewEl.classList.toggle("hidden", !this.gitActive);
   }
 
   // ----- delegation to active session -----
@@ -295,11 +296,11 @@ export class Multiplexer {
 
   /** Serialize every session into the v2 multi-session layout format. */
   async saveLayout(): Promise<void> {
-    const sessions: { name: string; root: LayoutSpec }[] = [];
+    const sessions: { name: string; worktree: string | null; root: LayoutSpec }[] = [];
     for (const view of this.sessions.values()) {
       if (!view.root) continue;
       const root = await view.serializeNode(view.root);
-      sessions.push({ name: view.name, root });
+      sessions.push({ name: view.name, worktree: view.worktree, root });
     }
     await saveLayout(JSON.stringify({ version: 2, sessions }));
   }
@@ -314,7 +315,12 @@ export class Multiplexer {
   }
 
   private async doRestoreLayout(raw: string): Promise<boolean> {
-    let parsed: { version?: number; name?: string; root?: LayoutSpec; sessions?: { name: string; root: LayoutSpec }[] };
+    let parsed: {
+      version?: number;
+      name?: string;
+      root?: LayoutSpec;
+      sessions?: { name: string; worktree?: string | null; root: LayoutSpec }[];
+    };
     try {
       parsed = JSON.parse(raw);
     } catch {
@@ -331,11 +337,13 @@ export class Multiplexer {
         const onEmpty = () => {
           if (viewRef) this.handleSessionRemoved(viewRef.sessionId);
         };
+        const spawnRoot = await this.sessionSpawnRoot(spec.worktree ?? null);
         viewRef = await SessionView.restore({
           name: spec.name || `session-${this.sessions.size + 1}`,
           spec: spec.root,
           shell: this.shell,
-          workspace: this.workspace,
+          workspace: spawnRoot,
+          worktree: spec.worktree ?? null,
           containerEl: container,
           onChanged,
           onEmpty,
@@ -343,11 +351,11 @@ export class Multiplexer {
         this.sessions.set(viewRef.sessionId, viewRef);
       }
       this.activeId = this.sessions.keys().next().value!;
-      this.gitActive = false;
       this.updateVisibility();
       const active = this.sessions.get(this.activeId)!;
       this.emitSessionChange(active);
-      this.emitTabs();
+      this.emitSessions();
+      void this.refreshGit();
       window.addEventListener("resize", () => this.relayout());
       this.startTitlePolling();
       return true;
@@ -367,19 +375,36 @@ export class Multiplexer {
       spec: rootSpec,
       shell: this.shell,
       workspace: this.workspace,
+      worktree: null,
       containerEl: container,
       onChanged,
       onEmpty,
     });
     this.sessions.set(viewRef.sessionId, viewRef);
     this.activeId = viewRef.sessionId;
-    this.gitActive = false;
     this.updateVisibility();
     this.emitSessionChange(viewRef);
-    this.emitTabs();
+    this.emitSessions();
+    void this.refreshGit();
     window.addEventListener("resize", () => this.relayout());
     this.startTitlePolling();
     return true;
+  }
+
+  /**
+   * Resolve the spawn root for a restored session: if it owned a worktree,
+   * re-attach (or re-create) it so the session's panes land in the right
+   * directory. Falls back to the workspace root on any git error.
+   */
+  private async sessionSpawnRoot(worktree: string | null): Promise<string | null> {
+    if (worktree && this.workspace) {
+      try {
+        return await gitCreateWorktree(worktree);
+      } catch (err) {
+        console.warn(`worktree restore failed for ${worktree}, using workspace root`, err);
+      }
+    }
+    return this.workspace;
   }
 
   // ----- titles -----
@@ -401,11 +426,16 @@ export class Multiplexer {
     });
   }
 
-  private emitTabs(): void {
+  private emitSessions(): void {
     const sessions: SessionTab[] = [];
     for (const [id, view] of this.sessions) {
-      sessions.push({ id, name: view.name, agentCount: view.agentCount() });
+      sessions.push({
+        id,
+        name: view.name,
+        agentCount: view.agentCount(),
+        branch: view.worktree ? `nmx/${view.worktree}` : null,
+      });
     }
-    this.onTabsChange({ activeId: this.activeId, activeName: this.sessions.get(this.activeId)?.name ?? "", sessions });
+    this.onSessionsChange({ activeId: this.activeId, activeName: this.sessions.get(this.activeId)?.name ?? "", sessions });
   }
 }

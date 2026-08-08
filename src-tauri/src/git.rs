@@ -119,6 +119,87 @@ pub fn diff(dir: &Path, rel_path: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// Sibling folder holding per-session worktrees: `<workspace>.worktrees`.
+pub fn worktrees_root(workspace: &Path) -> std::path::PathBuf {
+    let mut s = workspace.as_os_str().to_os_string();
+    s.push(".worktrees");
+    std::path::PathBuf::from(s)
+}
+
+fn session_dir(workspace: &Path, session_name: &str) -> std::path::PathBuf {
+    worktrees_root(workspace).join(sanitize_name(session_name))
+}
+
+/// Sanitize a session name into a valid git branch / directory name.
+fn sanitize_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .collect();
+    let trimmed = cleaned.trim_matches('.').to_string();
+    if trimmed.is_empty() { "session".to_string() } else { trimmed }
+}
+
+/// Create (or re-attach) a git worktree for a session, returning its path.
+/// The worktree lives in `<workspace>.worktrees/<session-name>` on a branch
+/// named `nmx/<session-name>`.
+pub fn create_worktree(workspace: &Path, session_name: &str) -> Result<std::path::PathBuf, String> {
+    let dir = session_dir(workspace, session_name);
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    let branch = format!("nmx/{}", sanitize_name(session_name));
+    let add = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["worktree", "add", "-b", &branch])
+        .arg(&dir)
+        .output();
+    if let Ok(o) = add {
+        if o.status.success() {
+            return Ok(dir);
+        }
+        // Branch already exists: attach the worktree to it instead.
+        let attach = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["worktree", "add"])
+            .arg(&dir)
+            .arg(&branch)
+            .output();
+        if let Ok(o) = attach {
+            if o.status.success() {
+                return Ok(dir);
+            }
+            return Err(format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+        }
+    }
+    Err(format!("git worktree add failed"))
+}
+
+/// Remove a session's worktree and its branch.
+pub fn remove_worktree(workspace: &Path, session_name: &str) -> Result<(), String> {
+    let dir = session_dir(workspace, session_name);
+    if dir.exists() {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["worktree", "remove", "--force"])
+            .arg(&dir)
+            .output();
+    }
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["branch", "-D"])
+        .arg(format!("nmx/{}", sanitize_name(session_name)))
+        .output();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +244,38 @@ mod tests {
         assert!(!changes[0].2); // unstaged M
         assert!(changes[1].2); // staged A
         let _ = dir;
+    }
+
+    #[test]
+    fn worktree_create_and_remove() {
+        let tmp = std::env::temp_dir().join(format!("neomux-git-{}", std::process::id()));
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(ok.status.success());
+        Command::new("git").arg("-C").arg(&repo).args(["config", "user.email", "t@x.com"]).output().unwrap();
+        Command::new("git").arg("-C").arg(&repo).args(["config", "user.name", "t"]).output().unwrap();
+        std::fs::write(repo.join("a.txt"), "hi").unwrap();
+        let add = Command::new("git").arg("-C").arg(&repo).args(["add", "."]).output().unwrap();
+        let cmt = Command::new("git").arg("-C").arg(&repo).args(["commit", "-qm", "init"]).output().unwrap();
+        assert!(add.status.success() && cmt.status.success());
+
+        let dir = create_worktree(&repo, "session-2").expect("create worktree");
+        assert_eq!(dir, worktrees_root(&repo).join("session-2"));
+        assert!(dir.join("a.txt").is_file());
+
+        // Idempotent: calling again returns the existing dir.
+        let again = create_worktree(&repo, "session-2").expect("reuse worktree");
+        assert_eq!(again, dir);
+
+        remove_worktree(&repo, "session-2").expect("remove worktree");
+        assert!(!dir.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

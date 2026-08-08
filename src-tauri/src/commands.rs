@@ -228,6 +228,23 @@ pub fn git_status() -> Option<crate::git::GitStatus> {
     crate::git::status(&dir)
 }
 
+/// Create a git worktree for a session, returning its path.
+#[tauri::command]
+pub fn git_create_worktree(session_name: String) -> Result<String, String> {
+    let ws = get_workspace().ok().flatten().ok_or_else(|| "no workspace".to_string())?;
+    let dir = std::path::PathBuf::from(ws);
+    let path = crate::git::create_worktree(&dir, &session_name)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Remove a session's git worktree and its branch.
+#[tauri::command]
+pub fn git_remove_worktree(session_name: String) -> Result<(), String> {
+    let ws = get_workspace().ok().flatten().ok_or_else(|| "no workspace".to_string())?;
+    let dir = std::path::PathBuf::from(ws);
+    crate::git::remove_worktree(&dir, &session_name)
+}
+
 /// Return the unified diff for one file in the current workspace.
 #[tauri::command]
 pub fn git_diff(path: String) -> Result<String, String> {

@@ -166,6 +166,14 @@ export async function gitDiff(path: string): Promise<string> {
   return invoke<string>("git_diff", { path });
 }
 
+export async function gitCreateWorktree(sessionName: string): Promise<string> {
+  return invoke<string>("git_create_worktree", { sessionName });
+}
+
+export async function gitRemoveWorktree(sessionName: string): Promise<void> {
+  await invoke("git_remove_worktree", { sessionName });
+}
+
 export async function saveLayout(layout: string): Promise<void> {
   await invoke("save_layout", { layout });
 }
