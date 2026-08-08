@@ -369,7 +369,7 @@ impl Pane {
             }
         }
 
-        self.vt.for_each_cell(|row, col, rc| {
+        self.vt.for_each_cell(|row, col, rc, selected| {
             if row >= ah as usize || col >= aw as usize {
                 return;
             }
@@ -389,6 +389,9 @@ impl Pane {
             }
             if rc.faint {
                 mods |= Modifier::DIM;
+            }
+            if selected {
+                mods |= Modifier::REVERSED;
             }
             if rc.text.is_empty() {
                 bcell.set_char(' ').set_fg(rgb(rc.fg)).set_bg(rgb(rc.bg));
@@ -414,43 +417,19 @@ impl Pane {
         }
     }
 
-    /// Text of the viewport cells between two (col, row) points (inclusive),
-    /// used to copy a mouse selection. Rows are joined with '\n'.
-    pub fn selection_text(&mut self, a: (u16, u16), b: (u16, u16)) -> String {
-        use std::collections::HashMap;
-        let (r0, r1) = (a.1.min(b.1), a.1.max(b.1));
-        self.vt.refresh();
-        let mut cells_by_row: HashMap<i32, Vec<(i32, char)>> = HashMap::new();
-        self.vt.for_each_cell(|row, col, rc| {
-            if let Some(ch) = rc.text.chars().next() {
-                cells_by_row.entry(row as i32).or_default().push((col as i32, ch));
-            }
-        });
-        let mut out = String::new();
-        for r in r0..=r1 {
-            let (c_lo, c_hi) = if r0 == r1 {
-                (a.0.min(b.0), a.0.max(b.0))
-            } else if r == r0 {
-                (a.0.min(b.0), u16::MAX)
-            } else if r == r1 {
-                (0, a.0.max(b.0))
-            } else {
-                (0, u16::MAX)
-            };
-            let mut line = String::new();
-            if let Some(mut cells) = cells_by_row.get(&(r as i32)).cloned() {
-                cells.sort_by_key(|(c, _)| *c);
-                for (c, ch) in cells {
-                    let cu = c as u16;
-                    if cu >= c_lo && cu <= c_hi {
-                        line.push(ch);
-                    }
-                }
-            }
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-        out.trim_end_matches('\n').to_string()
+    /// Install the terminal's active selection from two viewport coordinates.
+    pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
+        self.vt.set_selection(start, end)
+    }
+
+    /// Clear the terminal's active selection.
+    pub fn clear_selection(&mut self) {
+        self.vt.clear_selection();
+    }
+
+    /// Extract the terminal's active selection as plain text (unwrap + trim).
+    pub fn selected_text(&mut self) -> Option<String> {
+        self.vt.selected_text()
     }
 
     /// Viewport position of the terminal cursor, relative to the pane origin.

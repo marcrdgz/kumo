@@ -133,6 +133,92 @@ pub struct DeviceAttributes {
 pub const COLOR_SCHEME_LIGHT: i32 = 0;
 pub const COLOR_SCHEME_DARK: i32 = 1;
 
+// ---------------------------------------------------------------------------
+// Native selection types (GhosttyPoint / GridRef / Selection)
+// ---------------------------------------------------------------------------
+
+/// A coordinate in the terminal grid (column + row).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PointCoordinate {
+    pub x: u16,
+    pub y: u32,
+}
+
+/// Tagged value of a `GhosttyPoint`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union PointValue {
+    pub coordinate: PointCoordinate,
+    pub _padding: [u64; 2],
+}
+
+/// A point in the terminal grid under a coordinate system.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Point {
+    pub tag: i32,
+    pub value: PointValue,
+}
+
+pub const POINT_TAG_VIEWPORT: i32 = 1;
+pub const POINT_TAG_SCREEN: i32 = 2;
+
+fn viewport_point(x: u16, y: u32) -> Point {
+    Point { tag: POINT_TAG_VIEWPORT, value: PointValue { coordinate: PointCoordinate { x, y } } }
+}
+
+fn screen_point(x: u16, y: u32) -> Point {
+    Point { tag: POINT_TAG_SCREEN, value: PointValue { coordinate: PointCoordinate { x, y } } }
+}
+
+/// A resolved reference to a terminal cell position.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GridRef {
+    pub size: usize,
+    pub node: *mut c_void,
+    pub x: u16,
+    pub y: u16,
+}
+
+/// A snapshot selection range defined by two grid references (inclusive).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub size: usize,
+    pub start: GridRef,
+    pub end: GridRef,
+    pub rectangle: bool,
+}
+
+/// Row-local selected cell range from the render state (inclusive).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderStateRowSelection {
+    pub size: usize,
+    pub start_x: u16,
+    pub end_x: u16,
+}
+
+/// Options for one-shot formatting of a terminal selection.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SelectionFormatOptions {
+    pub size: usize,
+    pub emit: i32,
+    pub unwrap: bool,
+    pub trim: bool,
+    pub selection: *const Selection,
+}
+
+/// Plain-text formatter output.
+pub const FORMAT_PLAIN: i32 = 0;
+/// Terminal option id for the active screen selection.
+pub const TERMINAL_OPT_SELECTION: i32 = 21;
+/// Render-state row data id for the row-local selection range.
+pub const ROW_DATA_SELECTION: i32 = 4;
+
 /// Scrollbar state for the terminal viewport.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -338,6 +424,19 @@ unsafe extern "C" {
         data: i32,
         out: *mut c_void,
     ) -> Result;
+
+    fn ghostty_terminal_grid_ref(
+        terminal: TerminalHandle,
+        point: Point,
+        out_ref: *mut GridRef,
+    ) -> Result;
+    fn ghostty_terminal_selection_format_buf(
+        terminal: TerminalHandle,
+        options: SelectionFormatOptions,
+        buf: *mut u8,
+        buf_len: usize,
+        out_written: *mut usize,
+    ) -> Result;
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +617,70 @@ impl Terminal {
         *self.sink_cell = Some(writer);
     }
 
+    /// Install a linear selection covering two viewport coordinates
+    /// (inclusive), matching a mouse drag. Returns false if either endpoint
+    /// is outside the grid. The terminal converts the refs into owned tracked
+    /// state, so the selection survives subsequent output/scroll.
+    pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
+        let mut start_ref =
+            GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        let mut end_ref = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        unsafe {
+            if !ghostty_terminal_grid_ref(self.term, viewport_point(start.0, start.1 as u32), &mut start_ref).is_ok()
+                || !ghostty_terminal_grid_ref(self.term, viewport_point(end.0, end.1 as u32), &mut end_ref).is_ok()
+            {
+                return false;
+            }
+        }
+        let selection = Selection {
+            size: size_of::<Selection>(),
+            start: start_ref,
+            end: end_ref,
+            rectangle: false,
+        };
+        unsafe {
+            ghostty_terminal_set(self.term, TERMINAL_OPT_SELECTION, &selection as *const Selection as *const c_void)
+                .is_ok()
+        }
+    }
+
+    /// Clear the active terminal selection.
+    pub fn clear_selection(&mut self) {
+        unsafe {
+            ghostty_terminal_set(self.term, TERMINAL_OPT_SELECTION, ptr::null());
+        }
+    }
+
+    /// Extract the active selection as plain text: soft-wrapped lines are
+    /// unwrapped and trailing whitespace is trimmed, matching Ghostty's
+    /// clipboard behavior.
+    pub fn selected_text(&mut self) -> Option<String> {
+        let options = SelectionFormatOptions {
+            size: size_of::<SelectionFormatOptions>(),
+            emit: FORMAT_PLAIN,
+            unwrap: true,
+            trim: true,
+            selection: ptr::null(),
+        };
+        unsafe {
+            let mut written = 0usize;
+            let res =
+                ghostty_terminal_selection_format_buf(self.term, options, ptr::null_mut(), 0, &mut written);
+            if res != Result::OutOfSpace || written == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; written];
+            let mut filled = 0usize;
+            if !ghostty_terminal_selection_format_buf(self.term, options, buf.as_mut_ptr(), buf.len(), &mut filled)
+                .is_ok()
+            {
+                return None;
+            }
+            buf.truncate(filled.min(buf.len()));
+            Some(String::from_utf8_lossy(&buf).into_owned())
+        }
+    }
+
     /// Feed raw VT-encoded output from the PTY into the emulator.
     pub fn write(&mut self, data: &[u8]) {
         if data.is_empty() {
@@ -661,10 +824,12 @@ impl Terminal {
 
     /// Iterate every populated cell of the current viewport.
     ///
-    /// `f` is called with `(viewport_row, viewport_col, &RenderCell)` for each
-    /// cell that either has text or carries an explicit background (so wide
-    /// character tails and full-width highlights keep their background).
-    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell)) {
+    /// `f` is called with `(viewport_row, viewport_col, &RenderCell, selected)`
+    /// for each cell that either has text or carries an explicit background
+    /// (so wide character tails and full-width highlights keep their
+    /// background). `selected` is true when the cell is inside the terminal's
+    /// active selection (per the emulator's own text-aware ranges).
+    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell, bool)) {
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -680,12 +845,27 @@ impl Terminal {
 
             let mut row_idx: usize = 0;
             while ghostty_render_state_row_iterator_next(iter) {
+                // Row-local selection range (inclusive), if this row intersects.
+                let mut row_sel = RenderStateRowSelection {
+                    size: size_of::<RenderStateRowSelection>(),
+                    start_x: 0,
+                    end_x: 0,
+                };
+                let sel_ok = ghostty_render_state_row_get(
+                    iter,
+                    ROW_DATA_SELECTION,
+                    &mut row_sel as *mut RenderStateRowSelection as *mut c_void,
+                )
+                .is_ok();
                 // Populate the cells container with the current row's data.
                 ghostty_render_state_row_get(iter, ROW_DATA_CELLS, &mut cells as *mut RowCellsHandle as *mut c_void);
                 let mut col_idx: usize = 0;
                 while ghostty_render_state_row_cells_next(cells) {
                     if let Some(rc) = self.read_cell(cells) {
-                        f(row_idx, col_idx, &rc);
+                        let selected = sel_ok
+                            && col_idx >= row_sel.start_x as usize
+                            && col_idx <= row_sel.end_x as usize;
+                        f(row_idx, col_idx, &rc, selected);
                     }
                     col_idx += 1;
                 }
@@ -767,7 +947,7 @@ mod tests {
 
     fn collect(t: &mut Terminal) -> Vec<(usize, usize, String)> {
         let mut out = Vec::new();
-        t.for_each_cell(|r, c, rc| {
+        t.for_each_cell(|r, c, rc, _selected| {
             if !rc.text.is_empty() {
                 out.push((r, c, rc.text.clone()));
             }
@@ -833,6 +1013,34 @@ mod tests {
         t.scroll(-2);
         t.refresh();
         assert!(t.scrollbar().total > 0);
+    }
+
+    #[test]
+    fn native_selection_highlights_and_extracts() {
+        let mut t = Terminal::new(20, 5, 100, &palette()).unwrap();
+        t.write(b"hello world\nsecond line");
+        t.refresh();
+        assert!(t.set_selection((0, 0), (4, 0)), "set_selection should succeed");
+        t.refresh();
+        let mut selected = Vec::new();
+        t.for_each_cell(|r, c, rc, s| {
+            if s {
+                selected.push((r, c, rc.text.clone()));
+            }
+        });
+        assert!(!selected.is_empty(), "row should intersect the selection");
+        assert_eq!(t.selected_text().as_deref(), Some("hello"));
+
+        // Clearing removes the highlight.
+        t.clear_selection();
+        t.refresh();
+        let mut after = 0usize;
+        t.for_each_cell(|_, _, _, s| {
+            if s {
+                after += 1;
+            }
+        });
+        assert_eq!(after, 0);
     }
 }
 

@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = app::run(&mut terminal, workspace.as_deref());
+    let result = app::run(&mut terminal, workspace);
 
     // Restore the terminal regardless of how the app exits.
     let _ = crossterm::terminal::disable_raw_mode();

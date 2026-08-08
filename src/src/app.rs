@@ -53,10 +53,20 @@ enum Drag {
 }
 
 /// Mouse text selection inside a pane (viewport-relative coordinates).
+#[derive(Clone, Copy, PartialEq)]
 struct Sel {
     pane_id: u64,
     start: (u16, u16),
     end: (u16, u16),
+}
+
+/// A left-click in a mouse-reporting pane, waiting to be resolved as either a
+/// click (forwarded to the app) or the start of a text drag (selection).
+#[derive(Clone, Copy)]
+struct PendingClick {
+    pane_id: u64,
+    col: u16,
+    row: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +96,7 @@ pub struct App {
     mode: Mode,
     drag: Option<Drag>,
     sel: Option<Sel>,
+    pending_click: Option<PendingClick>,
     events_tx: mpsc::Sender<PtyEvent>,
     events_rx: mpsc::Receiver<PtyEvent>,
     shell: String,
@@ -144,6 +155,7 @@ impl App {
             mode: Mode::Normal,
             drag: None,
             sel: None,
+            pending_click: None,
             events_tx,
             events_rx,
             shell,
@@ -431,16 +443,19 @@ impl App {
                         .map(|p| p.has_mouse_reporting())
                         .unwrap_or(false);
                     if reporting {
-                        if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
-                            let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
-                            pane.write(&sgr_mouse(b, col + 1, row + 1, false));
-                        }
+                        // Hold the press until it resolves as a click (sent to
+                        // the app on release) or a drag (kumo text selection),
+                        // so drag-select works even when the app owns the mouse.
+                        self.pending_click = Some(PendingClick { pane_id: pg.pane_id, col, row });
                     } else {
                         self.sel = Some(Sel {
                             pane_id: pg.pane_id,
                             start: (col, row),
                             end: (col, row),
                         });
+                        if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
+                            pane.set_selection((col, row), (col, row));
+                        }
                     }
                 }
             }
@@ -460,22 +475,81 @@ impl App {
                     }
                     return Ok(());
                 }
-                let sel_pane = self.sel.as_ref().map(|s| s.pane_id);
-                if let Some(pid) = sel_pane {
+                let sel = self.sel;
+                if let Some(sel) = sel {
                     if let Some(pg) = self.pane_at(x, y) {
-                        if pg.pane_id == pid {
+                        if pg.pane_id == sel.pane_id {
                             let inner = pg.inner();
-                            if let Some(sel) = self.sel.as_mut() {
-                                sel.end = (x.saturating_sub(inner.x), y.saturating_sub(inner.y));
+                            let c = x
+                                .saturating_sub(inner.x)
+                                .min(inner.width.saturating_sub(1));
+                            let r = y
+                                .saturating_sub(inner.y)
+                                .min(inner.height.saturating_sub(1));
+                            self.sel.as_mut().unwrap().end = (c, r);
+                            if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
+                                pane.set_selection(sel.start, (c, r));
                             }
+                        }
+                    }
+                    return Ok(());
+                }
+                // A press that moves enough becomes a selection instead of a click.
+                if let Some(pc) = self.pending_click {
+                    let crossed = self
+                        .pane_at(x, y)
+                        .filter(|pg| pg.pane_id == pc.pane_id)
+                        .map(|pg| {
+                            let i = pg.inner();
+                            let c = x.saturating_sub(i.x);
+                            let r = y.saturating_sub(i.y);
+                            c.abs_diff(pc.col) >= 2 || r.abs_diff(pc.row) >= 2
+                        })
+                        .unwrap_or(false);
+                    if crossed {
+                        let start = (pc.col, pc.row);
+                        let end = self
+                            .pane_at(x, y)
+                            .map(|pg| {
+                                let i = pg.inner();
+                                let c = x.saturating_sub(i.x).min(i.width.saturating_sub(1));
+                                let r = y.saturating_sub(i.y).min(i.height.saturating_sub(1));
+                                (c, r)
+                            })
+                            .unwrap_or(start);
+                        self.pending_click = None;
+                        self.sel = Some(Sel { pane_id: pc.pane_id, start, end });
+                        if let Some(pane) = self.panes.get_mut(&pc.pane_id) {
+                            pane.set_selection(start, end);
                         }
                     }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.drag = None;
-                if let Some(sel) = self.sel.take() {
-                    self.copy_selection(&sel);
+                if let Some(pc) = self.pending_click.take() {
+                    // It was a click: deliver press+release to the app.
+                    let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
+                    let up = self
+                        .pane_at(x, y)
+                        .filter(|pg| pg.pane_id == pc.pane_id)
+                        .map(|pg| {
+                            let i = pg.inner();
+                            (x.saturating_sub(i.x) + 1, y.saturating_sub(i.y) + 1)
+                        })
+                        .unwrap_or((pc.col + 1, pc.row + 1));
+                    if let Some(pane) = self.panes.get_mut(&pc.pane_id) {
+                        pane.write(&sgr_mouse(b, pc.col + 1, pc.row + 1, false));
+                        pane.write(&sgr_mouse(b, up.0, up.1, true));
+                    }
+                } else if let Some(sel) = self.sel.take() {
+                    // A plain click without drag copies nothing, like a normal
+                    // terminal; only an actual drag copies.
+                    if sel.start != sel.end {
+                        self.copy_selection(&sel);
+                    } else if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
+                        pane.clear_selection();
+                    }
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
@@ -573,10 +647,12 @@ impl App {
 
     fn copy_selection(&mut self, sel: &Sel) {
         if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
-            let text = pane.selection_text(sel.start, sel.end);
-            if !text.is_empty() {
-                copy_to_clipboard(&text);
+            if let Some(text) = pane.selected_text() {
+                if !text.is_empty() {
+                    copy_to_clipboard(&text);
+                }
             }
+            pane.clear_selection();
         }
     }
 
@@ -779,27 +855,6 @@ impl App {
                     pane.render(inner, pg.pane_id == focused, f.buffer_mut());
                     let sb = pane.scrollbar_data();
                     self.render_scrollbar(f, &sb, inner);
-                }
-            }
-        }
-
-        if let Some(sel) = &self.sel {
-            if let Some(pg) = geom.panes.iter().find(|p| p.pane_id == sel.pane_id) {
-                let inner = pg.inner();
-                let r0 = sel.start.1.min(sel.end.1);
-                let r1 = sel.start.1.max(sel.end.1);
-                let c0 = sel.start.0.min(sel.end.0);
-                let c1 = sel.start.0.max(sel.end.0);
-                for r in r0..=r1 {
-                    for c in c0..=c1 {
-                        let x = inner.x + c;
-                        let y = inner.y + r;
-                        if x < inner.x + inner.width && y < inner.y + inner.height {
-                            if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
-                                cell.modifier |= ratatui::style::Modifier::REVERSED;
-                            }
-                        }
-                    }
                 }
             }
         }
