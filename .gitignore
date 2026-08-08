@@ -1,12 +1,5 @@
-# --- Rust / Tauri ---
-src-tauri/target/
-src-tauri/gen/schemas/
+# --- Rust ---
 /target/
-
-# --- Node / Frontend ---
-node_modules/
-dist/
-*.tsbuildinfo
 
 # --- C/C++ & Native Libraries Cache ---
 *.o
@@ -14,6 +7,11 @@ dist/
 *.so
 *.dylib
 *.dll
+
+# --- Zig (vendored libghostty-vt) ---
+zig-out/
+.zig-cache/
+**/.zig-cache/
 
 # --- Operating System Files ---
 # macOS

@@ -1,0 +1,16 @@
+[package]
+name = "kumo-tui"
+version.workspace = true
+edition.workspace = true
+description = "Kumo TUI (ratatui) frontend with mouse support"
+build = "build.rs"
+
+[dependencies]
+kumo-core = { path = "../kumo-core" }
+ratatui = "0.30"
+crossterm = "0.29"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
