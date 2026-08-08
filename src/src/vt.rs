@@ -344,16 +344,6 @@ unsafe extern "C" {
 // Safe wrapper
 // ---------------------------------------------------------------------------
 
-/// A null `*mut dyn Write + Send` fat pointer. Never dereferenced; only used
-/// as the initial "no sink installed" marker checked with `is_null()`.
-fn null_dyn_writer() -> *mut (dyn std::io::Write + Send) {
-    unsafe {
-        let raw: *const (dyn std::io::Write + Send) =
-            std::mem::transmute::<(*const (), *const ()), _>((std::ptr::null(), std::ptr::null()));
-        raw as *mut _
-    }
-}
-
 /// Write pty callback: forwards query responses to the installed pty writer.
 unsafe extern "C" fn write_pty_cb(
     _term: TerminalHandle,
@@ -364,11 +354,13 @@ unsafe extern "C" fn write_pty_cb(
     if userdata.is_null() {
         return;
     }
-    let cell: *mut *mut (dyn std::io::Write + Send) = userdata as *mut _;
-    if (*cell).is_null() {
+    // USERDATA points at a heap `Option<*mut dyn Write + Send>` slot (None =
+    // no writer installed yet).
+    let cell: *mut Option<*mut (dyn std::io::Write + Send)> = userdata as *mut _;
+    let Some(writer) = *cell else {
         return;
-    }
-    let writer = &mut **cell;
+    };
+    let writer = &mut *writer;
     let bytes = std::slice::from_raw_parts(data, len);
     let _ = writer.write_all(bytes);
 }
@@ -444,10 +436,10 @@ pub struct Terminal {
     default_bg: ColorRgb,
     /// Cached scrollbar state from the last `refresh`.
     scrollbar: TerminalScrollbar,
-    /// Heap cell holding the active pty writer. Its address is the USERDATA
-    /// passed to the write_pty callback; the callback writes responses through
-    /// whatever writer is currently installed here.
-    sink_cell: Box<*mut (dyn std::io::Write + Send)>,
+    /// Heap cell holding the active pty writer as an `Option` (None = not
+    /// installed). Its address is the USERDATA passed to the write_pty
+    /// callback, which writes responses through the current writer.
+    sink_cell: Box<Option<*mut (dyn std::io::Write + Send)>>,
 }
 
 impl Terminal {
@@ -495,8 +487,8 @@ impl Terminal {
 
         // The write_pty callback needs a stable place to find the current pty
         // writer. Allocate a heap cell and use it as the USERDATA pointer.
-        let sink_cell: Box<*mut (dyn std::io::Write + Send)> = Box::new(null_dyn_writer());
-        let userdata = (&*sink_cell) as *const *mut (dyn std::io::Write + Send) as *mut c_void;
+        let sink_cell: Box<Option<*mut (dyn std::io::Write + Send)>> = Box::new(None);
+        let userdata = (&*sink_cell) as *const Option<*mut (dyn std::io::Write + Send)> as *mut c_void;
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const c_void);
@@ -523,7 +515,7 @@ impl Terminal {
     /// must point into a stable heap allocation (e.g. a `Box`'s contents) and
     /// stay valid for the lifetime of the terminal.
     pub fn set_write_sink(&mut self, writer: *mut (dyn std::io::Write + Send)) {
-        *self.sink_cell = writer;
+        *self.sink_cell = Some(writer);
     }
 
     /// Feed raw VT-encoded output from the PTY into the emulator.
