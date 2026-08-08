@@ -293,15 +293,26 @@ impl Pane {
         self.is_ai || self.detected_ai
     }
 
-    /// Whether an AI CLI (opencode/claude) is currently running in this
-    /// pane's process tree.
+    /// Whether an AI CLI is currently running in this pane's process tree.
     pub fn ai_cli_running(&self) -> bool {
-        let Some(root) = self.pty.child.process_id() else {
-            return false;
-        };
-        ProcessSnapshot::capture()
-            .map(|snapshot| snapshot.contains_ai_cli(root))
-            .unwrap_or(false)
+        self.ai_cli_name().is_some()
+    }
+
+    /// Name of the AI CLI currently running in this pane's process tree.
+    pub fn ai_cli_name(&self) -> Option<String> {
+        let root = self.pty.child.process_id()?;
+        ProcessSnapshot::capture()?.ai_cli_in_tree(root)
+    }
+
+    /// Milliseconds since the pane last produced output. Debug/diagnostics.
+    pub fn last_output_age(&self) -> Duration {
+        self.last_output.elapsed()
+    }
+
+    /// Last `max_chars` of stripped output text. Debug/diagnostics.
+    pub fn recent_text_tail(&self, max_chars: usize) -> String {
+        let start = self.recent_text.len().saturating_sub(max_chars);
+        String::from_utf8_lossy(&self.recent_text[start..]).into_owned()
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -462,6 +473,11 @@ pub fn sgr_mouse(button: u8, col: u16, row: u16, release: bool) -> Vec<u8> {
     format!("\x1b[<{b};{col};{row}{}\x1b[0m", if release { "m" } else { "M" }).into_bytes()
 }
 
+/// Executable names treated as AI CLI panes.
+const AI_CLI_NAMES: &[&str] = &[
+    "opencode", "claude", "codex", "gemini", "qwen", "aider", "cody", "swe", "coco",
+];
+
 /// Snapshot of the process table (parent/child map + executable names), used
 /// to detect whether an AI CLI process runs inside a pane's process tree.
 pub struct ProcessSnapshot {
@@ -509,9 +525,8 @@ impl ProcessSnapshot {
         }
     }
 
-    /// True when any process reachable from `root` (including `root` itself)
-    /// is an AI CLI (opencode/claude).
-    pub fn contains_ai_cli(&self, root: u32) -> bool {
+    /// The AI CLI process name reachable from `root`, if any.
+    pub fn ai_cli_in_tree(&self, root: u32) -> Option<String> {
         let mut stack = vec![root];
         let mut seen = HashSet::new();
         while let Some(pid) = stack.pop() {
@@ -520,15 +535,15 @@ impl ProcessSnapshot {
             }
             if let Some(name) = self.names.get(&pid) {
                 let base = name.rsplit('/').next().unwrap_or(name);
-                if base == "opencode" || base == "claude" {
-                    return true;
+                if AI_CLI_NAMES.contains(&base) {
+                    return Some(name.clone());
                 }
             }
             if let Some(kids) = self.children.get(&pid) {
                 stack.extend(kids);
             }
         }
-        false
+        None
     }
 }
 
@@ -645,9 +660,9 @@ mod tests {
                 (4, "opencode".to_string()),
             ]),
         };
-        assert!(snap.contains_ai_cli(1));
-        assert!(snap.contains_ai_cli(4));
-        assert!(!snap.contains_ai_cli(3));
+        assert_eq!(snap.ai_cli_in_tree(1), Some("opencode".to_string()));
+        assert_eq!(snap.ai_cli_in_tree(4), Some("opencode".to_string()));
+        assert!(snap.ai_cli_in_tree(3).is_none());
     }
 
     #[test]
@@ -659,7 +674,7 @@ mod tests {
                 (2, "/Users/x/.opencode/bin/opencode".to_string()),
             ]),
         };
-        assert!(snap.contains_ai_cli(1));
+        assert_eq!(snap.ai_cli_in_tree(1), Some("/Users/x/.opencode/bin/opencode".to_string()));
     }
 
     #[test]

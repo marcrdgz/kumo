@@ -99,6 +99,8 @@ pub struct App {
     branch_cache: HashMap<PathBuf, (Option<String>, Instant)>,
     /// When the pane process tree was last scanned for an AI CLI.
     last_ai_scan: Instant,
+    /// When the agent-status debug log was last written (throttle).
+    last_agent_debug: Instant,
     quit: bool,
 }
 
@@ -153,6 +155,7 @@ impl App {
             sidebar_width: 26,
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
+            last_agent_debug: Instant::now(),
             quit: false,
         };
         app.new_session()?;
@@ -624,6 +627,42 @@ impl App {
         }
     }
 
+    /// Append the per-pane agent status, output age, and detected CLI to
+    /// `/tmp/kumo_agent.log` (throttled to 1/s, capped at 512 KiB). Gated
+    /// behind `DEBUG_AGENT=1` so it is inert in production but stays in the
+    /// codebase for diagnostics.
+    fn log_agent_statuses(&mut self) {
+        if std::env::var("DEBUG_AGENT").is_err() {
+            return;
+        }
+        if self.last_agent_debug.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_agent_debug = Instant::now();
+        use std::io::Write;
+        const PATH: &str = "/tmp/kumo_agent.log";
+        if std::fs::metadata(PATH).map(|m| m.len()).unwrap_or(0) > 512 * 1024 {
+            let _ = std::fs::write(PATH, b"");
+        }
+        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(PATH) {
+            for (pid, pane) in self.panes.iter() {
+                if !pane.is_ai_cli() {
+                    continue;
+                }
+                let tail = pane.recent_text_tail(200).replace('\n', "\\n");
+                let _ = writeln!(
+                    log,
+                    "pid={} cli={} status={:?} age_ms={} recent={}",
+                    pid,
+                    pane.ai_cli_name().unwrap_or_else(|| "?".into()),
+                    pane.agent_status(),
+                    pane.last_output_age().as_millis(),
+                    tail,
+                );
+            }
+        }
+    }
+
     /// Static rows of the sidebar (shared by render + mouse hit-testing).
     ///
     /// Top half: sessions with their git branch. Bottom half (starting at the
@@ -703,6 +742,7 @@ impl App {
         self.term_size = (size.width, size.height);
         self.refresh_branches();
         self.refresh_ai_cli();
+        self.log_agent_statuses();
         let area = Rect::new(0, 0, size.width, size.height);
         let geom = self.active_geom();
 
