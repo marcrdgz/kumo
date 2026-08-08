@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "kumo"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-core"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "portable-pty",
