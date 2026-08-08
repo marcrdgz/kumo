@@ -2,35 +2,42 @@ use std::collections::HashMap;
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use kumo_core::pty::Pty;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Position, Rect};
-use ratatui::style::{Color as RColor, Style};
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::layout::{self, LayoutTree, SplitDir, TreeGeom};
-use crate::pane::{sgr_mouse, Pane, PtyEvent};
+use crate::pane::{sgr_mouse, AgentStatus, Pane, PtyEvent};
 use crate::vt;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
-/// herdr-style Catppuccin panel colors.
-const PANEL_BG: RColor = RColor::Rgb(0x18, 0x18, 0x25);
-const PANEL_SEP: RColor = RColor::Rgb(0x31, 0x32, 0x44);
-const PANEL_MUTED: RColor = RColor::Rgb(0x6c, 0x70, 0x86);
-const BORDER_IDLE: RColor = RColor::Rgb(0x45, 0x47, 0x5a);
+/// Catppuccin mocha chrome colors (sidebars, status bar, chrome borders).
+const PANEL_BG: RColor = RColor::Rgb(0x18, 0x18, 0x25); // mantle
+const PANEL_SEP: RColor = RColor::Rgb(0x31, 0x32, 0x44); // surface0
+const PANEL_MUTED: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0
+const BORDER_IDLE: RColor = RColor::Rgb(0x45, 0x47, 0x5a); // surface1
+const YELLOW: RColor = RColor::Rgb(0xf9, 0xe2, 0xaf); // yellow
+const GREEN: RColor = RColor::Rgb(0xa6, 0xe3, 0xa1); // green
+const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
+
+/// How often the sidebar re-reads the git branch of each session's workspace.
+const BRANCH_REFRESH: Duration = Duration::from_secs(3);
 
 struct Session {
     id: u64,
     name: String,
     tree: LayoutTree,
     zoom: bool,
+    workspace: PathBuf,
 }
 
 #[derive(PartialEq)]
@@ -65,7 +72,9 @@ enum SidebarRow {
     Spacer,
     Section(String),
     Session(usize),
-    Pane(usize, u64),
+    Branch(String),
+    Agent(usize, u64),
+    NewSession,
 }
 
 pub struct App {
@@ -84,6 +93,8 @@ pub struct App {
     last_sizes: HashMap<u64, (u16, u16)>,
     sidebar_open: bool,
     sidebar_width: u16,
+    /// Cached git branch per workspace, refreshed periodically.
+    branch_cache: HashMap<PathBuf, (Option<String>, Instant)>,
     quit: bool,
 }
 
@@ -136,6 +147,7 @@ impl App {
             last_sizes: HashMap::new(),
             sidebar_open: true,
             sidebar_width: 26,
+            branch_cache: HashMap::new(),
             quit: false,
         };
         app.new_session()?;
@@ -148,13 +160,14 @@ impl App {
         let sid = self.next_session_id();
         let name = format!("session-{}", self.sessions.len() + 1);
         let pid = Pty::next_pane_id();
+        let workspace = self.workspace.clone();
         let (cols, rows) = self.pane_dims();
         let pane = Pane::spawn(
             sid,
             pid,
             self.shell.clone(),
             None,
-            Some(self.workspace.clone()),
+            Some(workspace.clone()),
             cols,
             rows,
             false,
@@ -166,6 +179,7 @@ impl App {
             name,
             tree: LayoutTree::new(pid),
             zoom: false,
+            workspace,
         });
         self.active = self.sessions.len() - 1;
         Ok(())
@@ -191,7 +205,7 @@ impl App {
             pid,
             shell,
             program,
-            Some(self.workspace.clone()),
+            Some(self.sessions[self.active].workspace.clone()),
             cols,
             rows,
             is_ai,
@@ -281,7 +295,10 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) -> Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let is_leader = ctrl && key.code == KeyCode::Char('b');
+        // Leader key: Ctrl+Space. Terminals report it as NUL, space-with-ctrl,
+        // or a literal space in the enhanced keyboard protocol.
+        let is_leader = ctrl
+            && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('\0') | KeyCode::Null);
 
         match self.mode {
             Mode::Normal => {
@@ -313,6 +330,7 @@ impl App {
         match key.code {
             KeyCode::Char('v') => self.split_active(SplitDir::V, false)?,
             KeyCode::Char('-') => self.split_active(SplitDir::H, false)?,
+            KeyCode::Char('a') => self.split_active(SplitDir::V, true)?,
             KeyCode::Char('c') => self.new_session()?,
             KeyCode::Char('x') => self.close_focused(),
             KeyCode::Char('z') => {
@@ -323,7 +341,7 @@ impl App {
             KeyCode::Char('k') => self.focus_dir(Dir::Up),
             KeyCode::Char('l') => self.focus_dir(Dir::Right),
             KeyCode::Char('b') => self.sidebar_open = !self.sidebar_open,
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('d') => self.quit = true, // detach (exit the TUI)
             KeyCode::Char('n') => self.cycle_session(1),
             KeyCode::Char('p') => self.cycle_session(-1),
             KeyCode::Tab => self.cycle_pane(),
@@ -385,17 +403,7 @@ impl App {
         let y = m.row;
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if y == 0 {
-                    if x >= self.plus_x() && x < self.plus_x() + 3 {
-                        self.new_session()?;
-                        return Ok(());
-                    }
-                    if let Some(i) = self.tab_at(x) {
-                        self.active = i;
-                        return Ok(());
-                    }
-                }
-                if self.sidebar_open && x < self.sidebar_width && y > 0 {
+                if self.sidebar_open && x < self.sidebar_width {
                     if self.sidebar_hit(x, y) {
                         return Ok(());
                     }
@@ -488,7 +496,7 @@ impl App {
 
     // ----- geometry / focus -----
 
-    /// Rect covered by the pane grid (excludes tab row and status bar).
+    /// Rect covered by the pane grid (excludes the status bar).
     fn panes_area(&self) -> Rect {
         let (w, h) = self.term_size;
         let x = if self.sidebar_open {
@@ -496,7 +504,7 @@ impl App {
         } else {
             0
         };
-        Rect::new(x, 1, w.saturating_sub(x), h.saturating_sub(2))
+        Rect::new(x, 0, w.saturating_sub(x), h.saturating_sub(1))
     }
 
     /// Geometry without zoom applied (used for navigation).
@@ -555,26 +563,6 @@ impl App {
         }
     }
 
-    fn tab_at(&self, x: u16) -> Option<usize> {
-        let mut xpos: u16 = 0;
-        for (i, s) in self.sessions.iter().enumerate() {
-            let w = s.name.chars().count() as u16 + 2;
-            if x >= xpos && x < xpos + w {
-                return Some(i);
-            }
-            xpos += w;
-        }
-        None
-    }
-
-    /// Column where the "+" new-session tab starts.
-    fn plus_x(&self) -> u16 {
-        self.sessions
-            .iter()
-            .map(|s| s.name.chars().count() as u16 + 2)
-            .sum()
-    }
-
     fn copy_selection(&mut self, sel: &Sel) {
         if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
             let text = pane.selection_text(sel.start, sel.end);
@@ -589,30 +577,72 @@ impl App {
         (r.width.max(1), r.height.max(1))
     }
 
+    // ----- git branch -----
+
+    /// Refresh cached git branches for all session workspaces (every
+    /// `BRANCH_REFRESH`). Runs `git` off the hot frame path (once per frame).
+    fn refresh_branches(&mut self) {
+        let now = Instant::now();
+        let live: Vec<PathBuf> = self.sessions.iter().map(|s| s.workspace.clone()).collect();
+        for ws in &live {
+            let stale = match self.branch_cache.get(ws) {
+                Some((_, t)) => now.duration_since(*t) >= BRANCH_REFRESH,
+                None => true,
+            };
+            if stale {
+                let branch = git_branch(ws);
+                self.branch_cache.insert(ws.clone(), (branch, now));
+            }
+        }
+        self.branch_cache.retain(|ws, _| live.contains(ws));
+    }
+
+    /// Cached git branch for a session's workspace.
+    fn session_branch(&self, idx: usize) -> Option<String> {
+        let ws = &self.sessions[idx].workspace;
+        self.branch_cache.get(ws).and_then(|(b, _)| b.clone())
+    }
+
     /// Static rows of the sidebar (shared by render + mouse hit-testing).
+    ///
+    /// Top half: sessions with their git branch. Bottom half (starting at the
+    /// vertical midpoint) holds the AGENTS list.
     fn sidebar_rows(&self) -> Vec<(u16, SidebarRow)> {
         let mut out = Vec::new();
-        let mut y: u16 = 1;
+        let mut y: u16 = 0;
         out.push((y, SidebarRow::Header("kumo".into())));
         y += 1;
         out.push((y, SidebarRow::Spacer));
         y += 1;
-        out.push((y, SidebarRow::Section("spaces".into())));
+        out.push((y, SidebarRow::Section("sessions".into())));
         y += 1;
         for (i, _s) in self.sessions.iter().enumerate() {
             out.push((y, SidebarRow::Session(i)));
             y += 1;
-        }
-        out.push((y, SidebarRow::Spacer));
-        y += 1;
-        out.push((y, SidebarRow::Section("panes".into())));
-        y += 1;
-        for (i, s) in self.sessions.iter().enumerate() {
-            for pid in s.tree.pane_ids() {
-                out.push((y, SidebarRow::Pane(i, pid)));
+            if let Some(branch) = self.session_branch(i) {
+                out.push((y, SidebarRow::Branch(branch)));
                 y += 1;
             }
         }
+
+        // AGENTS starts exactly at the screen midpoint (or below the sessions
+        // if they overflow it).
+        let footer_y = self.term_size.1.saturating_sub(2);
+        let agents_y = (self.term_size.1 / 2).max(y).min(footer_y);
+        out.push((agents_y, SidebarRow::Section("agents".into())));
+        let mut ay = agents_y + 1;
+        for (i, s) in self.sessions.iter().enumerate() {
+            for pid in s.tree.pane_ids() {
+                if self.panes.get(&pid).map(|p| p.is_ai).unwrap_or(false) {
+                    if ay >= footer_y {
+                        break;
+                    }
+                    out.push((ay, SidebarRow::Agent(i, pid)));
+                    ay += 1;
+                }
+            }
+        }
+        out.push((footer_y, SidebarRow::NewSession));
         out
     }
 
@@ -626,9 +656,13 @@ impl App {
                     self.active = i;
                     return true;
                 }
-                SidebarRow::Pane(session_idx, pid) => {
-                    self.active = session_idx;
-                    self.sessions[session_idx].tree.focus = pid;
+                SidebarRow::Agent(i, pid) => {
+                    self.active = i;
+                    self.sessions[i].tree.focus = pid;
+                    return true;
+                }
+                SidebarRow::NewSession => {
+                    let _ = self.new_session();
                     return true;
                 }
                 _ => return false,
@@ -646,6 +680,7 @@ impl App {
         }
         let size = terminal.size()?;
         self.term_size = (size.width, size.height);
+        self.refresh_branches();
         let area = Rect::new(0, 0, size.width, size.height);
         let geom = self.active_geom();
 
@@ -668,13 +703,11 @@ impl App {
     }
 
     fn render(&mut self, f: &mut Frame, size: Rect, geom: &TreeGeom, focused: u64) {
-        self.render_tabs(f, size);
-
         let panes_area = self.panes_area();
         fill(f, panes_area, PANEL_BG);
 
         for pg in &geom.panes {
-            let title = self.pane_title(pg.pane_id);
+            let title = self.pane_title(pg.pane_id, pg.pane_id == focused);
             self.render_pane_frame(f, pg.rect, pg.pane_id == focused, &title);
         }
         for pg in &geom.panes {
@@ -720,11 +753,22 @@ impl App {
         }
     }
 
-    fn pane_title(&self, pid: u64) -> String {
-        match self.panes.get(&pid) {
-            Some(p) if p.is_ai => " claude ".to_string(),
-            Some(_) => format!(" shell {}", pid),
-            None => format!(" pane {}", pid),
+    fn pane_title(&self, pid: u64, focused: bool) -> String {
+        let base = match self.panes.get(&pid) {
+            Some(p) if p.is_ai => " AI CLI ".to_string(),
+            Some(_) => {
+                if self.sessions[self.active].tree.pane_count() > 1 {
+                    format!(" shell {} ", pid)
+                } else {
+                    " shell ".to_string()
+                }
+            }
+            None => " pane ".to_string(),
+        };
+        if focused && self.sessions[self.active].zoom {
+            format!("{base}(zoom) ")
+        } else {
+            base
         }
     }
 
@@ -732,30 +776,33 @@ impl App {
         if rect.width < 3 || rect.height < 3 {
             return;
         }
-        let accent = if focused { crate::pane::ACCENT } else { BORDER_IDLE };
-        let style = Style::default().fg(accent).bg(PANEL_BG);
-        let bold = Style::default()
-            .fg(accent)
-            .bg(PANEL_BG)
-            .add_modifier(ratatui::style::Modifier::BOLD);
+        let border = if focused { crate::pane::ACCENT } else { BORDER_IDLE };
+        let border_style = Style::default().fg(border).bg(PANEL_BG);
         let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
-        put(f, x0, y0, "┌", style);
-        put(f, x1, y0, "┐", style);
-        put(f, x0, y1, "└", style);
-        put(f, x1, y1, "┘", style);
+        put(f, x0, y0, "┌", border_style);
+        put(f, x1, y0, "┐", border_style);
+        put(f, x0, y1, "└", border_style);
+        put(f, x1, y1, "┘", border_style);
         for x in (x0 + 1)..x1 {
-            put(f, x, y0, "─", style);
-            put(f, x, y1, "─", style);
+            put(f, x, y0, "─", border_style);
+            put(f, x, y1, "─", border_style);
         }
         for y in (y0 + 1)..y1 {
-            put(f, x0, y, "│", style);
-            put(f, x1, y, "│", style);
+            put(f, x0, y, "│", border_style);
+            put(f, x1, y, "│", border_style);
         }
-        let mut title = title.to_string();
+        // Title chip: filled accent when focused, plain otherwise.
         let max = rect.width.saturating_sub(2) as usize;
-        title.truncate(max);
-        for (i, ch) in title.chars().enumerate() {
-            put(f, x0 + 1 + i as u16, y0, &ch.to_string(), bold);
+        let chip = if focused {
+            Style::default()
+                .fg(RColor::Black)
+                .bg(crate::pane::ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(crate::pane::FG).bg(PANEL_BG)
+        };
+        for (i, ch) in title.chars().take(max).enumerate() {
+            put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
         }
     }
 
@@ -784,7 +831,7 @@ impl App {
 
     fn render_sidebar(&self, f: &mut Frame, size: Rect) {
         let w = self.sidebar_width.min(size.width);
-        let area = Rect::new(0, 1, w, size.height.saturating_sub(2));
+        let area = Rect::new(0, 0, w, size.height.saturating_sub(1));
         fill(f, area, PANEL_BG);
         // Separator between sidebar and panes.
         for y in area.y..(area.y + area.height) {
@@ -795,81 +842,58 @@ impl App {
                 break;
             }
             let x = area.x;
+            let max = w.saturating_sub(1);
             match row {
                 SidebarRow::Header(t) => {
                     let style = Style::default()
                         .fg(crate::pane::ACCENT)
                         .bg(PANEL_BG)
-                        .add_modifier(ratatui::style::Modifier::BOLD);
-                    text(f, x, y, &t, style, w.saturating_sub(1));
+                        .add_modifier(Modifier::BOLD);
+                    text(f, x, y, &format!("  {}", t), style, max);
                 }
                 SidebarRow::Spacer => {
                     put(f, x, y, " ", Style::default().bg(PANEL_BG));
                 }
                 SidebarRow::Section(t) => {
                     let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
-                    text(f, x, y, &format!(" {}", t.to_uppercase()), style, w.saturating_sub(1));
+                    text(f, x, y, &format!("  {}", t.to_uppercase()), style, max);
                 }
                 SidebarRow::Session(i) => {
                     let active = i == self.active;
                     let name = &self.sessions[i].name;
-                    let (dot, style) = if active {
-                        ("●", Style::default().fg(crate::pane::ACCENT).bg(PANEL_BG))
+                    let (marker, fg) = if active {
+                        ("▸", crate::pane::ACCENT)
                     } else {
-                        ("○", Style::default().fg(PANEL_MUTED).bg(PANEL_BG))
+                        (" ", PANEL_MUTED)
                     };
-                    let line = format!(" {} {}", dot, name);
-                    text(f, x, y, &line, style, w.saturating_sub(1));
+                    let line = format!(" {marker} {}", name);
+                    text(f, x, y, &line, Style::default().fg(fg).bg(PANEL_BG), max);
                 }
-                SidebarRow::Pane(session_idx, pid) => {
-                    let active_session = session_idx == self.active
-                        && self.sessions[session_idx].tree.focus == pid;
-                    let label = match self.panes.get(&pid) {
-                        Some(p) if p.is_ai => "claude".to_string(),
-                        Some(_) => "shell".to_string(),
-                        None => "pane".to_string(),
+                SidebarRow::Branch(b) => {
+                    let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
+                    text(f, x, y, &format!("    {}", b), style, max);
+                }
+                SidebarRow::Agent(i, pid) => {
+                    let status = self
+                        .panes
+                        .get(&pid)
+                        .map(|p| p.agent_status())
+                        .unwrap_or(AgentStatus::Idle);
+                    let color = match status {
+                        AgentStatus::Working => GREEN,
+                        AgentStatus::Blocked => ORANGE,
+                        AgentStatus::Idle => PANEL_MUTED,
                     };
-                    let prefix = if self.sessions.len() > 1 {
-                        format!("{} · ", self.sessions[session_idx].name)
-                    } else {
-                        String::new()
-                    };
-                    let (dot, fg) = if active_session {
-                        ("●", crate::pane::ACCENT)
-                    } else {
-                        ("○", PANEL_MUTED)
-                    };
-                    let line = format!(" {} {}{}", dot, prefix, label);
-                    text(f, x, y, &line, Style::default().fg(fg).bg(PANEL_BG), w.saturating_sub(1));
+                    text(f, x, y, "  ●", Style::default().fg(color).bg(PANEL_BG), 3);
+                    let label = format!(" {} - #{}", self.sessions[i].name, pid);
+                    text(f, x + 3, y, &label, Style::default().fg(crate::pane::FG).bg(PANEL_BG), max.saturating_sub(3));
+                }
+                SidebarRow::NewSession => {
+                    let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
+                    text(f, x, y, "  + new session", style, max);
                 }
             }
         }
-    }
-
-    fn render_tabs(&self, f: &mut Frame, size: Rect) {
-        let area = Rect::new(0, 0, size.width, 1);
-        fill(f, area, PANEL_BG);
-        let mut spans: Vec<Span> = Vec::new();
-        for (i, s) in self.sessions.iter().enumerate() {
-            let active = i == self.active;
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                s.name.clone(),
-                if active {
-                    Style::default().fg(RColor::Black).bg(crate::pane::ACCENT)
-                } else {
-                    Style::default().fg(crate::pane::FG).bg(PANEL_BG)
-                },
-            ));
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            "+",
-            Style::default().fg(RColor::Black).bg(PANEL_MUTED),
-        ));
-        spans.push(Span::raw(" "));
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_status(&self, f: &mut Frame, size: Rect) {
@@ -877,33 +901,87 @@ impl App {
         fill(f, area, PANEL_BG);
         let session = &self.sessions[self.active];
         let n = session.tree.pane_count();
-        let left = format!(
-            " {} · {} · {} panes{}",
-            session.name,
-            if session.zoom { "zoom" } else { "normal" },
-            n,
-            if self.sidebar_open { "" } else { " · sidebar hidden" }
+        let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
+        let mode_style = if self.mode == Mode::Leader {
+            Style::default().fg(RColor::Black).bg(YELLOW).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(RColor::Black).bg(crate::pane::ACCENT)
+        };
+
+        let mut spans: Vec<Span> = vec![
+            Span::styled(format!(" {} ", mode), mode_style),
+            Span::raw(" "),
+            Span::styled(session.name.clone(), Style::default().fg(crate::pane::FG).bg(PANEL_BG)),
+            Span::styled(format!(" · {n} panes"), Style::default().fg(PANEL_MUTED).bg(PANEL_BG)),
+        ];
+        if session.zoom {
+            spans.push(Span::styled(
+                " · zoomed",
+                Style::default().fg(YELLOW).bg(PANEL_BG),
+            ));
+        }
+        if !self.sidebar_open {
+            spans.push(Span::styled(
+                " · sidebar hidden",
+                Style::default().fg(PANEL_MUTED).bg(PANEL_BG),
+            ));
+        }
+
+        let right = Span::styled(
+            " ctrl+space · c new · x close · z zoom · d detach ",
+            Style::default().fg(PANEL_MUTED).bg(PANEL_BG),
         );
-        let right = " ctrl+b prefix · v v-split · - h-split · c new · x close · z zoom · h/j/k/l focus · q quit ";
-        let width = area.width as usize;
-        let right = right.to_string();
-        let pad = width.saturating_sub(left.chars().count() + right.chars().count() + 2);
-        let line = format!("{}{}{}", left, " ".repeat(pad.min(1024)), right);
-        let style = Style::default().fg(crate::pane::FG).bg(PANEL_BG);
-        f.render_widget(Paragraph::new(Line::from(Span::styled(line, style))), area);
+        let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let right_w = right.content.chars().count();
+        let avail = area.width as usize;
+        if left_w + right_w <= avail {
+            spans.push(Span::raw(" ".repeat(avail - left_w - right_w)));
+            spans.push(right);
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_leader(&self, f: &mut Frame, size: Rect) {
-        let text = Line::from(Span::styled(
-            "PREFIX  v=v-split · -=h-split · c=new · x=close · z=zoom · h/j/k/l=focus · n/p=tab · tab=pane · b=sidebar · q=quit · esc=exit",
-            Style::default().fg(RColor::Black).bg(crate::pane::ACCENT),
-        ));
-        let w = 100;
+        let lines = [
+            "CTRL+SPACE · v v-split · - h-split · a AI · c new · x close · z zoom",
+            "h/j/k/l focus · n/p session · tab pane · b sidebar · d detach · esc exit",
+        ];
+        let inner_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let w = (inner_w as u16 + 4).min(size.width);
+        let h = 4u16;
         let x = size.width.saturating_sub(w) / 2;
-        let y = size.height.saturating_sub(3);
-        let area = Rect::new(x, y, w, 1);
+        let y = size.height.saturating_sub(h + 3);
+        let area = Rect::new(x, y, w, h);
         f.render_widget(Clear, area);
-        f.render_widget(Paragraph::new(text).alignment(Alignment::Center), area);
+
+        let border = Style::default().fg(crate::pane::ACCENT).bg(PANEL_BG);
+        let (x0, y0, x1, y1) = (area.x, area.y, area.right() - 1, area.bottom() - 1);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for xx in (x0 + 1)..x1 {
+            put(f, xx, y0, "─", border);
+            put(f, xx, y1, "─", border);
+        }
+        for yy in (y0 + 1)..y1 {
+            put(f, x0, yy, "│", border);
+            put(f, x1, yy, "│", border);
+        }
+        // Title chip on the top border.
+        text(
+            f,
+            x0 + 1,
+            y0,
+            " CTRL+SPACE ",
+            Style::default().fg(RColor::Black).bg(crate::pane::ACCENT).add_modifier(Modifier::BOLD),
+            16,
+        );
+        // Keybinding lines.
+        for (i, line) in lines.iter().enumerate() {
+            let yy = y0 + 1 + i as u16;
+            text(f, x0 + 2, yy, line, Style::default().fg(crate::pane::FG).bg(PANEL_BG), w.saturating_sub(4));
+        }
     }
 
     fn place_cursor(&mut self, terminal: &mut Term, geom: &TreeGeom, focused: u64) -> Result<()> {
@@ -923,6 +1001,23 @@ impl App {
         }
         terminal.hide_cursor()?;
         Ok(())
+    }
+}
+
+/// Current git branch of `ws`, if it is a git repository.
+fn git_branch(ws: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", ws.to_str().unwrap_or_default(), "branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
     }
 }
 

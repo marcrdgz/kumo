@@ -545,15 +545,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumo-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "portable-pty",
-]
-
-[[package]]
-name = "kumo-tui"
+name = "kumo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -564,6 +556,14 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kumo-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "portable-pty",
 ]
 
 [[package]]

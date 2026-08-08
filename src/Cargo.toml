@@ -1,5 +1,5 @@
 [package]
-name = "kumo-tui"
+name = "kumo"
 version.workspace = true
 edition.workspace = true
 description = "Kumo TUI (ratatui) frontend with mouse support"

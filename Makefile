@@ -9,7 +9,7 @@ test:
 	cargo test
 
 run:
-	cargo run -p kumo-tui
+	cargo run -p kumo
 
 clean:
 	cargo clean

@@ -8,7 +8,7 @@ management, featuring Claude AI integration and TMUX-style session/pane
 management.
 
 ### Technology Stack
-- **Frontend**: Rust TUI (ratatui + crossterm), `src/` crate (`kumo-tui`).
+- **Frontend**: Rust TUI (ratatui + crossterm), `src/` crate (`kumo`).
 - **Terminal Emulator**: `libghostty-vt` vendored in `vendor/`, compiled at
   build time by `src/build.rs` via `zig build -Demit-lib-vt`, driven through
   a hand-written C FFI layer in `src/src/vt.rs`.
@@ -37,7 +37,7 @@ management.
 
 ## Build & Test Commands
 - **Build**: `cargo build` (from the workspace root)
-- **Run**: `cargo run -p kumo-tui` (or `make run`)
+- **Run**: `cargo run -p kumo` (or `make run`)
 - **Tests**: `cargo test`
 - **Lint**: `cargo clippy`
 - **Note**: building requires a `zig` toolchain on `PATH` to compile the

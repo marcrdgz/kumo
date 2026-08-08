@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use kumo_core::pty::{Pty, PtySpec};
@@ -42,7 +43,45 @@ pub struct Pane {
     pub pty: Pty,
     pub vt: vt::Terminal,
     pub dead: bool,
+    /// When the pane last produced output. Drives the agent status heuristic.
+    last_output: Instant,
+    /// Rolling tail of recent output, scanned for blocked (approval) markers.
+    recent: Vec<u8>,
 }
+
+/// Lifecycle state of an AI (opencode) agent, inferred from its output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentStatus {
+    /// Actively producing output (working on a task).
+    Working,
+    /// Quiet but waiting for a command approval.
+    Blocked,
+    /// Quiet and idle.
+    Idle,
+}
+
+/// A pane is "working" when it produced output within this window.
+const WORKING_WINDOW: Duration = Duration::from_millis(2500);
+/// How much recent output to keep for blocked-marker scanning. Sized so the
+/// opencode permission dialog (a multi-row footer block) survives the constant
+/// repainting of its spinner/statusline.
+const RECENT_BYTES: usize = 32 * 1024;
+/// Output markers that indicate the agent is waiting on a command approval.
+const BLOCKED_MARKERS: &[&str] = &[
+    // opencode permission dialog ("△ Permission required" header + buttons).
+    "permission required",
+    "allow once",
+    "allow always",
+    "always allow",
+    "reject permission",
+    "waiting for permission",
+    // Generic approval prompts.
+    "do you want to proceed",
+    "do you want to run",
+    "proceed?",
+    "(y/n)",
+    "would you like to",
+];
 
 #[derive(Clone)]
 pub enum PtyEvent {
@@ -78,6 +117,8 @@ impl Pane {
             pty,
             vt,
             dead: false,
+            last_output: Instant::now(),
+            recent: Vec::with_capacity(256),
         };
 
         // Route query responses (DA, size reports, etc.) back to the PTY.
@@ -94,7 +135,33 @@ impl Pane {
     }
 
     pub fn feed(&mut self, data: &[u8]) {
+        if !data.is_empty() {
+            self.last_output = Instant::now();
+            self.recent.extend_from_slice(data);
+            if self.recent.len() > RECENT_BYTES {
+                let drop = self.recent.len() - RECENT_BYTES;
+                self.recent.drain(..drop);
+            }
+        }
         self.vt.write(data);
+    }
+
+    /// Heuristic agent lifecycle state, derived from recent output.
+    pub fn agent_status(&self) -> AgentStatus {
+        if self.dead {
+            return AgentStatus::Idle;
+        }
+        let lower = String::from_utf8_lossy(&self.recent).to_lowercase();
+        // A permission/approval prompt wins over the recent-output window:
+        // opencode's spinner keeps repainting while it waits, so a time window
+        // alone would never surface the blocked state.
+        if BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
+            return AgentStatus::Blocked;
+        }
+        if self.last_output.elapsed() < WORKING_WINDOW {
+            return AgentStatus::Working;
+        }
+        AgentStatus::Idle
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -253,4 +320,72 @@ fn rgb(c: ColorRgb) -> RColor {
 pub fn sgr_mouse(button: u8, col: u16, row: u16, release: bool) -> Vec<u8> {
     let b = if release { button | 3 } else { button };
     format!("\x1b[<{b};{col};{row}{}\x1b[0m", if release { "m" } else { "M" }).into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn test_pane(is_ai: bool) -> Pane {
+        let (tx, _rx) = mpsc::channel();
+        Pane::spawn(
+            1,
+            1,
+            "/bin/sh".into(),
+            Some(("/usr/bin/true".into(), Vec::new())),
+            None,
+            10,
+            10,
+            is_ai,
+            tx,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn working_after_recent_output() {
+        let mut p = test_pane(true);
+        p.feed(b"streaming some output");
+        assert_eq!(p.agent_status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn idle_after_quiet_period() {
+        let mut p = test_pane(true);
+        p.feed(b"finished the task");
+        p.last_output = Instant::now() - Duration::from_secs(10);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn blocked_when_quiet_and_waiting_approval() {
+        let mut p = test_pane(true);
+        p.feed(b"Do you want to proceed with this command? (y/n)");
+        p.last_output = Instant::now() - Duration::from_secs(10);
+        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn blocked_while_spinner_keeps_repainting() {
+        let mut p = test_pane(true);
+        p.feed(b"\x1b[0m\xe2\x96\xb3 Permission required\nAllow once\nAllow always\nReject");
+        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn working_when_agent_streams_recent_output() {
+        let mut p = test_pane(true);
+        p.feed(b"running tests...");
+        assert_eq!(p.agent_status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn dead_pane_is_idle() {
+        let mut p = test_pane(true);
+        p.feed(b"working");
+        p.dead = true;
+        p.last_output = Instant::now();
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
 }

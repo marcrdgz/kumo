@@ -10,7 +10,16 @@ pub fn encode(e: KeyEvent) -> Vec<u8> {
 
     match e.code {
         KeyCode::Enter => vec![b'\r'],
-        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Backspace => {
+            // On macOS, Option+Delete (Alt+Backspace) deletes a whole word.
+            // Send ESC DEL (Meta+Backspace) so the shell's word-delete
+            // binding fires instead of a single-character delete.
+            if alt {
+                vec![0x1b, 0x7f]
+            } else {
+                vec![0x7f]
+            }
+        }
         KeyCode::Tab if shift => vec![0x1b, b'[', b'Z'],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::Esc => vec![0x1b],
