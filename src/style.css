@@ -128,6 +128,10 @@ body {
 }
 
 .pane .pane-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
   transition:
     transform 120ms ease-out,
     font-weight 120ms ease-out;

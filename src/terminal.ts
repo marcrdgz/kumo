@@ -3,7 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 
 import { decodeBase64, writePane } from "./api";
 
-const BASE_THEME = {
+export const DEFAULT_THEME: Record<string, string> = {
   background: "#1e1e2e",
   foreground: "#cdd6f4",
   cursor: "#f5e0dc",
@@ -48,7 +48,7 @@ export class PaneTerminal {
       fontSize: 13,
       lineHeight: 1.1,
       scrollback: 10000,
-      theme: BASE_THEME,
+      theme: DEFAULT_THEME,
     });
 
     this.term.loadAddon(this.fit);

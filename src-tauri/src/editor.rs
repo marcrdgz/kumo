@@ -11,6 +11,64 @@ pub struct EditorContext {
     pub file: Option<String>,
 }
 
+/// Detect the active process in a pane and render a short title for it.
+///
+/// Prefers an editor (vim/nvim) — rendered as `vim: file` — falling back to
+/// the deepest descendant process (the foreground command), or `None` when the
+/// shell is idle so the frontend keeps the shell name.
+pub fn pane_title(child_pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,args="])
+        .output()
+        .ok()?;
+    editor_title_from_ps(&parse_ps(&String::from_utf8_lossy(&out.stdout)), child_pid)
+}
+
+/// Render the pane title from a parsed process table (pure, testable).
+fn editor_title_from_ps(procs: &HashMap<u32, (u32, String)>, child_pid: u32) -> Option<String> {
+    if let Some((args, _pid)) = find_editor_process(procs, child_pid) {
+        let name = editor_name(&args).to_string();
+        let file = extract_file(&args).and_then(|f| basename(&f));
+        return Some(match file {
+            Some(f) => format!("{name}: {f}"),
+            None => name,
+        });
+    }
+
+    let (args, _pid) = find_deepest_process(procs, child_pid)?;
+    args.split_whitespace()
+        .next()
+        .and_then(basename)
+        .or_else(|| basename(&args))
+}
+
+/// Return the basename of the deepest descendant of `root` (the foreground
+/// process in the pane). The root shell itself is excluded.
+fn find_deepest_process(procs: &HashMap<u32, (u32, String)>, root: u32) -> Option<(String, u32)> {
+    let mut best: Option<(String, u32, u32)> = None; // (args, pid, depth)
+    let mut stack: Vec<(u32, u32)> = vec![(root, 0)];
+    while let Some((pid, depth)) = stack.pop() {
+        for (child, (parent, args)) in procs {
+            if *parent != pid || *child == pid {
+                continue;
+            }
+            let d = depth + 1;
+            if best.as_ref().map_or(true, |(_, _, bd)| d > *bd) {
+                best = Some((args.clone(), *child, d));
+            }
+            stack.push((*child, d));
+        }
+    }
+    best.map(|(args, pid, _)| (args, pid))
+}
+
+fn basename(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+}
+
 /// Locate the editor (vim/nvim) running inside the pane's PTY and extract
 /// the file path from its command line. The pane child is the shell, so we
 /// walk the process tree looking for a vim/nvim descendant.
@@ -191,5 +249,53 @@ mod tests {
             Some("src/main.rs")
         );
         assert_eq!(extract_file("vim -c q"), None);
+    }
+
+    #[test]
+    fn finds_deepest_process() {
+        let table = "  1     0 /sbin/launchd\n  42     1 -fish\n 100    42 node server.js\n 200   100 sh -c npm run dev\n";
+        let procs = parse_ps(table);
+        let (args, pid) = find_deepest_process(&procs, 42).expect("deepest");
+        assert_eq!(pid, 200);
+        assert!(args.contains("npm run dev"));
+    }
+
+    #[test]
+    fn idle_shell_has_no_deepest_process() {
+        let table = "  42     1 -fish\n";
+        let procs = parse_ps(table);
+        assert!(find_deepest_process(&procs, 42).is_none());
+    }
+
+    #[test]
+    fn basename_extracts_file_name() {
+        assert_eq!(basename("/usr/bin/vim src/main.rs").as_deref(), Some("main.rs"));
+        assert_eq!(basename("node").as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn pane_title_prefers_editor() {
+        let table = "  42     1 -fish\n 100    42 /usr/bin/vim src/main.rs\n";
+        let out = format!(" 42     1 -fish\n{table}");
+        let _ = out;
+        let procs = parse_ps(table);
+        let _ = procs;
+        // Directly exercise the title rendering logic without spawning ps.
+        let title = editor_title_from_ps(&parse_ps(table), 42);
+        assert_eq!(title.as_deref(), Some("vim: main.rs"));
+    }
+
+    #[test]
+    fn pane_title_falls_back_to_command() {
+        let table = "  42     1 -fish\n 100    42 node server.js\n";
+        let title = editor_title_from_ps(&parse_ps(table), 42);
+        assert_eq!(title.as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn pane_title_idle_shell_is_none() {
+        let table = "  42     1 -fish\n";
+        let title = editor_title_from_ps(&parse_ps(table), 42);
+        assert!(title.is_none());
     }
 }

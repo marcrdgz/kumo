@@ -206,6 +206,16 @@ pub fn pane_shell(state: State<AppState>, request: PaneRequest) -> Result<String
         .map_err(|e| e.to_string())
 }
 
+/// Detect the active process in a pane and return a short dynamic title
+/// (e.g. `vim: main.rs` or `server.js`). `None` when the shell is idle.
+#[tauri::command]
+pub fn pane_title(state: State<AppState>, request: PaneRequest) -> Result<Option<String>, String> {
+    let pid = state
+        .pane_child_pid(request.session_id, request.pane_id)
+        .map_err(|e| e.to_string())?;
+    Ok(crate::editor::pane_title(pid))
+}
+
 fn layout_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home).join(".neomux").join("layout.json")

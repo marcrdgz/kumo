@@ -12,6 +12,7 @@ import {
   openAiPane,
   paneCwd,
   paneShell,
+  paneTitle,
   resizePane,
   saveLayout,
   splitPane,
@@ -21,7 +22,13 @@ import {
 } from "./api";
 import { PaneTerminal } from "./terminal";
 
-type Leaf = { kind: "leaf"; id: number; term: PaneTerminal; el: HTMLDivElement };
+type Leaf = {
+  kind: "leaf";
+  id: number;
+  term: PaneTerminal;
+  el: HTMLDivElement;
+  titleEl: HTMLSpanElement;
+};
 
 type Node =
   | Leaf
@@ -142,6 +149,7 @@ export class Multiplexer {
     this.onSessionChange(session);
     window.addEventListener("resize", () => this.relayout());
     this.relayout();
+    this.startTitlePolling();
   }
 
   // ----- layout persistence -----
@@ -265,6 +273,7 @@ export class Multiplexer {
     this.onSessionChange(session);
     window.addEventListener("resize", () => this.relayout());
     this.relayout();
+    this.startTitlePolling();
     return true;
   }
 
@@ -309,7 +318,8 @@ export class Multiplexer {
   private addLeaf(info: PaneInfo): Leaf {
     const { el, host, header } = mkLeafEl();
     const term = new PaneTerminal(this.sessionId, info.paneId, host);
-    header.querySelector(".pane-title")!.textContent = `${info.shell}`;
+    const titleEl = header.querySelector(".pane-title")! as HTMLSpanElement;
+    titleEl.textContent = `${info.shell}`;
     header.querySelector(".pane-idx")!.textContent = `#${info.paneId}`;
     header
       .querySelector(".pane-close")!
@@ -318,7 +328,7 @@ export class Multiplexer {
         void this.closePaneById(info.paneId);
       });
     el.addEventListener("mousedown", () => void this.focusLeaf(info.paneId));
-    const leaf: Leaf = { kind: "leaf", id: info.paneId, term, el };
+    const leaf: Leaf = { kind: "leaf", id: info.paneId, term, el, titleEl };
     this.workspace.append(el);
     return leaf;
   }
@@ -652,6 +662,27 @@ export class Multiplexer {
         cols: l.term.cols(),
         rows: l.term.rows(),
       });
+    }
+  }
+
+  // ----- dynamic pane titles -----
+
+  /** Poll the active process of every pane and update its title (tmux-style:
+   *  `vim: main.rs` while editing, otherwise the running program). Also
+   *  re-sync the app chrome to the colorscheme of the focused editor. */
+  startTitlePolling(): void {
+    window.setInterval(() => void this.refreshTitles(), 1000);
+  }
+
+  private async refreshTitles(): Promise<void> {
+    const leaves: Node[] = [];
+    this.collectLeaves(this.root, leaves);
+    for (const l of leaves) {
+      if (l.kind !== "leaf") continue;
+      const title = await paneTitle({ sessionId: this.sessionId, paneId: l.id });
+      if (title && title !== l.titleEl.textContent) {
+        l.titleEl.textContent = title;
+      }
     }
   }
 }

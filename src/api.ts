@@ -138,6 +138,10 @@ export async function paneShell(req: PaneRequest): Promise<string> {
   return invoke<string>("pane_shell", { request: req });
 }
 
+export async function paneTitle(req: PaneRequest): Promise<string | null> {
+  return invoke<string | null>("pane_title", { request: req });
+}
+
 export async function saveLayout(layout: string): Promise<void> {
   await invoke("save_layout", { layout });
 }

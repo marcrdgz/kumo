@@ -30,6 +30,7 @@ pub fn run() {
             commands::editor_context,
             commands::pane_cwd,
             commands::pane_shell,
+            commands::pane_title,
             commands::save_layout,
             commands::load_layout,
             commands::debug_log,
