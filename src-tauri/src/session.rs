@@ -12,6 +12,7 @@ pub struct PaneInfo {
     pub cols: u16,
     pub rows: u16,
     pub shell: String,
+    pub ai: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -28,6 +29,7 @@ pub struct Pane {
     pub pty: Pty,
     pub parent: Option<u64>,
     pub children: Vec<u64>,
+    pub ai: bool,
 }
 
 pub struct Session {
@@ -76,6 +78,7 @@ impl AppState {
             pty,
             parent: None,
             children: Vec::new(),
+            ai: false,
         };
 
         let session = Session {
@@ -118,6 +121,7 @@ impl AppState {
         cols: u16,
         rows: u16,
         direction: &str,
+        ai: bool,
     ) -> anyhow::Result<PaneInfo> {
         let _ = direction;
         let mut sessions = self.sessions.lock().unwrap();
@@ -141,6 +145,7 @@ impl AppState {
             pty,
             parent: Some(parent),
             children: Vec::new(),
+            ai,
         };
 
         // Wire up tree relationship to the parent pane.
@@ -185,6 +190,7 @@ impl AppState {
             pty,
             parent: Some(parent),
             children: Vec::new(),
+            ai: true,
         };
 
         if let Some(parent_pane) = session.panes.get_mut(&parent) {
@@ -338,6 +344,7 @@ impl AppState {
             cols: pane.pty.cols,
             rows: pane.pty.rows,
             shell: pane.pty.shell.clone(),
+            ai: pane.ai,
         }
     }
 
@@ -373,6 +380,8 @@ pub struct SplitRequest {
     pub cols: u16,
     pub rows: u16,
     pub direction: String,
+    #[serde(default)]
+    pub ai: bool,
 }
 
 #[derive(Deserialize)]

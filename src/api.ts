@@ -6,6 +6,7 @@ export interface PaneInfo {
   cols: number;
   rows: number;
   shell: string;
+  ai: boolean;
 }
 
 export interface SessionInfo {
@@ -38,6 +39,7 @@ export interface SplitRequest {
   cols: number;
   rows: number;
   direction: string;
+  ai?: boolean;
 }
 
 export interface PaneRequest {
@@ -61,6 +63,20 @@ export interface AiPaneRequest {
 export interface EditorContext {
   editor: string;
   file: string | null;
+}
+
+export interface GitChange {
+  path: string;
+  status: string;
+  staged: boolean;
+}
+
+export interface GitStatus {
+  isRepo: boolean;
+  branch: string;
+  ahead: number;
+  behind: number;
+  changes: GitChange[];
 }
 
 function decodeBase64(b64: string): Uint8Array {
@@ -140,6 +156,14 @@ export async function paneShell(req: PaneRequest): Promise<string> {
 
 export async function paneTitle(req: PaneRequest): Promise<string | null> {
   return invoke<string | null>("pane_title", { request: req });
+}
+
+export async function gitStatus(): Promise<GitStatus | null> {
+  return invoke<GitStatus | null>("git_status");
+}
+
+export async function gitDiff(path: string): Promise<string> {
+  return invoke<string>("git_diff", { path });
 }
 
 export async function saveLayout(layout: string): Promise<void> {

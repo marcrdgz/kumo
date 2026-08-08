@@ -61,6 +61,7 @@ pub fn split_pane(
             request.cols,
             request.rows,
             &request.direction,
+            request.ai,
         )
         .map_err(|e| e.to_string())
 }
@@ -214,6 +215,28 @@ pub fn pane_title(state: State<AppState>, request: PaneRequest) -> Result<Option
         .pane_child_pid(request.session_id, request.pane_id)
         .map_err(|e| e.to_string())?;
     Ok(crate::editor::pane_title(pid))
+}
+
+/// Return the git status of the current workspace (branch + changes).
+#[tauri::command]
+pub fn git_status() -> Option<crate::git::GitStatus> {
+    let ws = get_workspace().ok().flatten()?;
+    let dir = std::path::PathBuf::from(ws);
+    if !dir.is_dir() {
+        return None;
+    }
+    crate::git::status(&dir)
+}
+
+/// Return the unified diff for one file in the current workspace.
+#[tauri::command]
+pub fn git_diff(path: String) -> Result<String, String> {
+    let ws = get_workspace().ok().flatten().ok_or_else(|| "no workspace".to_string())?;
+    let dir = std::path::PathBuf::from(ws);
+    if !dir.is_dir() {
+        return Err("workspace is not a directory".to_string());
+    }
+    Ok(crate::git::diff(&dir, &path))
 }
 
 fn neomux_dir() -> std::path::PathBuf {

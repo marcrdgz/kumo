@@ -1,5 +1,12 @@
 import { Multiplexer } from "./multiplexer";
-import { aiCommand, getRecentWorkspaces, getWorkspace, setWorkspace, type SessionInfo } from "./api";
+import {
+  aiCommand,
+  getRecentWorkspaces,
+  getWorkspace,
+  setWorkspace,
+  gitDiff,
+  type GitStatus,
+} from "./api";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,6 +15,11 @@ import "@xterm/xterm/css/xterm.css";
 const statusLeft = document.getElementById("status-left")!;
 const statusRight = document.getElementById("status-right")!;
 const workspace = document.getElementById("workspace") as HTMLDivElement;
+const tabbar = document.getElementById("tabs") as HTMLDivElement;
+const gitView = document.getElementById("git-view") as HTMLDivElement;
+const gitBranch = document.getElementById("git-branch")!;
+const gitMeta = document.getElementById("git-meta")!;
+const gitBody = document.getElementById("git-body")!;
 const searchBar = document.getElementById("search-bar") as HTMLDivElement;
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 
@@ -23,30 +35,157 @@ function basename(path: string): string {
 }
 
 function renderStatus(): void {
-  const panes = currentPanes;
   if (currentWorkspace) {
     statusLeft.innerHTML = `<span class="mode">●</span> <span class="session-name">${basename(currentWorkspace)}</span>`;
   } else {
     statusLeft.innerHTML = `<span class="mode">●</span> <span class="session-name">${currentSessionName}</span>`;
   }
-  statusRight.textContent = `${panes} panes${currentWorkspace ? "" : ` · ${currentSessionName}`}`;
+  const tabs = currentSessions > 1 ? `${currentSessions} tabs · ` : "";
+  statusRight.textContent = `${tabs}${panesLabel()}`;
+}
+
+function panesLabel(): string {
+  return `${currentPanes} panes${currentWorkspace ? "" : ` · ${currentSessionName}`}`;
 }
 
 let currentPanes = 0;
 let currentSessionName = "";
+let currentSessions = 0;
 
-const mux = new Multiplexer(workspace, (s: SessionInfo) => {
-  if (s.panes.length === 0) {
-    statusLeft.textContent = "session closed";
-    statusRight.textContent = "";
-    currentPanes = 0;
-    currentSessionName = "";
+const mux = new Multiplexer(
+  workspace,
+  tabbar,
+  gitView,
+  (s: { sessionId: number; name: string; panes: unknown[]; activePane: number }) => {
+    currentPanes = s.panes.length;
+    currentSessionName = s.name;
+    renderStatus();
+  },
+  (list) => {
+    currentSessions = list.sessions.length;
+    renderTabs(list);
+  },
+  renderGitPanel,
+);
+
+// ----- session tabs -----
+
+function renderTabs(list: { activeId: number; sessions: { id: number; name: string; agentCount: number }[] }): void {
+  tabbar.innerHTML = "";
+  for (const s of list.sessions) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab" + (s.id === list.activeId ? " active" : "");
+    btn.title = s.name;
+    const label = document.createElement("span");
+    label.textContent = s.name;
+    btn.append(label);
+    if (s.agentCount > 0) {
+      const badge = document.createElement("span");
+      badge.className = "tab-badge";
+      badge.textContent = `⚡${s.agentCount}`;
+      btn.append(badge);
+    }
+    btn.addEventListener("click", () => void mux.switchSession(s.id));
+    tabbar.append(btn);
+  }
+
+  const gitBtn = document.createElement("button");
+  gitBtn.type = "button";
+  gitBtn.className = "tab git-tab" + (mux.isGitActive() ? " active" : "");
+  gitBtn.title = "git changes";
+  gitBtn.textContent = "git";
+  gitBtn.addEventListener("click", () => void mux.toggleGit());
+  tabbar.append(gitBtn);
+}
+
+// ----- git panel -----
+
+const STATUS_ICON: Record<string, string> = {
+  "??": "?",
+  M: "M",
+  A: "A",
+  D: "D",
+  R: "R",
+  C: "C",
+  U: "U",
+};
+
+function gitStatusSymbol(status: string): string {
+  return STATUS_ICON[status] ?? status.slice(0, 1);
+}
+
+function renderGitPanel(data: { status: GitStatus | null; error: string | null }): void {
+  if (data.error) {
+    gitBranch.textContent = "git";
+    gitMeta.textContent = data.error;
+    gitBody.innerHTML = "";
     return;
   }
-  currentPanes = s.panes.length;
-  currentSessionName = s.name;
-  renderStatus();
-});
+  if (!data.status) {
+    gitBranch.textContent = "git";
+    gitMeta.textContent = "not a repo";
+    gitBody.innerHTML = "";
+    return;
+  }
+  const { status } = data;
+  gitBranch.textContent = status.branch || "(no branch)";
+  const parts: string[] = [];
+  if (status.ahead > 0) parts.push(`↑${status.ahead}`);
+  if (status.behind > 0) parts.push(`↓${status.behind}`);
+  gitMeta.textContent = parts.join(" ") || "clean";
+
+  gitBody.innerHTML = "";
+  if (status.changes.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "git-empty";
+    empty.textContent = "no changes";
+    gitBody.append(empty);
+    return;
+  }
+
+  const group = (label: string, items: GitStatus["changes"]) => {
+    if (items.length === 0) return;
+    const h = document.createElement("div");
+    h.className = "git-group";
+    h.textContent = label;
+    gitBody.append(h);
+    for (const c of items) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "git-row";
+      row.title = c.path;
+      const icon = document.createElement("span");
+      icon.className = "git-status" + (c.staged ? " staged" : "");
+      icon.textContent = gitStatusSymbol(c.status);
+      const path = document.createElement("span");
+      path.className = "git-path";
+      path.textContent = c.path;
+      row.append(icon, path);
+      row.addEventListener("click", () => void showGitDiff(c.path));
+      gitBody.append(row);
+    }
+  };
+
+  group("staged", status.changes.filter((c) => c.staged));
+  group("changes", status.changes.filter((c) => !c.staged && c.status !== "??"));
+  group("untracked", status.changes.filter((c) => c.status === "??"));
+}
+
+async function showGitDiff(path: string): Promise<void> {
+  gitBody.innerHTML = "";
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "git-back";
+  back.textContent = "← back";
+  back.addEventListener("click", () => void mux.refreshGit());
+  gitBody.append(back);
+
+  const pre = document.createElement("pre");
+  pre.className = "git-diff";
+  pre.textContent = await gitDiff(path);
+  gitBody.append(pre);
+}
 
 // Leader key state machine (Ctrl+A prefix).
 let leaderArmed = false;
@@ -144,7 +283,7 @@ window.addEventListener(
       e.preventDefault();
       e.stopPropagation();
       leaderArmed = true;
-      hint(`LEADER · h=v-split · v=h-split · z=zoom · q=close · /=search · o=open · c=${aiCmd} · esc=exit`);
+      hint(`LEADER · h=v-split · v=h-split · z=zoom · q=close · /=search · o=open · c=${aiCmd} · n=new · t/g=git · tab=next · esc=exit`);
       return;
     }
 
@@ -177,6 +316,22 @@ window.addEventListener(
           e.preventDefault();
           e.stopPropagation();
           await mux.openAiPane();
+          return;
+        case "n":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.createSession();
+          return;
+        case "g":
+        case "t":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.toggleGit();
+          return;
+        case "tab":
+          e.preventDefault();
+          e.stopPropagation();
+          await mux.nextSession();
           return;
         case "x":
           e.preventDefault();
@@ -347,6 +502,14 @@ void listen("menu-close-pane", () => {
 
 void listen("menu-search", () => {
   openSearch();
+});
+
+document.getElementById("new-session-btn")!.addEventListener("click", () => {
+  void mux.createSession();
+});
+
+document.getElementById("git-refresh")!.addEventListener("click", () => {
+  void mux.refreshGit();
 });
 
 void boot();

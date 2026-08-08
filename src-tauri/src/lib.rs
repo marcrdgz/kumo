@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod debug;
 mod editor;
+mod git;
 mod menu;
 mod pty;
 mod session;
@@ -34,6 +35,8 @@ pub fn run() {
             commands::pane_cwd,
             commands::pane_shell,
             commands::pane_title,
+            commands::git_status,
+            commands::git_diff,
             commands::save_layout,
             commands::load_layout,
             commands::set_workspace,
