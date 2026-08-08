@@ -484,12 +484,12 @@ impl App {
                     let row = y - inner.y + 1;
                     if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
                         if pane.has_mouse_reporting() {
-                            let b = if up { 65 } else { 64 };
+                            let b = if up { 64 } else { 65 };
                             pane.write(&sgr_mouse(b, col, row, false));
                         } else if pane.in_alt_screen() {
                             pane.write(if up { b"\x1b[A" } else { b"\x1b[B" });
                         } else {
-                            pane.scroll(if up { 3 } else { -3 });
+                            pane.scroll(if up { -3 } else { 3 });
                         }
                     }
                 }

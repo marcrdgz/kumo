@@ -50,8 +50,12 @@ pub struct Pane {
     pub dead: bool,
     /// When the pane last produced output. Drives the agent status heuristic.
     last_output: Instant,
-    /// Rolling tail of recent output, scanned for blocked (approval) markers.
-    recent: Vec<u8>,
+    /// Rolling tail of recent output with ANSI escapes stripped, scanned for
+    /// blocked (approval) markers.
+    recent_text: Vec<u8>,
+    /// Stripper state, kept across chunks so escapes split at chunk edges are
+    /// still removed.
+    stripper: TextStripper,
     /// Answers terminal capability probes as a plain xterm (no mouse caps).
     xtgettcap: XtgettcapTracker,
 }
@@ -69,10 +73,10 @@ pub enum AgentStatus {
 
 /// A pane is "working" when it produced output within this window.
 const WORKING_WINDOW: Duration = Duration::from_millis(2500);
-/// How much recent output to keep for blocked-marker scanning. Sized so the
-/// opencode permission dialog (a multi-row footer block) survives the constant
-/// repainting of its spinner/statusline.
-const RECENT_BYTES: usize = 32 * 1024;
+/// How much stripped text to keep for blocked-marker scanning. Sized so the
+/// opencode permission dialog (a multi-row footer block) survives the quiet
+/// period while the agent is paused waiting for approval.
+const RECENT_TEXT_BYTES: usize = 16 * 1024;
 /// Output markers that indicate the agent is waiting on a command approval.
 const BLOCKED_MARKERS: &[&str] = &[
     // opencode permission dialog ("△ Permission required" header + buttons).
@@ -93,6 +97,109 @@ const BLOCKED_MARKERS: &[&str] = &[
 #[derive(Clone)]
 pub enum PtyEvent {
     Output { pane_id: u64, data: Vec<u8> },
+}
+
+/// State of the ANSI escape stripper that builds the marker-scan text buffer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum AnsiState {
+    #[default]
+    Normal,
+    Esc,
+    Csi,
+    Osc,
+    OscEsc,
+    Str,
+    StrEsc,
+}
+
+/// Strips ANSI escapes (and control bytes) from a byte stream while keeping
+/// printable text — including multibyte UTF-8 — intact. Stateful so sequences
+/// split across feed chunks are handled correctly.
+struct TextStripper {
+    state: AnsiState,
+    /// Remaining UTF-8 continuation bytes expected after a lead byte.
+    cont: u8,
+}
+
+impl TextStripper {
+    fn new() -> Self {
+        Self { state: AnsiState::Normal, cont: 0 }
+    }
+
+    /// Append the printable portion of `data` to `out`.
+    fn feed(&mut self, data: &[u8], out: &mut Vec<u8>) {
+        for &b in data {
+            match self.state {
+                AnsiState::Normal => {
+                    if b == 0x1b {
+                        self.state = AnsiState::Esc;
+                    } else if b == 0x7f || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t') {
+                        // Skip control bytes that don't separate words.
+                    } else if b >= 0x80 {
+                        self.push_utf8(b, out);
+                    } else {
+                        out.push(b);
+                    }
+                }
+                AnsiState::Esc => match b {
+                    b'[' => self.state = AnsiState::Csi,
+                    b']' => self.state = AnsiState::Osc,
+                    b'P' | b'_' | b'^' | b'X' => self.state = AnsiState::Str,
+                    0x1b => self.state = AnsiState::Esc,
+                    _ => self.state = AnsiState::Normal,
+                },
+                AnsiState::Csi => {
+                    if b == 0x1b {
+                        self.state = AnsiState::Esc;
+                    } else if (0x40..=0x7e).contains(&b) {
+                        self.state = AnsiState::Normal;
+                    }
+                }
+                AnsiState::Osc => match b {
+                    0x1b => self.state = AnsiState::OscEsc,
+                    0x07 => self.state = AnsiState::Normal,
+                    _ => {}
+                },
+                AnsiState::OscEsc => {
+                    if b == b'\\' {
+                        self.state = AnsiState::Normal;
+                    } else if b != 0x1b {
+                        self.state = AnsiState::Osc;
+                    }
+                }
+                AnsiState::Str => match b {
+                    0x1b => self.state = AnsiState::StrEsc,
+                    0x9c => self.state = AnsiState::Normal,
+                    _ => {}
+                },
+                AnsiState::StrEsc => {
+                    if b == b'\\' {
+                        self.state = AnsiState::Normal;
+                    } else if b != 0x1b {
+                        self.state = AnsiState::Str;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Accept a byte >= 0x80 as UTF-8 text or skip it as a C1 control.
+    fn push_utf8(&mut self, b: u8, out: &mut Vec<u8>) {
+        if self.cont > 0 && (0x80..=0xbf).contains(&b) {
+            out.push(b);
+            self.cont -= 1;
+        } else if (0xc2..=0xf4).contains(&b) {
+            out.push(b);
+            self.cont = match b {
+                0xc2..=0xdf => 1,
+                0xe0..=0xef => 2,
+                _ => 3,
+            };
+        } else {
+            // Standalone C1 control or a stray continuation byte: drop it.
+            self.cont = 0;
+        }
+    }
 }
 
 impl Pane {
@@ -126,7 +233,8 @@ impl Pane {
             vt,
             dead: false,
             last_output: Instant::now(),
-            recent: Vec::with_capacity(256),
+            recent_text: Vec::with_capacity(256),
+            stripper: TextStripper::new(),
             xtgettcap: XtgettcapTracker::new(),
         };
 
@@ -146,10 +254,10 @@ impl Pane {
     pub fn feed(&mut self, data: &[u8]) {
         if !data.is_empty() {
             self.last_output = Instant::now();
-            self.recent.extend_from_slice(data);
-            if self.recent.len() > RECENT_BYTES {
-                let drop = self.recent.len() - RECENT_BYTES;
-                self.recent.drain(..drop);
+            self.stripper.feed(data, &mut self.recent_text);
+            if self.recent_text.len() > RECENT_TEXT_BYTES {
+                let drop = self.recent_text.len() - RECENT_TEXT_BYTES;
+                self.recent_text.drain(..drop);
             }
             // Answer XTGETTCAP capability probes as a plain xterm so apps
             // don't enable mouse reporting and steal text selection.
@@ -166,7 +274,7 @@ impl Pane {
         if self.dead {
             return AgentStatus::Idle;
         }
-        let lower = String::from_utf8_lossy(&self.recent).to_lowercase();
+        let lower = String::from_utf8_lossy(&self.recent_text).to_lowercase();
         // A permission/approval prompt wins over the recent-output window:
         // opencode's spinner keeps repainting while it waits, so a time window
         // alone would never surface the blocked state.
@@ -473,6 +581,41 @@ mod tests {
         let mut p = test_pane(true);
         p.feed(b"\x1b[0m\xe2\x96\xb3 Permission required\nAllow once\nAllow always\nReject");
         assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn blocked_detected_through_ansi_fragmentation() {
+        let mut p = test_pane(true);
+        // opencode wraps words in SGR sequences, so the raw buffer would never
+        // contain the contiguous marker text.
+        p.feed(b"\x1b[38;2;255;100;100mPermission\x1b[0m required\n");
+        p.feed(b"\x1b[1mAllow\x1b[22m once\n");
+        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn stripper_handles_split_escapes() {
+        let mut s = TextStripper::new();
+        let mut out = Vec::new();
+        s.feed(b"hello \x1b[3", &mut out);
+        s.feed(b"1mworld\x1b[0m", &mut out);
+        assert_eq!(String::from_utf8_lossy(&out), "hello world");
+    }
+
+    #[test]
+    fn stripper_keeps_multibyte_utf8() {
+        let mut s = TextStripper::new();
+        let mut out = Vec::new();
+        s.feed("△ Permission".as_bytes(), &mut out);
+        assert_eq!(String::from_utf8_lossy(&out), "△ Permission");
+    }
+
+    #[test]
+    fn stripper_skips_osc_strings() {
+        let mut s = TextStripper::new();
+        let mut out = Vec::new();
+        s.feed(b"a\x1b]52;c;dGVzdA==\x07b", &mut out);
+        assert_eq!(String::from_utf8_lossy(&out), "ab");
     }
 
     #[test]
