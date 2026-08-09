@@ -9,6 +9,7 @@ edition.workspace = true
 description = "Kumo TUI (ratatui) frontend with mouse support"
 build = "build.rs"
 repository = "https://github.com/marcrdgz/kumo"
+license = "MIT"
 
 [workspace.package]
 version = "0.0.0-dev"
