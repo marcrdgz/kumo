@@ -41,6 +41,11 @@ const STATUS_REFRESH: Duration = Duration::from_millis(500);
 const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
 const MENU_ITEMS: [&str; 2] = ["config", "detach"];
+/// Size of the session-name popup.
+const SESSION_POPUP_W: u16 = 44;
+const SESSION_POPUP_H: u16 = 7;
+/// Light background of the popup's text input, so it reads as an editable field.
+const INPUT_BG: RColor = RColor::Rgb(0xcd, 0xd6, 0xf4); // Catppuccin lavender
 
 struct Session {
     id: u64,
@@ -66,6 +71,24 @@ struct Menu {
 struct SidebarScroll {
     sessions: u16,
     agents: u16,
+}
+
+/// Buttons of the session-name popup.
+#[derive(Clone, Copy, PartialEq)]
+enum PopupBtn {
+    Enter,
+    Cancel,
+}
+
+/// Modal popup for naming a new session.
+struct NamePopup {
+    open: bool,
+    name: String,
+    /// Cursor position as a char index into `name`.
+    cursor: usize,
+    error: Option<String>,
+    /// Button under the mouse (highlighted while hovering).
+    hover: Option<PopupBtn>,
 }
 
 enum Drag {
@@ -149,6 +172,8 @@ pub struct App {
     menu: Menu,
     /// Scroll offsets for the sidebar sessions / AGENTS sections.
     sidebar_scroll: SidebarScroll,
+    /// Modal popup for naming a new session.
+    popup: NamePopup,
     /// Transient status-bar notice, e.g. "config: coming soon".
     notice: Option<(String, Instant)>,
 }
@@ -226,6 +251,7 @@ impl App {
             // AGENTS defaults to the bottom of its region (live list), so the
             // newest agents are visible without scrolling.
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
+            popup: NamePopup { open: false, name: String::new(), cursor: 0, error: None, hover: None },
             notice: None,
         };
         app.new_session()?;
@@ -234,9 +260,72 @@ impl App {
 
     // ----- lifecycle -----
 
+    /// Create a session (used for the initial session at startup).
     fn new_session(&mut self) -> Result<()> {
+        self.new_session_with_name(self.default_session_name())
+    }
+
+    /// Smallest free `session-N` name (N = 1, 2, ...).
+    fn default_session_name(&self) -> String {
+        let mut n = 1;
+        loop {
+            let cand = format!("session-{n}");
+            if !self.sessions.iter().any(|s| s.name == cand) {
+                return cand;
+            }
+            n += 1;
+        }
+    }
+
+    /// Open the modal popup to name a new session, pre-filled with the next
+    /// free default name.
+    fn open_session_popup(&mut self) {
+        let name = self.default_session_name();
+        self.popup.name = name.clone();
+        self.popup.cursor = name.chars().count();
+        self.popup.error = None;
+        self.popup.hover = None;
+        self.popup.open = true;
+        self.menu.open = false;
+    }
+
+    /// Confirm the popup: create the session if the name is valid.
+    fn commit_session_name(&mut self) {
+        let name = self.popup.name.trim().to_string();
+        if name.is_empty() {
+            self.popup.error = Some("name cannot be empty".to_string());
+            return;
+        }
+        if self.sessions.iter().any(|s| s.name == name) {
+            self.popup.error = Some(format!("a session named '{name}' already exists"));
+            return;
+        }
+        self.popup.open = false;
+        let _ = self.new_session_with_name(name);
+    }
+
+    /// Insert `ch` at the popup cursor and advance it.
+    fn popup_insert(&mut self, ch: char) {
+        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
+        self.popup.name.insert(b, ch);
+        self.popup.cursor += 1;
+    }
+
+    /// Delete the char before the popup cursor.
+    fn popup_backspace(&mut self) {
+        if self.popup.cursor == 0 {
+            return;
+        }
+        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
+        let prev_len = self.popup.name[..b].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0);
+        let start = b - prev_len;
+        self.popup.name.replace_range(start..b, "");
+        self.popup.cursor -= 1;
+    }
+
+    /// Create a session with an explicit name and focus it.
+    fn new_session_with_name(&mut self, name: String) -> Result<()> {
         let sid = self.next_session_id();
-        let name = format!("session-{}", self.sessions.len() + 1);
         let pid = Pty::next_pane_id();
         let workspace = self.workspace.clone();
         let (cols, rows) = self.pane_dims();
@@ -380,6 +469,29 @@ impl App {
         let is_leader = ctrl
             && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('\0') | KeyCode::Null);
 
+        if self.popup.open {
+            if is_leader || key.code == KeyCode::Esc {
+                self.popup.open = false;
+                return Ok(());
+            }
+            match key.code {
+                KeyCode::Enter => self.commit_session_name(),
+                KeyCode::Backspace => self.popup_backspace(),
+                KeyCode::Left => self.popup.cursor = self.popup.cursor.saturating_sub(1),
+                KeyCode::Right => {
+                    let len = self.popup.name.chars().count();
+                    self.popup.cursor = self.popup.cursor.min(len).saturating_add(1).min(len);
+                }
+                KeyCode::Home => self.popup.cursor = 0,
+                KeyCode::End => self.popup.cursor = self.popup.name.chars().count(),
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.popup_insert(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.menu.open {
             if is_leader || key.code == KeyCode::Esc {
                 self.menu.open = false;
@@ -429,7 +541,7 @@ impl App {
             KeyCode::Char('v') => self.split_active(SplitDir::V, false)?,
             KeyCode::Char('-') => self.split_active(SplitDir::H, false)?,
             KeyCode::Char('a') => self.split_active(SplitDir::V, true)?,
-            KeyCode::Char('c') => self.new_session()?,
+            KeyCode::Char('c') => self.open_session_popup(),
             KeyCode::Char('x') => self.close_focused(),
             KeyCode::Char('z') => {
                 self.sessions[self.active].zoom = !self.sessions[self.active].zoom;
@@ -527,6 +639,51 @@ impl App {
             })
     }
 
+    /// Centered rect of the session-name popup.
+    fn name_popup_rect(&self) -> Option<Rect> {
+        let (w, h) = self.term_size;
+        if w < SESSION_POPUP_W || h < SESSION_POPUP_H {
+            return None;
+        }
+        Some(Rect::new((w - SESSION_POPUP_W) / 2, (h - SESSION_POPUP_H) / 2, SESSION_POPUP_W, SESSION_POPUP_H))
+    }
+
+    /// Terminal cursor position inside the popup's name field (row 3).
+    fn name_popup_input_cursor(&self) -> Option<(u16, u16)> {
+        let dd = self.name_popup_rect()?;
+        let text_w = (dd.width - 4) as usize - 1;
+        let name = &self.popup.name;
+        let cursor = self.popup.cursor.min(name.chars().count());
+        let end = cursor + 1;
+        let start = end.saturating_sub(text_w);
+        let col = dd.x + 2 + cursor.saturating_sub(start) as u16;
+        Some((col, dd.y + 3))
+    }
+
+    /// Rect of a popup button.
+    fn name_popup_button_rect(&self, btn: PopupBtn) -> Option<Rect> {
+        let dd = self.name_popup_rect()?;
+        let label = match btn {
+            PopupBtn::Enter => "⏎ enter ",
+            PopupBtn::Cancel => " esc cancel ",
+        };
+        let w = label.chars().count() as u16;
+        let x = match btn {
+            PopupBtn::Enter => dd.x + 2,
+            PopupBtn::Cancel => dd.x + 2 + 10,
+        };
+        Some(Rect::new(x, dd.y + 4, w, 1))
+    }
+
+    /// Button under `(x, y)` in the popup, if any.
+    fn name_popup_button_at(&self, x: u16, y: u16) -> Option<PopupBtn> {
+        [PopupBtn::Enter, PopupBtn::Cancel].into_iter().find(|btn| {
+            self.name_popup_button_rect(*btn)
+                .map(|r| r.contains(Position::new(x, y)))
+                .unwrap_or(false)
+        })
+    }
+
     fn focus_dir(&mut self, dir: Dir) {
         self.sessions[self.active].zoom = false;
         let geom = self.tree_geom();
@@ -562,6 +719,25 @@ impl App {
         let y = m.row;
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.popup.open {
+                    // Buttons confirm/cancel; clicks on the popup itself are
+                    // modal (no-op); outside cancels.
+                    if let Some(btn) = self.name_popup_button_at(x, y) {
+                        match btn {
+                            PopupBtn::Enter => self.commit_session_name(),
+                            PopupBtn::Cancel => self.popup.open = false,
+                        }
+                        return Ok(());
+                    }
+                    if self
+                        .name_popup_rect()
+                        .map(|r| r.contains(Position::new(x, y)))
+                        .unwrap_or(false)
+                    {
+                        return Ok(());
+                    }
+                    self.popup.open = false;
+                }
                 if self.menu.open {
                     if let Some(i) = self.menu_item_at(x, y) {
                         self.menu_select(i);
@@ -725,6 +901,11 @@ impl App {
                 }
             }
             MouseEventKind::Moved => {
+                if self.popup.open {
+                    // Hover highlights a popup button.
+                    self.popup.hover = self.name_popup_button_at(x, y);
+                    return Ok(());
+                }
                 if self.menu.open {
                     // Modal menu: hovering moves the selection like j/k; don't
                     // forward motion to the panes underneath.
@@ -1082,7 +1263,7 @@ impl App {
                     return true;
                 }
                 SidebarRow::NewSession => {
-                    let _ = self.new_session();
+                    self.open_session_popup();
                     return true;
                 }
                 _ => return false,
@@ -1191,6 +1372,7 @@ impl App {
 
         self.render_status(f, size);
         self.render_menu(f);
+        self.render_name_popup(f);
     }
 
     fn pane_title(&self, pid: u64, focused: bool) -> String {
@@ -1492,7 +1674,95 @@ impl App {
         }
     }
 
+    /// Draw the centered session-name popup while it is open.
+    fn render_name_popup(&self, f: &mut Frame) {
+        if !self.popup.open {
+            return;
+        }
+        let Some(dd) = self.name_popup_rect() else { return };
+        let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+        let border = Style::default().fg(crate::pane::ACCENT).bg(PANEL_SEP);
+        fill(f, dd, PANEL_SEP);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+
+        // Title.
+        let title = Style::default()
+            .fg(crate::pane::FG)
+            .bg(PANEL_SEP)
+            .add_modifier(Modifier::BOLD);
+        text(f, x0 + 2, y0 + 1, "new session", title, dd.width.saturating_sub(4));
+
+        // "name:" label.
+        let label = Style::default().fg(crate::pane::FG).bg(PANEL_SEP);
+        text(f, x0 + 2, y0 + 2, "name:", label, dd.width.saturating_sub(4));
+
+        // Light input field, right-scrolled to keep the cursor visible.
+        let field = Style::default().fg(RColor::Black).bg(INPUT_BG);
+        let field_w = dd.width.saturating_sub(4);
+        for cx in (x0 + 2)..(x0 + 2 + field_w) {
+            put(f, cx, y0 + 3, " ", field);
+        }
+        let text_w = field_w as usize - 1;
+        let name = &self.popup.name;
+        let cursor = self.popup.cursor.min(name.chars().count());
+        let end = cursor + 1;
+        let start = end.saturating_sub(text_w);
+        let mut col = x0 + 2;
+        for (i, ch) in name.chars().enumerate() {
+            if i < start {
+                continue;
+            }
+            if i - start >= text_w {
+                break;
+            }
+            put(f, col, y0 + 3, &ch.to_string(), field);
+            col += 1;
+        }
+
+        // Buttons, styled like the status-bar menu button.
+        for btn in [PopupBtn::Enter, PopupBtn::Cancel] {
+            let Some(rect) = self.name_popup_button_rect(btn) else { continue };
+            let label = match btn {
+                PopupBtn::Enter => "⏎ enter ",
+                PopupBtn::Cancel => " esc cancel ",
+            };
+            let hovered = self.popup.hover == Some(btn);
+            let st = if hovered {
+                Style::default()
+                    .fg(RColor::Black)
+                    .bg(YELLOW)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(crate::pane::FG).bg(PANEL_SEP).add_modifier(Modifier::BOLD)
+            };
+            text(f, rect.x, rect.y, label, st, rect.width);
+        }
+
+        // Error line.
+        if let Some(err) = &self.popup.error {
+            text(f, x0 + 2, y0 + 5, err, Style::default().fg(ORANGE).bg(PANEL_SEP), dd.width.saturating_sub(4));
+        }
+    }
+
     fn place_cursor(&mut self, terminal: &mut Term, geom: &TreeGeom, focused: u64) -> Result<()> {
+        if self.popup.open {
+            if let Some((x, y)) = self.name_popup_input_cursor() {
+                terminal.set_cursor_position((x, y))?;
+                terminal.show_cursor()?;
+                return Ok(());
+            }
+        }
         if let Some(pg) = geom.panes.iter().find(|p| p.pane_id == focused) {
             if let Some(pane) = self.panes.get(&pg.pane_id) {
                 let inner = pg.inner();
@@ -1510,6 +1780,11 @@ impl App {
         terminal.hide_cursor()?;
         Ok(())
     }
+}
+
+/// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).
+fn char_idx_to_byte(s: &str, ci: usize) -> usize {
+    s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
 }
 
 /// Short display form of a workspace path, e.g. `.../kumo`.

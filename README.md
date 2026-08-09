@@ -93,7 +93,7 @@ During development: `cargo run -p kumo` or `make run`. 🧑‍💻
 | `Ctrl+Space` | Leader key (shows all bindings in the status bar) |
 | `v` / `-` | Vertical / horizontal split 🪓 |
 | `a` | AI CLI pane (vertical split) 🤖 |
-| `c` | New session 🆕 |
+| `c` | New session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
 | `x` | Close focused pane ❌ |
 | `z` | Zoom pane 🔍 |
 | `h`/`j`/`k`/`l` | Move focus left / down / up / right 🎯 |
