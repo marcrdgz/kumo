@@ -45,6 +45,9 @@ pub struct Pane {
     /// Whether an AI CLI (opencode/claude) was detected running inside the
     /// pane, even though it was spawned as a plain shell.
     pub detected_ai: bool,
+    /// Cached name of the detected AI CLI process (refreshed by the periodic
+    /// process scan, so the sidebar never spawns `ps` per frame).
+    pub detected_ai_name: Option<String>,
     pub pty: Pty,
     pub vt: vt::Terminal,
     pub dead: bool,
@@ -239,6 +242,7 @@ impl Pane {
             session_id,
             is_ai,
             detected_ai: false,
+            detected_ai_name: None,
             pty,
             vt,
             dead: false,
@@ -309,11 +313,6 @@ impl Pane {
     /// an AI CLI (opencode/claude) was detected running inside a plain shell.
     pub fn is_ai_cli(&self) -> bool {
         self.is_ai || self.detected_ai
-    }
-
-    /// Whether an AI CLI is currently running in this pane's process tree.
-    pub fn ai_cli_running(&self) -> bool {
-        self.ai_cli_name().is_some()
     }
 
     /// Name of the AI CLI currently running in this pane's process tree.

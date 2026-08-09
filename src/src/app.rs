@@ -87,7 +87,8 @@ enum SidebarRow {
     Section(String),
     Session(usize),
     Branch(String),
-    Agent(usize, u64),
+    AgentDir(usize, u64),
+    AgentName(usize, u64),
     NewSession,
 }
 
@@ -667,6 +668,16 @@ impl App {
         }
     }
 
+    /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from
+    /// the cached process scan. Falls back to "AI CLI".
+    fn agent_label(&self, pid: u64) -> String {
+        self.panes
+            .get(&pid)
+            .and_then(|p| p.detected_ai_name.clone())
+            .map(|name| name.rsplit('/').next().unwrap_or(&name).to_string())
+            .unwrap_or_else(|| "AI CLI".to_string())
+    }
+
     fn pane_dims(&self) -> (u16, u16) {
         let r = self.panes_area();
         (r.width.max(1), r.height.max(1))
@@ -707,10 +718,11 @@ impl App {
         }
         self.last_ai_scan = Instant::now();
         for pane in self.panes.values_mut() {
-            if pane.is_ai {
-                continue;
+            let name = pane.ai_cli_name();
+            pane.detected_ai_name = name.clone();
+            if !pane.is_ai {
+                pane.detected_ai = name.is_some();
             }
-            pane.detected_ai = pane.ai_cli_running();
         }
     }
 
@@ -755,7 +767,7 @@ impl App {
                     log,
                     "pid={} cli={} status={:?} age_ms={} recent={}",
                     pid,
-                    pane.ai_cli_name().unwrap_or_else(|| "?".into()),
+                    pane.detected_ai_name.as_deref().unwrap_or("?"),
                     self.agent_status_cache.get(pid).copied().unwrap_or(AgentStatus::Idle),
                     pane.last_output_age().as_millis(),
                     tail,
@@ -794,13 +806,16 @@ impl App {
         let mut ay = agents_y + 1;
         for (i, s) in self.sessions.iter().enumerate() {
             for pid in s.tree.pane_ids() {
-                if self.panes.get(&pid).map(|p| p.is_ai_cli()).unwrap_or(false) {
-                    if ay >= footer_y {
-                        break;
-                    }
-                    out.push((ay, SidebarRow::Agent(i, pid)));
-                    ay += 1;
+                if !self.panes.get(&pid).map(|p| p.is_ai_cli()).unwrap_or(false) {
+                    continue;
                 }
+                // Each agent takes two rows: workspace folder + agent name.
+                if ay + 1 >= footer_y {
+                    break;
+                }
+                out.push((ay, SidebarRow::AgentDir(i, pid)));
+                out.push((ay + 1, SidebarRow::AgentName(i, pid)));
+                ay += 2;
             }
         }
         out.push((footer_y, SidebarRow::NewSession));
@@ -817,7 +832,7 @@ impl App {
                     self.active = i;
                     return true;
                 }
-                SidebarRow::Agent(i, pid) => {
+                SidebarRow::AgentDir(i, pid) | SidebarRow::AgentName(i, pid) => {
                     self.active = i;
                     self.sessions[i].tree.focus = pid;
                     return true;
@@ -1016,16 +1031,33 @@ impl App {
                     let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
                     text(f, x, y, &format!("    {}", b), style, max);
                 }
-                SidebarRow::Agent(i, pid) => {
+                SidebarRow::AgentDir(i, pid) | SidebarRow::AgentName(i, pid) => {
+                    let focused =
+                        i == self.active && self.sessions[self.active].tree.focus == pid;
+                    let bg = if focused { PANEL_SEP } else { PANEL_BG };
+                    // Light up the whole sidebar row when this agent pane is focused.
+                    if focused {
+                        fill(f, Rect::new(x, y, max + 1, 1), bg);
+                    }
                     let status = self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle);
-                    let color = match status {
+                    let status_color = match status {
                         AgentStatus::Working => GREEN,
                         AgentStatus::Blocked => ORANGE,
                         AgentStatus::Idle => PANEL_MUTED,
                     };
-                    text(f, x, y, "  ●", Style::default().fg(color).bg(PANEL_BG), 3);
-                    let label = format!(" {} - #{}", self.sessions[i].name, pid);
-                    text(f, x + 3, y, &label, Style::default().fg(crate::pane::FG).bg(PANEL_BG), max.saturating_sub(3));
+                    match row {
+                        SidebarRow::AgentDir(_, _) => {
+                            put(f, x + 2, y, "●", Style::default().fg(status_color).bg(bg));
+                            let path = short_workspace(&self.sessions[i].workspace);
+                            let path_color = if focused { crate::pane::FG } else { PANEL_MUTED };
+                            text(f, x + 4, y, &path, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
+                        }
+                        SidebarRow::AgentName(_, _) => {
+                            let name = self.agent_label(pid);
+                            text(f, x + 4, y, &name, Style::default().fg(status_color).bg(bg), max.saturating_sub(4));
+                        }
+                        _ => {}
+                    }
                 }
                 SidebarRow::NewSession => {
                     let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
@@ -1140,6 +1172,21 @@ impl App {
         }
         terminal.hide_cursor()?;
         Ok(())
+    }
+}
+
+/// Short display form of a workspace path, e.g. `.../kumo`.
+fn short_workspace(ws: &std::path::Path) -> String {
+    let text = ws.to_string_lossy();
+    if let Some(base) = ws.file_name() {
+        let base = base.to_string_lossy();
+        if ws.parent().is_some() {
+            format!(".../{base}")
+        } else {
+            base.into_owned()
+        }
+    } else {
+        text.into_owned()
     }
 }
 
