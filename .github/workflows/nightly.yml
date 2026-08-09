@@ -41,7 +41,7 @@ jobs:
             local cur
             cur=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null) || cur=""
             if [ -n "$cur" ]; then
-              gh api -X PATCH repos/marcrdgz/kumo/git/refs/tags/nightly-last -f sha="$SHA" -f force=true >/dev/null 2>&1 || true
+              gh api -X PATCH repos/marcrdgz/kumo/git/refs/tags/nightly-last -f sha="$SHA" -F force=true >/dev/null 2>&1 || true
             else
               gh api -X POST repos/marcrdgz/kumo/git/refs -f ref=refs/tags/nightly-last -f sha="$SHA" >/dev/null 2>&1 || true
             fi
