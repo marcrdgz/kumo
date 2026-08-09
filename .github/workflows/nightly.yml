@@ -161,8 +161,8 @@ jobs:
       - name: Reset nightly release
         if: steps.guard.outputs.ok == 'true'
         run: |
-          gh release delete nightly --repo marcrdgz/kumo --yes || true
+          gh release delete nightly --repo marcrdgz/kumo --yes --cleanup-tag || true
           gh release create nightly --repo marcrdgz/kumo --prerelease \
             --target "${{ github.sha }}" \
             --title "kumo nightly" \
-            --notes "Rolling build of \`main\`." artifacts/* || true
+            --notes "Rolling build of main." artifacts/*
