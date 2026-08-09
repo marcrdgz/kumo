@@ -142,9 +142,12 @@ impl App {
         let (ai_prog, ai_args) = kumo_core::config::ai_command();
         let ai_prog = kumo_core::config::resolve_program(&ai_prog);
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+        // Workspace precedence: explicit argument, then the directory kumo
+        // was launched from, then $HOME.
         let workspace = workspace
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
             .unwrap_or(home);
 
         let (events_tx, events_rx) = mpsc::channel();
