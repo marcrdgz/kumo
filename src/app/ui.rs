@@ -296,10 +296,11 @@ impl App {
         }
     }
 
-    /// Draw the startup update banner (top-right) with a red ✕ close button.
+    /// Draw the startup update banner (top-right, two lines) with a red ✕
+    /// close button.
     fn render_update_notice(&self, f: &mut Frame) {
         let Some(rect) = self.update_notice_rect() else { return };
-        let Some(msg) = self.update_notice_text() else { return };
+        let Some((line1, line2)) = self.update_notice_lines() else { return };
         let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
         let border = Style::default().fg(PANEL_MUTED).bg(PANEL_SEP);
         fill(f, rect, PANEL_SEP);
@@ -317,7 +318,7 @@ impl App {
         }
         put(
             f,
-            x0 + 1,
+            x0 + 2,
             y0 + 1,
             "✕",
             Style::default().fg(RED).bg(PANEL_SEP).add_modifier(Modifier::BOLD),
@@ -325,11 +326,19 @@ impl App {
         let inner_w = rect.width.saturating_sub(2);
         text(
             f,
-            x0 + 2,
+            x0 + 5,
             y0 + 1,
-            &msg,
+            &line1,
             Style::default().fg(FG).bg(PANEL_SEP),
-            inner_w.saturating_sub(1),
+            inner_w.saturating_sub(6),
+        );
+        text(
+            f,
+            x0 + 5,
+            y0 + 2,
+            &line2,
+            Style::default().fg(FG).bg(PANEL_SEP),
+            inner_w.saturating_sub(5),
         );
     }
 

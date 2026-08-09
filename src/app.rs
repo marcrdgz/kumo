@@ -563,27 +563,31 @@ impl App {
         (r.width.max(1), r.height.max(1))
     }
 
-    /// Text of the update banner, e.g. "New version 1.0.0 available".
-    fn update_notice_text(&self) -> Option<String> {
+    /// Lines of the update banner: the headline (next to the close button) and
+    /// the action hint. Kept on two lines so the banner stays narrow.
+    fn update_notice_lines(&self) -> Option<(String, String)> {
         let notice = self.update_notice.as_ref()?;
-        Some(format!("New version {} available — run 'kumo update'", notice.display))
+        Some((
+            format!("New version {} available", notice.display),
+            "run 'kumo update'".to_string(),
+        ))
     }
 
     /// Rect of the update banner, anchored to the top-right corner.
     pub(super) fn update_notice_rect(&self) -> Option<Rect> {
-        let text = self.update_notice_text()?;
+        let (line1, line2) = self.update_notice_lines()?;
         let (w, h) = self.term_size;
-        let inner_w = text.chars().count() as u16 + 2;
+        let inner_w = line1.chars().count().max(line2.chars().count()) as u16 + 6;
         let width = inner_w + 2;
-        if w < width + 1 || h < 3 {
+        if w < width + 1 || h < 4 {
             return None;
         }
-        Some(Rect::new(w - width - 1, 0, width, 3))
+        Some(Rect::new(w - width - 1, 0, width, 4))
     }
 
     /// Whether `(x, y)` hits the banner's close button.
     pub(super) fn update_notice_close_at(&self, x: u16, y: u16) -> bool {
         let Some(r) = self.update_notice_rect() else { return false };
-        x == r.x + 1 && y == r.y + 1
+        x == r.x + 2 && y == r.y + 1
     }
 }
