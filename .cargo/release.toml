@@ -1,6 +1,0 @@
-[workspace]
-shared-version = true
-tag-name = "v{{version}}"
-pre-release-commit-message = "chore: release {{version}}"
-release-branch = ["main"]
-publish = false
