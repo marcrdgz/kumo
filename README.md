@@ -12,6 +12,10 @@ Built in **Rust** 🦀 with a single TUI frontend on **ratatui**, real terminal
 emulation from **libghostty-vt** (Ghostty's headless terminal core), and
 **portable-pty** for PTY management. 🧵
 
+And it's featherweight 🪶: while you work, kumo itself idles at **~0.7% CPU
+and ~6 MB of memory** — the real cost is whatever you run *inside* its panes,
+not the multiplexer.
+
 ## ✨ Features
 
 - 🖥️ **Real terminal emulation** — each pane is a genuine VT/xterm emulator
@@ -34,40 +38,6 @@ emulation from **libghostty-vt** (Ghostty's headless terminal core), and
   always works. 🧤
 - 📂 **Workspace-aware** — kumo opens in the directory you launch it from; every
   new pane/session starts there. 🗂️
-
-## 🗺️ Roadmap — a fully customizable multiplexer
-
-The long-term goal is that **every aspect of kumo is configurable by you**:
-colors, keybindings, the leader key, the layout of the status bar and sidebar,
-the AI panes, and more. The current build ships with a sensible fixed
-configuration, and the pieces below are planned — **not yet implemented**:
-
-- 🎨 **Theme & colors** — colors are currently hard-coded constants. Planned:
-  full color palette customization (Catppuccin-style schemes, per-scheme
-  backgrounds, status-dot colors, borders), a configurable theme, and
-  light/dark variants.
-- ⌨️ **Keybindings** — the leader dispatch and mouse actions are hard-coded.
-  Planned: remap any binding (splits, focus, sessions, zoom, sidebar, …),
-  custom leader keys, and per-mode keymaps.
-- ⚙️ **Config file** — today the unique file `~/.config/kumo/config` covers
-  the AI CLI command and the default shell. Planned: theme, keymaps, leader
-  key, status-bar layout, and pane behavior.
-- 🧭 **Layout & chrome** — planned: toggle/order sidebar sections, customize
-  the status bar (branch, session, agent status, hostname, clock), pane titles,
-  and border styling.
-- 🧩 **Plugins / extensions** — planned: a plugin system so the community can
-  add custom commands, widgets, and integrations without forking kumo.
-
-Until then, kumo stays opinionated: it picks good defaults for you so it just
-works, and you can follow the roadmap above as the knobs land. 🔧
-
-## 🛠️ Requirements
-
-- 🦀 Rust toolchain (`cargo`) — to build from source
-- ⚡ [Zig](https://ziglang.org) on `PATH` — `build.rs` compiles the vendored
-  `libghostty-vt` library at build time
-- 🐙 [GitHub CLI](https://cli.github.com) (`gh`, authenticated) — to run
-  `kumo update` and for the startup update check
 
 ## 📦 Install
 
@@ -92,16 +62,6 @@ cargo install --path . --locked
 # or: make install
 ```
 
-## ▶️ Run
-
-```sh
-kumo            # 🏠 opens in the current directory
-kumo ~/proyecto # 🗂️ opens in a specific workspace
-kumo --version  # ℹ️ prints the version and channel (stable / nightly / dev)
-```
-
-During development: `cargo run -p kumo` or `make run`. 🧑‍💻
-
 ## 🔄 Updating
 
 `kumo update` resolves the latest release with `gh` and installs it:
@@ -116,38 +76,6 @@ At startup kumo checks (at most once per day for stable, every 6 h for
 nightly) for a newer release and, if one exists, shows a banner at the
 top-right with a red ✕ to dismiss it. Disable the check with
 `update-check = false` in the config or by setting `KUMO_NO_UPDATE=1`.
-
-## ⌨️ Keybindings
-
-| Key | Action |
-| --- | --- |
-| `Ctrl+Space` | Leader key (shows all bindings in the status bar) |
-| `v` / `-` | Vertical / horizontal split 🪓 |
-| `a` | AI CLI pane (vertical split) 🤖 |
-| `c` | New session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
-| `x` | Close focused pane ❌ |
-| `z` | Zoom pane 🔍 |
-| `h`/`j`/`k`/`l` | Move focus left / down / up / right 🎯 |
-| `n` / `p` | Cycle session next / previous ⏭️ |
-| `1`–`9` | Jump to the session at that sidebar position 🎯 |
-| `Tab` | Cycle pane ↹ |
-| `b` | Toggle sidebar 📌 |
-| `d` | Detach (exit the TUI) 🚪 |
-| `Esc` | Exit leader mode ↩️ |
-
-> ⚠️ Keybindings are currently hard-coded. Remapping is on the roadmap (see
-> above).
-
-**🖱️ Mouse**
-
-- 🖐️ **Drag** selects text (copied on release) — works even in apps with mouse
-  reporting.
-- 👆 **Click** is forwarded to the app when it owns the mouse.
-- 🎚️ **Scroll** is forwarded to reporting apps; otherwise it scrolls the pane's
-  scrollback.
-- ↔️ **Drag a splitter** to resize.
-- 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
-  dropdown with `config` (coming soon) and `detach` (same as `leader+d`).
 
 ## ⚙️ Configuration
 
@@ -178,6 +106,82 @@ conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,
 Detected agents (auto-listed in the sidebar when running in any pane):
 `opencode` 🧠 · `claude` 💬 · `codex` ⚙️ · `gemini` ✨ · `qwen` 🐉 · `aider` 🛠️ ·
 `cody` 🐶 · `swe` 🔧 · `coco` 🥥
+
+## 🛠️ Requirements
+
+- 🦀 Rust toolchain (`cargo`) — to build from source
+- ⚡ [Zig](https://ziglang.org) on `PATH` — `build.rs` compiles the vendored
+  `libghostty-vt` library at build time
+- 🐙 [GitHub CLI](https://cli.github.com) (`gh`, authenticated) — to run
+  `kumo update` and for the startup update check
+
+## ⌨️ Keybindings
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+Space` | Leader key (shows all bindings in the status bar) |
+| `v` / `-` | Vertical / horizontal split 🪓 |
+| `a` | AI CLI pane (vertical split) 🤖 |
+| `c` | New session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
+| `x` | Close focused pane ❌ |
+| `z` | Zoom pane 🔍 |
+| `h`/`j`/`k`/`l` | Move focus left / down / up / right 🎯 |
+| `n` / `p` | Cycle session next / previous ⏭️ |
+| `1`–`9` | Jump to the session at that sidebar position 🎯 |
+| `Tab` | Cycle pane ↹ |
+| `b` | Toggle sidebar 📌 |
+| `d` | Detach (exit the TUI) 🚪 |
+| `Esc` | Exit leader mode ↩️ |
+
+> ⚠️ Keybindings are currently hard-coded. Remapping is on the roadmap (see
+> below).
+
+**🖱️ Mouse**
+
+- 🖐️ **Drag** selects text (copied on release) — works even in apps with mouse
+  reporting.
+- 👆 **Click** is forwarded to the app when it owns the mouse.
+- 🎚️ **Scroll** is forwarded to reporting apps; otherwise it scrolls the pane's
+  scrollback.
+- ↔️ **Drag a splitter** to resize.
+- 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
+  dropdown with `config` (coming soon) and `detach` (same as `leader+d`).
+
+## 🗺️ Roadmap — a fully customizable multiplexer
+
+The long-term goal is that **every aspect of kumo is configurable by you**:
+colors, keybindings, the leader key, the layout of the status bar and sidebar,
+the AI panes, and more. The current build ships with a sensible fixed
+configuration, and the pieces below are planned — **not yet implemented**:
+
+- 🎨 **Theme & colors** — colors are currently hard-coded constants. Planned:
+  full color palette customization (Catppuccin-style schemes, per-scheme
+  backgrounds, status-dot colors, borders), a configurable theme, and
+  light/dark variants.
+- ⌨️ **Keybindings** — the leader dispatch and mouse actions are hard-coded.
+  Planned: remap any binding (splits, focus, sessions, zoom, sidebar, …),
+  custom leader keys, and per-mode keymaps.
+- ⚙️ **Config file** — today the unique file `~/.config/kumo/config` covers
+  the AI CLI command and the default shell. Planned: theme, keymaps, leader
+  key, status-bar layout, and pane behavior.
+- 🧭 **Layout & chrome** — planned: toggle/order sidebar sections, customize
+  the status bar (branch, session, agent status, hostname, clock), pane titles,
+  and border styling.
+- 🧩 **Plugins / extensions** — planned: a plugin system so the community can
+  add custom commands, widgets, and integrations without forking kumo.
+
+Until then, kumo stays opinionated: it picks good defaults for you so it just
+works, and you can follow the roadmap above as the knobs land. 🔧
+
+## ▶️ Run
+
+```sh
+kumo            # 🏠 opens in the current directory
+kumo ~/proyecto # 🗂️ opens in a specific workspace
+kumo --version  # ℹ️ prints the version and channel (stable / nightly / dev)
+```
+
+During development: `cargo run -p kumo` or `make run`. 🧑‍💻
 
 ## 🗂️ Project layout
 
