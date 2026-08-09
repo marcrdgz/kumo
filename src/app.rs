@@ -62,6 +62,12 @@ struct Menu {
     selected: usize,
 }
 
+/// Scroll offsets for the sidebar's sessions and AGENTS sections.
+struct SidebarScroll {
+    sessions: u16,
+    agents: u16,
+}
+
 enum Drag {
     Splitter { split_id: u64 },
 }
@@ -141,6 +147,8 @@ pub struct App {
     quit: bool,
     /// Status-bar menu (MENU button + dropdown).
     menu: Menu,
+    /// Scroll offsets for the sidebar sessions / AGENTS sections.
+    sidebar_scroll: SidebarScroll,
     /// Transient status-bar notice, e.g. "config: coming soon".
     notice: Option<(String, Instant)>,
 }
@@ -215,6 +223,9 @@ impl App {
             pane_cache: HashMap::new(),
             quit: false,
             menu: Menu { open: false, selected: 0 },
+            // AGENTS defaults to the bottom of its region (live list), so the
+            // newest agents are visible without scrolling.
+            sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             notice: None,
         };
         app.new_session()?;
@@ -692,6 +703,10 @@ impl App {
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 let up = m.kind == MouseEventKind::ScrollUp;
+                // Wheel over the sidebar scrolls its sessions/AGENTS sections.
+                if self.sidebar_wheel(x, y, up) {
+                    return Ok(());
+                }
                 if let Some(pg) = self.pane_at(x, y) {
                     self.set_focus(pg.pane_id);
                     let inner = pg.inner();
@@ -931,10 +946,60 @@ impl App {
         }
     }
 
+    /// Row of the AGENTS section label: the sidebar midpoint, so the sessions
+    /// list (above it) never pushes the agents section past halfway.
+    fn sidebar_agents_y(&self) -> u16 {
+        let footer_y = self.term_size.1.saturating_sub(2);
+        (self.term_size.1 / 2).max(4).min(footer_y)
+    }
+
+    /// Sessions content: session rows (+ branch) followed by "+ new session".
+    fn sessions_content(&self) -> Vec<SidebarRow> {
+        let mut out = Vec::new();
+        for (i, _s) in self.sessions.iter().enumerate() {
+            out.push(SidebarRow::Session(i));
+            if let Some(branch) = self.session_branch(i) {
+                out.push(SidebarRow::Branch(branch));
+            }
+        }
+        out.push(SidebarRow::NewSession);
+        out
+    }
+
+    /// AGENTS content: a workspace + name row per AI pane, in session order.
+    fn agents_content(&self) -> Vec<SidebarRow> {
+        let mut out = Vec::new();
+        for (i, s) in self.sessions.iter().enumerate() {
+            for pid in s.tree.pane_ids() {
+                if !self.panes.get(&pid).map(|p| p.is_ai_cli()).unwrap_or(false) {
+                    continue;
+                }
+                out.push(SidebarRow::AgentDir(i, pid));
+                out.push(SidebarRow::AgentName(i, pid));
+            }
+        }
+        out
+    }
+
+    /// Max scroll offset for the sessions section.
+    fn sessions_scroll_max(&self) -> u16 {
+        let agents_y = self.sidebar_agents_y();
+        let region_h = agents_y.saturating_sub(3) as usize;
+        self.sessions_content().len().saturating_sub(region_h) as u16
+    }
+
+    /// Max scroll offset for the AGENTS section.
+    fn agents_scroll_max(&self) -> u16 {
+        let agents_y = self.sidebar_agents_y();
+        let footer_y = self.term_size.1.saturating_sub(2);
+        let region_h = footer_y.saturating_sub(agents_y) as usize;
+        self.agents_content().len().saturating_sub(region_h) as u16
+    }
+
     /// Static rows of the sidebar (shared by render + mouse hit-testing).
     ///
-    /// Top half: sessions with their git branch. Bottom half (starting at the
-    /// vertical midpoint) holds the AGENTS list.
+    /// Sessions live above the midpoint and scroll once they would push the
+    /// AGENTS section past it; AGENTS scrolls once it reaches the bottom edge.
     fn sidebar_rows(&self) -> Vec<(u16, SidebarRow)> {
         let mut out = Vec::new();
         let mut y: u16 = 0;
@@ -943,38 +1008,62 @@ impl App {
         out.push((y, SidebarRow::Spacer));
         y += 1;
         out.push((y, SidebarRow::Section("sessions".into())));
-        y += 1;
-        for (i, _s) in self.sessions.iter().enumerate() {
-            out.push((y, SidebarRow::Session(i)));
+
+        let agents_y = self.sidebar_agents_y();
+        let footer_y = self.term_size.1.saturating_sub(2);
+
+        // Sessions region: rows 3 .. agents_y-1.
+        let region_h = agents_y.saturating_sub(3) as usize;
+        let items = self.sessions_content();
+        let offset = (self.sidebar_scroll.sessions as usize).min(items.len().saturating_sub(region_h));
+        for item in items.iter().skip(offset).take(region_h) {
+            out.push((y, item.clone()));
             y += 1;
-            if let Some(branch) = self.session_branch(i) {
-                out.push((y, SidebarRow::Branch(branch)));
-                y += 1;
-            }
         }
 
-        // AGENTS starts exactly at the screen midpoint (or below the sessions
-        // if they overflow it).
-        let footer_y = self.term_size.1.saturating_sub(2);
-        let agents_y = (self.term_size.1 / 2).max(y).min(footer_y);
         out.push((agents_y, SidebarRow::Section("agents".into())));
+
+        // AGENTS region: rows agents_y+1 .. footer_y.
+        let region_h = footer_y.saturating_sub(agents_y) as usize;
+        let items = self.agents_content();
+        let offset = (self.sidebar_scroll.agents as usize).min(items.len().saturating_sub(region_h));
         let mut ay = agents_y + 1;
-        for (i, s) in self.sessions.iter().enumerate() {
-            for pid in s.tree.pane_ids() {
-                if !self.panes.get(&pid).map(|p| p.is_ai_cli()).unwrap_or(false) {
-                    continue;
-                }
-                // Each agent takes two rows: workspace folder + agent name.
-                if ay + 1 >= footer_y {
-                    break;
-                }
-                out.push((ay, SidebarRow::AgentDir(i, pid)));
-                out.push((ay + 1, SidebarRow::AgentName(i, pid)));
-                ay += 2;
-            }
+        for item in items.iter().skip(offset).take(region_h) {
+            out.push((ay, item.clone()));
+            ay += 1;
         }
-        out.push((footer_y, SidebarRow::NewSession));
         out
+    }
+
+    /// Mouse-wheel scroll for the sidebar: scrolls the sessions section above
+    /// the midpoint and the AGENTS section below it. Returns whether the
+    /// event was consumed.
+    fn sidebar_wheel(&mut self, x: u16, y: u16, up: bool) -> bool {
+        if !self.sidebar_open || x >= self.sidebar_width {
+            return false;
+        }
+        const STEP: u16 = 3;
+        let agents_y = self.sidebar_agents_y();
+        let footer_y = self.term_size.1.saturating_sub(2);
+        if y >= 3 && y < agents_y {
+            let max = self.sessions_scroll_max();
+            self.sidebar_scroll.sessions = if up {
+                self.sidebar_scroll.sessions.saturating_sub(STEP)
+            } else {
+                self.sidebar_scroll.sessions.saturating_add(STEP).min(max)
+            };
+            true
+        } else if y > agents_y && y <= footer_y {
+            let max = self.agents_scroll_max();
+            self.sidebar_scroll.agents = if up {
+                self.sidebar_scroll.agents.saturating_sub(STEP)
+            } else {
+                self.sidebar_scroll.agents.saturating_add(STEP).min(max)
+            };
+            true
+        } else {
+            false
+        }
     }
 
     fn sidebar_hit(&mut self, _x: u16, y: u16) -> bool {
@@ -1195,7 +1284,8 @@ impl App {
                 break;
             }
             let x = area.x;
-            let max = w.saturating_sub(1);
+            // Reserve the last column for section scrollbars.
+            let max = w.saturating_sub(2);
             match row {
                 SidebarRow::Header(t) => {
                     let style = Style::default()
@@ -1255,10 +1345,34 @@ impl App {
                     }
                 }
                 SidebarRow::NewSession => {
-                    let style = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
-                    text(f, x, y, "  + new session", style, max);
+                    let style = Style::default()
+                        .fg(crate::pane::FG)
+                        .bg(RColor::Reset)
+                        .add_modifier(Modifier::BOLD);
+                    text(f, x, y, "  + NEW SESSION", style, max);
                 }
             }
+        }
+        // Section scrollbars (rightmost sidebar column) when the content
+        // overflows its region.
+        let scroll_x = w.saturating_sub(1);
+        let agents_y = self.sidebar_agents_y();
+        let footer_y = self.term_size.1.saturating_sub(2);
+
+        let sess_region = agents_y.saturating_sub(3);
+        let sess_items = self.sessions_content();
+        if sess_items.len() > sess_region as usize {
+            let offset = (self.sidebar_scroll.sessions as usize)
+                .min(sess_items.len() - sess_region as usize);
+            draw_scrollbar(f, scroll_x, 3, sess_region, offset, sess_items.len());
+        }
+
+        let agent_region = footer_y.saturating_sub(agents_y);
+        let agent_items = self.agents_content();
+        if agent_items.len() > agent_region as usize {
+            let offset = (self.sidebar_scroll.agents as usize)
+                .min(agent_items.len() - agent_region as usize);
+            draw_scrollbar(f, scroll_x, agents_y + 1, agent_region, offset, agent_items.len());
         }
     }
 
@@ -1427,6 +1541,27 @@ fn git_branch(ws: &std::path::Path) -> Option<String> {
         None
     } else {
         Some(branch)
+    }
+}
+
+/// Draw a vertical scrollbar in a `region_h`-tall strip starting at
+/// `(x, y_top)`, with `offset` of `total` items scrolled into view.
+fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usize, total: usize) {
+    if total <= region_h as usize || region_h == 0 {
+        return;
+    }
+    let bar_h = region_h as usize;
+    let thumb = ((region_h as usize * bar_h) / total).max(1).min(bar_h);
+    let hist = total - region_h as usize;
+    let y_max = bar_h.saturating_sub(thumb);
+    let y_start = offset.saturating_mul(y_max) / hist.max(1);
+    for i in 0..bar_h {
+        let y = y_top + i as u16;
+        if i >= y_start && i < y_start + thumb {
+            put(f, x, y, "▐", Style::default().fg(crate::pane::ACCENT));
+        } else {
+            put(f, x, y, "░", Style::default().fg(PANEL_SEP));
+        }
     }
 }
 
