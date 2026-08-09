@@ -30,6 +30,11 @@ not the multiplexer.
   and CLI name with a status dot: **green** = working, **orange** = blocked
   (waiting for approval), **gray** = idle. Detected from the live terminal
   buffer (not the viewport), so it stays accurate even while you scroll. ⚡
+- 🔔 **Audible alerts** — when an agent **blocks** (waiting for approval) or
+  **finishes**, kumo plays a sound so you notice without watching: a distinct
+  chime for each event. Blocked agents float to the top of the AGENTS list
+  (with a filled `◉` dot and `· blocked` hint) and their pane glows orange,
+  even without focus. Tune with `agent-sound = false`. 🎵
 - 📋 **Native text selection** — drag to select in any pane, even inside apps
   that own the mouse (opencode's TUI, vim, less). Clicks still reach the app,
   and the highlight hugs the text like a normal terminal. ✂️
@@ -98,6 +103,7 @@ Supported keys:
 | `ai-cmd` | AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat. | `opencode` |
 | `shell` | Login shell used to spawn panes. | `$SHELL` → `/bin/zsh` |
 | `update-check` | Whether the startup update check runs (also `KUMO_NO_UPDATE=1`). | `true` |
+| `agent-sound` | Whether blocked/finished agent transitions play an audible alert (also `KUMO_NO_SOUND=1`). | `true` |
 
 Overrides for the config/state **locations** (not keys) follow the usual
 conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,
@@ -190,6 +196,7 @@ Cargo.toml              📄 workspace + package manifest
 build.rs                🏗️ compiles the vendored libghostty-vt (Zig)
 src/main.rs             🚪 TUI entry point
 src/app.rs              🧩 sessions/panes, layout tree, input routing, mouse, rendering
+src/alert.rs            🔊 audible agent alerts (blocked / finished)
 src/pane.rs             🪟 Pane = PTY + libghostty-vt terminal (agent status, dirty render)
 src/vt.rs               🔌 FFI bindings to libghostty-vt (emulator + native selection)
 src/pty.rs              🔧 portable-pty wrapper

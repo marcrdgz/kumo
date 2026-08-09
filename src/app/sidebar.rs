@@ -46,19 +46,37 @@ impl App {
         out
     }
 
-    /// AGENTS content: a workspace + name row per AI pane, in session order.
+    /// Sort rank for the AGENTS section: blocked agents float to the top so a
+    /// permission wait is visible without scrolling, then working, then idle.
+    fn agent_rank(status: AgentStatus) -> u8 {
+        match status {
+            AgentStatus::Blocked => 0,
+            AgentStatus::Working => 1,
+            AgentStatus::Idle => 2,
+        }
+    }
+
+    /// AGENTS content: a workspace + name row per AI pane, blocked first, then
+    /// working, then idle, stable within each group (session order).
     fn agents_content(&self) -> Vec<SidebarRow> {
-        let mut out = Vec::new();
+        let mut out: Vec<(u8, usize, u64, SidebarRow)> = Vec::new();
         for (i, s) in self.sessions.iter().enumerate() {
             for pid in s.tree.pane_ids() {
                 if !self.panes.get(&pid).map(|p| p.is_ai_cli()).unwrap_or(false) {
                     continue;
                 }
-                out.push(SidebarRow::AgentDir(i, pid));
-                out.push(SidebarRow::AgentName(i, pid));
+                let rank = self
+                    .agent_status_cache
+                    .get(&pid)
+                    .copied()
+                    .map(Self::agent_rank)
+                    .unwrap_or(2);
+                out.push((rank, i, pid, SidebarRow::AgentDir(i, pid)));
+                out.push((rank, i, pid, SidebarRow::AgentName(i, pid)));
             }
         }
-        out
+        out.sort_by_key(|(rank, i, pid, _)| (*rank, *i, *pid));
+        out.into_iter().map(|(_, _, _, row)| row).collect()
     }
 
     /// Max scroll offset for the sessions section.
@@ -244,16 +262,33 @@ impl App {
                         AgentStatus::Blocked => ORANGE,
                         AgentStatus::Idle => PANEL_MUTED,
                     };
+                    // Blocked agents get a filled dot and a bold label so the
+                    // waiting state stands out even at a glance.
+                    let dot = if status == AgentStatus::Blocked { "◉" } else { "●" };
+                    let name_style = if status == AgentStatus::Blocked {
+                        Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(status_color).bg(bg)
+                    };
                     match row {
                         SidebarRow::AgentDir(_, _) => {
-                            put(f, x + 2, y, "●", Style::default().fg(status_color).bg(bg));
+                            put(f, x + 2, y, dot, Style::default().fg(status_color).bg(bg));
                             let path = short_workspace(&self.sessions[i].workspace);
                             let path_color = if focused { FG } else { PANEL_MUTED };
                             text(f, x + 4, y, &path, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
                         }
                         SidebarRow::AgentName(_, _) => {
                             let name = self.agent_label(pid);
-                            text(f, x + 4, y, &name, Style::default().fg(status_color).bg(bg), max.saturating_sub(4));
+                            let avail = max.saturating_sub(4) as usize;
+                            const HINT: &str = " ·blocked";
+                            let label = if status == AgentStatus::Blocked
+                                && name.chars().count() + HINT.len() <= avail
+                            {
+                                format!("{name}{HINT}")
+                            } else {
+                                name
+                            };
+                            text(f, x + 4, y, &label, name_style, max.saturating_sub(4));
                         }
                         _ => {}
                     }
@@ -390,6 +425,8 @@ mod tests {
             last_agent_debug: Instant::now(),
             last_status_refresh: Instant::now(),
             agent_status_cache: HashMap::new(),
+            last_agent_status: HashMap::new(),
+            last_agent_sound: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
             quit: false,
@@ -451,5 +488,27 @@ mod tests {
         let (y, _) = sess_rows.last().unwrap();
         assert!(app.sidebar_hit(0, *y));
         assert_eq!(app.active, 9);
+    }
+
+    #[test]
+    fn agents_content_sorts_blocked_first() {
+        let mut app = build_app(3);
+        // Mark pane 2 (session 1) blocked and pane 1 (session 0) working.
+        app.panes.get_mut(&1).unwrap().is_ai = true;
+        app.panes.get_mut(&2).unwrap().is_ai = true;
+        app.panes.get_mut(&3).unwrap().is_ai = true;
+        app.agent_status_cache.insert(1, AgentStatus::Working);
+        app.agent_status_cache.insert(2, AgentStatus::Blocked);
+        app.agent_status_cache.insert(3, AgentStatus::Idle);
+        let dirs: Vec<(usize, u64)> = app
+            .agents_content()
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::AgentDir(i, pid) => Some((*i, *pid)),
+                _ => None,
+            })
+            .collect();
+        // Blocked (pane 2) first, then working (pane 1), then idle (pane 3).
+        assert_eq!(dirs, vec![(1, 2), (0, 1), (2, 3)]);
     }
 }

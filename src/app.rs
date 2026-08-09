@@ -88,6 +88,12 @@ pub struct App {
     last_status_refresh: Instant,
     /// Cached agent status per AI pane, refreshed during pane rendering.
     agent_status_cache: HashMap<u64, AgentStatus>,
+    /// Last observed agent status per AI pane, for lifecycle transition
+    /// detection (unlike `agent_status_cache`, never touched by rendering).
+    last_agent_status: HashMap<u64, AgentStatus>,
+    /// When the last audible agent alert sounded per pane (cooldown, so a
+    /// flickering status does not repeat the beep).
+    last_agent_sound: HashMap<u64, Instant>,
     /// Previously focused pane, so focus changes re-render the two panes (cursor).
     last_focused: Option<u64>,
     /// Rendered cells of each pane's viewport, blitted back when the pane is
@@ -184,6 +190,8 @@ impl App {
             last_agent_debug: Instant::now(),
             last_status_refresh: Instant::now(),
             agent_status_cache: HashMap::new(),
+            last_agent_status: HashMap::new(),
+            last_agent_sound: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
             quit: false,
@@ -295,6 +303,9 @@ impl App {
         }
         self.last_sizes.remove(&pid);
         self.pane_cache.remove(&pid);
+        self.agent_status_cache.remove(&pid);
+        self.last_agent_status.remove(&pid);
+        self.last_agent_sound.remove(&pid);
 
         let empty = self.sessions[self.active].tree.remove_pane(pid);
         if empty {
@@ -339,6 +350,9 @@ impl App {
         }
         self.last_sizes.remove(&pid);
         self.pane_cache.remove(&pid);
+        self.agent_status_cache.remove(&pid);
+        self.last_agent_status.remove(&pid);
+        self.last_agent_sound.remove(&pid);
         let empty = self.sessions[idx].tree.remove_pane(pid);
         if empty {
             self.sessions.remove(idx);

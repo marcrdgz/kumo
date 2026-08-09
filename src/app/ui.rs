@@ -7,9 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::overlays::MENU_BTN;
-use super::{App, BORDER_IDLE, Mode, PANEL_MUTED, PANEL_SEP, RED, Term, YELLOW};
+use super::{App, BORDER_IDLE, Mode, ORANGE, PANEL_MUTED, PANEL_SEP, RED, Term, YELLOW};
 use crate::layout::TreeGeom;
-use crate::pane::{ACCENT, FG};
+use crate::pane::{AgentStatus, ACCENT, FG};
 use crate::vt;
 
 impl App {
@@ -63,7 +63,14 @@ impl App {
         // panes keep the cells ratatui retains from their last render.
         for pg in &geom.panes {
             let title = self.pane_title(pg.pane_id, pg.pane_id == focused);
-            self.render_pane_frame(f, pg.rect, pg.pane_id == focused, &title);
+            let blocked = self
+                .panes
+                .get(&pg.pane_id)
+                .map(|p| p.is_ai_cli())
+                .unwrap_or(false)
+                && self.agent_status_cache.get(&pg.pane_id).copied() == Some(AgentStatus::Blocked);
+            let title = if blocked { format!("{title}· blocked ") } else { title };
+            self.render_pane_frame(f, pg.rect, pg.pane_id == focused, blocked, &title);
         }
         for pg in &geom.panes {
             if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
@@ -153,11 +160,18 @@ impl App {
         }
     }
 
-    fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, title: &str) {
+    fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, blocked: bool, title: &str) {
         if rect.width < 3 || rect.height < 3 {
             return;
         }
-        let border = if focused { ACCENT } else { BORDER_IDLE };
+        let border = if blocked {
+            // A blocked AI pane glows orange even when it does not have focus.
+            ORANGE
+        } else if focused {
+            ACCENT
+        } else {
+            BORDER_IDLE
+        };
         // Native background: the frame is just line glyphs over the host
         // terminal's background, matching the pane content.
         let border_style = Style::default().fg(border).bg(RColor::Reset);
@@ -174,12 +188,18 @@ impl App {
             put(f, x0, y, "│", border_style);
             put(f, x1, y, "│", border_style);
         }
-        // Title chip: filled accent when focused, plain otherwise.
+        // Title chip: filled accent when focused, orange when a blocked AI
+        // pane, plain otherwise.
         let max = rect.width.saturating_sub(2) as usize;
         let chip = if focused {
             Style::default()
                 .fg(RColor::Black)
                 .bg(ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else if blocked {
+            Style::default()
+                .fg(RColor::Black)
+                .bg(ORANGE)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(FG).bg(RColor::Reset)

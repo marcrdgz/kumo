@@ -86,6 +86,9 @@ pub struct Config {
     pub shell: Option<String>,
     /// Whether the startup update check runs (default: true).
     pub update_check: bool,
+    /// Whether agent lifecycle transitions (blocked / finished) play a sound
+    /// (default: true).
+    pub agent_sound: bool,
 }
 
 impl Config {
@@ -106,6 +109,10 @@ impl Config {
         cfg.update_check = map
             .get("update-check")
             .map(|v| !matches!(unquote(v).trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off" | "never"))
+            .unwrap_or(true);
+        cfg.agent_sound = map
+            .get("agent-sound")
+            .map(|v| !matches!(unquote(v).trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
             .unwrap_or(true);
         cfg
     }
@@ -214,6 +221,15 @@ pub fn update_check_enabled() -> bool {
         return false;
     }
     load_config().update_check
+}
+
+/// Whether agent lifecycle transitions play an audible alert. Disabled by
+/// `agent-sound = false` in the config file or by setting `KUMO_NO_SOUND=1`.
+pub fn agent_sound_enabled() -> bool {
+    if std::env::var("KUMO_NO_SOUND").is_ok() {
+        return false;
+    }
+    load_config().agent_sound
 }
 
 /// Split a command line string into program + args (space separated).
@@ -496,6 +512,34 @@ mod tests {
         );
         let (prog, _) = ai_command();
         assert_eq!(prog, "claude");
+    }
+
+    #[test]
+    fn agent_sound_defaults_on_and_parses_off() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sound");
+        let home = scratch_dir("home-sound");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::unset("KUMO_NO_SOUND"),
+        );
+        assert!(agent_sound_enabled(), "agent-sound should default to on");
+        write(&cfg_dir.join("config"), "agent-sound = false\n");
+        assert!(!agent_sound_enabled(), "agent-sound = false must disable alerts");
+    }
+
+    #[test]
+    fn agent_sound_disabled_by_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sound-env");
+        let home = scratch_dir("home-sound-env");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_SOUND", "1"),
+        );
+        assert!(!agent_sound_enabled(), "KUMO_NO_SOUND must disable alerts");
     }
 
     #[test]

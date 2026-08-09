@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::alert::{self, AlertKind};
+use crate::pane::AgentStatus;
+
 use super::App;
 
 /// How often the sidebar re-reads the git branch of each session's workspace.
@@ -10,6 +13,9 @@ const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// How often to recompute agent status from the terminal buffer even when the
 /// pane has produced no new output (so a finished agent returns to Idle).
 const STATUS_REFRESH: Duration = Duration::from_millis(500);
+/// Minimum gap between audible alerts for the same pane, so a status that
+/// flickers between Working and Blocked does not repeat the sound.
+const ALERT_COOLDOWN: Duration = Duration::from_secs(3);
 
 impl App {
     /// Refresh cached git branches for all session workspaces (every
@@ -58,18 +64,44 @@ impl App {
     /// refreshes the status when the pane produces output or scrolls, so a
     /// quiet agent that just finished would otherwise stay stuck on the last
     /// Working status forever.
+    ///
+    /// Also raises an audible alert on the transitions the user cares about
+    /// (Working -> Blocked, Working -> Idle), brings blocked agents into view
+    /// by scrolling the AGENTS section to its top, and keeps the sidebar's
+    /// blocked-first ordering consistent.
     pub(super) fn refresh_agent_statuses(&mut self) {
         if self.last_status_refresh.elapsed() < STATUS_REFRESH {
             return;
         }
         self.last_status_refresh = Instant::now();
+        let now = Instant::now();
+        let sound_enabled = crate::config::agent_sound_enabled();
         for (&pid, pane) in self.panes.iter_mut() {
-            if pane.is_ai_cli() {
-                let status = pane.agent_status();
-                if self.agent_status_cache.get(&pid) != Some(&status) {
-                    self.agent_status_cache.insert(pid, status);
+            if !pane.is_ai_cli() {
+                continue;
+            }
+            let status = pane.agent_status();
+            if self.agent_status_cache.get(&pid) != Some(&status) {
+                self.agent_status_cache.insert(pid, status);
+            }
+            let old = self.last_agent_status.get(&pid).copied();
+            if let Some(kind) = old.and_then(|old| should_alert(old, status)) {
+                let cooled = self
+                    .last_agent_sound
+                    .get(&pid)
+                    .map(|t| now.duration_since(*t) >= ALERT_COOLDOWN)
+                    .unwrap_or(true);
+                if sound_enabled && cooled {
+                    alert::play(kind);
+                    self.last_agent_sound.insert(pid, now);
                 }
             }
+            // A pane entering Blocked lands at the top of the sorted AGENTS
+            // section; scroll there so the blocked agent is actually visible.
+            if old.is_some() && old != Some(status) && status == AgentStatus::Blocked {
+                self.sidebar_scroll.agents = 0;
+            }
+            self.last_agent_status.insert(pid, status);
         }
     }
 
@@ -124,5 +156,47 @@ fn git_branch(ws: &std::path::Path) -> Option<String> {
         None
     } else {
         Some(branch)
+    }
+}
+
+/// The alert a status transition deserves, if any. A Working agent that goes
+/// Blocked is waiting for an approval; one that falls back to Idle finished
+/// its task. All other transitions (including the very first observation,
+/// when `old` is absent) stay silent.
+fn should_alert(old: AgentStatus, new: AgentStatus) -> Option<AlertKind> {
+    match (old, new) {
+        (AgentStatus::Working, AgentStatus::Blocked) => Some(AlertKind::Blocked),
+        (AgentStatus::Working, AgentStatus::Idle) => Some(AlertKind::Finished),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alerts_blocked_when_working_agent_blocks() {
+        assert_eq!(
+            should_alert(AgentStatus::Working, AgentStatus::Blocked),
+            Some(AlertKind::Blocked)
+        );
+    }
+
+    #[test]
+    fn alerts_finished_when_working_agent_goes_idle() {
+        assert_eq!(
+            should_alert(AgentStatus::Working, AgentStatus::Idle),
+            Some(AlertKind::Finished)
+        );
+    }
+
+    #[test]
+    fn silent_on_other_transitions() {
+        assert_eq!(should_alert(AgentStatus::Idle, AgentStatus::Working), None);
+        assert_eq!(should_alert(AgentStatus::Blocked, AgentStatus::Working), None);
+        assert_eq!(should_alert(AgentStatus::Blocked, AgentStatus::Idle), None);
+        assert_eq!(should_alert(AgentStatus::Idle, AgentStatus::Idle), None);
+        assert_eq!(should_alert(AgentStatus::Working, AgentStatus::Working), None);
     }
 }
