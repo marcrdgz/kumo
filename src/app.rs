@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use kumo_core::pty::Pty;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -17,6 +16,7 @@ use ratatui::{Frame, Terminal};
 
 use crate::layout::{self, LayoutTree, SplitDir, TreeGeom};
 use crate::pane::{sgr_mouse, AgentStatus, Pane, PtyEvent};
+use crate::pty::Pty;
 use crate::vt;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -155,9 +155,9 @@ pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
 
 impl App {
     fn new(workspace: Option<&str>) -> Result<App> {
-        let shell = kumo_core::config::default_shell();
-        let (ai_prog, ai_args) = kumo_core::config::ai_command();
-        let ai_prog = kumo_core::config::resolve_program(&ai_prog);
+        let shell = crate::config::default_shell();
+        let (ai_prog, ai_args) = crate::config::ai_command();
+        let ai_prog = crate::config::resolve_program(&ai_prog);
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         // Workspace precedence: explicit argument, then the directory kumo
         // was launched from, then $HOME.

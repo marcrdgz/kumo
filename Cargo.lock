@@ -550,20 +550,11 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "crossterm",
- "kumo-core",
  "log",
  "portable-pty",
  "ratatui",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "kumo-core"
-version = "0.0.0-dev"
-dependencies = [
- "anyhow",
- "portable-pty",
 ]
 
 [[package]]

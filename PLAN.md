@@ -11,8 +11,8 @@ integration for AI assistance via Claude.
 ## 2. Core Architecture
 
 ### A. Terminal Emulation & Rendering (libghostty-vt + ratatui)
-- Each pane owns a PTY (`kumo-core`, `portable-pty`) plus a `libghostty-vt`
-  terminal instance (see `src/src/vt.rs` FFI).
+- Each pane owns a PTY (`portable-pty`) plus a `libghostty-vt`
+  terminal instance (see `src/vt.rs` FFI).
 - PTY output is fed into the emulator via `ghostty_terminal_vt_write`.
 - Every frame the emulator's render state is refreshed and its viewport cells
   (text, colors, styles, graphemes) are drawn into a ratatui `Buffer`.
@@ -63,11 +63,11 @@ To ensure high-quality English technical output during development:
 ---
 
 ## 5. Key Source Files
-- **`src/src/main.rs`**: TUI entry point.
-- **`src/src/app.rs`**: sessions/panes, layout tree, input routing, mouse, rendering.
-- **`src/src/pane.rs`**: `Pane` = PTY + `libghostty-vt` terminal.
-- **`src/src/vt.rs`**: hand-written FFI bindings to `libghostty-vt` and the safe `Terminal` wrapper (write/resize/scroll/render/modes + query effects).
-- **`src/build.rs`**: compiles the vendored `libghostty-vt` Zig library.
-- **`kumo-core/src/pty.rs`**: `portable-pty` wrapper (spawn, read loop, resize, kill).
-- **`kumo-core/src/config.rs`**: shell/AI command resolution and `~/.kumo` config.
+- **`src/main.rs`**: TUI entry point.
+- **`src/app.rs`**: sessions/panes, layout tree, input routing, mouse, rendering.
+- **`src/pane.rs`**: `Pane` = PTY + `libghostty-vt` terminal.
+- **`src/vt.rs`**: hand-written FFI bindings to `libghostty-vt` and the safe `Terminal` wrapper (write/resize/scroll/render/modes + query effects).
+- **`build.rs`**: compiles the vendored `libghostty-vt` Zig library.
+- **`src/pty.rs`**: `portable-pty` wrapper (spawn, read loop, resize, kill).
+- **`src/config.rs`**: shell/AI command resolution and `~/.kumo` config.
 - **`vendor/libghostty-vt/`**: vendored Ghostty terminal emulator (Zig source + C headers).

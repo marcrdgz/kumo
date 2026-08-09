@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

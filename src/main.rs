@@ -1,7 +1,9 @@
 mod app;
+mod config;
 mod keys;
 mod layout;
 mod pane;
+mod pty;
 mod vt;
 mod xtgettcap;
 

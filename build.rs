@@ -33,7 +33,7 @@ fn env_bool(name: &str) -> Option<bool> {
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let vendored_dir = manifest_dir.join("../vendor/libghostty-vt");
+    let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", vendored_dir.join("build.zig").display());

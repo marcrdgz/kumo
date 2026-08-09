@@ -1,9 +1,0 @@
-[package]
-name = "kumo-core"
-version.workspace = true
-edition.workspace = true
-description = "PTY and config layer shared by the kumo GUI and TUI"
-
-[dependencies]
-portable-pty = "0.9"
-anyhow = "1"

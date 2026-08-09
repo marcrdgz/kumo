@@ -1,4 +1,4 @@
-.PHONY: all build test run clean
+.PHONY: all build test run install clean
 
 all: build
 
@@ -10,6 +10,9 @@ test:
 
 run:
 	cargo run -p kumo
+
+install:
+	cargo install --path . --locked
 
 clean:
 	cargo clean

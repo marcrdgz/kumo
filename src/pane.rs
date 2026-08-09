@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use kumo_core::pty::{Pty, PtySpec};
+use crate::pty::{Pty, PtySpec};
 use portable_pty::PtySize;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
