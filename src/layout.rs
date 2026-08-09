@@ -35,12 +35,12 @@ impl LayoutTree {
         }
     }
 
-    /// Split the pane holding `pane_id`, inserting `new_pane` as the first child.
+    /// Split the pane holding `pane_id`, inserting `new_pane` to its right (V)
+    /// or below (H) and keeping focus on the original pane.
     pub fn split(&mut self, pane_id: u64, new_pane: u64, dir: SplitDir) -> bool {
         if let Some(root) = self.root.as_mut() {
             if split_at(root, pane_id, new_pane, dir, self.next_split) {
                 self.next_split += 1;
-                self.focus = new_pane;
                 return true;
             }
         }
@@ -99,8 +99,8 @@ fn split_at(n: &mut Node, pane_id: u64, new_pane: u64, dir: SplitDir, split_id: 
                 id: split_id,
                 dir,
                 ratio: 0.5,
-                a: Box::new(Node::Pane { id: new_pane }),
-                b: Box::new(Node::Pane { id: pane_id }),
+                a: Box::new(Node::Pane { id: pane_id }),
+                b: Box::new(Node::Pane { id: new_pane }),
             };
             true
         }
@@ -244,7 +244,8 @@ mod tests {
     fn removing_one_of_two_keeps_other_and_repairs_focus() {
         let mut tree = LayoutTree::new(1);
         tree.split(1, 2, SplitDir::V);
-        assert_eq!(tree.focus, 2);
+        // Split keeps focus on the original pane, tmux-style.
+        assert_eq!(tree.focus, 1);
         assert!(!tree.remove_pane(2));
         assert_eq!(tree.pane_count(), 1);
         // Focus must move to the surviving pane, not stay stale.
