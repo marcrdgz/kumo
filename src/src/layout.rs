@@ -48,21 +48,22 @@ impl LayoutTree {
     }
 
     /// Remove a pane, collapsing splits that are left with a single child.
+    /// Returns true only when the tree is now empty (caller should drop the
+    /// session); a pane that was already removed is a no-op that returns false.
     pub fn remove_pane(&mut self, pane_id: u64) -> bool {
+        let mut empty = false;
         if let Some(root) = self.root.take() {
             self.root = remove_from(root, pane_id);
-            if self.root.is_none() {
-                return true;
-            }
+            empty = self.root.is_none();
         }
-        let all = pane_ids(self.root.as_ref().unwrap(), &mut Vec::new());
-        if !all.contains(&pane_id) {
-            if self.focus == pane_id {
+        // If focus pointed at the removed pane, move it to a surviving pane.
+        if let Some(root) = &self.root {
+            let all = pane_ids(root, &mut Vec::new());
+            if !all.contains(&self.focus) {
                 self.focus = all[0];
             }
-            return true;
         }
-        false
+        empty
     }
 
     pub fn pane_count(&self) -> usize {
@@ -215,5 +216,53 @@ pub fn compute_geometry(n: &Node, area: Rect, out: &mut TreeGeom) {
             compute_geometry(a, ra, out);
             compute_geometry(b, rb, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removing_missing_pane_keeps_tree() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        // Closing a pane that was already removed must NOT report the tree as
+        // empty (that used to close the whole session).
+        assert!(!tree.remove_pane(99));
+        assert_eq!(tree.pane_count(), 2);
+    }
+
+    #[test]
+    fn removing_last_pane_reports_empty() {
+        let mut tree = LayoutTree::new(1);
+        assert!(tree.remove_pane(1));
+        assert_eq!(tree.pane_count(), 0);
+    }
+
+    #[test]
+    fn removing_one_of_two_keeps_other_and_repairs_focus() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        assert_eq!(tree.focus, 2);
+        assert!(!tree.remove_pane(2));
+        assert_eq!(tree.pane_count(), 1);
+        // Focus must move to the surviving pane, not stay stale.
+        assert_eq!(tree.focus, 1);
+        assert!(tree.contains(1));
+    }
+
+    #[test]
+    fn removing_stale_focus_keeps_tree() {
+        // Simulate poll_exits closing a pane while focus still names it.
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        tree.focus = 2;
+        assert!(!tree.remove_pane(2));
+        assert_eq!(tree.focus, 1);
+        assert_eq!(tree.pane_count(), 1);
+        // A second close of the same (now stale) pane is a no-op, not empty.
+        assert!(!tree.remove_pane(2));
+        assert_eq!(tree.pane_count(), 1);
     }
 }

@@ -11,7 +11,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
 use crate::layout::{self, LayoutTree, SplitDir, TreeGeom};
@@ -129,13 +129,21 @@ pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
             app.on_pty_event(ev);
         }
         if event::poll(Duration::from_millis(16))? {
-            match event::read()? {
-                crossterm::event::Event::Key(k) => app.on_key(k)?,
-                crossterm::event::Event::Mouse(m) => app.on_mouse(m)?,
-                crossterm::event::Event::Resize(w, h) => {
-                    app.term_size = (w, h);
+            // Drain the whole input burst before rendering: a fast trackpad
+            // scroll can enqueue many events, and processing one per frame
+            // would trickle them into the pane and feel extremely laggy.
+            loop {
+                match event::read()? {
+                    crossterm::event::Event::Key(k) => app.on_key(k)?,
+                    crossterm::event::Event::Mouse(m) => app.on_mouse(m)?,
+                    crossterm::event::Event::Resize(w, h) => {
+                        app.term_size = (w, h);
+                    }
+                    _ => {}
                 }
-                _ => {}
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
         app.frame(terminal)?;
@@ -905,10 +913,6 @@ impl App {
         }
 
         self.render_status(f, size);
-
-        if self.mode == Mode::Leader {
-            self.render_leader(f, size);
-        }
     }
 
     fn pane_title(&self, pid: u64, focused: bool) -> String {
@@ -1098,61 +1102,24 @@ impl App {
             ));
         }
 
-        let right = Span::styled(
-            " ctrl+space · c new · x close · z zoom · d detach ",
-            Style::default().fg(PANEL_MUTED).bg(PANEL_BG),
-        );
-        let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let right_w = right.content.chars().count();
-        let avail = area.width as usize;
-        if left_w + right_w <= avail {
-            spans.push(Span::raw(" ".repeat(avail - left_w - right_w)));
-            spans.push(right);
+        let right = if self.mode == Mode::Leader {
+            Some(Span::styled(
+                " v: v-split · -: h-split · a: AI · c: new · x: close · z: zoom · h/j/k/l: focus · n/p: session · tab: pane · b: sidebar · d: detach · esc: exit ",
+                Style::default().fg(RColor::Black).bg(YELLOW).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            None
+        };
+        if let Some(right) = right {
+            let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let right_w = right.content.chars().count();
+            let avail = area.width as usize;
+            if left_w + right_w <= avail {
+                spans.push(Span::raw(" ".repeat(avail - left_w - right_w)));
+                spans.push(right);
+            }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
-    }
-
-    fn render_leader(&self, f: &mut Frame, size: Rect) {
-        let lines = [
-            "CTRL+SPACE · v v-split · - h-split · a AI · c new · x close · z zoom",
-            "h/j/k/l focus · n/p session · tab pane · b sidebar · d detach · esc exit",
-        ];
-        let inner_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-        let w = (inner_w as u16 + 4).min(size.width);
-        let h = 4u16;
-        let x = size.width.saturating_sub(w) / 2;
-        let y = size.height.saturating_sub(h + 3);
-        let area = Rect::new(x, y, w, h);
-        f.render_widget(Clear, area);
-
-        let border = Style::default().fg(crate::pane::ACCENT).bg(PANEL_BG);
-        let (x0, y0, x1, y1) = (area.x, area.y, area.right() - 1, area.bottom() - 1);
-        put(f, x0, y0, "┌", border);
-        put(f, x1, y0, "┐", border);
-        put(f, x0, y1, "└", border);
-        put(f, x1, y1, "┘", border);
-        for xx in (x0 + 1)..x1 {
-            put(f, xx, y0, "─", border);
-            put(f, xx, y1, "─", border);
-        }
-        for yy in (y0 + 1)..y1 {
-            put(f, x0, yy, "│", border);
-            put(f, x1, yy, "│", border);
-        }
-        // Title chip on the top border.
-        text(
-            f,
-            x0 + 1,
-            y0,
-            " CTRL+SPACE ",
-            Style::default().fg(RColor::Black).bg(crate::pane::ACCENT).add_modifier(Modifier::BOLD),
-            16,
-        );
-        // Keybinding lines.
-        for (i, line) in lines.iter().enumerate() {
-            let yy = y0 + 1 + i as u16;
-            text(f, x0 + 2, yy, line, Style::default().fg(crate::pane::FG).bg(PANEL_BG), w.saturating_sub(4));
-        }
     }
 
     fn place_cursor(&mut self, terminal: &mut Term, geom: &TreeGeom, focused: u64) -> Result<()> {
