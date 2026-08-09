@@ -49,9 +49,9 @@ configuration, and the pieces below are planned — **not yet implemented**:
 - ⌨️ **Keybindings** — the leader dispatch and mouse actions are hard-coded.
   Planned: remap any binding (splits, focus, sessions, zoom, sidebar, …),
   custom leader keys, and per-mode keymaps.
-- ⚙️ **Config file** — today only `ai_cmd` is read from `~/.kumo`. Planned: a
-  real configuration file (e.g. `~/.config/kumo/config.toml`) covering theme,
-  keymaps, default shell, AI CLI command, status-bar layout, and pane behavior.
+- ⚙️ **Config file** — today the unique file `~/.config/kumo/config` covers
+  the AI CLI command and the default shell. Planned: theme, keymaps, leader
+  key, status-bar layout, and pane behavior.
 - 🧭 **Layout & chrome** — planned: toggle/order sidebar sections, customize
   the status bar (branch, session, agent status, hostname, clock), pane titles,
   and border styling.
@@ -115,15 +115,30 @@ During development: `cargo run -p kumo` or `make run`. 🧑‍💻
   scrollback.
 - ↔️ **Drag a splitter** to resize.
 
-## 🤖 AI CLI configuration
+## ⚙️ Configuration
 
-By default the AI pane runs `opencode`. To use another agent:
+Kumo reads a single config file at `~/.config/kumo/config` (a
+flat `key = value` file with `#` comments). The directory follows the XDG
+layout, so the config lives in `~/.config/kumo/`, runtime state in
+`~/.local/state/kumo/`, and the future detach server's IPC socket in
+`$XDG_RUNTIME_DIR/kumo`.
 
-```sh
-echo 'ai_cmd=claude' >> ~/.kumo
-# or via env var
-KUMO_AI_CMD="claude --model sonnet" kumo
+```ini
+# ~/.config/kumo/config
+ai-cmd = claude --model sonnet
+shell  = /bin/zsh
 ```
+
+Supported keys:
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `ai-cmd` | AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat. | `opencode` |
+| `shell` | Login shell used to spawn panes. | `$SHELL` → `/bin/zsh` |
+
+Overrides for the config/state **locations** (not keys) follow the usual
+conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,
+`XDG_STATE_HOME`.
 
 Detected agents (auto-listed in the sidebar when running in any pane):
 `opencode` 🧠 · `claude` 💬 · `codex` ⚙️ · `gemini` ✨ · `qwen` 🐉 · `aider` 🛠️ ·
@@ -139,7 +154,7 @@ src/app.rs              🧩 sessions/panes, layout tree, input routing, mouse, 
 src/pane.rs             🪟 Pane = PTY + libghostty-vt terminal (agent status, dirty render)
 src/vt.rs               🔌 FFI bindings to libghostty-vt (emulator + native selection)
 src/pty.rs              🔧 portable-pty wrapper
-src/config.rs           ⚙️ shell / AI CLI resolution and ~/.kumo config
+src/config.rs           ⚙️ shell / AI CLI resolution and ~/.config/kumo config
 src/xtgettcap.rs        🧤 plain-tty capability responder
 vendor/libghostty-vt/   📚 vendored Ghostty terminal emulator (Zig + C headers)
 ```

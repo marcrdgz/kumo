@@ -69,5 +69,5 @@ To ensure high-quality English technical output during development:
 - **`src/vt.rs`**: hand-written FFI bindings to `libghostty-vt` and the safe `Terminal` wrapper (write/resize/scroll/render/modes + query effects).
 - **`build.rs`**: compiles the vendored `libghostty-vt` Zig library.
 - **`src/pty.rs`**: `portable-pty` wrapper (spawn, read loop, resize, kill).
-- **`src/config.rs`**: shell/AI command resolution and `~/.kumo` config.
+- **`src/config.rs`**: XDG directory resolution, Ghostty-style `~/.config/kumo/config` parser, shell/AI command resolution.
 - **`vendor/libghostty-vt/`**: vendored Ghostty terminal emulator (Zig source + C headers).
