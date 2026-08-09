@@ -22,10 +22,9 @@ use crate::vt;
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
 /// Catppuccin mocha chrome colors (sidebars, status bar, chrome borders).
-const PANEL_BG: RColor = RColor::Rgb(0x18, 0x18, 0x25); // mantle
 const PANEL_SEP: RColor = RColor::Rgb(0x31, 0x32, 0x44); // surface0
 const PANEL_MUTED: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0
-const BORDER_IDLE: RColor = RColor::Rgb(0x45, 0x47, 0x5a); // surface1
+const BORDER_IDLE: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0, visible on any terminal bg
 const YELLOW: RColor = RColor::Rgb(0xf9, 0xe2, 0xaf); // yellow
 const GREEN: RColor = RColor::Rgb(0xa6, 0xe3, 0xa1); // green
 const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
@@ -970,7 +969,9 @@ impl App {
             return;
         }
         let border = if focused { crate::pane::ACCENT } else { BORDER_IDLE };
-        let border_style = Style::default().fg(border).bg(PANEL_BG);
+        // Native background: the frame is just line glyphs over the host
+        // terminal's background, matching the pane content.
+        let border_style = Style::default().fg(border).bg(RColor::Reset);
         let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
         put(f, x0, y0, "┌", border_style);
         put(f, x1, y0, "┐", border_style);
@@ -992,7 +993,7 @@ impl App {
                 .bg(crate::pane::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(crate::pane::FG).bg(PANEL_BG)
+            Style::default().fg(crate::pane::FG).bg(RColor::Reset)
         };
         for (i, ch) in title.chars().take(max).enumerate() {
             put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
@@ -1025,7 +1026,7 @@ impl App {
     fn render_sidebar(&self, f: &mut Frame, size: Rect) {
         let w = self.sidebar_width.min(size.width);
         let area = Rect::new(0, 0, w, size.height.saturating_sub(1));
-        fill(f, area, PANEL_BG);
+        fill(f, area, RColor::Reset);
         // Separator between sidebar and panes.
         for y in area.y..(area.y + area.height) {
             put(f, area.x + area.width, y, "│", Style::default().fg(PANEL_SEP));
@@ -1040,15 +1041,15 @@ impl App {
                 SidebarRow::Header(t) => {
                     let style = Style::default()
                         .fg(crate::pane::ACCENT)
-                        .bg(PANEL_BG)
+                        .bg(RColor::Reset)
                         .add_modifier(Modifier::BOLD);
                     text(f, x, y, &format!("  {}", t), style, max);
                 }
                 SidebarRow::Spacer => {
-                    put(f, x, y, " ", Style::default().bg(PANEL_BG));
+                    put(f, x, y, " ", Style::default().bg(RColor::Reset));
                 }
                 SidebarRow::Section(t) => {
-                    let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
+                    let style = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
                     text(f, x, y, &format!("  {}", t.to_uppercase()), style, max);
                 }
                 SidebarRow::Session(i) => {
@@ -1060,16 +1061,16 @@ impl App {
                         (" ", PANEL_MUTED)
                     };
                     let line = format!(" {marker} {}", name);
-                    text(f, x, y, &line, Style::default().fg(fg).bg(PANEL_BG), max);
+                    text(f, x, y, &line, Style::default().fg(fg).bg(RColor::Reset), max);
                 }
                 SidebarRow::Branch(b) => {
-                    let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
+                    let style = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
                     text(f, x, y, &format!("    {}", b), style, max);
                 }
                 SidebarRow::AgentDir(i, pid) | SidebarRow::AgentName(i, pid) => {
                     let focused =
                         i == self.active && self.sessions[self.active].tree.focus == pid;
-                    let bg = if focused { PANEL_SEP } else { PANEL_BG };
+                    let bg = if focused { PANEL_SEP } else { RColor::Reset };
                     // Light up the whole sidebar row when this agent pane is focused.
                     if focused {
                         fill(f, Rect::new(x, y, max + 1, 1), bg);
@@ -1095,7 +1096,7 @@ impl App {
                     }
                 }
                 SidebarRow::NewSession => {
-                    let style = Style::default().fg(PANEL_MUTED).bg(PANEL_BG);
+                    let style = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
                     text(f, x, y, "  + new session", style, max);
                 }
             }
@@ -1104,7 +1105,7 @@ impl App {
 
     fn render_status(&self, f: &mut Frame, size: Rect) {
         let area = Rect::new(0, size.height.saturating_sub(1), size.width, 1);
-        fill(f, area, PANEL_BG);
+        fill(f, area, RColor::Reset);
         let session = &self.sessions[self.active];
         let n = session.tree.pane_count();
         let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
@@ -1117,19 +1118,19 @@ impl App {
         let mut spans: Vec<Span> = vec![
             Span::styled(format!(" {} ", mode), mode_style),
             Span::raw(" "),
-            Span::styled(session.name.clone(), Style::default().fg(crate::pane::FG).bg(PANEL_BG)),
-            Span::styled(format!(" · {n} panes"), Style::default().fg(PANEL_MUTED).bg(PANEL_BG)),
+            Span::styled(session.name.clone(), Style::default().fg(crate::pane::FG).bg(RColor::Reset)),
+            Span::styled(format!(" · {n} panes"), Style::default().fg(PANEL_MUTED).bg(RColor::Reset)),
         ];
         if session.zoom {
             spans.push(Span::styled(
                 " · zoomed",
-                Style::default().fg(YELLOW).bg(PANEL_BG),
+                Style::default().fg(YELLOW).bg(RColor::Reset),
             ));
         }
         if !self.sidebar_open {
             spans.push(Span::styled(
                 " · sidebar hidden",
-                Style::default().fg(PANEL_MUTED).bg(PANEL_BG),
+                Style::default().fg(PANEL_MUTED).bg(RColor::Reset),
             ));
         }
 

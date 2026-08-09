@@ -522,6 +522,10 @@ pub struct RenderCell {
     pub text: String,
     pub fg: ColorRgb,
     pub bg: ColorRgb,
+    /// Whether the app set an explicit foreground (else use the terminal's).
+    pub has_fg: bool,
+    /// Whether the app set an explicit background (else use the terminal's).
+    pub has_bg: bool,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -995,23 +999,26 @@ impl Terminal {
 
             let mut style = Style::new();
             ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_STYLE, &mut style as *mut Style as *mut c_void);
+            let has_fg = style.fg_color.tag != STYLE_COLOR_NONE;
+            let has_bg = style.bg_color.tag != STYLE_COLOR_NONE;
 
             let mut fg = self.default_fg;
             let mut bg = self.default_bg;
-            let fg_ok = ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_FG_COLOR, &mut fg as *mut ColorRgb as *mut c_void).is_ok();
-            let bg_ok = ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_BG_COLOR, &mut bg as *mut ColorRgb as *mut c_void).is_ok();
+            let _ = ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_FG_COLOR, &mut fg as *mut ColorRgb as *mut c_void);
+            let _ = ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_BG_COLOR, &mut bg as *mut ColorRgb as *mut c_void);
 
             // Skip fully blank cells with no explicit background; the renderer
-            // fills those with the default background.
-            if !has_text && !bg_ok {
+            // fills those with the terminal's default background.
+            if !has_text && !has_bg {
                 return None;
             }
 
-            let _ = fg_ok;
             Some(RenderCell {
                 text,
                 fg,
                 bg,
+                has_fg,
+                has_bg,
                 bold: style.bold,
                 italic: style.italic,
                 underline: style.underline != 0,

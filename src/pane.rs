@@ -380,8 +380,11 @@ impl Pane {
 
         self.vt.refresh();
         let level = self.vt.render_dirty_level();
-        let fg = rgb(self.vt.default_fg());
-        let bg = rgb(self.vt.default_bg());
+        // Blank cells use the host terminal's default background (Reset), so
+        // panes look native; apps that paint their own background (e.g. a
+        // black opencode) keep theirs via `has_bg`.
+        let fg = RColor::Reset;
+        let bg = RColor::Reset;
         let full = level == vt::DIRTY_FULL || self.full_redraw;
         self.full_redraw = false;
 
@@ -449,11 +452,15 @@ impl Pane {
             if selected {
                 mods |= Modifier::REVERSED;
             }
+            // Respect explicit app colors; otherwise fall back to the host
+            // terminal's defaults (native).
+            let cell_fg = if rc.has_fg { rgb(rc.fg) } else { RColor::Reset };
+            let cell_bg = if rc.has_bg { rgb(rc.bg) } else { RColor::Reset };
             if rc.text.is_empty() {
-                bcell.set_char(' ').set_fg(rgb(rc.fg)).set_bg(rgb(rc.bg));
+                bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
             } else {
                 let ch = rc.text.chars().next().unwrap_or(' ');
-                bcell.set_char(ch).set_fg(rgb(rc.fg)).set_bg(rgb(rc.bg));
+                bcell.set_char(ch).set_fg(cell_fg).set_bg(cell_bg);
             }
             bcell.modifier = mods;
         });
@@ -804,8 +811,20 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]
-    fn opencode_raw_output_renders_without_losing_rows() {
-        let raw = match std::fs::read("/tmp/oc_msg.raw") {
+    fn default_cells_use_native_terminal_background() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"hi");
+        p.render_dirty(area, true, &mut buf);
+        // Text with no explicit color and blank areas fall back to the host
+        // terminal's default (Reset), not a fixed kumo background.
+        assert_eq!(buf.cell((0, 0)).unwrap().bg, RColor::Reset, "text cell bg");
+        assert_eq!(buf.cell((60, 30)).unwrap().bg, RColor::Reset, "blank cell bg");
+    }
+
+    #[test]
+    fn opencode_raw_output_renders_without_losing_rows() {        let raw = match std::fs::read("/tmp/oc_msg.raw") {
             Ok(d) => d,
             Err(_) => return, // captured fixture not present
         };
@@ -907,6 +926,56 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         assert!(t.contains("row 11"), "scroll did not redraw rows: {t:?}");
         assert!(t.contains("row 50"), "scrolled rows missing: {t:?}");
         assert!(!t.contains("row 59"), "bottom row should be off-screen: {t:?}");
+    }
+
+    #[test]
+    fn select_text_in_opencode() {
+        let raw = std::fs::read("/tmp/oc_msg.raw").unwrap();
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        for chunk in raw.chunks(256) {
+            p.feed(chunk);
+            p.render_dirty(area, true, &mut buf);
+        }
+        // Locate "say hello" in the rendered viewport.
+        let lines: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                    .collect()
+            })
+            .collect();
+        let mut at = None;
+        for (y, line) in lines.iter().enumerate() {
+            if let Some(byte_off) = line.find("say hello") {
+                let char_off = line[..byte_off].chars().count();
+                at = Some((char_off as u16, y as u16));
+                break;
+            }
+        }
+        let (sx, sy) = at.expect("say hello on screen");
+        let (ex, ey) = (sx + "say hello".len() as u16 - 1, sy);
+        assert!(p.set_selection((sx, sy), (ex, ey)), "set_selection failed");
+        let text = p.selected_text().unwrap_or_default();
+        assert!(text.contains("say hello"), "selection wrong: {text:?}");
+
+        // Highlight must cover exactly the selected text cells (plus the
+        // terminal cursor, which is also reversed).
+        p.render_dirty(area, true, &mut buf);
+        let hl = |x: u16, y: u16| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED);
+        for dx in 0.."say hello".len() as u16 {
+            assert!(hl(sx + dx, sy), "selected cell not highlighted ({},{})", sx + dx, sy);
+        }
+        assert!(!hl(0, sy), "cell before selection highlighted");
+        assert!(!hl(sx + "say hello".len() as u16, sy), "cell after selection highlighted");
+
+        // Multi-row selection returns both lines joined.
+        p.clear_selection();
+        let (sx2, sy2) = (0u16, 0u16);
+        assert!(p.set_selection((sx2, sy2), (20, 3)), "multi set_selection failed");
+        let mtext = p.selected_text().unwrap_or_default();
+        assert!(mtext.contains("say hello"), "multi-row selection lost text: {mtext:?}");
     }
 
     #[test]
