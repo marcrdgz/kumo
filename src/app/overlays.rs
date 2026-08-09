@@ -27,14 +27,22 @@ pub(super) struct Menu {
     pub(super) selected: usize,
 }
 
-/// Right-click context menu inside a pane, anchored at the cursor.
+/// What the right-click context menu targets (rename applies to it).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum CtxTarget {
+    /// A pane (`pane id`).
+    Pane(u64),
+    /// A session (`session index`).
+    Session(usize),
+}
+
+/// Right-click context menu, anchored at the cursor.
 pub(super) struct CtxMenu {
     pub(super) open: bool,
     pub(super) x: u16,
     pub(super) y: u16,
     pub(super) selected: usize,
-    /// Pane the menu targets (rename applies to it).
-    pub(super) pane: u64,
+    pub(super) target: CtxTarget,
 }
 
 /// Buttons of the session-name popup.
@@ -51,6 +59,8 @@ pub(super) enum PopupTarget {
     NewSession,
     /// Renaming the pane `pid`.
     RenamePane(u64),
+    /// Renaming the session at index `idx`.
+    RenameSession(usize),
 }
 
 /// Modal popup for naming a new session or renaming a pane.
@@ -91,6 +101,19 @@ impl App {
         self.ctx_menu.open = false;
     }
 
+    /// Open the modal popup to rename the session at `idx`, pre-filled with
+    /// its current name.
+    pub(super) fn open_rename_session_popup(&mut self, idx: usize) {
+        let name = self.sessions.get(idx).map(|s| s.name.clone()).unwrap_or_default();
+        self.popup.name = name.clone();
+        self.popup.cursor = name.chars().count();
+        self.popup.error = None;
+        self.popup.hover = None;
+        self.popup.target = Some(PopupTarget::RenameSession(idx));
+        self.popup.open = true;
+        self.ctx_menu.open = false;
+    }
+
     /// Confirm the popup: create the session or rename the pane if valid.
     pub(super) fn commit_name(&mut self) {
         let name = self.popup.name.trim().to_string();
@@ -123,6 +146,24 @@ impl App {
                 if let Some(pane) = self.panes.get_mut(&pid) {
                     pane.custom_name = Some(name);
                 }
+                self.popup.open = false;
+            }
+            Some(PopupTarget::RenameSession(idx)) => {
+                if self.sessions.get(idx).is_none() {
+                    self.popup.open = false;
+                    return;
+                }
+                let taken = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .any(|(_, s)| s.name == name);
+                if taken {
+                    self.popup.error = Some(format!("a session named '{name}' already exists"));
+                    return;
+                }
+                self.sessions[idx].name = name;
                 self.popup.open = false;
             }
             None => {}
@@ -202,22 +243,26 @@ impl App {
         }
     }
 
-    /// Open (or reposition) the right-click context menu for `pid` at `(x, y)`.
-    pub(super) fn open_ctx_menu(&mut self, x: u16, y: u16, pid: u64) {
+    /// Open (or reposition) the right-click context menu for `target` at
+    /// `(x, y)`.
+    pub(super) fn open_ctx_menu(&mut self, x: u16, y: u16, target: CtxTarget) {
         self.ctx_menu.open = true;
         self.ctx_menu.x = x;
         self.ctx_menu.y = y;
         self.ctx_menu.selected = 0;
-        self.ctx_menu.pane = pid;
+        self.ctx_menu.target = target;
     }
 
     /// Run the action for context-menu item `idx` and close the menu.
     pub(super) fn ctx_menu_select(&mut self, idx: usize) {
         let action = CTX_MENU_ITEMS.get(idx).copied().unwrap_or("rename");
-        let pane = self.ctx_menu.pane;
+        let target = self.ctx_menu.target;
         self.ctx_menu.open = false;
         if action == "rename" {
-            self.open_rename_popup(pane);
+            match target {
+                CtxTarget::Pane(pid) => self.open_rename_popup(pid),
+                CtxTarget::Session(idx) => self.open_rename_session_popup(idx),
+            }
         }
     }
 
@@ -457,6 +502,7 @@ impl App {
             .add_modifier(Modifier::BOLD);
         let title_text = match self.popup.target {
             Some(PopupTarget::RenamePane(_)) => "rename pane",
+            Some(PopupTarget::RenameSession(_)) => "rename session",
             _ => "new session",
         };
         text(f, x0 + 2, y0 + 1, title_text, title, dd.width.saturating_sub(4));

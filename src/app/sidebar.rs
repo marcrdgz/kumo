@@ -170,6 +170,20 @@ impl App {
         false
     }
 
+    /// Session index under a sidebar row, if any (for right-click rename).
+    pub(super) fn sidebar_session_at(&self, x: u16, y: u16) -> Option<usize> {
+        if !self.sidebar_open || x >= self.sidebar_width {
+            return None;
+        }
+        self.sidebar_rows()
+            .into_iter()
+            .find(|(ry, _)| *ry == y)
+            .and_then(|(_, row)| match row {
+                SidebarRow::Session(i) => Some(i),
+                _ => None,
+            })
+    }
+
     pub(super) fn render_sidebar(&self, f: &mut Frame, size: Rect) {
         let w = self.sidebar_width.min(size.width);
         let area = Rect::new(0, 0, w, size.height.saturating_sub(1));
@@ -379,7 +393,7 @@ mod tests {
             pane_cache: HashMap::new(),
             quit: false,
             menu: super::super::Menu { open: false, selected: 0 },
-            ctx_menu: super::super::CtxMenu { open: false, x: 0, y: 0, selected: 0, pane: 0 },
+            ctx_menu: super::super::CtxMenu { open: false, x: 0, y: 0, selected: 0, target: super::super::CtxTarget::Pane(0) },
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             notice: None,
@@ -403,6 +417,11 @@ mod tests {
         let (y, _) = sess_rows[1];
         assert!(app.sidebar_hit(0, y), "click on sess-2 row should be handled");
         assert_eq!(app.active, 1, "clicking sess-2 must make it active");
+
+        assert_eq!(app.sidebar_session_at(0, 3), Some(0), "right-click sess-1 row");
+        assert_eq!(app.sidebar_session_at(0, y), Some(1), "right-click sess-2 row");
+        assert_eq!(app.sidebar_session_at(0, 2), None, "section label is not a session");
+        assert_eq!(app.sidebar_session_at(99, y), None, "outside the sidebar");
     }
 
     #[test]

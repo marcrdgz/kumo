@@ -17,7 +17,7 @@ use crate::pane::{AgentStatus, Pane, PtyEvent};
 use crate::pty::Pty;
 
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{is_leader, CtxMenu, Menu, NamePopup};
+use self::overlays::{is_leader, CtxMenu, CtxTarget, Menu, NamePopup};
 use self::sidebar::SidebarScroll;
 
 mod mouse;
@@ -175,7 +175,7 @@ impl App {
             pane_cache: HashMap::new(),
             quit: false,
             menu: Menu { open: false, selected: 0 },
-            ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, pane: 0 },
+            ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
             // AGENTS defaults to the bottom of its region (live list), so the
             // newest agents are visible without scrolling.
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },

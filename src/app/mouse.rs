@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
-use super::overlays::PopupBtn;
+use super::overlays::{CtxTarget, PopupBtn};
 use super::util::copy_to_clipboard;
 use super::App;
 use crate::layout::SplitDir;
@@ -122,8 +122,8 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 // Right-click toggles the context menu: click it again (or
-                // anywhere outside a pane) to close, click a pane to open it
-                // for that pane.
+                // anywhere outside a pane/session row) to close; click a pane
+                // or a sidebar session row to open it for that target.
                 if self.popup.open || self.menu.open {
                     return Ok(());
                 }
@@ -131,9 +131,13 @@ impl App {
                     self.ctx_menu.open = false;
                     return Ok(());
                 }
+                if let Some(i) = self.sidebar_session_at(x, y) {
+                    self.open_ctx_menu(x, y, CtxTarget::Session(i));
+                    return Ok(());
+                }
                 if let Some(pg) = self.pane_at(x, y) {
                     self.set_focus(pg.pane_id);
-                    self.open_ctx_menu(x, y, pg.pane_id);
+                    self.open_ctx_menu(x, y, CtxTarget::Pane(pg.pane_id));
                 } else {
                     self.ctx_menu.open = false;
                 }
