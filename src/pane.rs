@@ -42,6 +42,9 @@ pub struct Pane {
     pub id: u64,
     pub session_id: u64,
     pub is_ai: bool,
+    /// Custom pane name set by the user (rename). Overrides the default
+    /// `shell N` / `AI CLI` label in the pane title.
+    pub custom_name: Option<String>,
     /// Whether an AI CLI (opencode/claude) was detected running inside the
     /// pane, even though it was spawned as a plain shell.
     pub detected_ai: bool,
@@ -278,6 +281,7 @@ impl Pane {
             id,
             session_id,
             is_ai,
+            custom_name: None,
             detected_ai: false,
             detected_ai_name: None,
             pty,

@@ -41,7 +41,7 @@ impl App {
                     // modal (no-op); outside cancels.
                     if let Some(btn) = self.name_popup_button_at(x, y) {
                         match btn {
-                            PopupBtn::Enter => self.commit_session_name(),
+                            PopupBtn::Enter => self.commit_name(),
                             PopupBtn::Cancel => self.popup.open = false,
                         }
                         return Ok(());
@@ -65,6 +65,16 @@ impl App {
                         return Ok(());
                     }
                     self.menu.open = false;
+                }
+                if self.ctx_menu.open {
+                    if let Some(i) = self.ctx_menu_item_at(x, y) {
+                        self.ctx_menu_select(i);
+                        return Ok(());
+                    }
+                    if self.ctx_menu_at(x, y) {
+                        return Ok(());
+                    }
+                    self.ctx_menu.open = false;
                 }
                 if self.menu_btn_at(x, y) {
                     self.menu.open = !self.menu.open;
@@ -109,6 +119,25 @@ impl App {
                         }
                     }
                 }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // Right-click toggles the context menu: click it again (or
+                // anywhere outside a pane) to close, click a pane to open it
+                // for that pane.
+                if self.popup.open || self.menu.open {
+                    return Ok(());
+                }
+                if self.ctx_menu_at(x, y) {
+                    self.ctx_menu.open = false;
+                    return Ok(());
+                }
+                if let Some(pg) = self.pane_at(x, y) {
+                    self.set_focus(pg.pane_id);
+                    self.open_ctx_menu(x, y, pg.pane_id);
+                } else {
+                    self.ctx_menu.open = false;
+                }
+                return Ok(());
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(Drag::Splitter { split_id }) = self.drag {
@@ -226,6 +255,12 @@ impl App {
                     // forward motion to the panes underneath.
                     if let Some(i) = self.menu_item_at(x, y) {
                         self.menu.selected = i;
+                    }
+                    return Ok(());
+                }
+                if self.ctx_menu.open {
+                    if let Some(i) = self.ctx_menu_item_at(x, y) {
+                        self.ctx_menu.selected = i;
                     }
                     return Ok(());
                 }

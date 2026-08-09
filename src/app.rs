@@ -17,7 +17,7 @@ use crate::pane::{AgentStatus, Pane, PtyEvent};
 use crate::pty::Pty;
 
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{is_leader, Menu, NamePopup};
+use self::overlays::{is_leader, CtxMenu, Menu, NamePopup};
 use self::sidebar::SidebarScroll;
 
 mod mouse;
@@ -95,6 +95,8 @@ pub struct App {
     quit: bool,
     /// Status-bar menu (MENU button + dropdown).
     menu: Menu,
+    /// Right-click context menu inside a pane.
+    ctx_menu: CtxMenu,
     /// Scroll offsets for the sidebar sessions / AGENTS sections.
     sidebar_scroll: SidebarScroll,
     /// Modal popup for naming a new session.
@@ -173,10 +175,11 @@ impl App {
             pane_cache: HashMap::new(),
             quit: false,
             menu: Menu { open: false, selected: 0 },
+            ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, pane: 0 },
             // AGENTS defaults to the bottom of its region (live list), so the
             // newest agents are visible without scrolling.
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
-            popup: NamePopup { open: false, name: String::new(), cursor: 0, error: None, hover: None },
+            popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             notice: None,
         };
         app.new_session()?;
@@ -348,6 +351,10 @@ impl App {
         }
         if self.menu.open {
             self.on_menu_key(key);
+            return Ok(());
+        }
+        if self.ctx_menu.open {
+            self.on_ctx_menu_key(key);
             return Ok(());
         }
 

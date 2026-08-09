@@ -378,8 +378,9 @@ mod tests {
             pane_cache: HashMap::new(),
             quit: false,
             menu: super::super::Menu { open: false, selected: 0 },
+            ctx_menu: super::super::CtxMenu { open: false, x: 0, y: 0, selected: 0, pane: 0 },
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
-            popup: NamePopup { open: false, name: String::new(), cursor: 0, error: None, hover: None },
+            popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             notice: None,
         }
     }

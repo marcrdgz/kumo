@@ -13,6 +13,8 @@ use crate::pane::{ACCENT, FG};
 pub(super) const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
 const MENU_ITEMS: [&str; 2] = ["config", "detach"];
+/// Items shown in the right-click context menu inside a pane.
+const CTX_MENU_ITEMS: [&str; 1] = ["rename"];
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
@@ -25,6 +27,16 @@ pub(super) struct Menu {
     pub(super) selected: usize,
 }
 
+/// Right-click context menu inside a pane, anchored at the cursor.
+pub(super) struct CtxMenu {
+    pub(super) open: bool,
+    pub(super) x: u16,
+    pub(super) y: u16,
+    pub(super) selected: usize,
+    /// Pane the menu targets (rename applies to it).
+    pub(super) pane: u64,
+}
+
 /// Buttons of the session-name popup.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum PopupBtn {
@@ -32,9 +44,19 @@ pub(super) enum PopupBtn {
     Cancel,
 }
 
-/// Modal popup for naming a new session.
+/// What the name popup is editing.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum PopupTarget {
+    /// Naming a brand-new session.
+    NewSession,
+    /// Renaming the pane `pid`.
+    RenamePane(u64),
+}
+
+/// Modal popup for naming a new session or renaming a pane.
 pub(super) struct NamePopup {
     pub(super) open: bool,
+    pub(super) target: Option<PopupTarget>,
     pub(super) name: String,
     /// Cursor position as a char index into `name`.
     pub(super) cursor: usize,
@@ -52,23 +74,59 @@ impl App {
         self.popup.cursor = name.chars().count();
         self.popup.error = None;
         self.popup.hover = None;
+        self.popup.target = Some(PopupTarget::NewSession);
         self.popup.open = true;
         self.menu.open = false;
     }
 
-    /// Confirm the popup: create the session if the name is valid.
-    pub(super) fn commit_session_name(&mut self) {
+    /// Open the modal popup to rename `pid`, pre-filled with its current label.
+    pub(super) fn open_rename_popup(&mut self, pid: u64) {
+        let name = self.pane_label(pid);
+        self.popup.name = name.clone();
+        self.popup.cursor = name.chars().count();
+        self.popup.error = None;
+        self.popup.hover = None;
+        self.popup.target = Some(PopupTarget::RenamePane(pid));
+        self.popup.open = true;
+        self.ctx_menu.open = false;
+    }
+
+    /// Confirm the popup: create the session or rename the pane if valid.
+    pub(super) fn commit_name(&mut self) {
         let name = self.popup.name.trim().to_string();
         if name.is_empty() {
             self.popup.error = Some("name cannot be empty".to_string());
             return;
         }
-        if self.sessions.iter().any(|s| s.name == name) {
-            self.popup.error = Some(format!("a session named '{name}' already exists"));
-            return;
+        match self.popup.target {
+            Some(PopupTarget::NewSession) => {
+                if self.sessions.iter().any(|s| s.name == name) {
+                    self.popup.error = Some(format!("a session named '{name}' already exists"));
+                    return;
+                }
+                self.popup.open = false;
+                let _ = self.new_session_with_name(name);
+            }
+            Some(PopupTarget::RenamePane(pid)) => {
+                let taken = self
+                    .sessions[self.active]
+                    .tree
+                    .pane_ids()
+                    .into_iter()
+                    .filter(|id| *id != pid)
+                    .map(|id| self.pane_label(id))
+                    .any(|l| l == name);
+                if taken {
+                    self.popup.error = Some(format!("a pane named '{name}' already exists"));
+                    return;
+                }
+                if let Some(pane) = self.panes.get_mut(&pid) {
+                    pane.custom_name = Some(name);
+                }
+                self.popup.open = false;
+            }
+            None => {}
         }
-        self.popup.open = false;
-        let _ = self.new_session_with_name(name);
     }
 
     /// Insert `ch` at the popup cursor and advance it.
@@ -97,7 +155,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Enter => self.commit_session_name(),
+            KeyCode::Enter => self.commit_name(),
             KeyCode::Backspace => self.popup_backspace(),
             KeyCode::Left => self.popup.cursor = self.popup.cursor.saturating_sub(1),
             KeyCode::Right => {
@@ -142,6 +200,75 @@ impl App {
             }
             _ => self.quit = true, // detach (same as leader+d)
         }
+    }
+
+    /// Open (or reposition) the right-click context menu for `pid` at `(x, y)`.
+    pub(super) fn open_ctx_menu(&mut self, x: u16, y: u16, pid: u64) {
+        self.ctx_menu.open = true;
+        self.ctx_menu.x = x;
+        self.ctx_menu.y = y;
+        self.ctx_menu.selected = 0;
+        self.ctx_menu.pane = pid;
+    }
+
+    /// Run the action for context-menu item `idx` and close the menu.
+    pub(super) fn ctx_menu_select(&mut self, idx: usize) {
+        let action = CTX_MENU_ITEMS.get(idx).copied().unwrap_or("rename");
+        let pane = self.ctx_menu.pane;
+        self.ctx_menu.open = false;
+        if action == "rename" {
+            self.open_rename_popup(pane);
+        }
+    }
+
+    /// Handle a key while the right-click context menu is open.
+    pub(super) fn on_ctx_menu_key(&mut self, key: KeyEvent) {
+        if is_leader(key) || key.code == KeyCode::Esc {
+            self.ctx_menu.open = false;
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.ctx_menu.selected = (self.ctx_menu.selected + 1) % CTX_MENU_ITEMS.len();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.ctx_menu.selected = self.ctx_menu.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => self.ctx_menu_select(self.ctx_menu.selected),
+            _ => {}
+        }
+    }
+
+    /// Rect of the context-menu dropdown, anchored above the right-click point.
+    fn ctx_menu_rect(&self) -> Option<Rect> {
+        let (w, h) = self.term_size;
+        let width = CTX_MENU_ITEMS.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
+        let height = CTX_MENU_ITEMS.len() as u16 + 2;
+        if w < width || h < height + 1 {
+            return None;
+        }
+        let x = self.ctx_menu.x.saturating_add(1).min(w.saturating_sub(width));
+        let y = self.ctx_menu.y.saturating_sub(height);
+        Some(Rect::new(x, y, width, height))
+    }
+
+    /// Whether `(x, y)` is inside the open context menu.
+    pub(super) fn ctx_menu_at(&self, x: u16, y: u16) -> bool {
+        self.ctx_menu_rect()
+            .map(|r| r.contains(Position::new(x, y)))
+            .unwrap_or(false)
+    }
+
+    /// Context-menu item index under `(x, y)`, if the menu covers it.
+    pub(super) fn ctx_menu_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let dd = self.ctx_menu_rect()?;
+        CTX_MENU_ITEMS
+            .iter()
+            .enumerate()
+            .position(|(i, _)| {
+                let item = Rect::new(dd.x + 1, dd.y + 1 + i as u16, dd.width.saturating_sub(2), 1);
+                item.contains(Position::new(x, y))
+            })
     }
 
     /// x of the MENU button: right after the mode chip + separator space.
@@ -257,13 +384,47 @@ impl App {
             put(f, x1, y, "│", border);
         }
         for (i, item) in MENU_ITEMS.iter().enumerate() {
-            let y = y0 + 1 + i as u16;
-            let sel = i == self.menu.selected;
-            let bg = if sel { PANEL_SEP } else { RColor::Reset };
-            let item_style = Style::default().fg(FG).bg(bg);
-            let marker = if sel { "▸" } else { " " };
-            put(f, x0 + 1, y, marker, Style::default().fg(ACCENT).bg(bg));
-            text(f, x0 + 3, y, item, item_style, dd.width.saturating_sub(4));
+            render_item_row(
+                f,
+                x0,
+                y0 + 1 + i as u16,
+                dd.width.saturating_sub(2),
+                item,
+                i == self.menu.selected,
+            );
+        }
+    }
+
+    /// Draw the right-click context menu while it is open.
+    pub(super) fn render_ctx_menu(&self, f: &mut Frame) {
+        if !self.ctx_menu.open {
+            return;
+        }
+        let Some(dd) = self.ctx_menu_rect() else { return };
+        let border = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
+        fill(f, dd, RColor::Reset);
+        let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+        for (i, item) in CTX_MENU_ITEMS.iter().enumerate() {
+            render_item_row(
+                f,
+                x0,
+                y0 + 1 + i as u16,
+                dd.width.saturating_sub(2),
+                item,
+                i == self.ctx_menu.selected,
+            );
         }
     }
 
@@ -294,7 +455,11 @@ impl App {
             .fg(FG)
             .bg(PANEL_SEP)
             .add_modifier(Modifier::BOLD);
-        text(f, x0 + 2, y0 + 1, "new session", title, dd.width.saturating_sub(4));
+        let title_text = match self.popup.target {
+            Some(PopupTarget::RenamePane(_)) => "rename pane",
+            _ => "new session",
+        };
+        text(f, x0 + 2, y0 + 1, title_text, title, dd.width.saturating_sub(4));
 
         // "name:" label.
         let label = Style::default().fg(FG).bg(PANEL_SEP);
@@ -354,6 +519,31 @@ impl App {
 pub(super) fn is_leader(key: KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('\0') | KeyCode::Null)
+}
+
+/// Draw one dropdown/context-menu item as a full-width button: the whole row
+/// gets a filled background (yellow when selected, surface0 otherwise), with
+/// the `▸` marker and the item label drawn on top.
+fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool) {
+    let bg = if sel { YELLOW } else { PANEL_SEP };
+    for cx in (x0 + 1)..(x0 + 1 + width) {
+        put(f, cx, y, " ", Style::default().bg(bg));
+    }
+    let (marker, marker_style, label_style) = if sel {
+        (
+            "▸",
+            Style::default().fg(RColor::Black).bg(bg).add_modifier(Modifier::BOLD),
+            Style::default().fg(RColor::Black).bg(bg).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            " ",
+            Style::default().fg(ACCENT).bg(bg),
+            Style::default().fg(FG).bg(bg),
+        )
+    };
+    put(f, x0 + 1, y, marker, marker_style);
+    text(f, x0 + 3, y, item, label_style, width.saturating_sub(2));
 }
 
 /// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).

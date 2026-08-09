@@ -111,30 +111,40 @@ impl App {
 
         self.render_status(f, size);
         self.render_menu(f);
+        self.render_ctx_menu(f);
         self.render_name_popup(f);
     }
 
-    fn pane_title(&self, pid: u64, focused: bool) -> String {
-        let base = match self.panes.get(&pid) {
-            Some(p) if p.is_ai_cli() => " AI CLI ".to_string(),
-            Some(_) => {
-                if self.sessions[self.active].tree.pane_count() > 1 {
-                    let n = self
-                        .sessions[self.active]
-                        .tree
-                        .pane_ids()
-                        .into_iter()
-                        .filter(|id| self.panes.get(id).is_some_and(|p| !p.is_ai_cli()))
-                        .position(|id| id == pid)
-                        .map(|i| i + 1)
-                        .unwrap_or(pid as usize);
-                    format!(" shell {n} ")
-                } else {
-                    " shell ".to_string()
-                }
-            }
-            None => " pane ".to_string(),
+    /// Display label of a pane in the active session, without the focus/zoom
+    /// suffix. A custom name wins; otherwise the AI CLI marker or `shell N`.
+    pub(super) fn pane_label(&self, pid: u64) -> String {
+        let Some(pane) = self.panes.get(&pid) else {
+            return " pane ".to_string();
         };
+        if let Some(name) = &pane.custom_name {
+            return format!(" {name} ");
+        }
+        if pane.is_ai_cli() {
+            return " AI CLI ".to_string();
+        }
+        if self.sessions[self.active].tree.pane_count() > 1 {
+            let n = self
+                .sessions[self.active]
+                .tree
+                .pane_ids()
+                .into_iter()
+                .filter(|id| self.panes.get(id).is_some_and(|p| !p.is_ai_cli()))
+                .position(|id| id == pid)
+                .map(|i| i + 1)
+                .unwrap_or(pid as usize);
+            format!(" shell {n} ")
+        } else {
+            " shell ".to_string()
+        }
+    }
+
+    fn pane_title(&self, pid: u64, focused: bool) -> String {
+        let base = self.pane_label(pid);
         if focused && self.sessions[self.active].zoom {
             format!("{base}(zoom) ")
         } else {
