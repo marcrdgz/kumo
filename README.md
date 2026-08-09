@@ -114,6 +114,8 @@ During development: `cargo run -p kumo` or `make run`. 🧑‍💻
 - 🎚️ **Scroll** is forwarded to reporting apps; otherwise it scrolls the pane's
   scrollback.
 - ↔️ **Drag a splitter** to resize.
+- 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
+  dropdown with `config` (coming soon) and `detach` (same as `leader+d`).
 
 ## ⚙️ Configuration
 

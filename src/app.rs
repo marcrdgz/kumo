@@ -37,6 +37,11 @@ const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// pane has produced no new output (so a finished agent returns to Idle).
 const STATUS_REFRESH: Duration = Duration::from_millis(500);
 
+/// Label of the MENU button in the status bar.
+const MENU_BTN: &str = " MENU ";
+/// Items shown in the status-bar menu dropdown.
+const MENU_ITEMS: [&str; 2] = ["config", "detach"];
+
 struct Session {
     id: u64,
     name: String,
@@ -49,6 +54,12 @@ struct Session {
 enum Mode {
     Normal,
     Leader,
+}
+
+/// Status-bar menu: a small dropdown anchored to the MENU button.
+struct Menu {
+    open: bool,
+    selected: usize,
 }
 
 enum Drag {
@@ -128,6 +139,10 @@ pub struct App {
     /// unchanged so the frame loop never re-iterates unchanged terminals.
     pane_cache: HashMap<u64, Buffer>,
     quit: bool,
+    /// Status-bar menu (MENU button + dropdown).
+    menu: Menu,
+    /// Transient status-bar notice, e.g. "config: coming soon".
+    notice: Option<(String, Instant)>,
 }
 
 pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
@@ -199,6 +214,8 @@ impl App {
             last_focused: None,
             pane_cache: HashMap::new(),
             quit: false,
+            menu: Menu { open: false, selected: 0 },
+            notice: None,
         };
         app.new_session()?;
         Ok(app)
@@ -352,6 +369,24 @@ impl App {
         let is_leader = ctrl
             && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('\0') | KeyCode::Null);
 
+        if self.menu.open {
+            if is_leader || key.code == KeyCode::Esc {
+                self.menu.open = false;
+                return Ok(());
+            }
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.menu.selected = (self.menu.selected + 1) % MENU_ITEMS.len();
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.menu.selected = self.menu.selected.saturating_sub(1);
+                }
+                KeyCode::Enter => self.menu_select(self.menu.selected),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match self.mode {
             Mode::Normal => {
                 if is_leader {
@@ -420,6 +455,67 @@ impl App {
         }
     }
 
+    // ----- status-bar menu -----
+
+    /// Run the action for menu item `idx` and close the menu.
+    fn menu_select(&mut self, idx: usize) {
+        let action = MENU_ITEMS.get(idx).copied().unwrap_or("detach");
+        self.menu.open = false;
+        match action {
+            "config" => {
+                // Placeholder until the config editor lands.
+                self.notice = Some(("config: coming soon".to_string(), Instant::now()));
+            }
+            _ => self.quit = true, // detach (same as leader+d)
+        }
+    }
+
+    /// x of the MENU button: right after the mode chip + separator space.
+    fn menu_btn_x(&self) -> u16 {
+        let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
+        format!(" {} ", mode).chars().count() as u16 + 1
+    }
+
+    /// Rect of the MENU button, right after the mode chip in the status bar.
+    fn menu_btn_rect(&self) -> Option<Rect> {
+        let (w, h) = self.term_size;
+        let bw = MENU_BTN.chars().count() as u16;
+        let x = self.menu_btn_x();
+        (w >= x + bw).then(|| Rect::new(x, h.saturating_sub(1), bw, 1))
+    }
+
+    /// Rect of the dropdown box, anchored above the MENU button.
+    fn menu_dropdown_rect(&self) -> Option<Rect> {
+        let (w, h) = self.term_size;
+        let width = MENU_ITEMS.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
+        let height = MENU_ITEMS.len() as u16 + 2;
+        if w < width || h < height + 1 {
+            return None;
+        }
+        let btn_w = MENU_BTN.chars().count() as u16;
+        let x = (self.menu_btn_x() + btn_w).saturating_sub(width).min(w.saturating_sub(width));
+        let y = h.saturating_sub(1).saturating_sub(height);
+        Some(Rect::new(x, y, width, height))
+    }
+
+    fn menu_btn_at(&self, x: u16, y: u16) -> bool {
+        self.menu_btn_rect()
+            .map(|r| r.contains(Position::new(x, y)))
+            .unwrap_or(false)
+    }
+
+    /// Menu item index under `(x, y)`, if the dropdown is open and covers it.
+    fn menu_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let dd = self.menu_dropdown_rect()?;
+        MENU_ITEMS
+            .iter()
+            .enumerate()
+            .position(|(i, _)| {
+                let item = Rect::new(dd.x + 1, dd.y + 1 + i as u16, dd.width.saturating_sub(2), 1);
+                item.contains(Position::new(x, y))
+            })
+    }
+
     fn focus_dir(&mut self, dir: Dir) {
         self.sessions[self.active].zoom = false;
         let geom = self.tree_geom();
@@ -455,6 +551,22 @@ impl App {
         let y = m.row;
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.menu.open {
+                    if let Some(i) = self.menu_item_at(x, y) {
+                        self.menu_select(i);
+                        return Ok(());
+                    }
+                    if self.menu_btn_at(x, y) {
+                        self.menu.open = false;
+                        return Ok(());
+                    }
+                    self.menu.open = false;
+                }
+                if self.menu_btn_at(x, y) {
+                    self.menu.open = !self.menu.open;
+                    self.menu.selected = 0;
+                    return Ok(());
+                }
                 if self.sidebar_open && x < self.sidebar_width {
                     if self.sidebar_hit(x, y) {
                         return Ok(());
@@ -598,6 +710,14 @@ impl App {
                 }
             }
             MouseEventKind::Moved => {
+                if self.menu.open {
+                    // Modal menu: hovering moves the selection like j/k; don't
+                    // forward motion to the panes underneath.
+                    if let Some(i) = self.menu_item_at(x, y) {
+                        self.menu.selected = i;
+                    }
+                    return Ok(());
+                }
                 // Forward mouse motion to panes that requested any-motion
                 // reporting (mode 1003), so apps like opencode can highlight
                 // the message under the cursor on hover.
@@ -981,6 +1101,7 @@ impl App {
         }
 
         self.render_status(f, size);
+        self.render_menu(f);
     }
 
     fn pane_title(&self, pid: u64, focused: bool) -> String {
@@ -1153,8 +1274,25 @@ impl App {
             Style::default().fg(RColor::Black).bg(crate::pane::ACCENT)
         };
 
+        // Mode chip at the left edge.
+        let chip = format!(" {} ", mode);
+        let chip_w = chip.chars().count() as u16;
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(chip, mode_style)])),
+            Rect::new(0, area.y, chip_w, 1),
+        );
+
+        // MENU button right after the chip, then the remaining spans.
+        let btn_w = MENU_BTN.chars().count() as u16;
+        let btn_x = self.menu_btn_x();
+        let btn_style = if self.menu.open {
+            Style::default().fg(RColor::Black).bg(YELLOW).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(crate::pane::FG).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+        };
+        text(f, btn_x, area.y, MENU_BTN, btn_style, btn_w);
+
         let mut spans: Vec<Span> = vec![
-            Span::styled(format!(" {} ", mode), mode_style),
             Span::raw(" "),
             Span::styled(session.name.clone(), Style::default().fg(crate::pane::FG).bg(RColor::Reset)),
             Span::styled(format!(" · {n} panes"), Style::default().fg(PANEL_MUTED).bg(RColor::Reset)),
@@ -1171,25 +1309,73 @@ impl App {
                 Style::default().fg(PANEL_MUTED).bg(RColor::Reset),
             ));
         }
-
-        let right = if self.mode == Mode::Leader {
-            Some(Span::styled(
-                " v: v-split · -: h-split · a: AI · c: new · x: close · z: zoom · h/j/k/l: focus · n/p: session · tab: pane · b: sidebar · d: detach · esc: exit ",
-                Style::default().fg(RColor::Black).bg(YELLOW).add_modifier(Modifier::BOLD),
-            ))
-        } else {
-            None
-        };
-        if let Some(right) = right {
-            let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let right_w = right.content.chars().count();
-            let avail = area.width as usize;
-            if left_w + right_w <= avail {
-                spans.push(Span::raw(" ".repeat(avail - left_w - right_w)));
-                spans.push(right);
+        if let Some((msg, t)) = &self.notice {
+            if t.elapsed() < Duration::from_secs(2) {
+                spans.push(Span::styled(
+                    format!(" ⚠ {msg} "),
+                    Style::default().fg(YELLOW).bg(RColor::Reset),
+                ));
             }
         }
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+        let start = btn_x + btn_w;
+        let left_w = spans
+            .iter()
+            .map(|s| s.content.chars().count() as u16)
+            .sum::<u16>()
+            .min(area.width.saturating_sub(start));
+        if left_w > 0 {
+            f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(start, area.y, left_w, 1));
+        }
+
+        if self.mode == Mode::Leader {
+            let hint = " v: v-split · -: h-split · a: AI · c: new · x: close · z: zoom · h/j/k/l: focus · n/p: session · tab: pane · b: sidebar · d: detach · esc: exit ";
+            let hint_w = hint.chars().count() as u16;
+            let used = start.saturating_add(left_w);
+            if hint_w <= area.width.saturating_sub(used) {
+                let x = area.width.saturating_sub(hint_w);
+                let hint_style = Style::default()
+                    .fg(RColor::Black)
+                    .bg(YELLOW)
+                    .add_modifier(Modifier::BOLD);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(hint, hint_style)])),
+                    Rect::new(x, area.y, hint_w, 1),
+                );
+            }
+        }
+    }
+
+    /// Draw the dropdown above the MENU button while it is open.
+    fn render_menu(&self, f: &mut Frame) {
+        if !self.menu.open {
+            return;
+        }
+        let Some(dd) = self.menu_dropdown_rect() else { return };
+        let border = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
+        fill(f, dd, RColor::Reset);
+        let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+        for (i, item) in MENU_ITEMS.iter().enumerate() {
+            let y = y0 + 1 + i as u16;
+            let sel = i == self.menu.selected;
+            let bg = if sel { PANEL_SEP } else { RColor::Reset };
+            let item_style = Style::default().fg(crate::pane::FG).bg(bg);
+            let marker = if sel { "▸" } else { " " };
+            put(f, x0 + 1, y, marker, Style::default().fg(crate::pane::ACCENT).bg(bg));
+            text(f, x0 + 3, y, item, item_style, dd.width.saturating_sub(4));
+        }
     }
 
     fn place_cursor(&mut self, terminal: &mut Term, geom: &TreeGeom, focused: u64) -> Result<()> {
