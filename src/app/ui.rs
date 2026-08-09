@@ -119,7 +119,16 @@ impl App {
             Some(p) if p.is_ai_cli() => " AI CLI ".to_string(),
             Some(_) => {
                 if self.sessions[self.active].tree.pane_count() > 1 {
-                    format!(" shell {} ", pid)
+                    let n = self
+                        .sessions[self.active]
+                        .tree
+                        .pane_ids()
+                        .into_iter()
+                        .filter(|id| self.panes.get(id).is_some_and(|p| !p.is_ai_cli()))
+                        .position(|id| id == pid)
+                        .map(|i| i + 1)
+                        .unwrap_or(pid as usize);
+                    format!(" shell {n} ")
                 } else {
                     " shell ".to_string()
                 }
