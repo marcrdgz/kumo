@@ -562,9 +562,10 @@ impl Pane {
         self.full_redraw = true;
     }
 
-    /// Extract the terminal's active selection as plain text (unwrap + trim).
-    pub fn selected_text(&mut self) -> Option<String> {
-        self.vt.selected_text()
+    /// Extract the text between two viewport coordinates as plain text,
+    /// building a fresh selection at extraction time (unwrap + trim).
+    pub fn selection_text(&mut self, start: (u16, u16), end: (u16, u16)) -> Option<String> {
+        self.vt.selection_text(start, end)
     }
 
     /// Viewport position of the terminal cursor, relative to the pane origin.
@@ -957,7 +958,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         let (sx, sy) = at.expect("say hello on screen");
         let (ex, ey) = (sx + "say hello".len() as u16 - 1, sy);
         assert!(p.set_selection((sx, sy), (ex, ey)), "set_selection failed");
-        let text = p.selected_text().unwrap_or_default();
+        let text = p.selection_text((sx, sy), (ex, ey)).unwrap_or_default();
         assert!(text.contains("say hello"), "selection wrong: {text:?}");
 
         // Highlight must cover exactly the selected text cells (plus the
@@ -974,7 +975,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         p.clear_selection();
         let (sx2, sy2) = (0u16, 0u16);
         assert!(p.set_selection((sx2, sy2), (20, 3)), "multi set_selection failed");
-        let mtext = p.selected_text().unwrap_or_default();
+        let mtext = p.selection_text((sx2, sy2), (20, 3)).unwrap_or_default();
         assert!(mtext.contains("say hello"), "multi-row selection lost text: {mtext:?}");
     }
 

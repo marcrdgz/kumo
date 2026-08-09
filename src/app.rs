@@ -671,7 +671,7 @@ impl App {
 
     fn copy_selection(&mut self, sel: &Sel) {
         if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
-            if let Some(text) = pane.selected_text() {
+            if let Some(text) = pane.selection_text(sel.start, sel.end) {
                 if !text.is_empty() {
                     copy_to_clipboard(&text);
                 }

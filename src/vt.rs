@@ -638,7 +638,8 @@ impl Terminal {
     /// (inclusive), matching a mouse drag. Returns false if either endpoint
     /// is outside the grid. The terminal converts the refs into owned tracked
     /// state, so the selection survives subsequent output/scroll.
-    pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
+    /// Build a linear selection between two viewport coordinates (inclusive).
+    fn build_selection(&self, start: (u16, u16), end: (u16, u16)) -> Option<Selection> {
         let mut start_ref =
             GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
         let mut end_ref = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
@@ -646,14 +647,24 @@ impl Terminal {
             if !ghostty_terminal_grid_ref(self.term, viewport_point(start.0, start.1 as u32), &mut start_ref).is_ok()
                 || !ghostty_terminal_grid_ref(self.term, viewport_point(end.0, end.1 as u32), &mut end_ref).is_ok()
             {
-                return false;
+                return None;
             }
         }
-        let selection = Selection {
+        Some(Selection {
             size: size_of::<Selection>(),
             start: start_ref,
             end: end_ref,
             rectangle: false,
+        })
+    }
+
+    /// Install a linear selection covering two viewport coordinates
+    /// (inclusive), matching a mouse drag. Returns false if either endpoint
+    /// is outside the grid. The terminal converts the refs into owned tracked
+    /// state, so the selection survives subsequent output/scroll.
+    pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
+        let Some(selection) = self.build_selection(start, end) else {
+            return false;
         };
         unsafe {
             ghostty_terminal_set(self.term, TERMINAL_OPT_SELECTION, &selection as *const Selection as *const c_void)
@@ -668,16 +679,19 @@ impl Terminal {
         }
     }
 
-    /// Extract the active selection as plain text: soft-wrapped lines are
-    /// unwrapped and trailing whitespace is trimmed, matching Ghostty's
-    /// clipboard behavior.
-    pub fn selected_text(&mut self) -> Option<String> {
+    /// Extract the text between two viewport coordinates (inclusive) as plain
+    /// text: soft-wrapped lines are unwrapped and trailing whitespace is
+    /// trimmed, matching Ghostty's clipboard behavior. Builds a fresh
+    /// selection from the current viewport, so repaints during a drag can't
+    /// shift the tracked active selection.
+    pub fn selection_text(&mut self, start: (u16, u16), end: (u16, u16)) -> Option<String> {
+        let selection = self.build_selection(start, end)?;
         let options = SelectionFormatOptions {
             size: size_of::<SelectionFormatOptions>(),
             emit: FORMAT_PLAIN,
             unwrap: true,
             trim: true,
-            selection: ptr::null(),
+            selection: &selection,
         };
         unsafe {
             let mut written = 0usize;
@@ -1130,7 +1144,7 @@ mod tests {
             }
         });
         assert!(!selected.is_empty(), "row should intersect the selection");
-        assert_eq!(t.selected_text().as_deref(), Some("hello"));
+        assert_eq!(t.selection_text((0, 0), (4, 0)).as_deref(), Some("hello"));
 
         // Clearing removes the highlight.
         t.clear_selection();
