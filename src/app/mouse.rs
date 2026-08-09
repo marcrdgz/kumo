@@ -34,6 +34,13 @@ impl App {
     pub(super) fn on_mouse(&mut self, m: MouseEvent) -> Result<()> {
         let x = m.column;
         let y = m.row;
+        if m.kind == MouseEventKind::Down(MouseButton::Left) && self.update_notice_close_at(x, y) {
+            if let Some(notice) = &self.update_notice {
+                crate::update::dismiss(&notice.key);
+            }
+            self.update_notice = None;
+            return Ok(());
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.popup.open {

@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::overlays::MENU_BTN;
-use super::{App, BORDER_IDLE, Mode, PANEL_MUTED, PANEL_SEP, Term, YELLOW};
+use super::{App, BORDER_IDLE, Mode, PANEL_MUTED, PANEL_SEP, RED, Term, YELLOW};
 use crate::layout::TreeGeom;
 use crate::pane::{ACCENT, FG};
 use crate::vt;
@@ -113,6 +113,7 @@ impl App {
         self.render_menu(f);
         self.render_ctx_menu(f);
         self.render_name_popup(f);
+        self.render_update_notice(f);
     }
 
     /// Display label of a pane in the active session, without the focus/zoom
@@ -293,6 +294,43 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Draw the startup update banner (top-right) with a red ✕ close button.
+    fn render_update_notice(&self, f: &mut Frame) {
+        let Some(rect) = self.update_notice_rect() else { return };
+        let Some(msg) = self.update_notice_text() else { return };
+        let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
+        let border = Style::default().fg(PANEL_MUTED).bg(PANEL_SEP);
+        fill(f, rect, PANEL_SEP);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+        put(
+            f,
+            x0 + 1,
+            y0 + 1,
+            "✕",
+            Style::default().fg(RED).bg(PANEL_SEP).add_modifier(Modifier::BOLD),
+        );
+        let inner_w = rect.width.saturating_sub(2);
+        text(
+            f,
+            x0 + 2,
+            y0 + 1,
+            &msg,
+            Style::default().fg(FG).bg(PANEL_SEP),
+            inner_w.saturating_sub(1),
+        );
     }
 
     fn place_cursor(&mut self, terminal: &mut Term, geom: &TreeGeom, focused: u64) -> Result<()> {

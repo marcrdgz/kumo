@@ -341,6 +341,7 @@ mod tests {
 
     fn build_app(n: usize) -> App {
         let (tx, rx) = mpsc::channel();
+        let (_update_tx, update_rx) = mpsc::channel::<Option<crate::update::UpdateNotice>>();
         let mut panes = HashMap::new();
         let mut sessions = Vec::new();
         for i in 0..n {
@@ -397,6 +398,8 @@ mod tests {
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             notice: None,
+            update_notice: None,
+            update_rx,
         }
     }
 

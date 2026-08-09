@@ -8,6 +8,7 @@ version.workspace = true
 edition.workspace = true
 description = "Kumo TUI (ratatui) frontend with mouse support"
 build = "build.rs"
+repository = "https://github.com/marcrdgz/kumo"
 
 [workspace.package]
 version = "0.0.0-dev"
@@ -22,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 log = "0.4"
+semver = "1"
 
 [profile.release]
 panic = "abort"
@@ -29,3 +31,8 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

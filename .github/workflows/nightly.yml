@@ -1,0 +1,126 @@
+# Build a rolling "nightly" release from `main`, published as a single GitHub
+# release tagged `nightly` (recreated on every build). Runs on every push to
+# `main`, but only actually generates a nightly when at least 24 hours have
+# passed since the last one. `kumo update --nightly` consumes it.
+
+name: Nightly
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Only one nightly pipeline at a time; a newer push supersedes an older run.
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Decide whether a nightly is due
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST=$(gh release view nightly --repo marcrdgz/kumo --json createdAt --jq .createdAt 2>/dev/null || true)
+          if [ -z "$LAST" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$LAST" +%s 2>/dev/null || echo 0)
+          NOW_EPOCH=$(date +%s)
+          AGE=$(( NOW_EPOCH - LAST_EPOCH ))
+          if [ "$AGE" -ge 86400 ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "a nightly is due (last one was $AGE seconds ago)"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "last nightly was $AGE seconds ago; not due yet"
+          fi
+
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.skip != 'true' }}
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: enable windows longpaths
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Build artifacts
+        run: |
+          dist build --artifacts=local --target=${{ matrix.target }} --print=linkage --output-format=json > dist-manifest.json
+      - id: cargo-dist
+        name: Post-build
+        shell: bash
+        run: |
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            dist-manifest.json
+
+  publish:
+    needs: [prepare, build]
+    if: ${{ needs.prepare.outputs.skip != 'true' && !cancelled() && !contains(needs.build.result, 'failure') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Cleanup
+        run: |
+          rm -f artifacts/*-dist-manifest.json
+      - name: Reset nightly release
+        run: |
+          gh release delete nightly --repo marcrdgz/kumo --yes || true
+          gh release create nightly --repo marcrdgz/kumo --prerelease \
+            --target "${{ github.sha }}" \
+            --title "kumo nightly" \
+            --notes "Rolling build of \`main\`." artifacts/* || true

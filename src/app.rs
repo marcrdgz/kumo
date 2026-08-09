@@ -36,6 +36,7 @@ const BORDER_IDLE: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0, visible 
 const YELLOW: RColor = RColor::Rgb(0xf9, 0xe2, 0xaf); // yellow
 const GREEN: RColor = RColor::Rgb(0xa6, 0xe3, 0xa1); // green
 const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
+const RED: RColor = RColor::Rgb(0xf3, 0x8b, 0xa8); // red
 
 struct Session {
     id: u64,
@@ -103,6 +104,10 @@ pub struct App {
     popup: NamePopup,
     /// Transient status-bar notice, e.g. "config: coming soon".
     notice: Option<(String, Instant)>,
+    /// Startup update banner (top-right), when a newer release exists.
+    update_notice: Option<crate::update::UpdateNotice>,
+    /// Receives the background update check result.
+    update_rx: mpsc::Receiver<Option<crate::update::UpdateNotice>>,
 }
 
 pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
@@ -110,6 +115,9 @@ pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
     while !app.quit {
         while let Ok(ev) = app.events_rx.try_recv() {
             app.on_pty_event(ev);
+        }
+        while let Ok(notice) = app.update_rx.try_recv() {
+            app.update_notice = notice;
         }
         if event::poll(Duration::from_millis(16))? {
             // Drain the whole input burst before rendering: a fast trackpad
@@ -149,6 +157,11 @@ impl App {
             .unwrap_or(home);
 
         let (events_tx, events_rx) = mpsc::channel();
+        let (update_tx, update_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let notice = crate::update::poll_update_notice();
+            let _ = update_tx.send(notice);
+        });
         let mut app = App {
             sessions: Vec::new(),
             active: 0,
@@ -181,6 +194,8 @@ impl App {
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             notice: None,
+            update_notice: None,
+            update_rx,
         };
         app.new_session()?;
         Ok(app)
@@ -546,5 +561,29 @@ impl App {
     fn pane_dims(&self) -> (u16, u16) {
         let r = self.panes_area();
         (r.width.max(1), r.height.max(1))
+    }
+
+    /// Text of the update banner, e.g. "New version 1.0.0 available".
+    fn update_notice_text(&self) -> Option<String> {
+        let notice = self.update_notice.as_ref()?;
+        Some(format!("New version {} available — run 'kumo update'", notice.display))
+    }
+
+    /// Rect of the update banner, anchored to the top-right corner.
+    pub(super) fn update_notice_rect(&self) -> Option<Rect> {
+        let text = self.update_notice_text()?;
+        let (w, h) = self.term_size;
+        let inner_w = text.chars().count() as u16 + 2;
+        let width = inner_w + 2;
+        if w < width + 1 || h < 3 {
+            return None;
+        }
+        Some(Rect::new(w - width - 1, 0, width, 3))
+    }
+
+    /// Whether `(x, y)` hits the banner's close button.
+    pub(super) fn update_notice_close_at(&self, x: u16, y: u16) -> bool {
+        let Some(r) = self.update_notice_rect() else { return false };
+        x == r.x + 1 && y == r.y + 1
     }
 }

@@ -84,6 +84,8 @@ pub struct Config {
     pub ai_cmd: Option<(String, Vec<String>)>,
     /// Login shell used to spawn panes.
     pub shell: Option<String>,
+    /// Whether the startup update check runs (default: true).
+    pub update_check: bool,
 }
 
 impl Config {
@@ -101,6 +103,10 @@ impl Config {
                 cfg.shell = Some(v.to_string());
             }
         }
+        cfg.update_check = map
+            .get("update-check")
+            .map(|v| !matches!(unquote(v).trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off" | "never"))
+            .unwrap_or(true);
         cfg
     }
 }
@@ -199,6 +205,15 @@ pub fn default_shell() -> String {
     cfg.shell
         .or_else(|| env_nonempty("SHELL"))
         .unwrap_or_else(|| "/bin/bash".to_string())
+}
+
+/// Whether the startup update check is enabled. Disabled by `update-check =
+/// false` in the config file or by setting `KUMO_NO_UPDATE=1`.
+pub fn update_check_enabled() -> bool {
+    if std::env::var("KUMO_NO_UPDATE").is_ok() {
+        return false;
+    }
+    load_config().update_check
 }
 
 /// Split a command line string into program + args (space separated).
