@@ -903,14 +903,25 @@ impl App {
             if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
                 let inner = pg.inner();
                 if inner.width > 0 && inner.height > 0 {
-                    // Re-render only panes whose content changed, into a cached
-                    // buffer; unchanged panes are blitted back (no FFI scan).
+                    // Re-render dirty rows into the pane's retained cache;
+                    // unchanged rows are kept and blitted back (no FFI scan).
                     if pane.dirty {
-                        let mut cached = Buffer::empty(inner);
-                        let status = pane.render_dirty(inner, pg.pane_id == focused, &mut cached);
-                        self.pane_cache.insert(pg.pane_id, cached);
-                        if let Some(status) = status {
-                            self.agent_status_cache.insert(pg.pane_id, status);
+                        // Keep the previous cache unless it was for a different
+                        // rect (moved/resized), so clean rows survive.
+                        let recreate = self
+                            .pane_cache
+                            .get(&pg.pane_id)
+                            .map(|c| c.area != inner)
+                            .unwrap_or(true);
+                        if recreate {
+                            pane.full_redraw = true;
+                            self.pane_cache.insert(pg.pane_id, Buffer::empty(inner));
+                        }
+                        if let Some(cached) = self.pane_cache.get_mut(&pg.pane_id) {
+                            let status = pane.render_dirty(inner, pg.pane_id == focused, cached);
+                            if let Some(status) = status {
+                                self.agent_status_cache.insert(pg.pane_id, status);
+                            }
                         }
                     }
                     if let Some(cached) = self.pane_cache.get(&pg.pane_id) {

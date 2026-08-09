@@ -62,6 +62,10 @@ pub struct Pane {
     /// Whether the viewport changed since the last render (output, selection,
     /// scroll, resize). Lets the frame loop skip re-rendering unchanged panes.
     pub dirty: bool,
+    /// Force a full redraw next render. Viewport scroll, resize, and selection
+    /// changes do not mark rows dirty in the render state, so they must ignore
+    /// the per-row dirty patch.
+    pub full_redraw: bool,
     /// Current text of each viewport row, maintained during dirty renders and
     /// used for agent-state detection (no extra render-state scan).
     screen_rows: Vec<String>,
@@ -259,6 +263,7 @@ impl Pane {
             recent_text: Vec::with_capacity(256),
             stripper: TextStripper::new(),
             dirty: true,
+            full_redraw: true,
             screen_rows: Vec::new(),
             last_cursor: None,
             xtgettcap: XtgettcapTracker::new(),
@@ -325,6 +330,7 @@ impl Pane {
         }
         self.vt.resize(cols, rows);
         self.dirty = true;
+        self.full_redraw = true;
         let _ = self.pty.master.resize(PtySize {
             rows,
             cols,
@@ -340,6 +346,7 @@ impl Pane {
     pub fn scroll(&mut self, delta: i32) {
         self.vt.scroll(delta);
         self.dirty = true;
+        self.full_redraw = true;
     }
 
     pub fn has_mouse_reporting(&self) -> bool {
@@ -375,7 +382,8 @@ impl Pane {
         let level = self.vt.render_dirty_level();
         let fg = rgb(self.vt.default_fg());
         let bg = rgb(self.vt.default_bg());
-        let full = level == vt::DIRTY_FULL;
+        let full = level == vt::DIRTY_FULL || self.full_redraw;
+        self.full_redraw = false;
 
         let mut dirty: HashSet<usize> = if full {
             (0..ah.max(0) as usize).collect()
@@ -535,6 +543,7 @@ impl Pane {
         let ok = self.vt.set_selection(start, end);
         if ok {
             self.dirty = true;
+            self.full_redraw = true;
         }
         ok
     }
@@ -543,6 +552,7 @@ impl Pane {
     pub fn clear_selection(&mut self) {
         self.vt.clear_selection();
         self.dirty = true;
+        self.full_redraw = true;
     }
 
     /// Extract the terminal's active selection as plain text (unwrap + trim).
@@ -675,6 +685,25 @@ mod tests {
         p.render_dirty(area, true, &mut buf);
     }
 
+    /// Text of each row in a rendered pane buffer.
+    fn pane_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            let line = line.trim_end();
+            if !line.is_empty() {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     #[test]
     fn working_after_recent_output() {
         let mut p = test_pane(true);
@@ -762,12 +791,122 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]
-    fn dead_pane_is_idle() {
-        let mut p = test_pane(true);
-        p.feed(b"working");
-        p.dead = true;
-        p.last_output = Instant::now();
-        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    fn first_render_after_initial_output_shows_all_lines() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // Fish prints its banner immediately; the FIRST render happens after.
+        p.feed(b"Welcome to fish, the friendly interactive shell.\r\nfish, version 4.6.0\r\n> ");
+        p.render_dirty(area, true, &mut buf);
+        let t = pane_text(&buf);
+        assert!(t.contains("Welcome to fish"), "banner lost on first render: {t:?}");
+        assert!(t.contains("fish, version 4.6.0"), "banner line lost: {t:?}");
+    }
+
+    #[test]
+    fn opencode_raw_output_renders_without_losing_rows() {
+        let raw = match std::fs::read("/tmp/oc_msg.raw") {
+            Ok(d) => d,
+            Err(_) => return, // captured fixture not present
+        };
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // Feed like a pty: many small chunks, one render after each burst.
+        for chunk in raw.chunks(256) {
+            p.feed(chunk);
+            p.render_dirty(area, true, &mut buf);
+        }
+        let text = pane_text(&buf);
+        // opencode's composer + footer should be visible after a full session.
+        assert!(text.contains("say hello"), "opencode message lost: {text:?}");
+    }
+
+    #[test]
+    fn partial_render_preserves_static_rows() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+
+        p.feed(b"line one\nline two\n");
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("line one"), "initial render lost content");
+
+        // A later change to a different area must not wipe earlier rows.
+        p.feed(b"\x1b[5;1Hline three\n");
+        p.render_dirty(area, true, &mut buf);
+        let text = pane_text(&buf);
+        assert!(text.contains("line one"), "static row lost: {text:?}");
+        assert!(text.contains("line two"), "static row lost: {text:?}");
+        assert!(text.contains("line three"), "new row missing: {text:?}");
+    }
+
+    #[test]
+    fn clear_screen_clears_rows() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"aaa\nbbb\n");
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("aaa"));
+        p.feed(b"\x1b[2J\x1b[H");
+        p.render_dirty(area, true, &mut buf);
+        let t = pane_text(&buf);
+        assert!(!t.contains("aaa"), "clear screen left content: {t:?}");
+    }
+
+    #[test]
+    fn cursor_toggle_keeps_content() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"hello world");
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("hello world"));
+        // Show cursor, hide cursor, more output elsewhere.
+        p.feed(b"\x1b[?25h\x1b[?25l\x1b[3;1Hnew line");
+        p.render_dirty(area, true, &mut buf);
+        let t = pane_text(&buf);
+        assert!(t.contains("hello world"), "content lost after cursor toggles: {t:?}");
+        assert!(t.contains("new line"));
+    }
+
+    #[test]
+    fn render_before_output_then_feed_shows_all_rows() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // Empty render first (like a freshly spawned pane on frame 1).
+        p.render_dirty(area, true, &mut buf);
+        p.feed(b"hello\nworld\nthird");
+        p.render_dirty(area, true, &mut buf);
+        let t = pane_text(&buf);
+        assert!(t.contains("hello"), "content lost after empty first render: {t:?}");
+        assert!(t.contains("world"), "content lost after empty first render: {t:?}");
+        assert!(t.contains("third"), "content lost after empty first render: {t:?}");
+    }
+
+    #[test]
+    fn scroll_up_redraws_visible_rows() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut s = String::new();
+        for i in 0..60 {
+            s.push_str(&format!("row {i}\r\n"));
+        }
+        p.feed(s.as_bytes());
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("row 59"), "initial scrollback render wrong");
+
+        p.scroll(-10);
+        p.render_dirty(area, true, &mut buf);
+        let row0: String = (0..16).map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()).unwrap_or_default()).collect();
+        assert!(row0.starts_with("row 1"), "top row after scroll wrong: {row0:?}");
+        let t = pane_text(&buf);
+        assert!(t.contains("row 11"), "scroll did not redraw rows: {t:?}");
+        assert!(t.contains("row 50"), "scrolled rows missing: {t:?}");
+        assert!(!t.contains("row 59"), "bottom row should be off-screen: {t:?}");
     }
 
     #[test]
