@@ -33,6 +33,9 @@ const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
 const BRANCH_REFRESH: Duration = Duration::from_secs(3);
 /// How often to re-scan pane process trees for an AI CLI (opencode/claude).
 const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// How often to recompute agent status from the terminal buffer even when the
+/// pane has produced no new output (so a finished agent returns to Idle).
+const STATUS_REFRESH: Duration = Duration::from_millis(500);
 
 struct Session {
     id: u64,
@@ -114,6 +117,9 @@ pub struct App {
     last_ai_scan: Instant,
     /// When the agent-status debug log was last written (throttle).
     last_agent_debug: Instant,
+    /// When agent status was last recomputed from the terminal buffer (so a
+    /// finished, quiet agent falls back to Idle without new output).
+    last_status_refresh: Instant,
     /// Cached agent status per AI pane, refreshed during pane rendering.
     agent_status_cache: HashMap<u64, AgentStatus>,
     /// Previously focused pane, so focus changes re-render the two panes (cursor).
@@ -188,6 +194,7 @@ impl App {
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
             last_agent_debug: Instant::now(),
+            last_status_refresh: Instant::now(),
             agent_status_cache: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
@@ -748,6 +755,26 @@ impl App {
         }
     }
 
+    /// Recomputed agent status from the terminal buffer at most every
+    /// `STATUS_REFRESH`, independent of pane dirty state. `render_dirty` only
+    /// refreshes the status when the pane produces output or scrolls, so a
+    /// quiet agent that just finished would otherwise stay stuck on the last
+    /// Working status forever.
+    fn refresh_agent_statuses(&mut self) {
+        if self.last_status_refresh.elapsed() < STATUS_REFRESH {
+            return;
+        }
+        self.last_status_refresh = Instant::now();
+        for (&pid, pane) in self.panes.iter_mut() {
+            if pane.is_ai_cli() {
+                let status = pane.agent_status();
+                if self.agent_status_cache.get(&pid) != Some(&status) {
+                    self.agent_status_cache.insert(pid, status);
+                }
+            }
+        }
+    }
+
     /// Append the per-pane agent status, output age, and detected CLI to
     /// `/tmp/kumo_agent.log` (throttled to 1/s, capped at 512 KiB). Gated
     /// behind `DEBUG_AGENT=1` so it is inert in production but stays in the
@@ -866,6 +893,7 @@ impl App {
         self.term_size = (size.width, size.height);
         self.refresh_branches();
         self.refresh_ai_cli();
+        self.refresh_agent_statuses();
         self.log_agent_statuses();
         let area = Rect::new(0, 0, size.width, size.height);
         let geom = self.active_geom();

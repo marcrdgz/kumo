@@ -340,6 +340,7 @@ pub const TERMINAL_DATA_COLS: i32 = 1;
 pub const TERMINAL_DATA_ROWS: i32 = 2;
 pub const TERMINAL_DATA_SCROLLBAR: i32 = 9;
 pub const TERMINAL_DATA_MOUSE_TRACKING: i32 = 11;
+pub const TERMINAL_DATA_TOTAL_ROWS: i32 = 14;
 pub const TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
 pub const TERMINAL_DATA_COLOR_FOREGROUND: i32 = 18;
 pub const TERMINAL_DATA_COLOR_BACKGROUND: i32 = 19;
@@ -686,29 +687,94 @@ impl Terminal {
     /// shift the tracked active selection.
     pub fn selection_text(&mut self, start: (u16, u16), end: (u16, u16)) -> Option<String> {
         let selection = self.build_selection(start, end)?;
+        let text = self.format_selection(&selection);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Read the text of the last `lines` rows of the terminal's active screen
+    /// buffer (including scrollback), independent of the viewport scroll
+    /// position. Used for agent-state detection so scrolling the viewport
+    /// never changes the detected state. Reads via the selection formatter on
+    /// screen-buffer coordinates, mirroring herdr's recent-text snapshot.
+    pub fn bottom_text(&self, lines: usize) -> String {
+        let mut total: usize = 0;
+        unsafe {
+            if !ghostty_terminal_get(self.term, TERMINAL_DATA_TOTAL_ROWS, &mut total as *mut usize as *mut c_void)
+                .is_ok()
+                || total == 0
+            {
+                return String::new();
+            }
+        }
+        let mut cols: usize = 0;
+        unsafe {
+            if !ghostty_terminal_get(self.term, TERMINAL_DATA_COLS, &mut cols as *mut usize as *mut c_void).is_ok() {
+                return String::new();
+            }
+        }
+        let start = total.saturating_sub(lines);
+        let Some(selection) = self.build_screen_selection((0, start as u32), (cols.saturating_sub(1) as u16, (total - 1) as u32))
+        else {
+            return String::new();
+        };
+        self.format_selection(&selection)
+    }
+
+    /// Build a linear selection between two screen-buffer coordinates
+    /// (inclusive), independent of the viewport scroll position.
+    fn build_screen_selection(
+        &self,
+        start: (u16, u32),
+        end: (u16, u32),
+    ) -> Option<Selection> {
+        let mut start_ref =
+            GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        let mut end_ref = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        unsafe {
+            if !ghostty_terminal_grid_ref(self.term, screen_point(start.0, start.1), &mut start_ref).is_ok()
+                || !ghostty_terminal_grid_ref(self.term, screen_point(end.0, end.1), &mut end_ref).is_ok()
+            {
+                return None;
+            }
+        }
+        Some(Selection {
+            size: size_of::<Selection>(),
+            start: start_ref,
+            end: end_ref,
+            rectangle: false,
+        })
+    }
+
+    /// Format a selection as plain text (unwrap + trim), via the selection
+    /// formatter.
+    fn format_selection(&self, selection: &Selection) -> String {
         let options = SelectionFormatOptions {
             size: size_of::<SelectionFormatOptions>(),
             emit: FORMAT_PLAIN,
             unwrap: true,
             trim: true,
-            selection: &selection,
+            selection,
         };
         unsafe {
             let mut written = 0usize;
             let res =
                 ghostty_terminal_selection_format_buf(self.term, options, ptr::null_mut(), 0, &mut written);
             if res != Result::OutOfSpace || written == 0 {
-                return None;
+                return String::new();
             }
             let mut buf = vec![0u8; written];
             let mut filled = 0usize;
             if !ghostty_terminal_selection_format_buf(self.term, options, buf.as_mut_ptr(), buf.len(), &mut filled)
                 .is_ok()
             {
-                return None;
+                return String::new();
             }
             buf.truncate(filled.min(buf.len()));
-            Some(String::from_utf8_lossy(&buf).into_owned())
+            String::from_utf8_lossy(&buf).into_owned()
         }
     }
 
@@ -1128,6 +1194,20 @@ mod tests {
         t.scroll(-2);
         t.refresh();
         assert!(t.scrollbar().total > 0);
+    }
+
+    #[test]
+    fn bottom_text_reads_buffer_tail_independent_of_scroll() {
+        let mut t = Terminal::new(20, 5, 100, &palette()).unwrap();
+        t.write(b"top\nmid\nbottom\n\nexit shell mode");
+        t.refresh();
+        let before = t.bottom_text(5);
+        assert!(before.contains("exit shell mode"), "expected tail text, got {before:?}");
+        // Scrolling the viewport must not change what bottom_text reads.
+        t.scroll(-3);
+        t.refresh();
+        let after = t.bottom_text(5);
+        assert_eq!(before, after, "bottom_text changed after viewport scroll");
     }
 
     #[test]

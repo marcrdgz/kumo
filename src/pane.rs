@@ -66,9 +66,6 @@ pub struct Pane {
     /// changes do not mark rows dirty in the render state, so they must ignore
     /// the per-row dirty patch.
     pub full_redraw: bool,
-    /// Current text of each viewport row, maintained during dirty renders and
-    /// used for agent-state detection (no extra render-state scan).
-    screen_rows: Vec<String>,
     /// Viewport position where the terminal cursor was last drawn, so the
     /// previous cursor cell can be cleared on a row-level render.
     last_cursor: Option<(u16, u16)>,
@@ -91,7 +88,20 @@ pub enum AgentStatus {
 /// opencode permission dialog (a multi-row footer block) survives the quiet
 /// period while the agent is paused waiting for approval.
 const RECENT_TEXT_BYTES: usize = 16 * 1024;
+/// How many rows from the bottom of the terminal buffer to scan for
+/// agent-state markers. The live prompt/footer and any dialog live in the
+/// last screenful, while older transcript rows are excluded.
+const DETECTION_TAIL_LINES: usize = 200;
+/// How many bottom rows hold opencode's prompt footer ("esc interrupt",
+/// spinner, progress bar). This area is pinned to the buffer tail and never
+/// scrolls with the transcript, so its signals reflect the live agent state.
+const DETECTION_FOOTER_LINES: usize = 8;
 /// Output markers that indicate the agent is waiting on a command approval.
+///
+/// Only markers tied to a real on-screen dialog qualify. Generic prompts
+/// ("proceed?", "(y/n)", "would you like to", ...) are deliberately excluded:
+/// they also match conversation transcript text, falsely flagging an idle
+/// agent as blocked. Mirrors herdr's opencode manifest (state = "blocked").
 const BLOCKED_MARKERS: &[&str] = &[
     // opencode permission dialog ("△ Permission required" header + buttons).
     "permission required",
@@ -100,21 +110,35 @@ const BLOCKED_MARKERS: &[&str] = &[
     "always allow",
     "reject permission",
     "waiting for permission",
-    // Generic approval prompts.
-    "do you want to proceed",
-    "do you want to run",
-    "proceed?",
-    "(y/n)",
-    "would you like to",
 ];
+
+/// opencode's question dialog footer strings (QuestionPrompt). All three must
+/// be present together — "esc dismiss" alone also matches the idle prompt.
+const QUESTION_DIALOG_ENTER: &[&str] = &["enter submit", "enter confirm", "enter toggle"];
+const QUESTION_DIALOG_NAV: &[&str] = &["\u{2191}\u{2193} select", "\u{21c6} tab"];
+
+/// True when opencode's question dialog is on screen: its footer pairs
+/// "esc dismiss" with an enter action and a navigation hint. Mirrors herdr's
+/// opencode manifest rule (state = "blocked").
+fn question_dialog_visible(screen: &str) -> bool {
+    let lower = screen.to_lowercase();
+    if !lower.contains("esc dismiss") {
+        return false;
+    }
+    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| lower.contains(m));
+    let nav = QUESTION_DIALOG_NAV.iter().any(|m| screen.contains(m));
+    enter && nav
+}
 /// Markers, scanned against the current screen text, that indicate the agent
 /// is actively working. Idle is the fallback when none match (manifest-based
 /// detection instead of an output-recently window).
 const WORKING_MARKERS: &[&str] = &[
-    "esc to interrupt",
+    // opencode prompt footer ("esc interrupt" / "esc again to interrupt").
+    "esc interrupt",
     "esc again to interrupt",
     "ctrl+c to interrupt",
     "press esc to interrupt",
+    // Generic in-progress text.
     "waiting for assistant",
     "sending prompt",
     "retrying in",
@@ -264,7 +288,6 @@ impl Pane {
             stripper: TextStripper::new(),
             dirty: true,
             full_redraw: true,
-            screen_rows: Vec::new(),
             last_cursor: None,
             xtgettcap: XtgettcapTracker::new(),
         };
@@ -480,8 +503,6 @@ impl Pane {
             }
         }
 
-        self.update_screen_rows(area, cache, &dirty);
-
         self.vt.clear_dirty();
         self.dirty = false;
 
@@ -492,28 +513,8 @@ impl Pane {
         }
     }
 
-    /// Rebuild the text of the given rows from `cache`, for agent detection.
-    fn update_screen_rows(&mut self, area: Rect, cache: &Buffer, dirty: &HashSet<usize>) {
-        let rows = area.height as usize;
-        if self.screen_rows.len() < rows {
-            self.screen_rows.resize(rows, String::new());
-        }
-        for &y in dirty {
-            if y >= rows {
-                continue;
-            }
-            let mut line = String::new();
-            for x in area.x..(area.x + area.width) {
-                if let Some(cell) = cache.cell((x, area.y + y as u16)) {
-                    line.push_str(cell.symbol());
-                }
-            }
-            self.screen_rows[y] = line.trim_end().to_string();
-        }
-    }
-
-    /// Agent lifecycle state, derived from the pane's screen rows: Blocked/
-    /// Working win via distinctive markers, Idle is the fallback.
+    /// Agent lifecycle state, derived from the bottom of the terminal buffer:
+    /// Blocked/Working win via distinctive markers, Idle is the fallback.
     pub fn agent_status(&self) -> AgentStatus {
         self.compute_agent_status()
     }
@@ -522,24 +523,29 @@ impl Pane {
         if self.dead {
             return AgentStatus::Idle;
         }
-        let mut screen = String::new();
-        for line in &self.screen_rows {
-            screen.push_str(line);
-            screen.push('\n');
-        }
+        // Working signals live in opencode's prompt footer, which is pinned to
+        // the bottom rows of the terminal buffer and never scrolls with the
+        // transcript. Scanning only the tail rows keeps an "esc interrupt" or
+        // frozen spinner from an earlier turn in the scrolled transcript from
+        // being misread as currently working.
+        let footer = self.vt.bottom_text(DETECTION_FOOTER_LINES);
+        let footer_lower = footer.to_lowercase();
+        // Blocked signals (question/permission dialogs) are centered overlays,
+        // so they need the full recent buffer, not just the footer.
+        let screen = self.vt.bottom_text(DETECTION_TAIL_LINES);
         let lower = screen.to_lowercase();
-        if BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
+        if question_dialog_visible(&screen) || BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
             return AgentStatus::Blocked;
         }
-        if WORKING_MARKERS.iter().any(|m| lower.contains(m)) {
+        if WORKING_MARKERS.iter().any(|m| footer_lower.contains(m)) {
             return AgentStatus::Working;
         }
         // opencode's knight-rider status bar: 4+ block cells in a row.
-        if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| screen.contains(p)) {
+        if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| footer.contains(p)) {
             return AgentStatus::Working;
         }
-        // Braille spinner (tool call / thinking) visible on screen.
-        if screen.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
+        // Braille spinner (tool call / thinking) in the prompt footer.
+        if footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
             return AgentStatus::Working;
         }
         AgentStatus::Idle
@@ -715,9 +721,34 @@ mod tests {
     #[test]
     fn working_after_recent_output() {
         let mut p = test_pane(true);
-        p.feed(b"working on it - esc to interrupt");
+        // Position the footer hint at the bottom of the 40-row screen.
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed(b"working on it - esc interrupt");
         render_pane(&mut p);
 assert_eq!(p.agent_status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn idle_when_working_marker_is_older_transcript_not_footer() {
+        // A frozen "esc interrupt" from an earlier turn may remain in the
+        // scrolled transcript; only the pinned prompt footer counts.
+        let mut p = test_pane(true);
+        p.feed(b"previous turn output - esc interrupt\n");
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed(b"Ask anything... \"\"");
+        p.last_output = Instant::now() - Duration::from_secs(10);
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn working_when_footer_shows_interrupt_hint() {
+        let mut p = test_pane(true);
+        p.feed(b"some transcript text\n");
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed(b"esc interrupt");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
@@ -730,12 +761,36 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
-    fn blocked_when_quiet_and_waiting_approval() {
+    fn idle_when_transcript_contains_generic_prompt_text() {
+        // Generic approval text in the conversation transcript must NOT flag
+        // the agent as blocked; only real dialogs do.
         let mut p = test_pane(true);
-        p.feed(b"Do you want to proceed with this command? (y/n)");
+        p.feed(b"the assistant asked: Do you want to proceed? (y/n)\n");
         p.last_output = Instant::now() - Duration::from_secs(10);
         render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn blocked_on_opencode_question_dialog() {
+        // opencode's question dialog (QuestionPrompt) footer: esc dismiss must
+        // be paired with an enter action and a navigation hint to count.
+        let mut p = test_pane(true);
+        p.feed(b"\xe2\x87\x86 tab   \xe2\x86\x91\xe2\x86\x93 select\n");
+        p.feed(b"enter submit   esc dismiss\n");
+        render_pane(&mut p);
         assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn idle_when_esc_dismiss_without_question_footer() {
+        // opencode's idle prompt must stay Idle even if "esc dismiss"-like
+        // text lingers without the question dialog's enter/navigation hints.
+        let mut p = test_pane(true);
+        p.feed(b"Ask anything... \"\"\n");
+        p.feed(b"esc dismiss\n");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]
@@ -785,6 +840,7 @@ assert_eq!(p.agent_status(), AgentStatus::Blocked);
     #[test]
     fn working_when_agent_streams_recent_output() {
         let mut p = test_pane(true);
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
         p.feed(b"\xe2\x96\xa0\xe2\x96\xa0\xe2\x96\xa0\xe2\x96\xa0running...");
         render_pane(&mut p);
 assert_eq!(p.agent_status(), AgentStatus::Working);
