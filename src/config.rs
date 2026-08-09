@@ -193,12 +193,12 @@ pub fn ai_cwd() -> PathBuf {
     home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The user's login shell: the `shell` config key, else `$SHELL`, else zsh.
+/// The user's login shell: the `shell` config key, else `$SHELL`, else bash.
 pub fn default_shell() -> String {
     let cfg = load_config();
     cfg.shell
         .or_else(|| env_nonempty("SHELL"))
-        .unwrap_or_else(|| "/bin/zsh".to_string())
+        .unwrap_or_else(|| "/bin/bash".to_string())
 }
 
 /// Split a command line string into program + args (space separated).
@@ -251,7 +251,7 @@ fn resolve_program_uncached(program: &str) -> Option<String> {
     if let Some(found) = which_in_path(program) {
         return Some(found);
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let out = std::process::Command::new(&shell)
         .arg("-l")
         .arg("-c")
