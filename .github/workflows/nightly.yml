@@ -2,6 +2,12 @@
 # release tagged `nightly` (recreated on every build). Runs on every push to
 # `main`, but only actually generates a nightly when at least 24 hours have
 # passed since the last one. `kumo update --nightly` consumes it.
+#
+# A durable marker tag `nightly-last` records the commit claimed by the most
+# recent nightly run. `prepare` skips commits already claimed, and `publish`
+# only publishes when this run still holds the latest claim -- so a push that
+# arrives while a previous build is in flight never double-builds nor lets a
+# stale build overwrite a newer one.
 
 name: Nightly
 
@@ -30,25 +36,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          SHA="${{ github.sha }}"
+          claim() {
+            local cur
+            cur=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null || true)
+            if [ -n "$cur" ]; then
+              gh api -X PATCH repos/marcrdgz/kumo/git/refs/tags/nightly-last -f sha="$SHA" -f force=true >/dev/null 2>&1 || true
+            else
+              gh api -X POST repos/marcrdgz/kumo/git/refs -f ref=refs/tags/nightly-last -f sha="$SHA" >/dev/null 2>&1 || true
+            fi
+          }
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            claim
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          LAST=$(gh release view nightly --repo marcrdgz/kumo --json createdAt --jq .createdAt 2>/dev/null || true)
-          if [ -z "$LAST" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$LAST" +%s 2>/dev/null || echo 0)
-          NOW_EPOCH=$(date +%s)
-          AGE=$(( NOW_EPOCH - LAST_EPOCH ))
-          if [ "$AGE" -ge 86400 ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "a nightly is due (last one was $AGE seconds ago)"
-          else
+
+          # Skip if this exact commit was already claimed by a nightly run.
+          CLAIMED=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null || true)
+          if [ -n "$CLAIMED" ] && [ "$CLAIMED" = "$SHA" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "last nightly was $AGE seconds ago; not due yet"
+            echo "commit $SHA already claimed for a nightly; skipping"
+            exit 0
           fi
+
+          # Cadence: at most one nightly per 24h.
+          LAST=$(gh release view nightly --repo marcrdgz/kumo --json createdAt --jq .createdAt 2>/dev/null || true)
+          if [ -n "$LAST" ]; then
+            LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$LAST" +%s 2>/dev/null || echo 0)
+            NOW_EPOCH=$(date +%s)
+            AGE=$(( NOW_EPOCH - LAST_EPOCH ))
+            if [ "$AGE" -lt 86400 ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "last nightly was $AGE seconds ago; not due yet"
+              exit 0
+            fi
+          fi
+
+          claim
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -107,17 +134,32 @@ jobs:
     needs: [prepare, build]
     if: ${{ needs.prepare.outputs.skip != 'true' && !cancelled() && !contains(needs.build.result, 'failure') }}
     runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Only the latest claimed commit publishes
+        id: guard
+        run: |
+          CLAIMED=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null || true)
+          if [ "$CLAIMED" = "${{ github.sha }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "superseded by ${CLAIMED:-none}; not publishing"
+          fi
       - name: Download artifacts
+        if: steps.guard.outputs.ok == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
           path: artifacts
           merge-multiple: true
       - name: Cleanup
+        if: steps.guard.outputs.ok == 'true'
         run: |
           rm -f artifacts/*-dist-manifest.json
       - name: Reset nightly release
+        if: steps.guard.outputs.ok == 'true'
         run: |
           gh release delete nightly --repo marcrdgz/kumo --yes || true
           gh release create nightly --repo marcrdgz/kumo --prerelease \
