@@ -157,12 +157,13 @@ jobs:
       - name: Cleanup
         if: steps.guard.outputs.ok == 'true'
         run: |
-          rm -f artifacts/*-dist-manifest.json
+          find artifacts -name '*-dist-manifest.json' -delete
       - name: Reset nightly release
         if: steps.guard.outputs.ok == 'true'
         run: |
           gh release delete nightly --repo marcrdgz/kumo --yes --cleanup-tag || true
+          FILES=$(find artifacts -type f)
           gh release create nightly --repo marcrdgz/kumo --prerelease \
             --target "${{ github.sha }}" \
             --title "kumo nightly" \
-            --notes "Rolling build of main." artifacts/*
+            --notes "Rolling build of main." $FILES
