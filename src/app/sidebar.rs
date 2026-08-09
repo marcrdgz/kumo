@@ -191,7 +191,8 @@ impl App {
                         .fg(ACCENT)
                         .bg(RColor::Reset)
                         .add_modifier(Modifier::BOLD);
-                    text(f, x, y, &format!("  {}", t), style, max);
+                    let pad = max.saturating_sub(t.chars().count() as u16) / 2;
+                    text(f, x + pad, y, &t, style, max);
                 }
                 SidebarRow::Spacer => {
                     put(f, x, y, " ", Style::default().bg(RColor::Reset));
