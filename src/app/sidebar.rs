@@ -88,6 +88,7 @@ impl App {
         out.push((y, SidebarRow::Spacer));
         y += 1;
         out.push((y, SidebarRow::Section("sessions".into())));
+        y += 1;
 
         let agents_y = self.sidebar_agents_y();
         let footer_y = self.term_size.1.saturating_sub(2);
@@ -308,5 +309,123 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
         } else {
             put(f, x, y, "░", Style::default().fg(PANEL_SEP));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use crate::app::{Mode, NamePopup, Session};
+    use crate::layout::LayoutTree;
+    use crate::pane::Pane;
+
+    fn build_app(n: usize) -> App {
+        let (tx, rx) = mpsc::channel();
+        let mut panes = HashMap::new();
+        let mut sessions = Vec::new();
+        for i in 0..n {
+            let sid = (i + 1) as u64;
+            let pid = (i + 1) as u64;
+            let pane = Pane::spawn(
+                sid,
+                pid,
+                "/bin/sh".into(),
+                Some(("/usr/bin/true".into(), Vec::new())),
+                None,
+                80,
+                24,
+                false,
+                tx.clone(),
+            )
+            .unwrap();
+            panes.insert(pid, pane);
+            sessions.push(Session {
+                id: sid,
+                name: format!("sess-{}", i + 1),
+                tree: LayoutTree::new(pid),
+                zoom: false,
+                workspace: PathBuf::from("/tmp"),
+            });
+        }
+        App {
+            sessions,
+            active: 0,
+            panes,
+            mode: Mode::Normal,
+            drag: None,
+            sel: None,
+            pending_click: None,
+            events_tx: tx,
+            events_rx: rx,
+            shell: "/bin/sh".into(),
+            ai: ("opencode".into(), Vec::new()),
+            workspace: PathBuf::from("/tmp"),
+            term_size: (80, 24),
+            last_sizes: HashMap::new(),
+            sidebar_open: true,
+            sidebar_width: 26,
+            branch_cache: HashMap::new(),
+            last_ai_scan: Instant::now(),
+            last_agent_debug: Instant::now(),
+            last_status_refresh: Instant::now(),
+            agent_status_cache: HashMap::new(),
+            last_focused: None,
+            pane_cache: HashMap::new(),
+            quit: false,
+            menu: super::super::Menu { open: false, selected: 0 },
+            sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
+            popup: NamePopup { open: false, name: String::new(), cursor: 0, error: None, hover: None },
+            notice: None,
+        }
+    }
+
+    #[test]
+    fn clicking_session_row_switches_active() {
+        let mut app = build_app(3);
+        // h=24 -> agents_y=12 -> session rows 3,4,5.
+        let rows = app.sidebar_rows();
+        let sess_rows: Vec<(u16, usize)> = rows
+            .iter()
+            .filter_map(|(y, r)| match r {
+                SidebarRow::Session(i) => Some((*y, *i)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sess_rows, vec![(3, 0), (4, 1), (5, 2)]);
+
+        let (y, _) = sess_rows[1];
+        assert!(app.sidebar_hit(0, y), "click on sess-2 row should be handled");
+        assert_eq!(app.active, 1, "clicking sess-2 must make it active");
+    }
+
+    #[test]
+    fn session_rows_scroll_consistently() {
+        let mut app = build_app(10);
+        // 10 sessions + "new session" = 11 items, region 9 rows -> max offset 2.
+        app.sidebar_scroll.sessions = 5;
+        let rows = app.sidebar_rows();
+        let sess_rows: Vec<(u16, usize)> = rows
+            .iter()
+            .filter_map(|(y, r)| match r {
+                SidebarRow::Session(i) => Some((*y, *i)),
+                _ => None,
+            })
+            .collect();
+        // Offset caps at 2: first visible session is index 2 at y=3.
+        assert_eq!(sess_rows.first(), Some(&(3, 2)), "scrolled rows must match render");
+        assert_eq!(sess_rows.last(), Some(&(10, 9)));
+
+        let (y, _) = sess_rows.first().unwrap();
+        assert!(app.sidebar_hit(0, *y));
+        assert_eq!(app.active, 2);
+
+        let (y, _) = sess_rows.last().unwrap();
+        assert!(app.sidebar_hit(0, *y));
+        assert_eq!(app.active, 9);
     }
 }
