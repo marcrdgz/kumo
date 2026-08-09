@@ -32,6 +32,7 @@ management.
 2. **Clean Abstractions**: Keep PTY/process management (`src/pty.rs`), the terminal emulator FFI (`vt.rs`), layout tree management, and Claude AI integration modular and loosely coupled.
 3. **No Superficial Fixes**: Always verify PTY process lifecycle, file descriptor cleanup, and signal handling (`SIGWINCH`, `SIGCHLD`) thoroughly.
 4. **Verification**: Always run build/test commands after editing code to verify compilation and execution success.
+5. **Never commit without asking**: Do not run `git commit` (or amend/push) unless the user explicitly asks. Stage nothing on your own; leave commits to the user.
 
 ---
 
