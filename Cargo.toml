@@ -16,6 +16,14 @@ version = "0.0.0-dev"
 edition = "2021"
 authors = ["Marc Rodríguez <marc@rdgz.es>"]
 
+# cargo-release settings (cargo release)
+[workspace.metadata.release]
+shared-version = "workspace"
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: release {{version}}"
+allow-branch = ["main"]
+publish = false
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"
