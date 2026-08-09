@@ -804,6 +804,29 @@ impl Terminal {
         self.cursor
     }
 
+    /// Text of the current viewport, one line per row (trailing whitespace
+    /// trimmed per row). Used by the agent-state detection.
+    pub fn screen_text(&mut self) -> String {
+        use std::collections::HashMap;
+        self.refresh();
+        let mut cells: HashMap<usize, Vec<(usize, char)>> = HashMap::new();
+        self.for_each_cell(|row, col, rc, _selected| {
+            let ch = rc.text.chars().next().unwrap_or(' ');
+            cells.entry(row).or_default().push((col, ch));
+        });
+        let mut rows: Vec<usize> = cells.keys().copied().collect();
+        rows.sort_unstable();
+        let mut out = String::new();
+        for row in rows {
+            let mut cols = cells[&row].clone();
+            cols.sort_unstable_by_key(|(c, _)| *c);
+            let line: String = cols.into_iter().map(|(_, ch)| ch).collect();
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
     /// Scrollbar state from the last `refresh`.
     pub fn scrollbar(&self) -> TerminalScrollbar {
         self.scrollbar

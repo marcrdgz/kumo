@@ -33,6 +33,8 @@ const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
 const BRANCH_REFRESH: Duration = Duration::from_secs(3);
 /// How often to re-scan pane process trees for an AI CLI (opencode/claude).
 const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// How often to recompute AI pane agent status from the terminal screen.
+const AGENT_STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 struct Session {
     id: u64,
@@ -112,6 +114,10 @@ pub struct App {
     last_ai_scan: Instant,
     /// When the agent-status debug log was last written (throttle).
     last_agent_debug: Instant,
+    /// When pane agent statuses were last recomputed from the terminal screen.
+    last_agent_status: Instant,
+    /// Cached agent status per AI pane, refreshed every `AGENT_STATUS_INTERVAL`.
+    agent_status_cache: HashMap<u64, AgentStatus>,
     quit: bool,
 }
 
@@ -171,6 +177,8 @@ impl App {
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
             last_agent_debug: Instant::now(),
+            last_agent_status: Instant::now(),
+            agent_status_cache: HashMap::new(),
             quit: false,
         };
         app.new_session()?;
@@ -706,6 +714,20 @@ impl App {
         }
     }
 
+    /// Recompute the agent status of every AI pane from its terminal screen,
+    /// at most every `AGENT_STATUS_INTERVAL`.
+    fn refresh_agent_statuses(&mut self) {
+        if self.last_agent_status.elapsed() < AGENT_STATUS_INTERVAL {
+            return;
+        }
+        self.last_agent_status = Instant::now();
+        for (pid, pane) in self.panes.iter_mut() {
+            if pane.is_ai_cli() {
+                self.agent_status_cache.insert(*pid, pane.agent_status());
+            }
+        }
+    }
+
     /// Append the per-pane agent status, output age, and detected CLI to
     /// `/tmp/kumo_agent.log` (throttled to 1/s, capped at 512 KiB). Gated
     /// behind `DEBUG_AGENT=1` so it is inert in production but stays in the
@@ -734,7 +756,7 @@ impl App {
                     "pid={} cli={} status={:?} age_ms={} recent={}",
                     pid,
                     pane.ai_cli_name().unwrap_or_else(|| "?".into()),
-                    pane.agent_status(),
+                    self.agent_status_cache.get(pid).copied().unwrap_or(AgentStatus::Idle),
                     pane.last_output_age().as_millis(),
                     tail,
                 );
@@ -821,6 +843,7 @@ impl App {
         self.term_size = (size.width, size.height);
         self.refresh_branches();
         self.refresh_ai_cli();
+        self.refresh_agent_statuses();
         self.log_agent_statuses();
         let area = Rect::new(0, 0, size.width, size.height);
         let geom = self.active_geom();
@@ -994,11 +1017,7 @@ impl App {
                     text(f, x, y, &format!("    {}", b), style, max);
                 }
                 SidebarRow::Agent(i, pid) => {
-                    let status = self
-                        .panes
-                        .get(&pid)
-                        .map(|p| p.agent_status())
-                        .unwrap_or(AgentStatus::Idle);
+                    let status = self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle);
                     let color = match status {
                         AgentStatus::Working => GREEN,
                         AgentStatus::Blocked => ORANGE,

@@ -71,8 +71,6 @@ pub enum AgentStatus {
     Idle,
 }
 
-/// A pane is "working" when it produced output within this window.
-const WORKING_WINDOW: Duration = Duration::from_millis(2500);
 /// How much stripped text to keep for blocked-marker scanning. Sized so the
 /// opencode permission dialog (a multi-row footer block) survives the quiet
 /// period while the agent is paused waiting for approval.
@@ -92,6 +90,18 @@ const BLOCKED_MARKERS: &[&str] = &[
     "proceed?",
     "(y/n)",
     "would you like to",
+];
+/// Markers, scanned against the current screen text, that indicate the agent
+/// is actively working. Idle is the fallback when none match (the herdr
+/// manifest approach, instead of an output-recently window).
+const WORKING_MARKERS: &[&str] = &[
+    "esc to interrupt",
+    "esc again to interrupt",
+    "ctrl+c to interrupt",
+    "press esc to interrupt",
+    "waiting for assistant",
+    "sending prompt",
+    "retrying in",
 ];
 
 #[derive(Clone)]
@@ -269,19 +279,27 @@ impl Pane {
         self.vt.write(data);
     }
 
-    /// Heuristic agent lifecycle state, derived from recent output.
-    pub fn agent_status(&self) -> AgentStatus {
+    /// Agent lifecycle state, derived from the terminal's current screen
+    /// content (like herdr's manifests): Blocked/Working win via distinctive
+    /// markers, Idle is the fallback.
+    pub fn agent_status(&mut self) -> AgentStatus {
         if self.dead {
             return AgentStatus::Idle;
         }
-        let lower = String::from_utf8_lossy(&self.recent_text).to_lowercase();
-        // A permission/approval prompt wins over the recent-output window:
-        // opencode's spinner keeps repainting while it waits, so a time window
-        // alone would never surface the blocked state.
+        let screen = self.vt.screen_text();
+        let lower = screen.to_lowercase();
         if BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
             return AgentStatus::Blocked;
         }
-        if self.last_output.elapsed() < WORKING_WINDOW {
+        if WORKING_MARKERS.iter().any(|m| lower.contains(m)) {
+            return AgentStatus::Working;
+        }
+        // opencode's knight-rider status bar: 4+ block cells in a row.
+        if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| screen.contains(p)) {
+            return AgentStatus::Working;
+        }
+        // Braille spinner (tool call / thinking) visible on screen.
+        if screen.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
             return AgentStatus::Working;
         }
         AgentStatus::Idle
@@ -539,8 +557,8 @@ mod tests {
             "/bin/sh".into(),
             Some(("/usr/bin/true".into(), Vec::new())),
             None,
-            10,
-            10,
+            120,
+            40,
             is_ai,
             tx,
         )
@@ -550,7 +568,7 @@ mod tests {
     #[test]
     fn working_after_recent_output() {
         let mut p = test_pane(true);
-        p.feed(b"streaming some output");
+        p.feed(b"working on it - esc to interrupt");
         assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
@@ -615,8 +633,15 @@ mod tests {
     #[test]
     fn working_when_agent_streams_recent_output() {
         let mut p = test_pane(true);
-        p.feed(b"running tests...");
+        p.feed(b"\xe2\x96\xa0\xe2\x96\xa0\xe2\x96\xa0\xe2\x96\xa0running...");
         assert_eq!(p.agent_status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn idle_when_screen_has_no_working_marker() {
+        let mut p = test_pane(true);
+        p.feed(b"opencode 1.18.15\n~/.opencode\n");
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]
