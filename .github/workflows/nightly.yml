@@ -39,7 +39,7 @@ jobs:
           SHA="${{ github.sha }}"
           claim() {
             local cur
-            cur=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null || true)
+            cur=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null) || cur=""
             if [ -n "$cur" ]; then
               gh api -X PATCH repos/marcrdgz/kumo/git/refs/tags/nightly-last -f sha="$SHA" -f force=true >/dev/null 2>&1 || true
             else
@@ -54,7 +54,7 @@ jobs:
           fi
 
           # Skip if this exact commit was already claimed by a nightly run.
-          CLAIMED=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null || true)
+          CLAIMED=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null) || CLAIMED=""
           if [ -n "$CLAIMED" ] && [ "$CLAIMED" = "$SHA" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "commit $SHA already claimed for a nightly; skipping"
@@ -140,7 +140,7 @@ jobs:
       - name: Only the latest claimed commit publishes
         id: guard
         run: |
-          CLAIMED=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null || true)
+          CLAIMED=$(gh api repos/marcrdgz/kumo/git/ref/tags/nightly-last --jq .object.sha 2>/dev/null) || CLAIMED=""
           if [ "$CLAIMED" = "${{ github.sha }}" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
