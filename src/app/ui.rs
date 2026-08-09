@@ -278,7 +278,7 @@ impl App {
         }
 
         if self.mode == Mode::Leader {
-            let hint = " v: v-split · -: h-split · a: AI · c: new · x: close · z: zoom · h/j/k/l: focus · n/p: session · tab: pane · b: sidebar · d: detach · esc: exit ";
+            let hint = " v: v-split · -: h-split · a: AI · c: new · x: close · z: zoom · h/j/k/l: focus · n/p: session · 1-9: jump · tab: pane · b: sidebar · d: detach · esc: exit ";
             let hint_w = hint.chars().count() as u16;
             let used = start.saturating_add(left_w);
             if hint_w <= area.width.saturating_sub(used) {

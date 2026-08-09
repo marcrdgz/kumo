@@ -403,6 +403,13 @@ impl App {
             KeyCode::Char('d') => self.quit = true, // detach (exit the TUI)
             KeyCode::Char('n') => self.cycle_session(1),
             KeyCode::Char('p') => self.cycle_session(-1),
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                // leader + 1-9 jumps to the session at that list position.
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                if n <= self.sessions.len() {
+                    self.active = n - 1;
+                }
+            }
             KeyCode::Tab => self.cycle_pane(),
             _ => {}
         }

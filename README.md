@@ -98,6 +98,7 @@ During development: `cargo run -p kumo` or `make run`. 🧑‍💻
 | `z` | Zoom pane 🔍 |
 | `h`/`j`/`k`/`l` | Move focus left / down / up / right 🎯 |
 | `n` / `p` | Cycle session next / previous ⏭️ |
+| `1`–`9` | Jump to the session at that sidebar position 🎯 |
 | `Tab` | Cycle pane ↹ |
 | `b` | Toggle sidebar 📌 |
 | `d` | Detach (exit the TUI) 🚪 |
