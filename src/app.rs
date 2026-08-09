@@ -60,8 +60,9 @@ struct Sel {
     end: (u16, u16),
 }
 
-/// A left-click in a mouse-reporting pane, waiting to be resolved as either a
-/// click (forwarded to the app) or the start of a text drag (selection).
+/// A left press in a mouse-reporting pane. The pane owns the mouse: kumo
+/// forwards the whole gesture (press on down, drags, release on up) to it so
+/// the app can do its own text selection.
 #[derive(Clone, Copy)]
 struct PendingClick {
     pane_id: u64,
@@ -467,10 +468,15 @@ impl App {
                         .map(|p| p.has_mouse_reporting())
                         .unwrap_or(false);
                     if reporting {
-                        // Hold the press until it resolves as a click (sent to
-                        // the app on release) or a drag (kumo text selection),
-                        // so drag-select works even when the app owns the mouse.
+                        // The pane owns the mouse: forward the full gesture to
+                        // it (press now, drags while held, release on up) so the
+                        // app can do its own text selection instead of kumo
+                        // drawing a grid selection over its cells. Mirrors herdr.
                         self.pending_click = Some(PendingClick { pane_id: pg.pane_id, col, row });
+                        let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
+                        if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
+                            pane.write(&sgr_mouse(b, col + 1, row + 1, false));
+                        }
                     } else {
                         self.sel = Some(Sel {
                             pane_id: pg.pane_id,
@@ -518,41 +524,31 @@ impl App {
                     }
                     return Ok(());
                 }
-                // A press that moves enough becomes a selection instead of a click.
+                // A press in a mouse-reporting pane forwards its drags to the
+                // pane so the app (e.g. opencode) does its own text selection.
                 if let Some(pc) = self.pending_click {
-                    let crossed = self
+                    let pos = self
                         .pane_at(x, y)
                         .filter(|pg| pg.pane_id == pc.pane_id)
                         .map(|pg| {
                             let i = pg.inner();
-                            let c = x.saturating_sub(i.x);
-                            let r = y.saturating_sub(i.y);
-                            c.abs_diff(pc.col) >= 2 || r.abs_diff(pc.row) >= 2
+                            let c = x.saturating_sub(i.x).min(i.width.saturating_sub(1));
+                            let r = y.saturating_sub(i.y).min(i.height.saturating_sub(1));
+                            (c + 1, r + 1)
                         })
-                        .unwrap_or(false);
-                    if crossed {
-                        let start = (pc.col, pc.row);
-                        let end = self
-                            .pane_at(x, y)
-                            .map(|pg| {
-                                let i = pg.inner();
-                                let c = x.saturating_sub(i.x).min(i.width.saturating_sub(1));
-                                let r = y.saturating_sub(i.y).min(i.height.saturating_sub(1));
-                                (c, r)
-                            })
-                            .unwrap_or(start);
-                        self.pending_click = None;
-                        self.sel = Some(Sel { pane_id: pc.pane_id, start, end });
-                        if let Some(pane) = self.panes.get_mut(&pc.pane_id) {
-                            pane.set_selection(start, end);
-                        }
+                        .unwrap_or((pc.col + 1, pc.row + 1));
+                    let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
+                    if let Some(pane) = self.panes.get_mut(&pc.pane_id) {
+                        pane.write(&sgr_mouse(b + 32, pos.0, pos.1, false));
                     }
+                    return Ok(());
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.drag = None;
                 if let Some(pc) = self.pending_click.take() {
-                    // It was a click: deliver press+release to the app.
+                    // Release the forwarded gesture back to the app; the press
+                    // was already delivered on mouse-down.
                     let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
                     let up = self
                         .pane_at(x, y)
@@ -563,7 +559,6 @@ impl App {
                         })
                         .unwrap_or((pc.col + 1, pc.row + 1));
                     if let Some(pane) = self.panes.get_mut(&pc.pane_id) {
-                        pane.write(&sgr_mouse(b, pc.col + 1, pc.row + 1, false));
                         pane.write(&sgr_mouse(b, up.0, up.1, true));
                     }
                 } else if let Some(sel) = self.sel.take() {
@@ -591,6 +586,21 @@ impl App {
                             pane.write(if up { b"\x1b[A" } else { b"\x1b[B" });
                         } else {
                             pane.scroll(if up { -3 } else { 3 });
+                        }
+                    }
+                }
+            }
+            MouseEventKind::Moved => {
+                // Forward mouse motion to panes that requested any-motion
+                // reporting (mode 1003), so apps like opencode can highlight
+                // the message under the cursor on hover.
+                if let Some(pg) = self.pane_at(x, y) {
+                    if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
+                        if pane.has_mouse_reporting() {
+                            let inner = pg.inner();
+                            let col = x.saturating_sub(inner.x) + 1;
+                            let row = y.saturating_sub(inner.y) + 1;
+                            pane.write(&sgr_mouse(35, col, row, false));
                         }
                     }
                 }

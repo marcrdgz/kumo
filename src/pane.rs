@@ -825,7 +825,8 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]
-    fn opencode_raw_output_renders_without_losing_rows() {        let raw = match std::fs::read("/tmp/oc_msg.raw") {
+    fn opencode_raw_output_renders_without_losing_rows() {
+        let raw = match std::fs::read("/tmp/oc_msg.raw") {
             Ok(d) => d,
             Err(_) => return, // captured fixture not present
         };
@@ -1013,5 +1014,24 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         let snap = snap.expect("ps should run on this platform");
         assert!(!snap.children.is_empty());
         assert!(!snap.names.is_empty());
+    }
+
+    #[test]
+    fn opencode_pane_reports_mouse_tracking() {
+        let raw = match std::fs::read("/tmp/oc_msg.raw") {
+            Ok(d) => d,
+            Err(_) => return, // captured fixture not present
+        };
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        for chunk in raw.chunks(256) {
+            p.feed(chunk);
+            p.render_dirty(area, true, &mut buf);
+        }
+        assert!(p.has_mouse_reporting(), "opencode should enable mouse tracking");
+        // Motion event encoding must be valid SGR.
+        let motion = sgr_mouse(35, 5, 3, false);
+        assert!(motion.starts_with(b"\x1b[<35;5;3M"));
     }
 }
