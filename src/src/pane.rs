@@ -59,6 +59,15 @@ pub struct Pane {
     /// Stripper state, kept across chunks so escapes split at chunk edges are
     /// still removed.
     stripper: TextStripper,
+    /// Whether the viewport changed since the last render (output, selection,
+    /// scroll, resize). Lets the frame loop skip re-rendering unchanged panes.
+    pub dirty: bool,
+    /// Current text of each viewport row, maintained during dirty renders and
+    /// used for agent-state detection (no extra render-state scan).
+    screen_rows: Vec<String>,
+    /// Viewport position where the terminal cursor was last drawn, so the
+    /// previous cursor cell can be cleared on a row-level render.
+    last_cursor: Option<(u16, u16)>,
     /// Answers terminal capability probes as a plain xterm (no mouse caps).
     xtgettcap: XtgettcapTracker,
 }
@@ -95,8 +104,8 @@ const BLOCKED_MARKERS: &[&str] = &[
     "would you like to",
 ];
 /// Markers, scanned against the current screen text, that indicate the agent
-/// is actively working. Idle is the fallback when none match (the herdr
-/// manifest approach, instead of an output-recently window).
+/// is actively working. Idle is the fallback when none match (manifest-based
+/// detection instead of an output-recently window).
 const WORKING_MARKERS: &[&str] = &[
     "esc to interrupt",
     "esc again to interrupt",
@@ -249,6 +258,9 @@ impl Pane {
             last_output: Instant::now(),
             recent_text: Vec::with_capacity(256),
             stripper: TextStripper::new(),
+            dirty: true,
+            screen_rows: Vec::new(),
+            last_cursor: None,
             xtgettcap: XtgettcapTracker::new(),
         };
 
@@ -268,6 +280,7 @@ impl Pane {
     pub fn feed(&mut self, data: &[u8]) {
         if !data.is_empty() {
             self.last_output = Instant::now();
+            self.dirty = true;
             self.stripper.feed(data, &mut self.recent_text);
             if self.recent_text.len() > RECENT_TEXT_BYTES {
                 let drop = self.recent_text.len() - RECENT_TEXT_BYTES;
@@ -281,32 +294,6 @@ impl Pane {
             }
         }
         self.vt.write(data);
-    }
-
-    /// Agent lifecycle state, derived from the terminal's current screen
-    /// content (like herdr's manifests): Blocked/Working win via distinctive
-    /// markers, Idle is the fallback.
-    pub fn agent_status(&mut self) -> AgentStatus {
-        if self.dead {
-            return AgentStatus::Idle;
-        }
-        let screen = self.vt.screen_text();
-        let lower = screen.to_lowercase();
-        if BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
-            return AgentStatus::Blocked;
-        }
-        if WORKING_MARKERS.iter().any(|m| lower.contains(m)) {
-            return AgentStatus::Working;
-        }
-        // opencode's knight-rider status bar: 4+ block cells in a row.
-        if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| screen.contains(p)) {
-            return AgentStatus::Working;
-        }
-        // Braille spinner (tool call / thinking) visible on screen.
-        if screen.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
-            return AgentStatus::Working;
-        }
-        AgentStatus::Idle
     }
 
     /// Whether this pane counts as an AI CLI pane: either spawned as one, or
@@ -337,6 +324,7 @@ impl Pane {
             return;
         }
         self.vt.resize(cols, rows);
+        self.dirty = true;
         let _ = self.pty.master.resize(PtySize {
             rows,
             cols,
@@ -351,6 +339,7 @@ impl Pane {
 
     pub fn scroll(&mut self, delta: i32) {
         self.vt.scroll(delta);
+        self.dirty = true;
     }
 
     pub fn has_mouse_reporting(&self) -> bool {
@@ -367,30 +356,72 @@ impl Pane {
         self.vt.scrollbar()
     }
 
-    /// Render the emulator viewport into `buf` at `area`. If `cursor`, draw the
-    /// terminal cursor as an inverted cell.
-    pub fn render(&mut self, area: Rect, focused: bool, buf: &mut Buffer) {
+    /// Re-render only the rows that changed since the last frame into `cache`
+    /// (the pane's retained viewport buffer), skipping clean rows via the
+    /// render-state dirty patch. Maintains `screen_rows` for agent-state
+    /// detection. Returns the agent status when this is an AI CLI pane.
+    pub fn render_dirty(
+        &mut self,
+        area: Rect,
+        focused: bool,
+        cache: &mut Buffer,
+    ) -> Option<AgentStatus> {
         let area_x = area.x;
         let area_y = area.y;
         let aw = area.width as i32;
         let ah = area.height as i32;
 
         self.vt.refresh();
+        let level = self.vt.render_dirty_level();
         let fg = rgb(self.vt.default_fg());
         let bg = rgb(self.vt.default_bg());
+        let full = level == vt::DIRTY_FULL;
 
-        // Prefill with the default background color.
-        for y in area_y..(area_y + area.height) {
+        let mut dirty: HashSet<usize> = if full {
+            (0..ah.max(0) as usize).collect()
+        } else {
+            self.vt.dirty_rows().into_iter().collect()
+        };
+
+        // Always re-render the cursor's row and the previous cursor's row so
+        // the inverted cursor is drawn/cleared even on an otherwise clean row.
+        if focused && self.vt.cursor_visible() {
+            if let Some((_, cy)) = self.vt.cursor_pos() {
+                dirty.insert(cy as usize);
+            }
+        }
+        if let Some((_, oy)) = self.last_cursor {
+            dirty.insert(oy as usize);
+        }
+        self.last_cursor = if focused && self.vt.cursor_visible() {
+            self.vt.cursor_pos()
+        } else {
+            None
+        };
+
+        // Reset dirty rows to the default background, then apply populated
+        // cells so content that disappeared this frame is cleared.
+        for y in dirty.iter().copied() {
+            let yy = area_y + y as u16;
+            if yy >= area_y + area.height {
+                continue;
+            }
             for x in area_x..(area_x + area.width) {
-                buf.cell_mut((x, y)).unwrap().set_char(' ').set_fg(fg).set_bg(bg);
+                if let Some(c) = cache.cell_mut((x, yy)) {
+                    c.set_char(' ').set_fg(fg).set_bg(bg);
+                    c.modifier = Modifier::empty();
+                }
             }
         }
 
-        self.vt.for_each_cell(|row, col, rc, selected| {
+        self.vt.for_each_cell(|row, col, rc, selected, row_dirty| {
+            if !full && !row_dirty && !dirty.contains(&row) {
+                return;
+            }
             if row >= ah as usize || col >= aw as usize {
                 return;
             }
-            let bcell = buf.cell_mut((area_x + col as u16, area_y + row as u16)).unwrap();
+            let bcell = cache.cell_mut((area_x + col as u16, area_y + row as u16)).unwrap();
             let mut mods = Modifier::empty();
             if rc.bold {
                 mods |= Modifier::BOLD;
@@ -424,24 +455,94 @@ impl Pane {
                 let x = area_x + cx;
                 let y = area_y + cy;
                 if x < area_x + area.width && y < area_y + area.height {
-                    let bcell = buf.cell_mut((x, y)).unwrap();
-                    let f = bcell.fg;
-                    let b = bcell.bg;
-                    bcell.set_fg(b).set_bg(f);
-                    bcell.modifier = Modifier::REVERSED;
+                    if let Some(bcell) = cache.cell_mut((x, y)) {
+                        let f = bcell.fg;
+                        let b = bcell.bg;
+                        bcell.set_fg(b).set_bg(f);
+                        bcell.modifier = Modifier::REVERSED;
+                    }
                 }
             }
         }
+
+        self.update_screen_rows(area, cache, &dirty);
+
+        self.vt.clear_dirty();
+        self.dirty = false;
+
+        if self.is_ai_cli() {
+            Some(self.compute_agent_status())
+        } else {
+            None
+        }
+    }
+
+    /// Rebuild the text of the given rows from `cache`, for agent detection.
+    fn update_screen_rows(&mut self, area: Rect, cache: &Buffer, dirty: &HashSet<usize>) {
+        let rows = area.height as usize;
+        if self.screen_rows.len() < rows {
+            self.screen_rows.resize(rows, String::new());
+        }
+        for &y in dirty {
+            if y >= rows {
+                continue;
+            }
+            let mut line = String::new();
+            for x in area.x..(area.x + area.width) {
+                if let Some(cell) = cache.cell((x, area.y + y as u16)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            self.screen_rows[y] = line.trim_end().to_string();
+        }
+    }
+
+    /// Agent lifecycle state, derived from the pane's screen rows: Blocked/
+    /// Working win via distinctive markers, Idle is the fallback.
+    pub fn agent_status(&self) -> AgentStatus {
+        self.compute_agent_status()
+    }
+
+    fn compute_agent_status(&self) -> AgentStatus {
+        if self.dead {
+            return AgentStatus::Idle;
+        }
+        let mut screen = String::new();
+        for line in &self.screen_rows {
+            screen.push_str(line);
+            screen.push('\n');
+        }
+        let lower = screen.to_lowercase();
+        if BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
+            return AgentStatus::Blocked;
+        }
+        if WORKING_MARKERS.iter().any(|m| lower.contains(m)) {
+            return AgentStatus::Working;
+        }
+        // opencode's knight-rider status bar: 4+ block cells in a row.
+        if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| screen.contains(p)) {
+            return AgentStatus::Working;
+        }
+        // Braille spinner (tool call / thinking) visible on screen.
+        if screen.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
+            return AgentStatus::Working;
+        }
+        AgentStatus::Idle
     }
 
     /// Install the terminal's active selection from two viewport coordinates.
     pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
-        self.vt.set_selection(start, end)
+        let ok = self.vt.set_selection(start, end);
+        if ok {
+            self.dirty = true;
+        }
+        ok
     }
 
     /// Clear the terminal's active selection.
     pub fn clear_selection(&mut self) {
         self.vt.clear_selection();
+        self.dirty = true;
     }
 
     /// Extract the terminal's active selection as plain text (unwrap + trim).
@@ -546,6 +647,8 @@ impl ProcessSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use std::sync::mpsc;
 
     fn test_pane(is_ai: bool) -> Pane {
@@ -564,11 +667,20 @@ mod tests {
         .unwrap()
     }
 
+    /// Feed already happened; render the pane once so `screen_rows` (the
+    /// agent-status source) reflects the fed output.
+    fn render_pane(p: &mut Pane) {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.render_dirty(area, true, &mut buf);
+    }
+
     #[test]
     fn working_after_recent_output() {
         let mut p = test_pane(true);
         p.feed(b"working on it - esc to interrupt");
-        assert_eq!(p.agent_status(), AgentStatus::Working);
+        render_pane(&mut p);
+assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
@@ -576,6 +688,7 @@ mod tests {
         let mut p = test_pane(true);
         p.feed(b"finished the task");
         p.last_output = Instant::now() - Duration::from_secs(10);
+        render_pane(&mut p);
         assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
@@ -584,6 +697,7 @@ mod tests {
         let mut p = test_pane(true);
         p.feed(b"Do you want to proceed with this command? (y/n)");
         p.last_output = Instant::now() - Duration::from_secs(10);
+        render_pane(&mut p);
         assert_eq!(p.agent_status(), AgentStatus::Blocked);
     }
 
@@ -591,7 +705,8 @@ mod tests {
     fn blocked_while_spinner_keeps_repainting() {
         let mut p = test_pane(true);
         p.feed(b"\x1b[0m\xe2\x96\xb3 Permission required\nAllow once\nAllow always\nReject");
-        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+        render_pane(&mut p);
+assert_eq!(p.agent_status(), AgentStatus::Blocked);
     }
 
     #[test]
@@ -601,7 +716,8 @@ mod tests {
         // contain the contiguous marker text.
         p.feed(b"\x1b[38;2;255;100;100mPermission\x1b[0m required\n");
         p.feed(b"\x1b[1mAllow\x1b[22m once\n");
-        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+        render_pane(&mut p);
+assert_eq!(p.agent_status(), AgentStatus::Blocked);
     }
 
     #[test]
@@ -633,14 +749,16 @@ mod tests {
     fn working_when_agent_streams_recent_output() {
         let mut p = test_pane(true);
         p.feed(b"\xe2\x96\xa0\xe2\x96\xa0\xe2\x96\xa0\xe2\x96\xa0running...");
-        assert_eq!(p.agent_status(), AgentStatus::Working);
+        render_pane(&mut p);
+assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
     fn idle_when_screen_has_no_working_marker() {
         let mut p = test_pane(true);
         p.feed(b"opencode 1.18.15\n~/.opencode\n");
-        assert_eq!(p.agent_status(), AgentStatus::Idle);
+        render_pane(&mut p);
+assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]

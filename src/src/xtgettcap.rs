@@ -4,8 +4,7 @@
 //! as a plain xterm, vouching only for non-mouse capabilities. Clients like
 //! vim, less, tmux, and opencode probe for mouse support (`XM`, `kmous`)
 //! before enabling mouse reporting; omitting those keeps the emulator out of
-//! mouse-tracking mode so kumo's own text selection always works. This is the
-//! same identity trick herdr uses on top of libghostty-vt.
+//! mouse-tracking mode so kumo's own text selection always works.
 
 /// Parse `DCS + q` queries (statefully, across chunk boundaries) and queue
 /// one `DCS + r` reply per supported capability.

@@ -8,6 +8,7 @@ use anyhow::Result;
 use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use kumo_core::pty::Pty;
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -33,8 +34,6 @@ const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
 const BRANCH_REFRESH: Duration = Duration::from_secs(3);
 /// How often to re-scan pane process trees for an AI CLI (opencode/claude).
 const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
-/// How often to recompute AI pane agent status from the terminal screen.
-const AGENT_STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 struct Session {
     id: u64,
@@ -115,10 +114,13 @@ pub struct App {
     last_ai_scan: Instant,
     /// When the agent-status debug log was last written (throttle).
     last_agent_debug: Instant,
-    /// When pane agent statuses were last recomputed from the terminal screen.
-    last_agent_status: Instant,
-    /// Cached agent status per AI pane, refreshed every `AGENT_STATUS_INTERVAL`.
+    /// Cached agent status per AI pane, refreshed during pane rendering.
     agent_status_cache: HashMap<u64, AgentStatus>,
+    /// Previously focused pane, so focus changes re-render the two panes (cursor).
+    last_focused: Option<u64>,
+    /// Rendered cells of each pane's viewport, blitted back when the pane is
+    /// unchanged so the frame loop never re-iterates unchanged terminals.
+    pane_cache: HashMap<u64, Buffer>,
     quit: bool,
 }
 
@@ -186,8 +188,9 @@ impl App {
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
             last_agent_debug: Instant::now(),
-            last_agent_status: Instant::now(),
             agent_status_cache: HashMap::new(),
+            last_focused: None,
+            pane_cache: HashMap::new(),
             quit: false,
         };
         app.new_session()?;
@@ -270,6 +273,7 @@ impl App {
             pane.pty.kill();
         }
         self.last_sizes.remove(&pid);
+        self.pane_cache.remove(&pid);
 
         let empty = self.sessions[self.active].tree.remove_pane(pid);
         if empty {
@@ -313,6 +317,7 @@ impl App {
             pane.pty.kill();
         }
         self.last_sizes.remove(&pid);
+        self.pane_cache.remove(&pid);
         let empty = self.sessions[idx].tree.remove_pane(pid);
         if empty {
             self.sessions.remove(idx);
@@ -734,20 +739,6 @@ impl App {
         }
     }
 
-    /// Recompute the agent status of every AI pane from its terminal screen,
-    /// at most every `AGENT_STATUS_INTERVAL`.
-    fn refresh_agent_statuses(&mut self) {
-        if self.last_agent_status.elapsed() < AGENT_STATUS_INTERVAL {
-            return;
-        }
-        self.last_agent_status = Instant::now();
-        for (pid, pane) in self.panes.iter_mut() {
-            if pane.is_ai_cli() {
-                self.agent_status_cache.insert(*pid, pane.agent_status());
-            }
-        }
-    }
-
     /// Append the per-pane agent status, output age, and detected CLI to
     /// `/tmp/kumo_agent.log` (throttled to 1/s, capped at 512 KiB). Gated
     /// behind `DEBUG_AGENT=1` so it is inert in production but stays in the
@@ -776,7 +767,7 @@ impl App {
                     "pid={} cli={} status={:?} age_ms={} recent={}",
                     pid,
                     pane.detected_ai_name.as_deref().unwrap_or("?"),
-                    self.agent_status_cache.get(pid).copied().unwrap_or(AgentStatus::Idle),
+                    pane.agent_status(),
                     pane.last_output_age().as_millis(),
                     tail,
                 );
@@ -866,7 +857,6 @@ impl App {
         self.term_size = (size.width, size.height);
         self.refresh_branches();
         self.refresh_ai_cli();
-        self.refresh_agent_statuses();
         self.log_agent_statuses();
         let area = Rect::new(0, 0, size.width, size.height);
         let geom = self.active_geom();
@@ -883,6 +873,19 @@ impl App {
         }
 
         let focused = self.sessions[self.active].tree.focus;
+        // When focus moves, re-render the old and new panes so the cursor
+        // highlight is drawn/cleared even if neither produced output.
+        if self.last_focused != Some(focused) {
+            if let Some(old) = self.last_focused {
+                if let Some(p) = self.panes.get_mut(&old) {
+                    p.dirty = true;
+                }
+            }
+            if let Some(p) = self.panes.get_mut(&focused) {
+                p.dirty = true;
+            }
+            self.last_focused = Some(focused);
+        }
         let geom_ref = &geom;
         terminal.draw(|f| self.render(f, area, geom_ref, focused))?;
         self.place_cursor(terminal, &geom, focused)?;
@@ -890,9 +893,8 @@ impl App {
     }
 
     fn render(&mut self, f: &mut Frame, size: Rect, geom: &TreeGeom, focused: u64) {
-        let panes_area = self.panes_area();
-        fill(f, panes_area, PANEL_BG);
-
+        // Note: no global fill over the pane area, so unchanged (non-dirty)
+        // panes keep the cells ratatui retains from their last render.
         for pg in &geom.panes {
             let title = self.pane_title(pg.pane_id, pg.pane_id == focused);
             self.render_pane_frame(f, pg.rect, pg.pane_id == focused, &title);
@@ -901,7 +903,25 @@ impl App {
             if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
                 let inner = pg.inner();
                 if inner.width > 0 && inner.height > 0 {
-                    pane.render(inner, pg.pane_id == focused, f.buffer_mut());
+                    // Re-render only panes whose content changed, into a cached
+                    // buffer; unchanged panes are blitted back (no FFI scan).
+                    if pane.dirty {
+                        let mut cached = Buffer::empty(inner);
+                        let status = pane.render_dirty(inner, pg.pane_id == focused, &mut cached);
+                        self.pane_cache.insert(pg.pane_id, cached);
+                        if let Some(status) = status {
+                            self.agent_status_cache.insert(pg.pane_id, status);
+                        }
+                    }
+                    if let Some(cached) = self.pane_cache.get(&pg.pane_id) {
+                        let dst = f.buffer_mut();
+                        for (i, src) in cached.content.iter().enumerate() {
+                            let (x, y) = cached.pos_of(i);
+                            if let Some(dst_cell) = dst.cell_mut((x, y)) {
+                                *dst_cell = src.clone();
+                            }
+                        }
+                    }
                     let sb = pane.scrollbar_data();
                     self.render_scrollbar(f, &sb, inner);
                 }

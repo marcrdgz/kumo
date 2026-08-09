@@ -360,6 +360,13 @@ pub const RENDER_DATA_CURSOR_VIEWPORT_X: i32 = 15;
 pub const RENDER_DATA_CURSOR_VIEWPORT_Y: i32 = 16;
 
 pub const RENDER_DATA_ROW_ITERATOR: i32 = 4;
+pub const RENDER_STATE_DATA_DIRTY: i32 = 3;
+pub const RENDER_STATE_OPTION_DIRTY: i32 = 0;
+pub const ROW_DATA_DIRTY: i32 = 1;
+pub const ROW_OPTION_DIRTY: i32 = 0;
+pub const DIRTY_FALSE: i32 = 0;
+pub const DIRTY_PARTIAL: i32 = 1;
+pub const DIRTY_FULL: i32 = 2;
 
 pub const ROW_DATA_CELLS: i32 = 3;
 
@@ -402,6 +409,7 @@ unsafe extern "C" {
     fn ghostty_render_state_free(state: RenderStateHandle);
     fn ghostty_render_state_update(state: RenderStateHandle, terminal: TerminalHandle) -> Result;
     fn ghostty_render_state_get(state: RenderStateHandle, data: i32, out: *mut c_void) -> Result;
+    fn ghostty_render_state_set(state: RenderStateHandle, option: i32, value: *const c_void) -> Result;
     fn ghostty_render_state_row_iterator_new(
         allocator: *const c_void,
         out_iterator: *mut RowIteratorHandle,
@@ -412,6 +420,11 @@ unsafe extern "C" {
         iterator: RowIteratorHandle,
         data: i32,
         out: *mut c_void,
+    ) -> Result;
+    fn ghostty_render_state_row_set(
+        iterator: RowIteratorHandle,
+        option: i32,
+        value: *const c_void,
     ) -> Result;
     fn ghostty_render_state_row_cells_new(
         allocator: *const c_void,
@@ -799,6 +812,60 @@ impl Terminal {
         self.cursor = if has { Some((cx, cy)) } else { None };
     }
 
+    /// Global render-state dirty level (DIRTY_FALSE/PARTIAL/FULL) after a
+    /// `refresh`.
+    pub fn render_dirty_level(&self) -> i32 {
+        let mut d: i32 = 0;
+        unsafe {
+            ghostty_render_state_get(self.render, RENDER_STATE_DATA_DIRTY, &mut d as *mut i32 as *mut c_void);
+        }
+        d
+    }
+
+    /// Indices of the rows that changed since the last render-state update.
+    pub fn dirty_rows(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut iter: RowIteratorHandle = ptr::null_mut();
+            if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
+                return out;
+            }
+            ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
+            let mut row = 0usize;
+            while ghostty_render_state_row_iterator_next(iter) {
+                let mut d: bool = false;
+                ghostty_render_state_row_get(iter, ROW_DATA_DIRTY, &mut d as *mut bool as *mut c_void);
+                if d {
+                    out.push(row);
+                }
+                row += 1;
+            }
+            ghostty_render_state_row_iterator_free(iter);
+        }
+        out
+    }
+
+    /// Reset the per-row dirty flags and the global dirty state to clean, so
+    /// the next `refresh` only reports changes since this point.
+    pub fn clear_dirty(&mut self) {
+        unsafe {
+            let mut iter: RowIteratorHandle = ptr::null_mut();
+            if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
+                return;
+            }
+            ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
+            let clear: bool = false;
+            while ghostty_render_state_row_iterator_next(iter) {
+                ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
+            }
+            ghostty_render_state_row_iterator_free(iter);
+        }
+        let clean: i32 = DIRTY_FALSE;
+        unsafe {
+            ghostty_render_state_set(self.render, RENDER_STATE_OPTION_DIRTY, &clean as *const i32 as *const c_void);
+        }
+    }
+
     /// Viewport-relative cursor position from the last `refresh`.
     pub fn cursor_pos(&self) -> Option<(u16, u16)> {
         self.cursor
@@ -810,7 +877,7 @@ impl Terminal {
         use std::collections::HashMap;
         self.refresh();
         let mut cells: HashMap<usize, Vec<(usize, char)>> = HashMap::new();
-        self.for_each_cell(|row, col, rc, _selected| {
+        self.for_each_cell(|row, col, rc, _selected, _row_dirty| {
             let ch = rc.text.chars().next().unwrap_or(' ');
             cells.entry(row).or_default().push((col, ch));
         });
@@ -847,12 +914,12 @@ impl Terminal {
 
     /// Iterate every populated cell of the current viewport.
     ///
-    /// `f` is called with `(viewport_row, viewport_col, &RenderCell, selected)`
-    /// for each cell that either has text or carries an explicit background
-    /// (so wide character tails and full-width highlights keep their
-    /// background). `selected` is true when the cell is inside the terminal's
-    /// active selection (per the emulator's own text-aware ranges).
-    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell, bool)) {
+    /// `f` is called with `(viewport_row, viewport_col, &RenderCell, selected,
+    /// row_dirty)` for each cell that either has text or carries an explicit
+    /// background. `selected` is true inside the terminal's active selection;
+    /// `row_dirty` is true when the row changed since the last render-state
+    /// update.
+    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell, bool, bool)) {
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -868,6 +935,8 @@ impl Terminal {
 
             let mut row_idx: usize = 0;
             while ghostty_render_state_row_iterator_next(iter) {
+                let mut row_dirty: bool = false;
+                ghostty_render_state_row_get(iter, ROW_DATA_DIRTY, &mut row_dirty as *mut bool as *mut c_void);
                 // Row-local selection range (inclusive), if this row intersects.
                 let mut row_sel = RenderStateRowSelection {
                     size: size_of::<RenderStateRowSelection>(),
@@ -888,7 +957,7 @@ impl Terminal {
                         let selected = sel_ok
                             && col_idx >= row_sel.start_x as usize
                             && col_idx <= row_sel.end_x as usize;
-                        f(row_idx, col_idx, &rc, selected);
+                        f(row_idx, col_idx, &rc, selected, row_dirty);
                     }
                     col_idx += 1;
                 }
@@ -903,24 +972,26 @@ impl Terminal {
     /// Read the render-state cell the `cells` iterator currently points at.
     fn read_cell(&mut self, cells: RowCellsHandle) -> Option<RenderCell> {
         unsafe {
-            // Query the UTF-8 size for the cell's grapheme cluster.
-            let mut buf = Buffer { ptr: ptr::null_mut(), cap: 0, len: 0 };
-            ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut buf as *mut Buffer as *mut c_void);
-
-            let mut text = String::new();
-            let has_text = buf.len > 0;
-            if has_text {
-                self.scratch.clear();
-                self.scratch.resize(buf.len, 0);
-                let mut buf = Buffer {
-                    ptr: self.scratch.as_mut_ptr(),
-                    cap: self.scratch.len(),
-                    len: 0,
-                };
-                if ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut buf as *mut Buffer as *mut c_void).is_ok() {
-                    text = String::from_utf8_lossy(&self.scratch[..buf.len]).into_owned();
-                }
+            // Read the cell's grapheme cluster with a reusable scratch buffer,
+            // growing it only when a cell holds more text than fits (so the
+            // common single-codepoint case needs one FFI call, not two).
+            let mut out = Buffer { ptr: self.scratch.as_mut_ptr(), cap: self.scratch.len(), len: 0 };
+            let mut res =
+                ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut out as *mut Buffer as *mut c_void);
+            if res == Result::OutOfSpace {
+                self.scratch.resize(out.len, 0);
+                out.ptr = self.scratch.as_mut_ptr();
+                out.cap = self.scratch.len();
+                out.len = 0;
+                res =
+                    ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut out as *mut Buffer as *mut c_void);
             }
+            let has_text = res.is_ok() && out.len > 0;
+            let text = if has_text {
+                String::from_utf8_lossy(&self.scratch[..out.len]).into_owned()
+            } else {
+                String::new()
+            };
 
             let mut style = Style::new();
             ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_STYLE, &mut style as *mut Style as *mut c_void);
@@ -970,7 +1041,7 @@ mod tests {
 
     fn collect(t: &mut Terminal) -> Vec<(usize, usize, String)> {
         let mut out = Vec::new();
-        t.for_each_cell(|r, c, rc, _selected| {
+        t.for_each_cell(|r, c, rc, _selected, _row_dirty| {
             if !rc.text.is_empty() {
                 out.push((r, c, rc.text.clone()));
             }
@@ -1046,7 +1117,7 @@ mod tests {
         assert!(t.set_selection((0, 0), (4, 0)), "set_selection should succeed");
         t.refresh();
         let mut selected = Vec::new();
-        t.for_each_cell(|r, c, rc, s| {
+        t.for_each_cell(|r, c, rc, s, _row_dirty| {
             if s {
                 selected.push((r, c, rc.text.clone()));
             }
@@ -1058,7 +1129,7 @@ mod tests {
         t.clear_selection();
         t.refresh();
         let mut after = 0usize;
-        t.for_each_cell(|_, _, _, s| {
+        t.for_each_cell(|_, _, _, s, _row_dirty| {
             if s {
                 after += 1;
             }
