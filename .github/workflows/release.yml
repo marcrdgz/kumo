@@ -135,6 +135,11 @@ jobs:
         uses: "mlugg/setup-zig@v2"
         with:
           "version": "0.15.2"
+      - name: "Cache Zig"
+        uses: "actions/cache@v4"
+        with:
+          "key": "zig-${{ runner.os }}-${{ join(matrix.targets, '-') }}-${{ hashFiles('vendor/libghostty-vt/build.zig.zon', 'vendor/libghostty-vt/VERSION') }}"
+          "path": "vendor/libghostty-vt/.zig-cache"
       - uses: swatinem/rust-cache@v2
         with:
           key: ${{ join(matrix.targets, '-') }}

@@ -78,7 +78,8 @@ release pipeline:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/marcrdgz/kumo/releases/latest/download/kumo-installer.sh | sh
 ```
 
-**Nightly** — rolling build of `main`:
+**Nightly** — rolling build of `main` (macOS ARM + Linux x86_64; the full
+target matrix can be built on demand via a manual workflow dispatch):
 
 ```sh
 kumo update --nightly

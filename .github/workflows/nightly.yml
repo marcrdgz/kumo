@@ -3,6 +3,10 @@
 # `main`, but only actually generates a nightly when at least 24 hours have
 # passed since the last one. `kumo update --nightly` consumes it.
 #
+# By default only macOS ARM and Linux x86_64 are built to keep the CI cost low;
+# the full target matrix can be requested manually via `workflow_dispatch` with
+# the `full-matrix` input.
+#
 # A durable marker tag `nightly-last` records the commit claimed by the most
 # recent nightly run. `prepare` skips commits already claimed, and `publish`
 # only publishes when this run still holds the latest claim -- so a push that
@@ -16,6 +20,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      full-matrix:
+        description: Build all targets instead of the default two
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -77,24 +86,28 @@ jobs:
           claim
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-  build:
+  config:
     needs: prepare
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full-matrix }}" = "true" ]; then
+            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2022"}]}'
+          else
+            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"}]}'
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [prepare, config]
     if: ${{ needs.prepare.outputs.skip != 'true' }}
     name: build (${{ matrix.target }})
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-14
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2022
+      matrix: ${{ fromJson(needs.config.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - name: enable windows longpaths
@@ -107,6 +120,11 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: vendor/libghostty-vt/.zig-cache
+          key: zig-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('vendor/libghostty-vt/build.zig.zon', 'vendor/libghostty-vt/VERSION') }}
       - name: Install dist
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
       - uses: swatinem/rust-cache@v2
