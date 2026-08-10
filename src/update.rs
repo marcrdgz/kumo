@@ -1,7 +1,8 @@
 //! Self-update support.
 //!
-//! Version detection is done through the `gh` CLI (GitHub CLI), which the
-//! release pipeline publishes against. The stable channel installs through
+//! Version detection talks to the public GitHub REST API over plain HTTPS
+//! (the repo is public, so no authentication is needed), while downloads use
+//! the release assets' direct URLs. The stable channel installs through
 //! cargo-dist's generated `installer.sh` / `installer.ps1` (which verify the
 //! artifact checksum and handle the platform-specific install path), while the
 //! nightly channel downloads the archive directly and swaps the binary.
@@ -10,15 +11,14 @@
 //! never hits the GitHub API on every launch.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config;
 
-pub const REPO: &str = "marcrdgz/kumo";
 pub const APP: &str = "kumo";
 const STABLE_TTL: u64 = 24 * 3600;
 const NIGHTLY_TTL: u64 = 6 * 3600;
@@ -112,33 +112,37 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-// ----- gh helpers -----
+// ----- http helpers -----
 
-pub fn gh_available() -> bool {
-    Command::new("gh")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+const API_BASE: &str = "https://api.github.com/repos/marcrdgz/kumo";
+
+fn http_get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
+    ureq::get(url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(120)))
+        .user_agent(format!("kumo/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .call()
+        .context(format!("request failed: {url}"))
 }
 
-fn gh(args: &[&str]) -> Result<String> {
-    let out = Command::new("gh")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to spawn `gh` (install the GitHub CLI and run `gh auth login`)")?;
-    if !out.status.success() {
-        bail!(
-            "gh {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+fn http_get_string(url: &str) -> Result<String> {
+    let mut resp = http_get(url)?;
+    resp.body_mut().read_to_string().context("failed to read the response body")
+}
+
+fn http_get_json(url: &str) -> Result<serde_json::Value> {
+    let body = http_get_string(url)?;
+    serde_json::from_str(&body).context("invalid JSON from the GitHub API")
+}
+
+/// Stream `url` into `dest`.
+fn download(url: &str, dest: &Path) -> Result<()> {
+    let resp = http_get(url)?;
+    let mut reader = resp.into_body().into_reader();
+    let mut file = std::fs::File::create(dest).context("failed to create the download file")?;
+    std::io::copy(&mut reader, &mut file).context("failed to write the download")?;
+    Ok(())
 }
 
 // ----- version helpers -----
@@ -187,33 +191,36 @@ fn target_triple() -> String {
 // ----- release resolution -----
 
 pub fn resolve_latest(nightly: bool) -> Result<Latest> {
-    if nightly {
-        let out = gh(&[
-            "release", "view", "nightly", "--repo", REPO, "--json", "tagName,createdAt", "--jq",
-            ".tagName + \" \" + .createdAt",
-        ])?;
-        let mut it = out.splitn(2, ' ');
-        let tag = it.next().unwrap_or("nightly").to_string();
-        let created_at = it.next().map(|s| s.to_string());
-        Ok(Latest { tag: tag.clone(), version: parse_version_from_tag(&tag), created_at })
+    let url = if nightly {
+        format!("{API_BASE}/releases/tags/nightly")
     } else {
-        let tag = gh(&["release", "view", "--repo", REPO, "--json", "tagName", "--jq", ".tagName"])?;
-        Ok(Latest { tag: tag.clone(), version: parse_version_from_tag(&tag), created_at: None })
-    }
+        format!("{API_BASE}/releases/latest")
+    };
+    parse_release(&http_get_json(&url)?)
 }
 
 fn resolve_tag(tag: &str) -> Result<Latest> {
-    let out = gh(&[
-        "release", "view", tag, "--repo", REPO, "--json", "tagName,createdAt", "--jq",
-        ".tagName + \" \" + .createdAt",
-    ])?;
-    let mut it = out.splitn(2, ' ');
-    let resolved = it.next().unwrap_or(tag).to_string();
-    Ok(Latest {
-        tag: resolved.clone(),
-        version: parse_version_from_tag(&resolved),
-        created_at: it.next().map(|s| s.to_string()),
-    })
+    parse_release(&http_get_json(&format!("{API_BASE}/releases/tags/{tag}"))?)
+}
+
+fn parse_release(json: &serde_json::Value) -> Result<Latest> {
+    let tag = json["tag_name"].as_str().context("release missing tag_name")?.to_string();
+    let created_at = json["created_at"].as_str().map(|s| s.to_string());
+    Ok(Latest { tag: tag.clone(), version: parse_version_from_tag(&tag), created_at })
+}
+
+/// The (name, download URL) asset list of a release.
+fn release_assets(tag: &str) -> Result<Vec<(String, String)>> {
+    let json = http_get_json(&format!("{API_BASE}/releases/tags/{tag}"))?;
+    let assets = json["assets"].as_array().context("release has no assets array")?;
+    Ok(assets
+        .iter()
+        .filter_map(|a| {
+            let name = a["name"].as_str()?;
+            let url = a["browser_download_url"].as_str()?;
+            Some((name.to_string(), url.to_string()))
+        })
+        .collect())
 }
 
 fn is_update_needed(channel: Channel, latest: &Latest, force: bool) -> bool {
@@ -246,18 +253,14 @@ fn remove_dir(path: &Path) {
 }
 
 fn install_stable(latest: &Latest) -> Result<()> {
-    let assets =
-        gh(&["release", "view", &latest.tag, "--repo", REPO, "--json", "assets", "--jq", ".assets[].name"])?;
-    let installer = assets
-        .lines()
-        .find(|n| n.ends_with("-installer.sh") || n.ends_with("-installer.ps1"))
+    let assets = release_assets(&latest.tag)?;
+    let (installer, url) = assets
+        .iter()
+        .find(|(n, _)| n.ends_with("-installer.sh") || n.ends_with("-installer.ps1"))
         .context("no cargo-dist installer found on the release")?;
     let dir = temp_dir()?;
-    gh(&[
-        "release", "download", &latest.tag, "--repo", REPO, "--pattern", installer, "--dir",
-        dir.to_str().unwrap(),
-    ])?;
     let script = dir.join(installer);
+    download(url, &script)?;
     let status = if cfg!(windows) {
         Command::new("powershell")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -277,14 +280,14 @@ fn install_stable(latest: &Latest) -> Result<()> {
 fn install_nightly(latest: &Latest) -> Result<()> {
     let dir = temp_dir()?;
     let pattern = format!("{APP}-{}.tar.xz", target_triple());
-    gh(&[
-        "release", "download", &latest.tag, "--repo", REPO, "--pattern", &pattern, "--dir",
-        dir.to_str().unwrap(),
-    ])?;
+    let assets = release_assets(&latest.tag)?;
+    let url = assets
+        .iter()
+        .find(|(n, _)| n == &pattern)
+        .map(|(_, url)| url)
+        .context(format!("expected archive {pattern} not found on the release"))?;
     let archive = dir.join(&pattern);
-    if !archive.is_file() {
-        bail!("expected archive {} not found", archive.display());
-    }
+    download(url, &archive)?;
     let extract = dir.join("extract");
     std::fs::create_dir_all(&extract)?;
     let ok = Command::new("tar")
@@ -357,9 +360,6 @@ pub fn parse_args(args: &[String]) -> Result<UpdateOpts> {
 }
 
 pub fn update(opts: &UpdateOpts) -> Result<Outcome> {
-    if !gh_available() {
-        bail!("`gh` is required to update kumo (install the GitHub CLI and run `gh auth login`)");
-    }
     let channel = if opts.nightly { Channel::Nightly } else { Channel::Stable };
     let latest = match &opts.tag {
         Some(tag) => resolve_tag(tag)?,
@@ -417,7 +417,7 @@ fn dismiss_key(channel: Channel, latest: &Latest) -> String {
 }
 
 /// Best-effort check with a TTL cache. Never blocks or fails hard: callers must
-/// tolerate `None` (no gh, network down, or nothing cached yet).
+/// tolerate `None` (network down, GitHub API unavailable, or nothing cached yet).
 fn check_latest_cached(nightly: bool) -> Option<Latest> {
     let mut cache = read_cache();
     let ttl = if nightly { NIGHTLY_TTL } else { STABLE_TTL };
@@ -490,6 +490,18 @@ mod tests {
         assert_eq!(parse_version_from_tag("v1.0.0-rc.1").unwrap(), semver::Version::parse("1.0.0-rc.1").unwrap());
         assert_eq!(parse_version_from_tag("kumo-v0.2.0").unwrap(), semver::Version::parse("0.2.0").unwrap());
         assert_eq!(parse_version_from_tag("1.0.0").unwrap(), semver::Version::parse("1.0.0").unwrap());
+    }
+
+    #[test]
+    fn parses_release_json() {
+        let json: serde_json::Value = serde_json::json!({
+            "tag_name": "v0.2.0",
+            "created_at": "2026-08-10T00:00:00Z",
+        });
+        let latest = parse_release(&json).unwrap();
+        assert_eq!(latest.tag, "v0.2.0");
+        assert_eq!(latest.version, Some(semver::Version::parse("0.2.0").unwrap()));
+        assert_eq!(latest.created_at.as_deref(), Some("2026-08-10T00:00:00Z"));
     }
 
     #[test]

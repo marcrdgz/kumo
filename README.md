@@ -70,7 +70,7 @@ cargo install --path . --locked
 
 ## 🔄 Updating
 
-`kumo update` resolves the latest release with `gh` and installs it:
+`kumo update` resolves the latest release from GitHub and installs it:
 
 ```sh
 kumo update            # update to the latest stable release
@@ -132,8 +132,9 @@ listed but always shown as idle.
 - 🦀 Rust toolchain (`cargo`) — to build from source
 - ⚡ [Zig](https://ziglang.org) on `PATH` — `build.rs` compiles the vendored
   `libghostty-vt` library at build time
-- 🐙 [GitHub CLI](https://cli.github.com) (`gh`, authenticated) — to run
-  `kumo update` and for the startup update check
+- 🐙 [GitHub CLI](https://cli.github.com) (`gh`, authenticated) — only for
+  maintainers publishing releases via the cargo-dist pipeline; **not** required
+  to use or update kumo
 
 ## ⌨️ Keybindings
 
