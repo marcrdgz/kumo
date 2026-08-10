@@ -506,7 +506,7 @@ fn rgb(c: ColorRgb) -> RColor {
 
 pub fn sgr_mouse(button: u8, col: u16, row: u16, release: bool) -> Vec<u8> {
     let b = if release { button | 3 } else { button };
-    format!("\x1b[<{b};{col};{row}{}\x1b[0m", if release { "m" } else { "M" }).into_bytes()
+    format!("\x1b[<{b};{col};{row}{}", if release { "m" } else { "M" }).into_bytes()
 }
 
 /// Executable names treated as AI CLI panes.
