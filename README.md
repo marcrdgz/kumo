@@ -150,7 +150,7 @@ listed but always shown as idle.
 | `1`–`9` | Jump to the session at that sidebar position 🎯 |
 | `Tab` | Cycle pane ↹ |
 | `b` | Toggle sidebar 📌 |
-| `d` | Detach (exit the TUI) 🚪 |
+| `d` | Exit kumo 🚪 |
 | `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
@@ -167,7 +167,7 @@ listed but always shown as idle.
 - ↔️ **Drag a splitter** to resize.
 - 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
   dropdown with `config` (coming soon), `keybinds` (the same showcase as
-  `leader+?`), and `detach`.
+  `leader+?`), and `exit`.
 
 ## 🗺️ Roadmap
 

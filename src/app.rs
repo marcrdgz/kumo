@@ -464,7 +464,7 @@ impl App {
             KeyCode::Char('k') => self.focus_dir(Dir::Up),
             KeyCode::Char('l') => self.focus_dir(Dir::Right),
             KeyCode::Char('b') => self.sidebar_open = !self.sidebar_open,
-            KeyCode::Char('d') => self.quit = true, // detach (exit the TUI)
+            KeyCode::Char('d') => self.quit = true, // exit (quit the TUI)
             KeyCode::Char('n') => self.cycle_session(1),
             KeyCode::Char('p') => self.cycle_session(-1),
             KeyCode::Char('?') => self.open_keybind_overlay(),
