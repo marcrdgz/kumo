@@ -151,10 +151,11 @@ listed but always shown as idle.
 | `Tab` | Cycle pane ↹ |
 | `b` | Toggle sidebar 📌 |
 | `d` | Detach (exit the TUI) 🚪 |
+| `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
-> ⚠️ Keybindings are currently hard-coded. Remapping is on the roadmap (see
-> below).
+> ⚠️ Keybindings are currently hard-coded. Remapping is on the
+> [roadmap](ROADMAP.md).
 
 **🖱️ Mouse**
 
@@ -165,30 +166,14 @@ listed but always shown as idle.
   scrollback.
 - ↔️ **Drag a splitter** to resize.
 - 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
-  dropdown with `config` (coming soon) and `detach` (same as `leader+d`).
+  dropdown with `config` (coming soon), `keybinds` (the same showcase as
+  `leader+?`), and `detach`.
 
-## 🗺️ Roadmap — a fully customizable multiplexer
+## 🗺️ Roadmap
 
-The long-term goal is that **every aspect of kumo is configurable by you**:
-colors, keybindings, the leader key, the layout of the status bar and sidebar,
-the AI panes, and more. The current build ships with a sensible fixed
-configuration, and the pieces below are planned — **not yet implemented**:
-
-- 🎨 **Theme & colors** — colors are currently hard-coded constants. Planned:
-  full color palette customization (Catppuccin-style schemes, per-scheme
-  backgrounds, status-dot colors, borders), a configurable theme, and
-  light/dark variants.
-- ⌨️ **Keybindings** — the leader dispatch and mouse actions are hard-coded.
-  Planned: remap any binding (splits, focus, sessions, zoom, sidebar, …),
-  custom leader keys, and per-mode keymaps.
-- ⚙️ **Config file** — today the unique file `~/.config/kumo/config` covers
-  the AI CLI command and the default shell. Planned: theme, keymaps, leader
-  key, status-bar layout, and pane behavior.
-- 🧭 **Layout & chrome** — planned: toggle/order sidebar sections, customize
-  the status bar (branch, session, agent status, hostname, clock), pane titles,
-  and border styling.
-- 🧩 **Plugins / extensions** — planned: a plugin system so the community can
-  add custom commands, widgets, and integrations without forking kumo.
+Kumo is on a path to become fully customizable — theme & colors, keybinding
+remapping (including a `LEADER+?` keybind showcase), config expansion, layout &
+chrome, and a plugin system. See [ROADMAP.md](ROADMAP.md) for the details.
 
 Until then, kumo stays opinionated: it picks good defaults for you so it just
 works, and you can follow the roadmap above as the knobs land. 🔧

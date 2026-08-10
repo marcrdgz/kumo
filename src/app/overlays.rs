@@ -6,6 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 
+use super::bindings::{Binding, Group, KEYBINDINGS};
 use super::ui::{fill, put, text};
 use super::{App, ORANGE, PANEL_MUTED, PANEL_SEP, YELLOW};
 use crate::layout::SplitDir;
@@ -14,7 +15,7 @@ use crate::pane::{ACCENT, FG};
 /// Label of the MENU button in the status bar.
 pub(super) const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
-const MENU_ITEMS: [&str; 2] = ["config", "detach"];
+const MENU_ITEMS: [&str; 3] = ["config", "keybinds", "detach"];
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
@@ -82,6 +83,14 @@ pub(super) struct NamePopup {
     pub(super) error: Option<String>,
     /// Button under the mouse (highlighted while hovering).
     pub(super) hover: Option<PopupBtn>,
+}
+
+/// The `leader+?` keybind showcase: a modal overlay listing every binding,
+/// generated from the `bindings` table.
+pub(super) struct KeybindOverlay {
+    pub(super) open: bool,
+    /// Scroll offset of the body rows.
+    pub(super) scroll: u16,
 }
 
 impl App {
@@ -248,6 +257,7 @@ impl App {
                 // Placeholder until the config editor lands.
                 self.notice = Some(("config: coming soon".to_string(), Instant::now()));
             }
+            "keybinds" => self.open_keybind_overlay(),
             _ => self.quit = true, // detach (same as leader+d)
         }
     }
@@ -312,6 +322,117 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Open the keybind showcase (from `leader+?`).
+    pub(super) fn open_keybind_overlay(&mut self) {
+        self.keybind_overlay.open = true;
+        self.keybind_overlay.scroll = 0;
+    }
+
+    /// Handle a key while the keybind showcase is open.
+    pub(super) fn on_overlay_key(&mut self, key: KeyEvent) {
+        if is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
+            self.keybind_overlay.open = false;
+            return;
+        }
+        let max = self.keybind_overlay_scroll_max();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.keybind_overlay.scroll = (self.keybind_overlay.scroll + 1).min(max);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.keybind_overlay.scroll = self.keybind_overlay.scroll.saturating_sub(1);
+            }
+            KeyCode::Home => self.keybind_overlay.scroll = 0,
+            KeyCode::End => self.keybind_overlay.scroll = max,
+            _ => {}
+        }
+    }
+
+    /// Max scroll offset of the showcase body, so the last row stays reachable.
+    fn keybind_overlay_scroll_max(&self) -> u16 {
+        let Some(dd) = self.keybind_overlay_rect() else { return 0 };
+        let lines = keybind_lines().len();
+        let visible = dd.height.saturating_sub(4) as usize;
+        lines.saturating_sub(visible) as u16
+    }
+
+    /// Centered rect of the keybind showcase, sized to fit the longest row.
+    fn keybind_overlay_rect(&self) -> Option<Rect> {
+        let (w, h) = self.term_size;
+        let max_keys = KEYBINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
+        let max_desc = KEYBINDINGS.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
+        let inner = (max_keys + 2 + max_desc).max(20);
+        let width = (inner + 6).min(w.saturating_sub(4));
+        let lines = keybind_lines().len();
+        let height = ((lines + 4) as u16).min(h.saturating_sub(4)).max(3);
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    /// Draw the keybind showcase while it is open.
+    pub(super) fn render_keybind_overlay(&self, f: &mut Frame) {
+        if !self.keybind_overlay.open {
+            return;
+        }
+        let Some(dd) = self.keybind_overlay_rect() else { return };
+        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
+        fill(f, dd, PANEL_SEP);
+        let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default()
+            .fg(FG)
+            .bg(PANEL_SEP)
+            .add_modifier(Modifier::BOLD);
+        text(f, x0 + 2, y0 + 1, "keybindings", title, inner_w);
+
+        let max_keys = KEYBINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
+        let scroll = self.keybind_overlay.scroll as usize;
+        let body_top = y0 + 2;
+        let body_bottom = y1 - 1; // footer row
+        for (i, line) in keybind_lines().iter().skip(scroll).enumerate() {
+            let y = body_top + i as u16;
+            if y >= body_bottom {
+                break;
+            }
+            match line {
+                KbLine::Header(label) => {
+                    let st = Style::default()
+                        .fg(ORANGE)
+                        .bg(PANEL_SEP)
+                        .add_modifier(Modifier::BOLD);
+                    text(f, x0 + 2, y, label, st, inner_w);
+                }
+                KbLine::Bind(b) => {
+                    let keys = Style::default()
+                        .fg(ACCENT)
+                        .bg(PANEL_SEP)
+                        .add_modifier(Modifier::BOLD);
+                    let desc = Style::default().fg(FG).bg(PANEL_SEP);
+                    text(f, x0 + 2, y, b.keys, keys, max_keys);
+                    text(f, x0 + 2 + max_keys + 2, y, b.desc, desc, inner_w.saturating_sub(max_keys + 2));
+                }
+            }
+        }
+
+        let footer = Style::default().fg(PANEL_MUTED).bg(PANEL_SEP);
+        text(f, x0 + 2, y1 - 1, "j/k: scroll · esc / ?: close", footer, inner_w);
     }
 
     /// Rect of the context-menu dropdown, anchored above the right-click point.
@@ -604,11 +725,35 @@ pub(super) fn is_leader(key: KeyEvent) -> bool {
     ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('\0') | KeyCode::Null)
 }
 
+/// One display row of the keybind showcase: a group header or a binding.
+enum KbLine<'a> {
+    Header(&'a str),
+    Bind(&'a Binding),
+}
+
+/// Flatten `KEYBINDINGS` into showcase rows, one header per group followed by
+/// its bindings, in `Group::ALL` order.
+fn keybind_lines() -> Vec<KbLine<'static>> {
+    let mut lines = Vec::new();
+    for group in Group::ALL {
+        let mut pushed = false;
+        for b in KEYBINDINGS {
+            if b.group == group {
+                if !pushed {
+                    lines.push(KbLine::Header(group.label()));
+                    pushed = true;
+                }
+                lines.push(KbLine::Bind(b));
+            }
+        }
+    }
+    lines
+}
+
 /// Draw one dropdown/context-menu item as a full-width button: the whole row
 /// gets a filled background (yellow when selected, surface0 otherwise), with
 /// the `▸` marker and the item label drawn on top.
-fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool) {
-    let bg = if sel { YELLOW } else { PANEL_SEP };
+fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool) {    let bg = if sel { YELLOW } else { PANEL_SEP };
     for cx in (x0 + 1)..(x0 + 1 + width) {
         put(f, cx, y, " ", Style::default().bg(bg));
     }

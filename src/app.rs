@@ -18,9 +18,10 @@ use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
 
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{is_leader, CtxMenu, CtxTarget, Menu, NamePopup};
+use self::overlays::{is_leader, CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
 use self::sidebar::SidebarScroll;
 
+mod bindings;
 mod mouse;
 mod overlays;
 mod sidebar;
@@ -109,6 +110,8 @@ pub struct App {
     sidebar_scroll: SidebarScroll,
     /// Modal popup for naming a new session.
     popup: NamePopup,
+    /// `leader+?` keybind showcase.
+    keybind_overlay: KeybindOverlay,
     /// Transient status-bar notice, e.g. "config: coming soon".
     notice: Option<(String, Instant)>,
     /// Startup update banner (top-right), when a newer release exists.
@@ -202,6 +205,7 @@ impl App {
             // newest agents are visible without scrolling.
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
+            keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             notice: None,
             update_notice: None,
             update_rx,
@@ -413,6 +417,10 @@ impl App {
             self.on_ctx_menu_key(key)?;
             return Ok(());
         }
+        if self.keybind_overlay.open {
+            self.on_overlay_key(key);
+            return Ok(());
+        }
 
         let leader = is_leader(key);
         match self.mode {
@@ -459,6 +467,7 @@ impl App {
             KeyCode::Char('d') => self.quit = true, // detach (exit the TUI)
             KeyCode::Char('n') => self.cycle_session(1),
             KeyCode::Char('p') => self.cycle_session(-1),
+            KeyCode::Char('?') => self.open_keybind_overlay(),
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 // leader + 1-9 jumps to the session at that list position.
                 let n = c.to_digit(10).unwrap_or(0) as usize;

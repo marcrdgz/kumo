@@ -435,6 +435,7 @@ mod tests {
             ctx_menu: super::super::CtxMenu { open: false, x: 0, y: 0, selected: 0, target: super::super::CtxTarget::Pane(0) },
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
+            keybind_overlay: super::super::KeybindOverlay { open: false, scroll: 0 },
             notice: None,
             update_notice: None,
             update_rx,

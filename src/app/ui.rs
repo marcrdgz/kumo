@@ -6,6 +6,7 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::bindings::leader_hint;
 use super::overlays::MENU_BTN;
 use super::{App, BORDER_IDLE, Mode, ORANGE, PANEL_MUTED, PANEL_SEP, RED, Term, YELLOW};
 use crate::layout::TreeGeom;
@@ -122,6 +123,7 @@ impl App {
         self.render_ctx_menu(f);
         self.render_name_popup(f);
         self.render_update_notice(f);
+        self.render_keybind_overlay(f);
     }
 
     /// Display label of a pane in the active session, without the focus/zoom
@@ -300,10 +302,13 @@ impl App {
         }
 
         if self.mode == Mode::Leader {
-            let hint = " v: v-split · -: h-split · a: AI · c: new · x: close · z: zoom · h/j/k/l: focus · n/p: session · 1-9: jump · tab: pane · b: sidebar · d: detach · esc: exit ";
-            let hint_w = hint.chars().count() as u16;
-            let used = start.saturating_add(left_w);
-            if hint_w <= area.width.saturating_sub(used) {
+            let hint = leader_hint();
+            let avail = area.width.saturating_sub(start.saturating_add(left_w));
+            if avail > 0 {
+                // Clip the hint to the available width instead of hiding it: on
+                // narrow terminals the head ("?: help · …") still shows.
+                let hint: String = hint.chars().take(avail as usize).collect();
+                let hint_w = hint.chars().count() as u16;
                 let x = area.width.saturating_sub(hint_w);
                 let hint_style = Style::default()
                     .fg(RColor::Black)

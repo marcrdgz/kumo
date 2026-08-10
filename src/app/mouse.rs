@@ -41,6 +41,20 @@ impl App {
             self.update_notice = None;
             return Ok(());
         }
+        if self.keybind_overlay.open {
+            // Modal showcase: a click or scroll dismisses it; hover is ignored
+            // so moving the mouse over it doesn't close it. `Up` is deliberately
+            // excluded: the release of the click that opened it (e.g. the MENU
+            // dropdown) arrives after the overlay is already open and would
+            // close it instantly.
+            if matches!(
+                m.kind,
+                MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+            ) {
+                self.keybind_overlay.open = false;
+            }
+            return Ok(());
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.popup.open {
