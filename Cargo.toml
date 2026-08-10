@@ -21,6 +21,8 @@ authors = ["Marc Rodríguez <marc@rdgz.es>"]
 shared-version = "workspace"
 tag-name = "v{{version}}"
 pre-release-commit-message = "chore: release {{version}}"
+# Regenerate CHANGELOG.md from conventional commits before the release commit.
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{tag_name}}"]
 allow-branch = ["main"]
 publish = false
 

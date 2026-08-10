@@ -1,0 +1,11 @@
+# git-cliff configuration (git-cliff --config cliff.toml)
+# The rest of the settings fall back to git-cliff defaults.
+
+# Proper document header for the changelog.
+[changelog]
+header = "# Changelog\n\n"
+
+# Never treat the rolling `nightly`/`nightly-last` tags as release boundaries;
+# those commits belong to the nearest versioned release instead.
+[git]
+ignore_tags = "nightly*"
