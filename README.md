@@ -29,7 +29,8 @@ not the multiplexer.
 - 🟢🟠⚪ **Agent status at a glance** — the sidebar shows each agent's workspace
   and CLI name with a status dot: **green** = working, **orange** = blocked
   (waiting for approval), **gray** = idle. Detected from the live terminal
-  buffer (not the viewport), so it stays accurate even while you scroll. ⚡
+  buffer (not the viewport), so it stays accurate even while you scroll.
+  Lifecycle detection is per-agent — see [Agents](#agents). ⚡
 - 🔔 **Audible alerts** — when an agent **blocks** (waiting for approval) or
   **finishes**, kumo plays a sound so you notice without watching: a distinct
   chime for each event. Blocked agents float to the top of the AGENTS list
@@ -109,9 +110,22 @@ Overrides for the config/state **locations** (not keys) follow the usual
 conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,
 `XDG_STATE_HOME`.
 
-Detected agents (auto-listed in the sidebar when running in any pane):
-`opencode` 🧠 · `claude` 💬 · `codex` ⚙️ · `gemini` ✨ · `qwen` 🐉 · `aider` 🛠️ ·
-`cody` 🐶 · `swe` 🔧 · `coco` 🥥
+## Agents
+
+Kumo auto-detects any AI CLI running inside a pane and lists it in the
+sidebar. **Process** detection (name + workspace) works for every agent below;
+**lifecycle** detection (working / blocked / idle) is per-agent and currently
+only **opencode** and **claude** are fully implemented — every other agent is
+listed but always shown as idle.
+
+### ✅ Implemented — full lifecycle detection
+
+- `opencode` — permission dialogs, question prompt, prompt-footer signals
+- `claude` — approval forms, permission prompts, OSC-title spinner
+
+### 🧭 ToDo / Not Implemented Yet — auto-listed, status always idle
+
+- `codex` · `gemini` · `qwen` · `aider` · `cody` · `swe` · `coco`
 
 ## 🛠️ Requirements
 
@@ -196,6 +210,7 @@ Cargo.toml              📄 workspace + package manifest
 build.rs                🏗️ compiles the vendored libghostty-vt (Zig)
 src/main.rs             🚪 TUI entry point
 src/app.rs              🧩 sessions/panes, layout tree, input routing, mouse, rendering
+src/agents/             🔍 per-agent lifecycle detection (opencode.rs, claude.rs)
 src/alert.rs            🔊 audible agent alerts (blocked / finished)
 src/pane.rs             🪟 Pane = PTY + libghostty-vt terminal (agent status, dirty render)
 src/vt.rs               🔌 FFI bindings to libghostty-vt (emulator + native selection)

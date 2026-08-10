@@ -4,7 +4,8 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 
 use super::ui::{fill, put, text};
 use super::{App, GREEN, ORANGE, PANEL_MUTED, PANEL_SEP};
-use crate::pane::{AgentStatus, ACCENT, FG};
+use crate::agents::AgentStatus;
+use crate::pane::{ACCENT, FG};
 
 /// Stable rows of the left sidebar, shared by rendering and mouse hit-testing.
 #[derive(Clone)]

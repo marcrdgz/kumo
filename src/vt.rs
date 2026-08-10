@@ -340,6 +340,9 @@ pub const TERMINAL_DATA_COLS: i32 = 1;
 pub const TERMINAL_DATA_ROWS: i32 = 2;
 pub const TERMINAL_DATA_SCROLLBAR: i32 = 9;
 pub const TERMINAL_DATA_MOUSE_TRACKING: i32 = 11;
+/// Window title set via OSC 0 / OSC 2 (borrowed `GhosttyString`). Claude Code
+/// paints its live state here: a braille spinner while working, `✳ ` idle.
+pub const TERMINAL_DATA_TITLE: i32 = 12;
 pub const TERMINAL_DATA_TOTAL_ROWS: i32 = 14;
 pub const TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
 pub const TERMINAL_DATA_COLOR_FOREGROUND: i32 = 18;
@@ -722,6 +725,24 @@ impl Terminal {
             return String::new();
         };
         self.format_selection(&selection)
+    }
+
+    /// The terminal window title set via OSC 0 / OSC 2 (e.g. Claude Code's
+    /// spinner status). Empty when no title has been set. The C string is
+    /// borrowed and invalidated by the next `write`, so it's copied here.
+    pub fn title(&self) -> String {
+        let mut t = StringSlice { ptr: ptr::null(), len: 0 };
+        unsafe {
+            if !ghostty_terminal_get(self.term, TERMINAL_DATA_TITLE, &mut t as *mut StringSlice as *mut c_void)
+                .is_ok()
+            {
+                return String::new();
+            }
+        }
+        if t.ptr.is_null() || t.len == 0 {
+            return String::new();
+        }
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(t.ptr, t.len)).into_owned() }
     }
 
     /// Build a linear selection between two screen-buffer coordinates

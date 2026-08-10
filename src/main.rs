@@ -1,3 +1,4 @@
+mod agents;
 mod alert;
 mod app;
 mod config;

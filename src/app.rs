@@ -13,7 +13,8 @@ use ratatui::style::Color as RColor;
 use ratatui::Terminal;
 
 use crate::layout::{self, LayoutTree, SplitDir};
-use crate::pane::{AgentStatus, Pane, PtyEvent};
+use crate::agents::AgentStatus;
+use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
 
 use self::mouse::{Drag, PendingClick, Sel};

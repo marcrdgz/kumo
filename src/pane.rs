@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use crate::agents::AgentStatus;
 use crate::pty::{Pty, PtySpec};
 use portable_pty::PtySize;
 use ratatui::buffer::Buffer;
@@ -76,76 +77,10 @@ pub struct Pane {
     xtgettcap: XtgettcapTracker,
 }
 
-/// Lifecycle state of an AI (opencode) agent, inferred from its output.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AgentStatus {
-    /// Actively producing output (working on a task).
-    Working,
-    /// Quiet but waiting for a command approval.
-    Blocked,
-    /// Quiet and idle.
-    Idle,
-}
-
 /// How much stripped text to keep for blocked-marker scanning. Sized so the
 /// opencode permission dialog (a multi-row footer block) survives the quiet
 /// period while the agent is paused waiting for approval.
 const RECENT_TEXT_BYTES: usize = 16 * 1024;
-/// How many rows from the bottom of the terminal buffer to scan for
-/// agent-state markers. The live prompt/footer and any dialog live in the
-/// last screenful, while older transcript rows are excluded.
-const DETECTION_TAIL_LINES: usize = 200;
-/// How many bottom rows hold opencode's prompt footer ("esc interrupt",
-/// spinner, progress bar). This area is pinned to the buffer tail and never
-/// scrolls with the transcript, so its signals reflect the live agent state.
-const DETECTION_FOOTER_LINES: usize = 8;
-/// Output markers that indicate the agent is waiting on a command approval.
-///
-/// Only markers tied to a real on-screen dialog qualify. Generic prompts
-/// ("proceed?", "(y/n)", "would you like to", ...) are deliberately excluded:
-/// they also match conversation transcript text, falsely flagging an idle
-/// agent as blocked. Mirrors herdr's opencode manifest (state = "blocked").
-const BLOCKED_MARKERS: &[&str] = &[
-    // opencode permission dialog ("△ Permission required" header + buttons).
-    "permission required",
-    "allow once",
-    "allow always",
-    "always allow",
-    "reject permission",
-    "waiting for permission",
-];
-
-/// opencode's question dialog footer strings (QuestionPrompt). All three must
-/// be present together — "esc dismiss" alone also matches the idle prompt.
-const QUESTION_DIALOG_ENTER: &[&str] = &["enter submit", "enter confirm", "enter toggle"];
-const QUESTION_DIALOG_NAV: &[&str] = &["\u{2191}\u{2193} select", "\u{21c6} tab"];
-
-/// True when opencode's question dialog is on screen: its footer pairs
-/// "esc dismiss" with an enter action and a navigation hint. Mirrors herdr's
-/// opencode manifest rule (state = "blocked").
-fn question_dialog_visible(screen: &str) -> bool {
-    let lower = screen.to_lowercase();
-    if !lower.contains("esc dismiss") {
-        return false;
-    }
-    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| lower.contains(m));
-    let nav = QUESTION_DIALOG_NAV.iter().any(|m| screen.contains(m));
-    enter && nav
-}
-/// Markers, scanned against the current screen text, that indicate the agent
-/// is actively working. Idle is the fallback when none match (manifest-based
-/// detection instead of an output-recently window).
-const WORKING_MARKERS: &[&str] = &[
-    // opencode prompt footer ("esc interrupt" / "esc again to interrupt").
-    "esc interrupt",
-    "esc again to interrupt",
-    "ctrl+c to interrupt",
-    "press esc to interrupt",
-    // Generic in-progress text.
-    "waiting for assistant",
-    "sending prompt",
-    "retrying in",
-];
 
 #[derive(Clone)]
 pub enum PtyEvent {
@@ -517,8 +452,9 @@ impl Pane {
         }
     }
 
-    /// Agent lifecycle state, derived from the bottom of the terminal buffer:
-    /// Blocked/Working win via distinctive markers, Idle is the fallback.
+    /// Agent lifecycle state, derived from a snapshot of the terminal buffer
+    /// (see [`crate::agents`]): Blocked/Working win via distinctive markers,
+    /// Idle is the fallback.
     pub fn agent_status(&self) -> AgentStatus {
         self.compute_agent_status()
     }
@@ -527,32 +463,7 @@ impl Pane {
         if self.dead {
             return AgentStatus::Idle;
         }
-        // Working signals live in opencode's prompt footer, which is pinned to
-        // the bottom rows of the terminal buffer and never scrolls with the
-        // transcript. Scanning only the tail rows keeps an "esc interrupt" or
-        // frozen spinner from an earlier turn in the scrolled transcript from
-        // being misread as currently working.
-        let footer = self.vt.bottom_text(DETECTION_FOOTER_LINES);
-        let footer_lower = footer.to_lowercase();
-        // Blocked signals (question/permission dialogs) are centered overlays,
-        // so they need the full recent buffer, not just the footer.
-        let screen = self.vt.bottom_text(DETECTION_TAIL_LINES);
-        let lower = screen.to_lowercase();
-        if question_dialog_visible(&screen) || BLOCKED_MARKERS.iter().any(|m| lower.contains(m)) {
-            return AgentStatus::Blocked;
-        }
-        if WORKING_MARKERS.iter().any(|m| footer_lower.contains(m)) {
-            return AgentStatus::Working;
-        }
-        // opencode's knight-rider status bar: 4+ block cells in a row.
-        if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| footer.contains(p)) {
-            return AgentStatus::Working;
-        }
-        // Braille spinner (tool call / thinking) in the prompt footer.
-        if footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
-            return AgentStatus::Working;
-        }
-        AgentStatus::Idle
+        crate::agents::detect(&crate::agents::Snapshot::capture(&self.vt))
     }
 
     /// Install the terminal's active selection from two viewport coordinates.
@@ -856,6 +767,99 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         p.feed(b"opencode 1.18.15\n~/.opencode\n");
         render_pane(&mut p);
 assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn claude_working_when_osc_title_has_spinner() {
+        // Claude Code paints its live state in the OSC window title: a braille
+        // spinner while a task runs, `✳ ` when idle.
+        let mut p = test_pane(true);
+        p.feed("\x1b]0;\u{280b} Fixing the bug\x07".as_bytes());
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn claude_idle_when_osc_title_has_idle_marker() {
+        let mut p = test_pane(true);
+        p.feed("\x1b]0;\u{2733} ~/proj\x07".as_bytes());
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed("\u{276f} ".as_bytes());
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn claude_blocked_on_approval_form() {
+        // Generic permission prompt: "do you want to proceed?" + "esc to
+        // cancel" + numbered yes/no options below the last horizontal rule.
+        let mut p = test_pane(true);
+        p.feed(b"Claude wants to run a command\n");
+        p.feed("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n".as_bytes());
+        p.feed(b"Do you want to proceed?\n");
+        p.feed(b"  1. yes\n");
+        p.feed(b"  2. no\n");
+        p.feed(b"  esc to cancel\n");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn claude_blocked_on_live_form() {
+        // Live form: "esc to cancel" + "enter to confirm" (dynamic workflow,
+        // snippet save, etc.).
+        let mut p = test_pane(true);
+        p.feed("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n".as_bytes());
+        p.feed(b"Run a dynamic workflow?\n");
+        p.feed(b"  enter to confirm\n");
+        p.feed(b"  esc to cancel\n");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn claude_blocked_on_bash_approval() {
+        let mut p = test_pane(true);
+        p.feed(b"Do you want to proceed?\n");
+        p.feed(b"  bash(rm -rf build)\n");
+        p.feed(b"  1. yes\n");
+        p.feed(b"  2. no\n");
+        p.feed(b"  esc to cancel\n");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn claude_idle_on_prompt_box() {
+        // A bare `❯` prompt means idle, even with generic question text above
+        // in the transcript.
+        let mut p = test_pane(true);
+        p.feed(b"assistant: do you want to proceed? (y/n)\n");
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed("\u{276f} ".as_bytes());
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn claude_not_blocked_without_form_chrome() {
+        // "esc to cancel" needs the matching enter action; a select list
+        // without a navigation hint stays idle.
+        let mut p = test_pane(true);
+        p.feed("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n".as_bytes());
+        p.feed(b"enter to select\n");
+        p.feed(b"esc to cancel\n");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn claude_working_on_btw_overlay() {
+        let mut p = test_pane(true);
+        p.feed(b"/btw reasoning about the bug\n");
+        p.feed(b"  esc to close\n");
+        render_pane(&mut p);
+        assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]

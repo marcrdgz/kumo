@@ -20,6 +20,9 @@ pub fn encode(e: KeyEvent) -> Vec<u8> {
                 vec![0x7f]
             }
         }
+        // crossterm reports Shift+Tab as `BackTab` (unix and windows); the
+        // `Tab`+shift arm covers terminals that report it that way instead.
+        KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
         KeyCode::Tab if shift => vec![0x1b, b'[', b'Z'],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::Esc => vec![0x1b],
@@ -130,5 +133,27 @@ fn ctrl_code(c: char) -> u8 {
             '?' => 0x7f,
             _ => 0x00,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shift_tab_encodes_backtab() {
+        // crossterm reports Shift+Tab as `BackTab`; both forms must send the
+        // terminal's reverse-tab sequence (`CSI Z`), which Claude Code needs
+        // to move backwards through form fields.
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(encode(backtab), b"\x1b[Z");
+        let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(encode(shift_tab), b"\x1b[Z");
+    }
+
+    #[test]
+    fn plain_tab_encodes_tab() {
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(encode(tab), b"\t");
     }
 }

@@ -55,6 +55,8 @@ management.
 - **`src/main.rs`**: TUI entry point.
 - **`src/app.rs`**: Session/pane tree, input routing, mouse, rendering.
 - **`src/pane.rs`**: Pane = PTY (`src/pty.rs`) + ghostty terminal.
+- **`src/agents/`**: Per-agent lifecycle detection (`opencode.rs`, `claude.rs`),
+  dispatched by `src/agents/mod.rs` from a `Snapshot` of the terminal buffer.
 - **`src/vt.rs`**: Hand-written FFI bindings to the `libghostty-vt` C API
   plus the safe `Terminal` wrapper.
 - **`build.rs`**: Compiles the vendored Zig library at build time.

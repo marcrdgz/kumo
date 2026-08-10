@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::alert::{self, AlertKind};
-use crate::pane::AgentStatus;
+use crate::agents::AgentStatus;
 
 use super::App;
 

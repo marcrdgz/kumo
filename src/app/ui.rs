@@ -9,7 +9,8 @@ use ratatui::widgets::Paragraph;
 use super::overlays::MENU_BTN;
 use super::{App, BORDER_IDLE, Mode, ORANGE, PANEL_MUTED, PANEL_SEP, RED, Term, YELLOW};
 use crate::layout::TreeGeom;
-use crate::pane::{AgentStatus, ACCENT, FG};
+use crate::agents::AgentStatus;
+use crate::pane::{ACCENT, FG};
 use crate::vt;
 
 impl App {
