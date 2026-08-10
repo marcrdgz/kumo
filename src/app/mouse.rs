@@ -75,7 +75,7 @@ impl App {
                 }
                 if self.ctx_menu.open {
                     if let Some(i) = self.ctx_menu_item_at(x, y) {
-                        self.ctx_menu_select(i);
+                        self.ctx_menu_select(i)?;
                         return Ok(());
                     }
                     if self.ctx_menu_at(x, y) {

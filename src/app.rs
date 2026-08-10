@@ -319,6 +319,32 @@ impl App {
         }
     }
 
+    /// Close the session at `idx` and all of its panes.
+    fn close_session(&mut self, idx: usize) {
+        if self.sessions.get(idx).is_none() {
+            return;
+        }
+        for pid in self.sessions[idx].tree.pane_ids() {
+            if let Some(mut pane) = self.panes.remove(&pid) {
+                pane.pty.kill();
+            }
+            self.last_sizes.remove(&pid);
+            self.pane_cache.remove(&pid);
+            self.agent_status_cache.remove(&pid);
+            self.last_agent_status.remove(&pid);
+            self.last_agent_sound.remove(&pid);
+        }
+        self.sessions.remove(idx);
+        if self.sessions.is_empty() {
+            self.quit = true;
+            return;
+        }
+        if idx <= self.active {
+            self.active = self.active.saturating_sub(1);
+        }
+        self.active = self.active.min(self.sessions.len() - 1);
+    }
+
     /// Remove panes whose child process has exited, collapsing the layout.
     fn poll_exits(&mut self) {
         let mut exited: Vec<u64> = Vec::new();
@@ -384,7 +410,7 @@ impl App {
             return Ok(());
         }
         if self.ctx_menu.open {
-            self.on_ctx_menu_key(key);
+            self.on_ctx_menu_key(key)?;
             return Ok(());
         }
 

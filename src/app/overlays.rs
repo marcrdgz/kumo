@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -7,14 +8,13 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 
 use super::ui::{fill, put, text};
 use super::{App, ORANGE, PANEL_MUTED, PANEL_SEP, YELLOW};
+use crate::layout::SplitDir;
 use crate::pane::{ACCENT, FG};
 
 /// Label of the MENU button in the status bar.
 pub(super) const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
 const MENU_ITEMS: [&str; 2] = ["config", "detach"];
-/// Items shown in the right-click context menu inside a pane.
-const CTX_MENU_ITEMS: [&str; 1] = ["rename"];
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
@@ -27,13 +27,22 @@ pub(super) struct Menu {
     pub(super) selected: usize,
 }
 
-/// What the right-click context menu targets (rename applies to it).
+/// What the right-click context menu targets.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum CtxTarget {
     /// A pane (`pane id`).
     Pane(u64),
     /// A session (`session index`).
     Session(usize),
+}
+
+/// Right-click context menu items for a target: a pane gets rename, both split
+/// directions and close; a session gets rename and close.
+fn ctx_items(target: CtxTarget) -> &'static [&'static str] {
+    match target {
+        CtxTarget::Pane(_) => &["rename", "split vertical", "split horizontal", "close"],
+        CtxTarget::Session(_) => &["rename", "close"],
+    }
 }
 
 /// Right-click context menu, anchored at the cursor.
@@ -254,41 +263,68 @@ impl App {
     }
 
     /// Run the action for context-menu item `idx` and close the menu.
-    pub(super) fn ctx_menu_select(&mut self, idx: usize) {
-        let action = CTX_MENU_ITEMS.get(idx).copied().unwrap_or("rename");
+    pub(super) fn ctx_menu_select(&mut self, idx: usize) -> Result<()> {
+        let items = ctx_items(self.ctx_menu.target);
+        let action = items.get(idx).copied().unwrap_or("close");
         let target = self.ctx_menu.target;
         self.ctx_menu.open = false;
-        if action == "rename" {
-            match target {
+        match action {
+            "rename" => match target {
                 CtxTarget::Pane(pid) => self.open_rename_popup(pid),
                 CtxTarget::Session(idx) => self.open_rename_session_popup(idx),
+            },
+            "split vertical" => {
+                if let CtxTarget::Pane(pid) = target {
+                    self.set_focus(pid);
+                    self.split_active(SplitDir::V, false)?;
+                }
             }
+            "split horizontal" => {
+                if let CtxTarget::Pane(pid) = target {
+                    self.set_focus(pid);
+                    self.split_active(SplitDir::H, false)?;
+                }
+            }
+            "close" => match target {
+                CtxTarget::Pane(pid) => self.close_pane(pid),
+                CtxTarget::Session(idx) => self.close_session(idx),
+            },
+            _ => {}
         }
+        Ok(())
     }
 
     /// Handle a key while the right-click context menu is open.
-    pub(super) fn on_ctx_menu_key(&mut self, key: KeyEvent) {
+    pub(super) fn on_ctx_menu_key(&mut self, key: KeyEvent) -> Result<()> {
         if is_leader(key) || key.code == KeyCode::Esc {
             self.ctx_menu.open = false;
-            return;
+            return Ok(());
         }
+        let items = ctx_items(self.ctx_menu.target);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.ctx_menu.selected = (self.ctx_menu.selected + 1) % CTX_MENU_ITEMS.len();
+                self.ctx_menu.selected = (self.ctx_menu.selected + 1) % items.len();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.ctx_menu.selected = self.ctx_menu.selected.saturating_sub(1);
             }
-            KeyCode::Enter => self.ctx_menu_select(self.ctx_menu.selected),
+            KeyCode::Enter => self.ctx_menu_select(self.ctx_menu.selected)?,
             _ => {}
         }
+        Ok(())
     }
 
     /// Rect of the context-menu dropdown, anchored above the right-click point.
+    /// Only meaningful while the menu is open; once closed the stale anchor is
+    /// ignored so a later right-click can't hit-test against it.
     fn ctx_menu_rect(&self) -> Option<Rect> {
+        if !self.ctx_menu.open {
+            return None;
+        }
+        let items = ctx_items(self.ctx_menu.target);
         let (w, h) = self.term_size;
-        let width = CTX_MENU_ITEMS.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
-        let height = CTX_MENU_ITEMS.len() as u16 + 2;
+        let width = items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
+        let height = items.len() as u16 + 2;
         if w < width || h < height + 1 {
             return None;
         }
@@ -307,7 +343,8 @@ impl App {
     /// Context-menu item index under `(x, y)`, if the menu covers it.
     pub(super) fn ctx_menu_item_at(&self, x: u16, y: u16) -> Option<usize> {
         let dd = self.ctx_menu_rect()?;
-        CTX_MENU_ITEMS
+        let items = ctx_items(self.ctx_menu.target);
+        items
             .iter()
             .enumerate()
             .position(|(i, _)| {
@@ -461,7 +498,7 @@ impl App {
             put(f, x0, y, "│", border);
             put(f, x1, y, "│", border);
         }
-        for (i, item) in CTX_MENU_ITEMS.iter().enumerate() {
+        for (i, item) in ctx_items(self.ctx_menu.target).iter().enumerate() {
             render_item_row(
                 f,
                 x0,
