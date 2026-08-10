@@ -47,7 +47,7 @@ management.
 ## Commit Convention
 - Use **Conventional Commits**: `<type>(<scope>): <summary>` where `type` is one of `feat`, `fix`, `refactor`, `chore`, `docs`, `test`, `build`.
 - Keep the summary lowercase and imperative, under ~72 chars.
-- Do not include a body unless it adds meaningful context.
+- Do not add a body/description; use only the header line.
 
 ---
 
@@ -62,3 +62,4 @@ management.
 - **`build.rs`**: Compiles the vendored Zig library at build time.
 - **`vendor/libghostty-vt/`**: Vendored Ghostty terminal emulator (Zig + C headers).
 - **`PLAN.md`**: Contains the full high-level implementation roadmap and component breakdowns.
+- **`ROADMAP.md`**: User-facing roadmap of planned features (theme, keymaps, config, chrome, plugins).
