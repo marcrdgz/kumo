@@ -12,7 +12,7 @@ repository = "https://github.com/marcrdgz/kumo"
 license = "MIT"
 
 [workspace.package]
-version = "0.0.0-dev"
+version = "0.1.0"
 edition = "2021"
 authors = ["Marc Rodríguez <marc@rdgz.es>"]
 
