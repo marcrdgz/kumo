@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1] - 2026-08-11
+
+### 🐛 Bug Fixes
+
+- *(update)* Pick platform-appropriate cargo-dist installer
+- *(app)* Open context menu down-right, flipping up/left when needed
+
+### 📚 Documentation
+
+- Update roadmap for 0.2.0 release and 0.3.0 follow-workspace
 ## [0.2.0] - 2026-08-10
 
 ### 🚀 Features
@@ -25,6 +35,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Generate changelog with git-cliff on release
+- Release 0.2.0
 ## [0.1.0] - 2026-08-10
 
 ### 🚀 Features
