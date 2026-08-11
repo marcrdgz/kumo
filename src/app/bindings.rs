@@ -53,7 +53,7 @@ pub(super) const KEYBINDINGS: &[Binding] = &[
     Binding { keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions },
     Binding { keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions },
     Binding { keys: "b", desc: "toggle the sidebar", group: Group::Chrome },
-    Binding { keys: "d", desc: "exit kumo", group: Group::General },
+    Binding { keys: "d", desc: "detach (save & exit)", group: Group::General },
     Binding { keys: "?", desc: "show all keybindings", group: Group::General },
 ];
 

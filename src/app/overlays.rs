@@ -15,7 +15,7 @@ use crate::pane::{ACCENT, FG};
 /// Label of the MENU button in the status bar.
 pub(super) const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
-const MENU_ITEMS: [&str; 3] = ["config", "keybinds", "exit"];
+const MENU_ITEMS: [&str; 3] = ["config", "keybinds", "detach"];
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
@@ -257,7 +257,7 @@ impl App {
 
     /// Run the action for menu item `idx` and close the menu.
     pub(super) fn menu_select(&mut self, idx: usize) {
-        let action = MENU_ITEMS.get(idx).copied().unwrap_or("exit");
+        let action = MENU_ITEMS.get(idx).copied().unwrap_or("detach");
         self.menu.open = false;
         match action {
             "config" => {
@@ -265,7 +265,12 @@ impl App {
                 self.notice = Some(("config: coming soon".to_string(), Instant::now()));
             }
             "keybinds" => self.open_keybind_overlay(),
-            _ => self.quit = true, // exit (same as leader+d)
+            "detach" => {
+                // Save the session state and exit (same as leader+d).
+                self.detach_requested = true;
+                self.quit = true;
+            }
+            _ => {}
         }
     }
 
