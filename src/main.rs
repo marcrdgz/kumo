@@ -1,10 +1,13 @@
 mod agents;
 mod alert;
 mod app;
+#[cfg(unix)]
+mod client;
 mod config;
 mod keys;
 mod layout;
 mod pane;
+mod protocol;
 mod pty;
 mod state;
 mod update;
@@ -12,15 +15,19 @@ mod vt;
 mod xtgettcap;
 
 use anyhow::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use crossterm::execute;
-use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-use std::io::stdout;
 use std::path::PathBuf;
 
 use crate::app::Launch;
+
+#[cfg(not(unix))]
+use {
+    crossterm::event::{DisableMouseCapture, EnableMouseCapture},
+    crossterm::execute,
+    crossterm::terminal::{enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ratatui::backend::CrosstermBackend,
+    ratatui::Terminal,
+    std::io::stdout,
+};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,10 +58,24 @@ fn main() -> Result<()> {
             }
         }
     }
+    if args.first().map(|s| s.as_str()) == Some("daemon") {
+        // Hidden subcommand: run the headless daemon. Spawned detached by the
+        // client; also available to start manually.
+        let workspace = args.get(1).map(PathBuf::from);
+        #[cfg(unix)]
+        {
+            return app::server::run_daemon(Launch::New(workspace));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = workspace;
+            anyhow::bail!("the kumo daemon is unix-only for now");
+        }
+    }
 
-    // tmux-style launch: `kumo` attaches to the last state if present,
-    // `kumo attach` restores (erroring if none), `kumo new [dir]` and the
-    // back-compat `kumo [dir]` always start fresh.
+    // tmux-style launch: `kumo` attaches to the daemon if present (else starts
+    // one), `kumo attach` requires a running daemon, `kumo new [dir]` and the
+    // back-compat `kumo [dir]` start fresh.
     let launch = match args.first().map(|s| s.as_str()) {
         Some("attach") => Launch::Attach,
         Some("new") => Launch::New(args.get(1).map(PathBuf::from)),
@@ -62,6 +83,19 @@ fn main() -> Result<()> {
         _ => Launch::Auto,
     };
 
+    #[cfg(unix)]
+    {
+        client::run(launch)
+    }
+    #[cfg(not(unix))]
+    {
+        run_foreground(launch)
+    }
+}
+
+/// Foreground TUI (non-unix fallback until daemon parity lands).
+#[cfg(not(unix))]
+fn run_foreground(launch: Launch) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -83,8 +117,8 @@ fn print_help() {
     println!("kumo {} — terminal multiplexer", env!("CARGO_PKG_VERSION"));
     println!();
     println!("USAGE:");
-    println!("    kumo                       attach to the last session (or start fresh)");
-    println!("    kumo attach                restore the last saved session");
+    println!("    kumo                       attach to the daemon (start it if needed)");
+    println!("    kumo attach                attach to the running daemon");
     println!("    kumo new [WORKSPACE]       start a fresh session");
     println!("    kumo [WORKSPACE]           start fresh inside this directory");
     println!("    kumo update [--nightly] [--check]");
@@ -97,9 +131,12 @@ fn print_help() {
     println!("    -v, --version  Print version and channel (stable / nightly / dev)");
     println!();
     println!("COMMANDS:");
-    println!("    attach         Restore the saved session state (light re-attach)");
-    println!("    new            Start fresh, ignoring any saved state");
+    println!("    attach         Attach a terminal to the daemon (no daemon = error)");
+    println!("    new            Start a fresh session in the daemon");
     println!("    update         Update to the latest release (needs gh)");
     println!("                   --nightly  update to the latest nightly build");
     println!("                   --check    report availability (exit 0 = up to date, 1 = update)");
+    println!();
+    println!("The daemon runs in the background and owns your panes; `leader+d`");
+    println!("detaches this terminal, leaving everything running. Re-attach with `kumo`.");
 }

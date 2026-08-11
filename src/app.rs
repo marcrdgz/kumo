@@ -25,11 +25,15 @@ use self::sidebar::SidebarScroll;
 mod bindings;
 mod mouse;
 mod overlays;
+pub(super) mod server;
 mod sidebar;
 mod tasks;
 mod ui;
 mod util;
 
+/// Foreground TUI terminal backend, used only by the non-unix fallback path
+/// (`App::run`); the daemon renders to a `TestBackend` instead.
+#[cfg_attr(unix, allow(dead_code))]
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
 /// Catppuccin mocha chrome colors (sidebars, status bar, chrome borders).
@@ -134,6 +138,9 @@ pub struct App {
     update_rx: mpsc::Receiver<Option<crate::update::UpdateNotice>>,
 }
 
+/// Foreground TUI loop, used only on non-unix (fallback until daemon parity
+/// lands); on unix the daemon drives `App` directly and the thin client renders.
+#[cfg_attr(unix, allow(dead_code))]
 pub fn run(terminal: &mut Term, launch: Launch) -> Result<()> {
     let mut app = App::new(launch)?;
     while !app.quit {
@@ -304,7 +311,9 @@ impl App {
         Ok(())
     }
 
-    /// Serialize the current sessions/panes for `state::save`.
+    /// Serialize the current sessions/panes for `state::save`. Dormant until
+    /// 0.5.0 persistence revives it on the daemon side.
+    #[cfg_attr(unix, allow(dead_code))]
     fn to_saved_state(&self) -> Option<SavedState> {
         if self.sessions.is_empty() {
             return None;
@@ -339,7 +348,9 @@ impl App {
         Some(state::SavedState { version: state::STATE_VERSION, active: self.active, sessions })
     }
 
-    /// Persist (or clear) the state file once the loop exits.
+    /// Persist (or clear) the state file once the loop exits. Dormant until
+    /// 0.5.0 persistence revives it on the daemon side.
+    #[cfg_attr(unix, allow(dead_code))]
     fn on_exit(&mut self) {
         let path = crate::config::state_file();
         if self.detach_requested {

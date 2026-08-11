@@ -4,6 +4,11 @@
 //! This module is deliberately pure data — no `App`, no TUI, no PTY handles.
 //! That is what makes it daemon-ready: 0.4.0's daemon reuses these exact types
 //! as its wire format and this same save/load path without a rewrite.
+//!
+//! Some helpers are dormant right now: the light-restore client path was
+//! superseded by the daemon, and 0.5.0's persistence (grid re-encode) will
+//! revive `save`/`remap`/`from_layout_node` on the daemon side.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

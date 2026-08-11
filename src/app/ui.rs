@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ratatui::Frame;
+use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier, Style};
@@ -8,14 +9,17 @@ use ratatui::widgets::Paragraph;
 
 use super::bindings::leader_hint;
 use super::overlays::MENU_BTN;
-use super::{App, BORDER_IDLE, Mode, ORANGE, PANEL_MUTED, PANEL_SEP, RED, Term, YELLOW};
+use super::{App, BORDER_IDLE, Mode, ORANGE, PANEL_MUTED, PANEL_SEP, RED, YELLOW};
 use crate::layout::TreeGeom;
 use crate::agents::AgentStatus;
 use crate::pane::{ACCENT, FG};
 use crate::vt;
 
 impl App {
-    pub(super) fn frame(&mut self, terminal: &mut Term) -> Result<()> {
+    pub(super) fn frame<B: Backend>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()>
+    where
+        B::Error: Send + Sync + 'static,
+    {
         self.poll_exits();
         if self.quit {
             return Ok(());
@@ -368,7 +372,15 @@ impl App {
         );
     }
 
-    fn place_cursor(&mut self, terminal: &mut Term, geom: &TreeGeom, focused: u64) -> Result<()> {
+    fn place_cursor<B: Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+        geom: &TreeGeom,
+        focused: u64,
+    ) -> Result<()>
+    where
+        B::Error: Send + Sync + 'static,
+    {
         if self.popup.open {
             if let Some((x, y)) = self.name_popup_input_cursor() {
                 terminal.set_cursor_position((x, y))?;

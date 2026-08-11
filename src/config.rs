@@ -327,13 +327,16 @@ fn which_in_path(program: &str) -> Option<String> {
     None
 }
 
+/// Serializes process-wide env mutation between the config tests and any other
+/// test (e.g. the daemon integration test) that must override config/env.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Restore env vars on drop so tests never leak mutations.
     struct EnvGuard(Vec<(&'static str, Option<String>)>);
@@ -377,7 +380,7 @@ mod tests {
 
     #[test]
     fn config_dir_uses_xdg_when_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let xdg = scratch_dir("xdg");
         let _guards = (
             EnvGuard::set("XDG_CONFIG_HOME", &xdg.to_string_lossy()),
@@ -389,7 +392,7 @@ mod tests {
 
     #[test]
     fn config_dir_overridden_by_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let custom = scratch_dir("kumo-custom");
         let _guards = (
             EnvGuard::set("KUMO_CONFIG_DIR", &custom.to_string_lossy()),
@@ -401,7 +404,7 @@ mod tests {
 
     #[test]
     fn config_dir_falls_back_to_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let home = scratch_dir("home");
         let _guards = (
             EnvGuard::unset("KUMO_CONFIG_DIR"),
@@ -413,7 +416,7 @@ mod tests {
 
     #[test]
     fn state_dir_uses_xdg_when_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let xdg = scratch_dir("xdg-state");
         let _guards = (
             EnvGuard::set("XDG_STATE_HOME", &xdg.to_string_lossy()),
@@ -425,7 +428,7 @@ mod tests {
 
     #[test]
     fn state_dir_falls_back_to_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let home = scratch_dir("home-state");
         let _guards = (
             EnvGuard::unset("KUMO_STATE_DIR"),
@@ -437,7 +440,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_prefers_xdg_runtime() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let _guards = (
             EnvGuard::set("XDG_RUNTIME_DIR", "/run/user/1000"),
             EnvGuard::unset("TMPDIR"),
@@ -447,7 +450,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_falls_back_to_tmp() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let _guards = (
             EnvGuard::unset("XDG_RUNTIME_DIR"),
             EnvGuard::set("TMPDIR", "/var/folders/xyz"),
@@ -457,7 +460,7 @@ mod tests {
 
     #[test]
     fn default_is_opencode() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-empty");
         let home = scratch_dir("home-empty");
         let _guards = (
@@ -471,7 +474,7 @@ mod tests {
 
     #[test]
     fn ai_command_reads_config_file() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-ai");
         let home = scratch_dir("home-ai");
         write(&cfg_dir.join("config"), "ai-cmd = claude --model sonnet\n");
@@ -486,7 +489,7 @@ mod tests {
 
     #[test]
     fn ai_command_accepts_underscore_alias() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-ai-underscore");
         let home = scratch_dir("home-ai-underscore");
         write(&cfg_dir.join("config"), "ai_cmd = codex\n");
@@ -501,7 +504,7 @@ mod tests {
 
     #[test]
     fn ai_command_reads_legacy_kumo_file() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-legacy");
         let home = scratch_dir("home-legacy");
         write(&home.join(".kumo"), "ai_cmd = gemini\n");
@@ -515,7 +518,7 @@ mod tests {
 
     #[test]
     fn ai_command_config_wins_over_legacy() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-wins");
         let home = scratch_dir("home-wins");
         write(&cfg_dir.join("config"), "ai-cmd = claude\n");
@@ -530,7 +533,7 @@ mod tests {
 
     #[test]
     fn agent_sound_defaults_on_and_parses_off() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-sound");
         let home = scratch_dir("home-sound");
         let _guards = (
@@ -545,7 +548,7 @@ mod tests {
 
     #[test]
     fn agent_sound_disabled_by_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-sound-env");
         let home = scratch_dir("home-sound-env");
         let _guards = (
@@ -565,7 +568,7 @@ mod tests {
 
     #[test]
     fn default_shell_uses_config_when_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-shell");
         let home = scratch_dir("home-shell");
         write(&cfg_dir.join("config"), "shell = /bin/bash\n");
@@ -579,7 +582,7 @@ mod tests {
 
     #[test]
     fn default_shell_falls_back_to_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-shell-empty");
         let home = scratch_dir("home-shell-empty");
         let _guards = (
@@ -592,7 +595,7 @@ mod tests {
 
     #[test]
     fn ai_cwd_prefers_state_dir() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let state = scratch_dir("state-cwd");
         let home = scratch_dir("home-cwd");
         let project = scratch_dir("project-cwd");
@@ -606,7 +609,7 @@ mod tests {
 
     #[test]
     fn ai_cwd_falls_back_to_legacy_workspace() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let state = scratch_dir("state-cwd-legacy");
         let home = scratch_dir("home-cwd-legacy");
         let project = scratch_dir("project-cwd-legacy");
@@ -620,7 +623,7 @@ mod tests {
 
     #[test]
     fn ai_cwd_falls_back_to_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let state = scratch_dir("state-cwd-none");
         let home = scratch_dir("home-cwd-none");
         let _guards = (

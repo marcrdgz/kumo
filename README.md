@@ -151,7 +151,7 @@ listed but always shown as idle.
 | `1`–`9` | Jump to the session at that sidebar position 🎯 |
 | `Tab` | Cycle pane ↹ |
 | `b` | Toggle sidebar 📌 |
-| `d` | Detach (save & exit) 🚪 |
+| `d` | Detach (daemon keeps running) 🚪 |
 | `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
@@ -182,9 +182,9 @@ works, and you can follow the roadmap above as the knobs land. 🔧
 ## ▶️ Run
 
 ```sh
-kumo                       # 🏠 attach to the last session, or start fresh
-kumo attach                # 🔁 restore the last saved session (light re-attach)
-kumo new ~/proyecto        # 🆕 start fresh inside a workspace, ignoring saved state
+kumo                       # 🏠 attach to the daemon (starts it if needed)
+kumo attach                # 🧷 attach to the running daemon
+kumo new ~/proyecto        # 🆕 start a fresh session in the daemon
 kumo ~/proyecto            # 🗂️ same as `kumo new ~/proyecto` (back-compat)
 kumo --version             # ℹ️ prints the version and channel (stable / nightly / dev)
 ```
@@ -193,15 +193,14 @@ During development: `cargo run -p kumo` or `make run`. 🧑‍💻
 
 ## 🔁 Detach / re-attach
 
-`leader+d` (or MENU → `detach`) saves the current sessions — layout tree, pane
-titles, working directories, AI panes — to `~/.local/state/kumo/state.json` and
-exits. The next `kumo` or `kumo attach` restores them; `kumo new` always starts
-fresh.
+`leader+d` (or MENU → `detach`) detaches **this terminal**; the daemon keeps
+running in the background, owning your panes, their processes, and their agents.
+Re-attach from any terminal with `kumo` or `kumo attach`, and everything is
+exactly where you left it.
 
-The state file is **versioned** and written **atomically** (temp + rename), and
-restore reuses the same pane-spawn path as a live session. Until the daemon
-lands, processes **restart** on re-attach (fresh shells in the same layout);
-0.4.0's daemon makes them survive the TUI closing.
+- The daemon **auto-stops** when the last session closes — no lingering process.
+- `kumo new` always starts a fresh session; it never attaches to an existing one.
+- The socket is owner-only and the daemon refuses connections from other users.
 
 ## 🗂️ Project layout
 
