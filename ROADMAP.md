@@ -34,7 +34,40 @@ persistent kumo.
 - ✅ `leader+?` keybind showcase; the leader-mode status-bar hint is generated
   from the same table (`src/app/bindings.rs`), so the two never drift
 
-## ⚙️ 0.3.0 — Config & keymaps
+## 🔌 0.3.0 — Detach / re-attach (light, daemon-ready)
+
+> Detach/re-attach the tmux way, designed so 0.4.0's daemon drops in without a
+> rewrite. For now processes **restart** on re-attach (fresh shells); the daemon
+> in 0.4.0 makes them survive.
+
+- **State contract** (`src/state.rs`): serialize sessions, the layout tree, and
+  per-pane identity (cwd, title, shell, AI program) into `state_dir()/state.json`.
+  Versioned (`v1`), **atomic** write (tmp + rename), **tolerant** load (unknown
+  version / corrupt JSON → fresh start, never crashes), pure data decoupled from
+  the TUI.
+- **tmux-style CLI**: `kumo` attaches to the last state if present (else fresh),
+  `kumo attach` forces a restore, `kumo new [WORKSPACE]` starts fresh (never
+  attaches), and `kumo [WORKSPACE]` remains a fresh-start alias for back-compat.
+- **`leader+d` / MENU `detach`** = save state + exit; detaching with zero
+  sessions clears the state file.
+- **Daemon-ready**: `config::ipc_socket_path()` (`runtime_dir()/kumo.sock`) is
+  reserved now; restored panes reuse `Pane::spawn`/`PtySpec` (the exact path the
+  daemon will own); `state.rs` doubles as the daemon's wire format unchanged.
+- Restore is layout/cwd state, not live processes → *reaparecer sesiones y
+  paneles como estaban* at the layout level.
+
+## 🧬 0.4.0 — Daemon real · client-server
+
+- **Daemon** owning the PTYs; IPC socket in `runtime_dir` (`src/config.rs`) —
+  reuses the state contract and the socket path reserved in 0.3.0, no rewrite.
+- `kumo detach` / `kumo attach [session]` / `kumo ls` / `kumo kill`.
+- **Control CLI / scripting** (`kumo send-keys`, `kumo split`, `kumo new-session`, …)
+  — nearly free once the IPC socket exists; turns kumo into an automation target
+  (editors, test runners, shell scripts).
+- Agents **survive** the TUI closing (covers *daemon para los agentes*).
+- 0.3.0 + 0.4.0 together deliver full *reaparecer tal cual* with live processes.
+
+## ⚙️ 0.5.0 — Config & keymaps
 
 - **Keymap data-driven**: the hard-coded leader dispatch (`leader_command` in
   `src/app.rs`) and mouse actions become configurable tables; remap any binding
@@ -59,7 +92,7 @@ persistent kumo.
   snippet is **idempotent and reversible**, and skips shells that already emit
   OSC 7 (several distros / Oh My Zsh do).
 
-## 🎨 0.4.0 — Theme & chrome
+## 🎨 0.6.0 — Theme & chrome
 
 - **Themes**: full color palette customization (Catppuccin-style schemes,
   light/dark variants, per-scheme backgrounds, status-dot colors, borders) —
@@ -69,29 +102,6 @@ persistent kumo.
 - **Status bar**: customizable widgets (branch, session, agent status, hostname,
   clock).
 - **Sidebar**: toggle/order sections; pane titles and border styling.
-
-## 💾 0.5.0 — Session persistence (light restore)
-
-- Serialize layout tree + sessions + cwd (plus scrollback via Ghostty
-  serialization) into `state_dir`.
-- Auto-restore on launch, with `kumo --resume` / `--no-resume`.
-- Processes **restart** (fresh shells); restore is state, not live processes.
-  → *Reaparecer sesiones y paneles como estaban* at the layout level.
-- ⚠️ **Daemon-ready design**: 0.5.0 and 0.6.0 solve the same problem two ways —
-  a decision is made explicitly before opening 0.5.0: either keep light restore
-  but design the state format as a **contract the 0.6.0 daemon reuses**, or
-  invert the order and build the daemon first (with a daemon, the crash-safe
-  persistence of gate #3 comes almost for free). The format must not be
-  rewritten when the daemon lands.
-
-## 🔌 0.6.0 — Detach real · client-server
-
-- **Daemon** owning the PTYs; IPC socket in `runtime_dir` (`src/config.rs`).
-- `kumo detach` / `kumo attach [session]` / `kumo ls` / `kumo kill`.
-- **Control CLI / scripting** (`kumo send-keys`, `kumo split`, `kumo new-session`, …)
-  — nearly free once the IPC socket exists; turns kumo into an automation target
-  (editors, test runners, shell scripts).
-- Agents **survive** the TUI closing (covers *daemon para los agentes*).
 
 ## 🔍 0.7.0 — Copy-mode, search & pane plumbing
 
@@ -106,7 +116,7 @@ persistent kumo.
 - Lifecycle detection for `codex · gemini · qwen · aider · cody · swe · coco`
   (today auto-listed, always idle).
 - Improved context sharing: scrollback → prompt, command traceback — powered by
-  the **OSC 133** boundaries installed with the follow-workspace snippet (0.3.0),
+  the **OSC 133** boundaries installed with the follow-workspace snippet (0.5.0),
   no blind scrollback parsing.
 
 ## 🛡️ 0.9.0 — Stability & parity
