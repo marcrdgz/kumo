@@ -73,6 +73,30 @@ fn main() -> Result<()> {
         }
     }
 
+    match args.first().map(|s| s.as_str()) {
+        Some("ls") => {
+            #[cfg(unix)]
+            {
+                return client::list_sessions();
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("`kumo ls` needs the unix daemon");
+            }
+        }
+        Some("kill") => {
+            #[cfg(unix)]
+            {
+                return client::kill_server();
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("`kumo kill` needs the unix daemon");
+            }
+        }
+        _ => {}
+    }
+
     // tmux-style launch: `kumo` attaches to the daemon if present (else starts
     // one), `kumo attach` requires a running daemon, `kumo new [dir]` and the
     // back-compat `kumo [dir]` start fresh.
@@ -121,6 +145,8 @@ fn print_help() {
     println!("    kumo attach                attach to the running daemon");
     println!("    kumo new [WORKSPACE]       start a fresh session");
     println!("    kumo [WORKSPACE]           start fresh inside this directory");
+    println!("    kumo ls                    list the daemon's sessions");
+    println!("    kumo kill                  stop the daemon (and its panes)");
     println!("    kumo update [--nightly] [--check]");
     println!();
     println!("ARGS:");
@@ -133,6 +159,8 @@ fn print_help() {
     println!("COMMANDS:");
     println!("    attach         Attach a terminal to the daemon (no daemon = error)");
     println!("    new            Start a fresh session in the daemon");
+    println!("    ls             List the daemon's sessions");
+    println!("    kill           Stop the daemon (kills its panes)");
     println!("    update         Update to the latest release (needs gh)");
     println!("                   --nightly  update to the latest nightly build");
     println!("                   --check    report availability (exit 0 = up to date, 1 = update)");

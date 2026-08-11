@@ -43,6 +43,48 @@ fn workspace_for(launch: &Launch) -> Option<PathBuf> {
     }
 }
 
+/// Connect to a running daemon, or fail with a friendly error.
+fn connect_daemon() -> Result<UnixStream> {
+    let path = crate::config::ipc_socket_path();
+    UnixStream::connect(&path).map_err(|_| {
+        anyhow::anyhow!("no kumo daemon is running (start with `kumo` or `kumo new`)")
+    })
+}
+
+/// `kumo ls`: list the daemon's sessions and exit.
+pub fn list_sessions() -> Result<()> {
+    let mut stream = connect_daemon()?;
+    protocol::write_framed(&mut stream, &ClientMsg::ListSessions)?;
+    match protocol::read_framed::<ServerMsg>(&mut stream)? {
+        ServerMsg::SessionList { sessions } => {
+            for s in &sessions {
+                let mark = if s.active { "* " } else { "  " };
+                let pane_word = if s.panes == 1 { "pane" } else { "panes" };
+                println!(
+                    "{mark}{}: {} {} · {}{}",
+                    s.name,
+                    s.panes,
+                    pane_word,
+                    s.workspace.display(),
+                    if s.zoomed { " (zoomed)" } else { "" }
+                );
+            }
+            if sessions.is_empty() {
+                println!("(no sessions)");
+            }
+            Ok(())
+        }
+        other => Err(anyhow::anyhow!("unexpected daemon reply: {other:?}")),
+    }
+}
+
+/// `kumo kill`: stop the daemon (and the processes in its panes).
+pub fn kill_server() -> Result<()> {
+    let mut stream = connect_daemon()?;
+    protocol::write_framed(&mut stream, &ClientMsg::KillServer)?;
+    Ok(())
+}
+
 fn client_loop(stream: &mut UnixStream) -> Result<()> {
     let (cols, rows) = crossterm::terminal::size()?;
     protocol::write_framed(
@@ -60,12 +102,28 @@ fn client_loop(stream: &mut UnixStream) -> Result<()> {
     std::thread::spawn(move || input_loop(write_half));
 
     let result: Result<()> = (|| {
+        let mut saw_frame = false;
         loop {
             match protocol::read_framed::<ServerMsg>(stream)? {
                 ServerMsg::Welcome { .. } => {}
-                ServerMsg::Frame { frame } => blit(&mut stdout, &frame)?,
+                ServerMsg::Frame { frame } => {
+                    saw_frame = true;
+                    blit(&mut stdout, &frame)?;
+                }
+                ServerMsg::SessionList { .. } => {}
                 ServerMsg::Detach => break,
-                ServerMsg::Shutdown => break,
+                ServerMsg::Shutdown => {
+                    // A shutdown before any frame means the daemon rejected the
+                    // handshake (protocol mismatch with an old lingering daemon)
+                    // rather than a clean auto-stop.
+                    if !saw_frame {
+                        anyhow::bail!(
+                            "the running kumo daemon is from an older, incompatible kumo.\n\
+                             Restart it with:  pkill -f 'kumo daemon'\nthen run `kumo` again"
+                        );
+                    }
+                    break;
+                }
             }
         }
         Ok(())
@@ -98,35 +156,15 @@ fn input_loop(mut stream: UnixStream) {
 /// The subset of a cell's styling that decides whether to re-emit SGR codes.
 type StyleKey = (Option<u32>, Option<u32>, bool, bool, bool, bool, bool);
 
-/// Phase 1 blit: clear and redraw every non-empty cell each frame. Correct but
-/// not diff-efficient; dirty-row streaming lands with the protocol v2 work.
+/// Blit a frame: repaint only the dirty rows (`full` frames clear first), so
+/// unchanged parts of the terminal never flicker.
 fn blit(out: &mut io::Stdout, f: &FrameMsg) -> io::Result<()> {
-    let mut buf = String::with_capacity(f.cells.len() * 8);
-    buf.push_str("\x1b[2J\x1b[H");
-    let mut prev_style: Option<StyleKey> = None;
-    for y in 0..f.rows {
-        for x in 0..f.cols {
-            let cell = &f.cells[(y as usize) * f.cols as usize + (x as usize)];
-            if cell.text.is_empty() {
-                continue;
-            }
-            let style = (
-                cell.fg,
-                cell.bg,
-                cell.bold,
-                cell.italic,
-                cell.underline,
-                cell.inverse,
-                cell.faint,
-            );
-            if prev_style != Some(style) {
-                buf.push_str("\x1b[0m");
-                push_sgr(&mut buf, &style);
-                prev_style = Some(style);
-            }
-            buf.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
-            buf.push_str(&cell.text);
-        }
+    let mut buf = String::with_capacity(4096);
+    if f.full {
+        buf.push_str("\x1b[2J\x1b[H");
+    }
+    for patch in &f.rows_dirty {
+        write_row(&mut buf, patch.row, &patch.cells);
     }
     match f.cursor {
         Some((x, y)) => {
@@ -137,6 +175,45 @@ fn blit(out: &mut io::Stdout, f: &FrameMsg) -> io::Result<()> {
     }
     out.write_all(buf.as_bytes())?;
     out.flush()
+}
+
+/// Rewrite one row (column-major cells), then erase the tail to the end of the
+/// line so stale cells beyond the row's content are cleared. Continuation cells
+/// after a wide grapheme (`cell_width == 0`) are skipped so wide characters
+/// are not overwritten.
+fn write_row(buf: &mut String, row: u16, cells: &[protocol::WireCell]) {
+    let last = cells
+        .iter()
+        .rposition(|c| !c.text.trim().is_empty())
+        .unwrap_or(usize::MAX);
+    let mut prev_style: Option<StyleKey> = None;
+    for (col, cell) in cells.iter().enumerate() {
+        if col > last {
+            break;
+        }
+        if cell.cell_width == 0 {
+            continue;
+        }
+        let style = (
+            cell.fg,
+            cell.bg,
+            cell.bold,
+            cell.italic,
+            cell.underline,
+            cell.inverse,
+            cell.faint,
+        );
+        if prev_style != Some(style) {
+            buf.push_str("\x1b[0m");
+            push_sgr(buf, &style);
+            prev_style = Some(style);
+        }
+        buf.push_str(&format!("\x1b[{};{}H", row + 1, col + 1));
+        // Blank cells still reset to a space so previously drawn content in the
+        // row is cleared.
+        buf.push_str(if cell.text.trim().is_empty() { " " } else { &cell.text });
+    }
+    buf.push_str("\x1b[K");
 }
 
 fn push_sgr(

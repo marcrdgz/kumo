@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
 /// with a mismatched version.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -290,10 +290,15 @@ pub struct WireCell {
     pub underline: bool,
     pub inverse: bool,
     pub faint: bool,
+    /// Cell width in columns: `2` for a wide grapheme, `0` for the
+    /// continuation cell after a wide grapheme, `1` otherwise. The client skips
+    /// continuation cells so wide characters are not overwritten.
+    pub cell_width: u16,
 }
 
 impl WireCell {
     fn from_ratatui(cell: &ratatui::buffer::Cell) -> Self {
+        use ratatui::buffer::CellWidth;
         use ratatui::style::{Color, Modifier};
         let fg = match cell.fg {
             Color::Rgb(r, g, b) => Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)),
@@ -313,30 +318,74 @@ impl WireCell {
             underline: m.contains(Modifier::UNDERLINED),
             inverse: m.contains(Modifier::REVERSED),
             faint: m.contains(Modifier::DIM),
+            cell_width: cell.cell_width(),
         }
     }
 }
 
-/// A full rendered grid (phase 1: no row diffs yet).
+/// One dirty row: its index plus every cell, so the client can repaint it fully
+/// (handles wide chars, styles, and cells that were cleared).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RowPatch {
+    pub row: u16,
+    pub cells: Vec<WireCell>,
+}
+
+/// A render frame. Rows are sent as patches; `full` means every row is included
+/// and the client should clear the screen first (first frame, or a resize).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct FrameMsg {
     pub cols: u16,
     pub rows: u16,
-    /// Row-major cells.
-    pub cells: Vec<WireCell>,
+    pub full: bool,
+    pub rows_dirty: Vec<RowPatch>,
     /// Host-terminal cursor position, if the app wants one shown.
     pub cursor: Option<(u16, u16)>,
 }
 
 impl FrameMsg {
-    pub fn from_buffer(buf: &ratatui::buffer::Buffer, cursor: Option<(u16, u16)>) -> Self {
-        Self {
-            cols: buf.area.width,
-            rows: buf.area.height,
-            cells: buf.content.iter().map(WireCell::from_ratatui).collect(),
-            cursor,
-        }
+    /// A frame containing every row (`full = true`): for a client's first
+    /// attach or after a resize.
+    pub fn full_frame(buf: &ratatui::buffer::Buffer, cursor: Option<(u16, u16)>) -> Self {
+        let cols = buf.area.width;
+        let rows = buf.area.height;
+        let rows_dirty = (0..rows)
+            .map(|row| RowPatch {
+                row,
+                cells: row_cells(buf, row, cols),
+            })
+            .collect();
+        Self { cols, rows, full: true, rows_dirty, cursor }
     }
+
+    /// A frame containing only the rows that changed since `last` (same size).
+    pub fn diff_frame(
+        buf: &ratatui::buffer::Buffer,
+        last: &ratatui::buffer::Buffer,
+        cursor: Option<(u16, u16)>,
+    ) -> Self {
+        let cols = buf.area.width;
+        let rows = buf.area.height;
+        let rows_dirty = (0..rows)
+            .filter(|row| row_changed(buf, last, *row, cols))
+            .map(|row| RowPatch { row, cells: row_cells(buf, row, cols) })
+            .collect();
+        Self { cols, rows, full: false, rows_dirty, cursor }
+    }
+}
+
+/// The cells of one row, in column order.
+fn row_cells(buf: &ratatui::buffer::Buffer, row: u16, cols: u16) -> Vec<WireCell> {
+    let s = row as usize * cols as usize;
+    let e = s + cols as usize;
+    buf.content[s..e].iter().map(WireCell::from_ratatui).collect()
+}
+
+/// Whether any cell in `row` differs between the two buffers.
+fn row_changed(buf: &ratatui::buffer::Buffer, last: &ratatui::buffer::Buffer, row: u16, cols: u16) -> bool {
+    let s = row as usize * cols as usize;
+    let e = s + cols as usize;
+    buf.content[s..e] != last.content[s..e]
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +411,20 @@ pub enum ClientMsg {
     },
     /// The client is detaching; the daemon keeps running.
     Detach,
+    /// `kumo ls`: request the session list (non-TUI client).
+    ListSessions,
+    /// `kumo kill`: stop the daemon (killing its panes).
+    KillServer,
+}
+
+/// One session, as reported to `kumo ls`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SessionInfo {
+    pub name: String,
+    pub workspace: std::path::PathBuf,
+    pub panes: usize,
+    pub zoomed: bool,
+    pub active: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -376,6 +439,10 @@ pub enum ServerMsg {
     Detach,
     /// The daemon is stopping (last session closed / `kumo kill`).
     Shutdown,
+    /// Response to `ListSessions`.
+    SessionList {
+        sessions: Vec<SessionInfo>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +512,8 @@ pub fn write_framed<T: serde::Serialize>(writer: &mut impl io::Write, msg: &T) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     #[test]
     fn key_roundtrip() {
@@ -486,5 +555,35 @@ mod tests {
         write_framed(&mut buf, &msg).unwrap();
         let decoded: ServerMsg = read_framed(&mut &buf[..]).unwrap();
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn diff_frame_sends_only_changed_rows() {
+        let mut a = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let mut b = Buffer::empty(Rect::new(0, 0, 4, 3));
+        b.cell_mut((1, 0)).unwrap().set_symbol("X");
+        let frame = FrameMsg::diff_frame(&b, &a, None);
+        assert!(!frame.full);
+        assert_eq!(frame.rows_dirty.len(), 1, "only the touched row should be dirty");
+        assert_eq!(frame.rows_dirty[0].row, 0);
+        assert_eq!(frame.rows_dirty[0].cells.len(), 4);
+        assert_eq!(frame.rows_dirty[0].cells[1].text, "X");
+    }
+
+    #[test]
+    fn diff_frame_all_rows_equal_is_empty() {
+        let a = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let b = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let frame = FrameMsg::diff_frame(&b, &a, None);
+        assert!(!frame.full);
+        assert!(frame.rows_dirty.is_empty());
+    }
+
+    #[test]
+    fn full_frame_includes_every_row() {
+        let buf = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let frame = FrameMsg::full_frame(&buf, None);
+        assert!(frame.full);
+        assert_eq!(frame.rows_dirty.len(), 3);
     }
 }

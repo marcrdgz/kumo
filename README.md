@@ -186,6 +186,8 @@ kumo                       # 🏠 attach to the daemon (starts it if needed)
 kumo attach                # 🧷 attach to the running daemon
 kumo new ~/proyecto        # 🆕 start a fresh session in the daemon
 kumo ~/proyecto            # 🗂️ same as `kumo new ~/proyecto` (back-compat)
+kumo ls                    # 📋 list the daemon's sessions (* = active)
+kumo kill                  # 🛑 stop the daemon (kills its panes)
 kumo --version             # ℹ️ prints the version and channel (stable / nightly / dev)
 ```
 

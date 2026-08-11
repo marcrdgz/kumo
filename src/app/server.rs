@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
@@ -26,6 +27,9 @@ use crate::protocol::{self, ClientMsg, ServerMsg};
 struct Client {
     tx: mpsc::SyncSender<ServerMsg>,
     welcomed: bool,
+    /// True until this client has received one full frame (its first attach);
+    /// it needs a full repaint even if the daemon's own frame is a diff.
+    needs_full: bool,
 }
 
 pub fn run_daemon(launch: Launch) -> Result<()> {
@@ -49,6 +53,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let (input_tx, input_rx) = mpsc::channel::<(usize, ClientMsg)>();
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
+    let mut last_buffer: Option<Buffer> = None;
+    let mut kill = false;
 
     let mut render_dirty = true;
     let mut last_forced = Instant::now();
@@ -67,7 +73,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let id = next_id;
             next_id += 1;
             std::thread::spawn(move || client_read_loop(read_half, tx, id));
-            clients.insert(id, Client { tx: writer_tx, welcomed: false });
+            clients.insert(id, Client { tx: writer_tx, welcomed: false, needs_full: true });
             render_dirty = true;
         }
 
@@ -110,6 +116,24 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 ClientMsg::Detach => {
                     clients.remove(&id);
                 }
+                ClientMsg::ListSessions => {
+                    let sessions = app
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| protocol::SessionInfo {
+                            name: s.name.clone(),
+                            workspace: s.workspace.clone(),
+                            panes: s.tree.pane_count(),
+                            zoomed: s.zoom,
+                            active: i == app.active,
+                        })
+                        .collect();
+                    let _ = send_to(&mut clients, id, &ServerMsg::SessionList { sessions });
+                }
+                ClientMsg::KillServer => {
+                    kill = true;
+                }
             }
         }
 
@@ -135,16 +159,32 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let pos = terminal.get_cursor_position()?;
                 (pos.x, pos.y)
             };
-            let msg = ServerMsg::Frame {
-                frame: protocol::FrameMsg::from_buffer(terminal.backend().buffer(), Some((cx, cy))),
-            };
+            let new_buf = terminal.backend().buffer().clone();
+            let cursor = Some((cx, cy));
+            let area_changed = last_buffer.as_ref().map(|l| l.area != new_buf.area).unwrap_or(true);
+
+            // Build the shared messages lazily: one full frame (if anything needs
+            // it) and one row-diff. A client gets the full frame on its first
+            // attach or after a resize, then the row diffs.
+            let mut full_msg: Option<ServerMsg> = None;
+            let mut diff_msg: Option<ServerMsg> = None;
             let mut dead = Vec::new();
             for (id, client) in clients.iter_mut() {
                 if !client.welcomed {
                     continue;
                 }
-                // try_send: a lagging client that never reads is dropped from
-                // this frame instead of blocking the whole daemon.
+                let send_full = client.needs_full || area_changed;
+                let msg = if send_full {
+                    client.needs_full = false;
+                    full_msg.get_or_insert_with(|| {
+                        ServerMsg::Frame { frame: protocol::FrameMsg::full_frame(&new_buf, cursor) }
+                    })
+                } else {
+                    let Some(last) = &last_buffer else { continue };
+                    diff_msg.get_or_insert_with(|| {
+                        ServerMsg::Frame { frame: protocol::FrameMsg::diff_frame(&new_buf, last, cursor) }
+                    })
+                };
                 if client.tx.try_send(msg.clone()).is_err() {
                     dead.push(*id);
                 }
@@ -152,6 +192,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             for id in dead {
                 clients.remove(&id);
             }
+            last_buffer = Some(new_buf);
         }
 
         // `leader+d` / MENU detach: tell every client to disconnect and keep
@@ -163,8 +204,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let _ = client.tx.try_send(ServerMsg::Detach);
             }
         }
-        // Every session closed (or explicit shutdown): stop the daemon.
-        if app.quit {
+        // Every session closed (explicit `kumo kill`, or auto-stop when the
+        // last session closes): stop the daemon.
+        if app.quit || kill {
             for client in clients.values_mut() {
                 let _ = client.tx.try_send(ServerMsg::Shutdown);
             }
@@ -325,10 +367,10 @@ mod tests {
         loop {
             let f = next_frame(stream);
             let has_content = f
-                .cells
+                .rows_dirty
                 .iter()
-                .enumerate()
-                .any(|(i, c)| i % f.cols as usize >= 27 && !c.text.trim().is_empty());
+                .flat_map(|p| p.cells.iter().enumerate())
+                .any(|(col_in_row, c)| col_in_row >= 27 && !c.text.trim().is_empty());
             if has_content {
                 return;
             }
@@ -416,6 +458,20 @@ mod tests {
         send_key(&mut stream2, WireKeyCode::Char('w'));
         wait_cursor_move(&mut stream2, start2, "re-attached session did not accept input");
 
+        // `kumo ls`: the daemon reports its sessions (frames interleave, so
+        // skip them until the SessionList reply arrives).
+        protocol::write_framed(&mut stream2, &ClientMsg::ListSessions).unwrap();
+        let sessions = loop {
+            match protocol::read_framed::<ServerMsg>(&mut stream2).unwrap() {
+                ServerMsg::SessionList { sessions } => break sessions,
+                _ => {}
+            }
+        };
+        assert_eq!(sessions.len(), 1, "one session should be listed");
+        assert_eq!(sessions[0].name, "session-1");
+        assert!(sessions[0].active);
+        assert!(sessions[0].panes >= 1);
+
         // The echo checks left `qw` pending in the shell's line buffer; submit
         // it (a harmless "command not found") so the following `exit` runs.
         send_key(&mut stream2, WireKeyCode::Enter);
@@ -430,6 +486,17 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         while sock.exists() {
             assert!(Instant::now() < deadline, "daemon socket not removed after last session closed");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // `kumo kill` stops a daemon and cleans its socket.
+        start_daemon(&sock);
+        let _ = wait_for_socket(&sock, Duration::from_secs(10));
+        let mut kstream = UnixStream::connect(&sock).unwrap();
+        protocol::write_framed(&mut kstream, &ClientMsg::KillServer).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sock.exists() {
+            assert!(Instant::now() < deadline, "daemon socket not removed after kumo kill");
             std::thread::sleep(Duration::from_millis(50));
         }
 
