@@ -446,11 +446,15 @@ impl App {
         let (w, h) = self.term_size;
         let width = items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = items.len() as u16 + 2;
-        if w < width || h < height + 1 {
+        if w < width || h < height {
             return None;
         }
-        let x = self.ctx_menu.x.saturating_add(1).min(w.saturating_sub(width));
-        let y = self.ctx_menu.y.saturating_sub(height);
+        // Prefer opening down-right of the cursor, like a normal context menu;
+        // flip up/left when there's no room in that direction.
+        let px = self.ctx_menu.x;
+        let py = self.ctx_menu.y;
+        let x = if px.saturating_add(1) + width <= w { px + 1 } else { px.saturating_sub(width) };
+        let y = if py + 1 + height <= h { py + 1 } else { py.saturating_sub(height) };
         Some(Rect::new(x, y, width, height))
     }
 
