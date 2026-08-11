@@ -151,7 +151,7 @@ listed but always shown as idle.
 | `1`–`9` | Jump to the session at that sidebar position 🎯 |
 | `Tab` | Cycle pane ↹ |
 | `b` | Toggle sidebar 📌 |
-| `d` | Exit kumo 🚪 |
+| `d` | Detach (save & exit) 🚪 |
 | `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
@@ -182,12 +182,26 @@ works, and you can follow the roadmap above as the knobs land. 🔧
 ## ▶️ Run
 
 ```sh
-kumo            # 🏠 opens in the current directory
-kumo ~/proyecto # 🗂️ opens in a specific workspace
-kumo --version  # ℹ️ prints the version and channel (stable / nightly / dev)
+kumo                       # 🏠 attach to the last session, or start fresh
+kumo attach                # 🔁 restore the last saved session (light re-attach)
+kumo new ~/proyecto        # 🆕 start fresh inside a workspace, ignoring saved state
+kumo ~/proyecto            # 🗂️ same as `kumo new ~/proyecto` (back-compat)
+kumo --version             # ℹ️ prints the version and channel (stable / nightly / dev)
 ```
 
 During development: `cargo run -p kumo` or `make run`. 🧑‍💻
+
+## 🔁 Detach / re-attach
+
+`leader+d` (or MENU → `detach`) saves the current sessions — layout tree, pane
+titles, working directories, AI panes — to `~/.local/state/kumo/state.json` and
+exits. The next `kumo` or `kumo attach` restores them; `kumo new` always starts
+fresh.
+
+The state file is **versioned** and written **atomically** (temp + rename), and
+restore reuses the same pane-spawn path as a live session. Until the daemon
+lands, processes **restart** on re-attach (fresh shells in the same layout);
+0.4.0's daemon makes them survive the TUI closing.
 
 ## 🗂️ Project layout
 
