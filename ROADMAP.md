@@ -23,16 +23,16 @@ persistent kumo.
 
 ## 🚀 0.2.0 — Polish & hygiene
 
-> ✅ **Shipped** — `leader+?` opens a browsable keybind showcase, and the
-> leader-mode status-bar hint is generated from the same table
-> (`src/app/bindings.rs`), so the two never drift.
+> ✅ **Released** — `v0.2.0`, 2026-08-10.
 
 - ✅ CLI `-h/--help` usage output
 - ✅ Context menu with split / close actions
 - ✅ Per-agent lifecycle detection split + `claude` support
 - ✅ Mouse SGR forwarding fix; git-cliff changelog pipeline
-- Rename the `d` binding from *detach* to *exit* until real detach lands
+- ✅ Rename the `d` binding from *detach* to *exit* until real detach lands
   (`src/app/bindings.rs`, `src/app.rs`, `src/app/overlays.rs`)
+- ✅ `leader+?` keybind showcase; the leader-mode status-bar hint is generated
+  from the same table (`src/app/bindings.rs`), so the two never drift
 
 ## ⚙️ 0.3.0 — Config & keymaps
 
@@ -44,6 +44,13 @@ persistent kumo.
   **clear validation errors** instead of silent ignores.
 - The `config` item in the MENU dropdown (today "coming soon") opens the config
   file for editing.
+- **Follow workspace** — the active session tracks the focused pane's directory:
+  new panes open where you are, and the sidebar / git-branch / AI context follow
+  along. **ON by default**, `follow-workspace = true` in the config (no leader
+  binding; config-only). Delivered via **OSC 7** (`pwd_changed` already exists
+  in `libghostty-vt`, not yet wired in `src/vt.rs`): on first use kumo offers to
+  auto-install the OSC 7 snippet into your shell rc (zsh / bash / fish, with
+  confirmation).
 
 ## 🎨 0.4.0 — Theme & chrome
 
