@@ -4,6 +4,27 @@
 # Proper document header for the changelog.
 [changelog]
 header = "# Changelog\n\n"
+# Custom body: identical to the git-cliff default except the version heading
+# omits the date and keeps the `v` prefix (`## v0.2.1`). cargo-dist derives the
+# GitHub release title from this heading, so the release title becomes exactly
+# `v0.2.1` instead of `0.2.1 - 2026-08-11`.
+body = """
+{% if version %}\
+    ## v{{ version | trim_start_matches(pat="v") }}
+{% else %}\
+    ## [unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+            {% if commit.breaking %}[**breaking**] {% endif %}\
+            {{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}
+"""
+# Remove leading and trailing whitespace from the rendered body.
+trim = true
 
 # Never treat the rolling `nightly`/`nightly-last` tags as release boundaries;
 # those commits belong to the nearest versioned release instead.
