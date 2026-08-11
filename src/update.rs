@@ -252,12 +252,20 @@ fn remove_dir(path: &Path) {
     let _ = std::fs::remove_dir_all(path);
 }
 
+fn select_installer(assets: &[(String, String)], windows: bool) -> Option<&(String, String)> {
+    let suffix = if windows { "-installer.ps1" } else { "-installer.sh" };
+    assets.iter().find(|(n, _)| n.ends_with(suffix))
+}
+
 fn install_stable(latest: &Latest) -> Result<()> {
     let assets = release_assets(&latest.tag)?;
-    let (installer, url) = assets
-        .iter()
-        .find(|(n, _)| n.ends_with("-installer.sh") || n.ends_with("-installer.ps1"))
-        .context("no cargo-dist installer found on the release")?;
+    let (installer, url) = select_installer(&assets, cfg!(windows))
+        .context(if cfg!(windows) {
+            "no -installer.ps1 cargo-dist installer found on the release"
+        } else {
+            "no -installer.sh cargo-dist installer found on the release"
+        })?;
+
     let dir = temp_dir()?;
     let script = dir.join(installer);
     download(url, &script)?;
@@ -540,5 +548,27 @@ mod tests {
             created_at: Some("2026-08-09T04:00:00Z".to_string()),
         };
         assert_eq!(dismiss_key(Channel::Nightly, &latest), "2026-08-09T04:00:00Z");
+    }
+
+    #[test]
+    fn unix_selects_shell_installer_even_when_ps1_lists_first() {
+        let assets = vec![
+            ("kumo-installer.ps1".to_string(), "https://x/ps1".to_string()),
+            ("kumo-installer.sh".to_string(), "https://x/sh".to_string()),
+        ];
+        let (name, url) = select_installer(&assets, false).expect("a shell installer must exist");
+        assert_eq!(name, "kumo-installer.sh");
+        assert_eq!(url, "https://x/sh");
+    }
+
+    #[test]
+    fn windows_selects_powershell_installer() {
+        let assets = vec![
+            ("kumo-installer.sh".to_string(), "https://x/sh".to_string()),
+            ("kumo-installer.ps1".to_string(), "https://x/ps1".to_string()),
+        ];
+        let (name, url) = select_installer(&assets, true).expect("a powershell installer must exist");
+        assert_eq!(name, "kumo-installer.ps1");
+        assert_eq!(url, "https://x/ps1");
     }
 }
