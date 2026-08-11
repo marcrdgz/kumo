@@ -37,12 +37,19 @@ pub(super) enum CtxTarget {
     Session(usize),
 }
 
-/// Right-click context menu items for a target: a pane gets rename, both split
-/// directions and close; a session gets rename and close.
-fn ctx_items(target: CtxTarget) -> &'static [&'static str] {
-    match target {
-        CtxTarget::Pane(_) => &["rename", "split vertical", "split horizontal", "close"],
-        CtxTarget::Session(_) => &["rename", "close"],
+/// Right-click context menu items for the current target: a pane gets rename,
+/// zoom (or unzoom, when the session is already zoomed), both split directions
+/// and close; a session gets rename and close. The right-clicked pane is
+/// focused before the menu opens, so `zoom` state always refers to it.
+impl App {
+    fn ctx_items(&self) -> &'static [&'static str] {
+        match self.ctx_menu.target {
+            CtxTarget::Pane(_) if self.sessions[self.active].zoom => {
+                &["rename", "unzoom", "split vertical", "split horizontal", "close"]
+            }
+            CtxTarget::Pane(_) => &["rename", "zoom", "split vertical", "split horizontal", "close"],
+            CtxTarget::Session(_) => &["rename", "close"],
+        }
     }
 }
 
@@ -274,7 +281,7 @@ impl App {
 
     /// Run the action for context-menu item `idx` and close the menu.
     pub(super) fn ctx_menu_select(&mut self, idx: usize) -> Result<()> {
-        let items = ctx_items(self.ctx_menu.target);
+        let items = self.ctx_items();
         let action = items.get(idx).copied().unwrap_or("close");
         let target = self.ctx_menu.target;
         self.ctx_menu.open = false;
@@ -295,6 +302,15 @@ impl App {
                     self.split_active(SplitDir::H, false)?;
                 }
             }
+            "zoom" => {
+                if let CtxTarget::Pane(pid) = target {
+                    self.set_focus(pid);
+                    self.sessions[self.active].zoom = true;
+                }
+            }
+            "unzoom" => {
+                self.sessions[self.active].zoom = false;
+            }
             "close" => match target {
                 CtxTarget::Pane(pid) => self.close_pane(pid),
                 CtxTarget::Session(idx) => self.close_session(idx),
@@ -310,7 +326,7 @@ impl App {
             self.ctx_menu.open = false;
             return Ok(());
         }
-        let items = ctx_items(self.ctx_menu.target);
+        let items = self.ctx_items();
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.ctx_menu.selected = (self.ctx_menu.selected + 1) % items.len();
@@ -442,7 +458,7 @@ impl App {
         if !self.ctx_menu.open {
             return None;
         }
-        let items = ctx_items(self.ctx_menu.target);
+        let items = self.ctx_items();
         let (w, h) = self.term_size;
         let width = items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = items.len() as u16 + 2;
@@ -468,7 +484,7 @@ impl App {
     /// Context-menu item index under `(x, y)`, if the menu covers it.
     pub(super) fn ctx_menu_item_at(&self, x: u16, y: u16) -> Option<usize> {
         let dd = self.ctx_menu_rect()?;
-        let items = ctx_items(self.ctx_menu.target);
+        let items = self.ctx_items();
         items
             .iter()
             .enumerate()
@@ -623,7 +639,7 @@ impl App {
             put(f, x0, y, "│", border);
             put(f, x1, y, "│", border);
         }
-        for (i, item) in ctx_items(self.ctx_menu.target).iter().enumerate() {
+        for (i, item) in self.ctx_items().iter().enumerate() {
             render_item_row(
                 f,
                 x0,
