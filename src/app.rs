@@ -16,6 +16,7 @@ use crate::layout::{self, LayoutTree, SplitDir};
 use crate::agents::AgentStatus;
 use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
+use crate::state::{self, SavedState};
 
 use self::mouse::{Drag, PendingClick, Sel};
 use self::overlays::{is_leader, CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
@@ -62,6 +63,16 @@ enum Dir {
     Down,
 }
 
+/// How to start kumo (0.3.0 tmux-style CLI).
+pub enum Launch {
+    /// `kumo`: attach to the last saved state if present, else fresh in cwd.
+    Auto,
+    /// `kumo attach`: restore the saved state; error if none exists.
+    Attach,
+    /// `kumo new [WORKSPACE]` / `kumo [WORKSPACE]`: start fresh, never attach.
+    New(Option<PathBuf>),
+}
+
 pub struct App {
     sessions: Vec<Session>,
     active: usize,
@@ -102,6 +113,9 @@ pub struct App {
     /// unchanged so the frame loop never re-iterates unchanged terminals.
     pane_cache: HashMap<u64, Buffer>,
     quit: bool,
+    /// True when the user asked to detach (`leader+d` / MENU `detach`): the
+    /// loop exits and the state is persisted before returning.
+    detach_requested: bool,
     /// Status-bar menu (MENU button + dropdown).
     menu: Menu,
     /// Right-click context menu inside a pane.
@@ -120,8 +134,8 @@ pub struct App {
     update_rx: mpsc::Receiver<Option<crate::update::UpdateNotice>>,
 }
 
-pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
-    let mut app = App::new(workspace)?;
+pub fn run(terminal: &mut Term, launch: Launch) -> Result<()> {
+    let mut app = App::new(launch)?;
     while !app.quit {
         while let Ok(ev) = app.events_rx.try_recv() {
             app.on_pty_event(ev);
@@ -149,22 +163,23 @@ pub fn run(terminal: &mut Term, workspace: Option<&str>) -> Result<()> {
         }
         app.frame(terminal)?;
     }
+    app.on_exit();
     Ok(())
 }
 
 impl App {
-    fn new(workspace: Option<&str>) -> Result<App> {
+    fn new(launch: Launch) -> Result<App> {
         let shell = crate::config::default_shell();
         let (ai_prog, ai_args) = crate::config::ai_command();
         let ai_prog = crate::config::resolve_program(&ai_prog);
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-        // Workspace precedence: explicit argument, then the directory kumo
-        // was launched from, then $HOME.
-        let workspace = workspace
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or(home);
+        let cwd = std::env::current_dir().ok();
+        // Workspace for a fresh session: the explicit `kumo new [dir]` arg, else
+        // the directory kumo was launched from, else $HOME.
+        let workspace = match &launch {
+            Launch::New(Some(p)) if p.is_dir() => p.clone(),
+            _ => cwd.clone().unwrap_or_else(|| home.clone()),
+        };
 
         let (events_tx, events_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
@@ -199,6 +214,7 @@ impl App {
             last_focused: None,
             pane_cache: HashMap::new(),
             quit: false,
+            detach_requested: false,
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
             // AGENTS defaults to the bottom of its region (live list), so the
@@ -210,8 +226,139 @@ impl App {
             update_notice: None,
             update_rx,
         };
-        app.new_session()?;
+
+        match launch {
+            Launch::Auto | Launch::Attach => {
+                if let Some(state) = state::load(&crate::config::state_file())? {
+                    app.restore(state)?;
+                } else if matches!(launch, Launch::Attach) {
+                    anyhow::bail!("no saved state to attach to (start with `kumo` or `kumo new`)");
+                } else {
+                    app.new_session()?;
+                }
+            }
+            Launch::New(_) => app.new_session()?,
+        }
         Ok(app)
+    }
+
+    /// Rebuild sessions and panes from a saved state. Saved pane ids are
+    /// remapped to fresh process-local ids; every pane is respawned via the
+    /// same `Pane::spawn` path a fresh session uses (and that 0.4.0's daemon
+    /// will own).
+    fn restore(&mut self, mut state: SavedState) -> Result<()> {
+        // Assign a fresh pane id per saved id, consistently across sessions.
+        let mut map = std::collections::HashMap::new();
+        for session in &state.sessions {
+            let mut ids = Vec::new();
+            state::tree_pane_ids(&session.tree, &mut ids);
+            for old in ids {
+                map.entry(old).or_insert_with(Pty::next_pane_id);
+            }
+        }
+        state::remap_pane_ids(&mut state, &map);
+
+        self.panes.clear();
+        self.sessions.clear();
+        let (cols, rows) = self.pane_dims();
+        let saved_active = state.active;
+        for (i, saved) in state.sessions.into_iter().enumerate() {
+            let sid = self.next_session_id();
+            for sp in saved.panes {
+                let mut pane = Pane::spawn(
+                    sid,
+                    sp.id,
+                    sp.shell,
+                    sp.program,
+                    Some(sp.cwd.clone()),
+                    cols,
+                    rows,
+                    sp.is_ai,
+                    self.events_tx.clone(),
+                )?;
+                pane.custom_name = sp.custom_name;
+                self.panes.insert(sp.id, pane);
+            }
+            let mut tree = LayoutTree::from_node(state::to_layout_node(&saved.tree), saved.focus);
+            if !tree.contains(tree.focus) {
+                if let Some(&first) = tree.pane_ids().first() {
+                    tree.focus = first;
+                }
+            }
+            self.sessions.push(Session {
+                id: sid,
+                name: saved.name,
+                tree,
+                zoom: saved.zoom,
+                workspace: saved.workspace,
+            });
+            self.active = i;
+        }
+        if self.sessions.is_empty() {
+            // Saved state without any surviving pane (or empty): fall back to a
+            // fresh session rather than rendering a broken tree.
+            self.new_session()?;
+        } else {
+            self.active = saved_active.min(self.sessions.len() - 1);
+        }
+        Ok(())
+    }
+
+    /// Serialize the current sessions/panes for `state::save`.
+    fn to_saved_state(&self) -> Option<SavedState> {
+        if self.sessions.is_empty() {
+            return None;
+        }
+        let mut sessions = Vec::new();
+        for session in &self.sessions {
+            let root = session.tree.root.as_ref()?;
+            let mut panes = Vec::new();
+            for pid in session.tree.pane_ids() {
+                let Some(pane) = self.panes.get(&pid) else { continue };
+                panes.push(state::SavedPane {
+                    id: pid,
+                    is_ai: pane.is_ai,
+                    shell: pane.pty.shell.clone(),
+                    program: pane.program.clone(),
+                    cwd: pane.cwd.clone(),
+                    custom_name: pane.custom_name.clone(),
+                });
+            }
+            sessions.push(state::SavedSession {
+                name: session.name.clone(),
+                workspace: session.workspace.clone(),
+                zoom: session.zoom,
+                focus: session.tree.focus,
+                tree: state::from_layout_node(root),
+                panes,
+            });
+        }
+        if sessions.is_empty() {
+            return None;
+        }
+        Some(state::SavedState { version: state::STATE_VERSION, active: self.active, sessions })
+    }
+
+    /// Persist (or clear) the state file once the loop exits.
+    fn on_exit(&mut self) {
+        let path = crate::config::state_file();
+        if self.detach_requested {
+            match self.to_saved_state() {
+                Some(state) => {
+                    if let Err(e) = state::save(&path, &state) {
+                        log::warn!("kumo: failed to save state: {e:#}");
+                    }
+                }
+                None => {
+                    // Detached with every session closed: a resume would be
+                    // pointless, so clear any previous state.
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        } else if self.sessions.is_empty() {
+            // Exited by closing every session: don't let a stale state resume.
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     // ----- lifecycle -----
@@ -464,7 +611,12 @@ impl App {
             KeyCode::Char('k') => self.focus_dir(Dir::Up),
             KeyCode::Char('l') => self.focus_dir(Dir::Right),
             KeyCode::Char('b') => self.sidebar_open = !self.sidebar_open,
-            KeyCode::Char('d') => self.quit = true, // exit (quit the TUI)
+            KeyCode::Char('d') => {
+                // detach: save the session state and exit (light restore for
+                // now; 0.4.0's daemon turns this into a real client detach).
+                self.detach_requested = true;
+                self.quit = true;
+            }
             KeyCode::Char('n') => self.cycle_session(1),
             KeyCode::Char('p') => self.cycle_session(-1),
             KeyCode::Char('?') => self.open_keybind_overlay(),

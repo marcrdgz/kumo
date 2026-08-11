@@ -61,6 +61,20 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config")
 }
 
+/// The persisted session state (0.3.0 detach/re-attach): `state_dir()/state.json`.
+/// Written atomically by `state::save`; a missing or unreadable file simply
+/// means a fresh start.
+pub fn state_file() -> PathBuf {
+    state_dir().join("state.json")
+}
+
+/// The future daemon's IPC socket (0.4.0 client-server): `runtime_dir()/kumo.sock`.
+/// Reserved now so 0.3.0's state contract and 0.4.0's daemon agree on the path
+/// from day one.
+pub fn ipc_socket_path() -> PathBuf {
+    runtime_dir().join("kumo.sock")
+}
+
 /// Legacy config file (`~/.kumo`) read as a fallback for back-compat.
 fn legacy_config_file() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".kumo"))

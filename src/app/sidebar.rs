@@ -431,6 +431,7 @@ mod tests {
             last_focused: None,
             pane_cache: HashMap::new(),
             quit: false,
+            detach_requested: false,
             menu: super::super::Menu { open: false, selected: 0 },
             ctx_menu: super::super::CtxMenu { open: false, x: 0, y: 0, selected: 0, target: super::super::CtxTarget::Pane(0) },
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },

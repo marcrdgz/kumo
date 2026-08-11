@@ -1,7 +1,8 @@
 use ratatui::layout::{Margin, Rect};
+use serde::{Deserialize, Serialize};
 
 /// Split orientation. `V` = side-by-side columns, `H` = stacked rows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SplitDir {
     V,
     H,
@@ -89,6 +90,27 @@ impl LayoutTree {
             Some(r) => pane_ids(r, &mut Vec::new()),
             None => Vec::new(),
         }
+    }
+
+    /// Rebuild a tree from a restored node, with `focus` naming a surviving
+    /// pane. `next_split` is derived from the tree so future splits never
+    /// collide with restored split ids.
+    pub fn from_node(root: Node, focus: u64) -> Self {
+        let mut max_split = 0u64;
+        max_split_id(&root, &mut max_split);
+        Self { root: Some(root), focus, next_split: max_split + 1 }
+    }
+}
+
+/// Highest split id in the tree (used to seed `LayoutTree::next_split`).
+fn max_split_id(n: &Node, out: &mut u64) {
+    match n {
+        Node::Split { id, a, b, .. } => {
+            *out = (*out).max(*id);
+            max_split_id(a, out);
+            max_split_id(b, out);
+        }
+        Node::Pane { .. } => {}
     }
 }
 
@@ -265,5 +287,22 @@ mod tests {
         // A second close of the same (now stale) pane is a no-op, not empty.
         assert!(!tree.remove_pane(2));
         assert_eq!(tree.pane_count(), 1);
+    }
+
+    #[test]
+    fn from_node_restores_tree_and_seeds_split_ids() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        tree.split(2, 3, SplitDir::H);
+        tree.focus = 3;
+        let root = tree.root.clone().unwrap();
+
+        let mut restored = LayoutTree::from_node(root, 3);
+        assert_eq!(restored.pane_ids(), vec![1, 2, 3]);
+        assert_eq!(restored.focus, 3);
+
+        // A new split must not collide with the restored split id (1).
+        assert!(restored.split(1, 99, SplitDir::V));
+        assert!(restored.contains(99));
     }
 }

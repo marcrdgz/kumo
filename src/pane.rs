@@ -43,6 +43,10 @@ pub struct Pane {
     pub id: u64,
     pub session_id: u64,
     pub is_ai: bool,
+    /// Program + args this pane was spawned with (AI panes). None = plain shell.
+    pub program: Option<(String, Vec<String>)>,
+    /// Working directory the pane was spawned in.
+    pub cwd: PathBuf,
     /// Custom pane name set by the user (rename). Overrides the default
     /// `shell N` / `AI CLI` label in the pane title.
     pub custom_name: Option<String>,
@@ -203,9 +207,9 @@ impl Pane {
         events_tx: Sender<PtyEvent>,
     ) -> Result<Pane> {
         let pty = Pty::spawn(&PtySpec {
-            shell,
-            program,
-            cwd,
+            shell: shell.clone(),
+            program: program.clone(),
+            cwd: cwd.clone(),
             cols,
             rows,
         })?;
@@ -216,6 +220,8 @@ impl Pane {
             id,
             session_id,
             is_ai,
+            program,
+            cwd: cwd.unwrap_or_else(|| PathBuf::from("/")),
             custom_name: None,
             detected_ai: false,
             detected_ai_name: None,
