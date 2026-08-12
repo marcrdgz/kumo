@@ -20,6 +20,7 @@ use crate::protocol::{self, ClientMsg, FrameMsg, ServerMsg};
 
 pub fn run(launch: Launch) -> Result<()> {
     let path = crate::config::ipc_socket_path();
+    let mut spawned = false;
     let mut stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(_) => match launch {
@@ -29,11 +30,22 @@ pub fn run(launch: Launch) -> Result<()> {
             _ => {
                 spawn_daemon(workspace_for(&launch))?;
                 wait_for_daemon(&path)?;
+                spawned = true;
                 UnixStream::connect(&path)?
             }
         },
     };
-    client_loop(&mut stream)
+    // `kumo new` against an already-running daemon: create the fresh session
+    // instead of silently attaching to the existing one. The daemon owns the
+    // sessions, so the client resolves the workspace (its own cwd when no
+    // explicit dir was given) and ships it over the wire.
+    let pre: Vec<ClientMsg> = if !spawned && matches!(launch, Launch::New(_)) {
+        let workspace = workspace_for(&launch).or_else(|| std::env::current_dir().ok());
+        vec![ClientMsg::NewSession { workspace }]
+    } else {
+        Vec::new()
+    };
+    client_loop(&mut stream, &pre)
 }
 
 fn workspace_for(launch: &Launch) -> Option<PathBuf> {
@@ -85,12 +97,17 @@ pub fn kill_server() -> Result<()> {
     Ok(())
 }
 
-fn client_loop(stream: &mut UnixStream) -> Result<()> {
+fn client_loop(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<()> {
     let (cols, rows) = crossterm::terminal::size()?;
     protocol::write_framed(
         stream,
         &ClientMsg::Hello { protocol: protocol::PROTOCOL_VERSION, cols, rows },
     )?;
+    // Messages to send right after the handshake (e.g. the `kumo new` session
+    // request), before entering the render loop.
+    for msg in pre {
+        protocol::write_framed(stream, msg)?;
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

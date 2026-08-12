@@ -379,6 +379,14 @@ impl App {
         self.new_session_with_name(self.default_session_name())
     }
 
+    /// Create a fresh session in `workspace` and focus it. The workspace is the
+    /// `kumo new [WORKSPACE]` dir, or (against a running daemon) the client's
+    /// cwd sent over the wire.
+    fn new_session_in(&mut self, workspace: PathBuf) -> Result<()> {
+        self.workspace = workspace;
+        self.new_session()
+    }
+
     /// Smallest free `session-N` name (N = 1, 2, ...).
     fn default_session_name(&self) -> String {
         let mut n = 1;

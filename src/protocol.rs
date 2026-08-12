@@ -11,8 +11,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
-/// with a mismatched version.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// with a mismatched version. The daemon is unreleased, so it starts at 1;
+/// once 0.4.0 ships, wire changes must bump it.
+pub const PROTOCOL_VERSION: u32 = 1;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -445,6 +446,12 @@ pub enum ClientMsg {
     ListSessions,
     /// `kumo kill`: stop the daemon (killing its panes).
     KillServer,
+    /// `kumo new [WORKSPACE]` against a running daemon: create a fresh session
+    /// and focus it. `workspace` is the client-resolved dir (its cwd when no
+    /// explicit arg was given; the daemon falls back to its own if unusable).
+    NewSession {
+        workspace: Option<std::path::PathBuf>,
+    },
 }
 
 /// One session, as reported to `kumo ls`.

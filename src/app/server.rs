@@ -134,6 +134,20 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 ClientMsg::KillServer => {
                     kill = true;
                 }
+                ClientMsg::NewSession { workspace } => {
+                    // `kumo new` against a running daemon: create a fresh
+                    // session and focus it. The client resolved its own cwd
+                    // when no dir was given; a path that is not a directory
+                    // falls back to the daemon's own workspace.
+                    let ws = match workspace {
+                        Some(p) if p.is_dir() => p,
+                        _ => app.workspace.clone(),
+                    };
+                    if let Err(e) = app.new_session_in(ws) {
+                        log::warn!("daemon: new session error: {e:#}");
+                    }
+                    render_dirty = true;
+                }
             }
         }
 
@@ -489,11 +503,31 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // `kumo kill` stops a daemon and cleans its socket.
+        // A freshly spawned daemon accepts `kumo new` over the wire: the
+        // NewSession IPC message must create a second session and focus it.
         start_daemon(&sock);
         let _ = wait_for_socket(&sock, Duration::from_secs(10));
-        let mut kstream = UnixStream::connect(&sock).unwrap();
-        protocol::write_framed(&mut kstream, &ClientMsg::KillServer).unwrap();
+        let mut nstream = handshake(&sock);
+        protocol::write_framed(
+            &mut nstream,
+            &ClientMsg::NewSession { workspace: Some(PathBuf::from("/tmp")) },
+        )
+        .unwrap();
+        protocol::write_framed(&mut nstream, &ClientMsg::ListSessions).unwrap();
+        let sessions = loop {
+            match protocol::read_framed::<ServerMsg>(&mut nstream).unwrap() {
+                ServerMsg::SessionList { sessions } => break sessions,
+                _ => {}
+            }
+        };
+        assert_eq!(sessions.len(), 2, "NewSession should create a second session");
+        assert_eq!(sessions[1].name, "session-2");
+        assert_eq!(sessions[1].workspace, PathBuf::from("/tmp"));
+        assert!(sessions[1].active, "the new session should be focused");
+        assert!(!sessions[0].active, "the original session should be unfocused");
+
+        // `kumo kill` stops a daemon and cleans its socket.
+        protocol::write_framed(&mut nstream, &ClientMsg::KillServer).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while sock.exists() {
             assert!(Instant::now() < deadline, "daemon socket not removed after kumo kill");
