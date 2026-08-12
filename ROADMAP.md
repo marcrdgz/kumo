@@ -61,8 +61,10 @@ persistent kumo.
 - ✅ **`kumo new` creates a new session in the running daemon** via a `NewSession`
   IPC message; a fresh daemon still spawns with the session in the given
   workspace. Uses the client's cwd when no workspace is given.
-- ⏳ **Socket hygiene**: owner-only permissions done; the same-owner check
-  (`SO_PEERCRED` / `getpeereid`) still to land.
+- ✅ **Socket hygiene**: owner-only permissions (0o600) plus the same-owner
+  check on every accepted connection (`SO_PEERCRED` on Linux, `getpeereid()` on
+  macOS/BSD) — a different user's client is rejected, fail closed
+  (`src/app/server.rs`).
 - ⏳ **Agents live in the daemon**: lifecycle detection, status, and audible
   alerts already run server-side (visible in the sidebar of any attached
   terminal). Surface agent status in `kumo ls` to notice a blocked agent from

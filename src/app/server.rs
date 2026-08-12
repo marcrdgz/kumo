@@ -62,6 +62,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     loop {
         // Accept new clients (each gets a reader thread + a writer thread).
         while let Ok((stream, _)) = listener.accept() {
+            if !peer_owned_by_same_user(&stream) {
+                log::warn!("daemon: rejecting connection from a different user");
+                continue;
+            }
             // A socket accepted from a nonblocking listener can inherit
             // O_NONBLOCK on some platforms; force blocking mode so the reader
             // thread actually blocks (not spin on EAGAIN).
@@ -313,6 +317,59 @@ fn set_socket_perms(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether the peer behind an accepted connection is the same user that runs
+/// the daemon. The socket file perms alone are not enough: the runtime dir can
+/// sit somewhere world-visible (e.g. `/tmp`), and any user able to reach the
+/// path must not be able to drive the daemon's panes. Linux exposes the peer
+/// credentials via `SO_PEERCRED`; the BSDs (macOS included) use `getpeereid()`.
+/// A failed or unavailable probe rejects the connection (fail closed).
+fn peer_owned_by_same_user(stream: &UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let our_uid = unsafe { libc::geteuid() };
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        rc == 0 && cred.uid == our_uid
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+        rc == 0 && uid == our_uid
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        // No peer-credential API; the socket perms are the only protection.
+        let _ = fd;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +462,21 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "{what}");
         }
+    }
+
+    #[test]
+    fn peer_owned_by_same_user_accepts_same_user_connection() {
+        let dir = scratch("peercred");
+        let sock = dir.join("peer.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let _stream = UnixStream::connect(&sock).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        assert!(
+            peer_owned_by_same_user(&accepted),
+            "a same-user connection must pass the owner check"
+        );
+        drop(accepted);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// End-to-end daemon behavior over the socket, in one sequential test so the
