@@ -249,6 +249,7 @@ impl App {
                 }
             }
             Launch::New(_) => app.new_session()?,
+            #[cfg(unix)]
             Launch::Resume(path) => {
                 let resumed = match state::load(&path)? {
                     Some(state) => app.resume(state),
@@ -273,6 +274,10 @@ impl App {
                     }
                 }
             }
+            // PTY master adoption is unix-only; the daemon never passes a
+            // resume file on other platforms.
+            #[cfg(not(unix))]
+            Launch::Resume(_) => app.new_session()?,
         }
         Ok(app)
     }
