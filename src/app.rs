@@ -25,6 +25,7 @@ use self::sidebar::SidebarScroll;
 mod bindings;
 mod mouse;
 mod overlays;
+#[cfg(unix)]
 pub(super) mod server;
 mod sidebar;
 mod tasks;
