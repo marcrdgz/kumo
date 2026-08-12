@@ -65,10 +65,10 @@ persistent kumo.
   check on every accepted connection (`SO_PEERCRED` on Linux, `getpeereid()` on
   macOS/BSD) — a different user's client is rejected, fail closed
   (`src/app/server.rs`).
-- ⏳ **Agents live in the daemon**: lifecycle detection, status, and audible
+- ✅ **Agents live in the daemon**: lifecycle detection, status, and audible
   alerts already run server-side (visible in the sidebar of any attached
-  terminal). Surface agent status in `kumo ls` to notice a blocked agent from
-  outside the TUI.
+  terminal). `kumo ls` surfaces each AI CLI's status (name + working/blocked/idle)
+  so a blocked agent is noticeable from outside the TUI.
 - ⏳ **Update without losing the web** (final phase): `kumo update` swaps the
   binary and the daemon restarts **inheriting the live terminals** — running
   agents survive the update (screens come back fresh until 0.4.0's persistence

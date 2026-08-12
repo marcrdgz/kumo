@@ -2,7 +2,7 @@
 //! daemon streams, and forwards input. It has no terminal emulator — the daemon
 //! renders the whole UI (panes, chrome, sidebar) and ships rendered cells.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -67,7 +67,7 @@ fn connect_daemon() -> Result<UnixStream> {
 pub fn list_sessions() -> Result<()> {
     let mut stream = connect_daemon()?;
     protocol::write_framed(&mut stream, &ClientMsg::ListSessions)?;
-    match protocol::read_framed::<ServerMsg>(&mut stream)? {
+    match read_server(&mut stream)? {
         ServerMsg::SessionList { sessions } => {
             for s in &sessions {
                 let mark = if s.active { "* " } else { "  " };
@@ -80,6 +80,13 @@ pub fn list_sessions() -> Result<()> {
                     s.workspace.display(),
                     if s.zoomed { " (zoomed)" } else { "" }
                 );
+                // One indented line per running AI CLI, so a blocked agent is
+                // noticeable from outside the TUI. Status word colored only on
+                // a real terminal (orange blocked, green working).
+                let color = io::stdout().is_terminal();
+                for agent in &s.agents {
+                    println!("{}", agent_line(&agent.name, agent.status, color));
+                }
             }
             if sessions.is_empty() {
                 println!("(no sessions)");
@@ -88,6 +95,40 @@ pub fn list_sessions() -> Result<()> {
         }
         other => Err(anyhow::anyhow!("unexpected daemon reply: {other:?}")),
     }
+}
+
+/// ANSI truecolor for the agent status word in `kumo ls` output, matching the
+/// sidebar's palette. `None` = leave the terminal's default color (idle).
+fn agent_status_color(status: protocol::AgentStatus) -> Option<(u8, u8, u8)> {
+    match status {
+        protocol::AgentStatus::Blocked => Some((0xfa, 0xb3, 0x87)), // peach/orange
+        protocol::AgentStatus::Working => Some((0xa6, 0xe3, 0xa1)), // green
+        protocol::AgentStatus::Idle => None,
+    }
+}
+
+/// One `kumo ls` agent line, e.g. `    opencode · blocked`. Colored (orange
+/// blocked, green working) only when `color` is set, so piped output stays plain.
+fn agent_line(name: &str, status: protocol::AgentStatus, color: bool) -> String {
+    let label = status.label();
+    match (color, agent_status_color(status)) {
+        (true, Some((r, g, b))) => format!("    {name} · \x1b[38;2;{r};{g};{b}m{label}\x1b[0m"),
+        _ => format!("    {name} · {label}"),
+    }
+}
+
+/// Read one `ServerMsg`, mapping a decode failure (a reply from an older,
+/// incompatible daemon) to a friendly restart hint instead of a raw bincode
+/// error. `kumo ls` never handshakes, so it cannot rely on the `Hello` version
+/// check the attach path uses.
+fn read_server(stream: &mut UnixStream) -> Result<ServerMsg> {
+    protocol::read_framed::<ServerMsg>(stream).map_err(|e| {
+        anyhow::anyhow!(
+            "the running kumo daemon is from an older, incompatible kumo.\n\
+             Restart it with:  pkill -f 'kumo daemon'\n\
+             ({e})"
+        )
+    })
 }
 
 /// `kumo kill`: stop the daemon (and the processes in its panes).
@@ -331,6 +372,79 @@ mod tests {
             faint: false,
             cell_width: width,
         }
+    }
+
+    #[test]
+    fn read_server_maps_old_daemon_reply_to_friendly_error() {
+        // An old daemon's SessionList (5-field SessionInfo) is undecodable; the
+        // user must see the restart hint, not a raw bincode error.
+        use serde::Serialize;
+        use std::os::unix::net::UnixStream;
+
+        #[derive(Serialize)]
+        struct OldSessionInfo {
+            name: String,
+            workspace: PathBuf,
+            panes: usize,
+            zoomed: bool,
+            active: bool,
+        }
+        // Mirrors `ServerMsg`: `SessionList` is the 5th variant (index 4), so
+        // bincode encodes the exact bytes an old daemon would send. Only
+        // `SessionList` is ever constructed here; the leading variants exist
+        // solely to match its variant index.
+        #[allow(dead_code)]
+        #[derive(Serialize)]
+        enum OldServerMsg {
+            Welcome,
+            Frame,
+            Detach,
+            Shutdown,
+            SessionList { sessions: Vec<OldSessionInfo> },
+        }
+        let old = OldServerMsg::SessionList {
+            sessions: vec![OldSessionInfo {
+                name: "session-1".into(),
+                workspace: PathBuf::from("/tmp"),
+                panes: 1,
+                zoomed: false,
+                active: true,
+            }],
+        };
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        protocol::write_framed(&mut a, &old).unwrap();
+
+        let err = read_server(&mut b).unwrap_err();
+        assert!(
+            err.to_string().contains("older, incompatible kumo"),
+            "expected the restart hint, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn agent_line_colors_blocked_orange() {
+        assert_eq!(
+            agent_line("opencode", protocol::AgentStatus::Blocked, true),
+            "    opencode · \x1b[38;2;250;179;135mblocked\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn agent_line_colors_working_green() {
+        assert_eq!(
+            agent_line("claude", protocol::AgentStatus::Working, true),
+            "    claude · \x1b[38;2;166;227;161mworking\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn agent_line_leaves_idle_plain() {
+        assert_eq!(agent_line("opencode", protocol::AgentStatus::Idle, true), "    opencode · idle");
+    }
+
+    #[test]
+    fn agent_line_plain_when_not_a_terminal() {
+        assert_eq!(agent_line("opencode", protocol::AgentStatus::Blocked, false), "    opencode · blocked");
     }
 
     #[test]

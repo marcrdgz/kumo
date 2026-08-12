@@ -20,6 +20,16 @@ use ratatui::Terminal;
 use super::{App, Launch};
 use crate::protocol::{self, ClientMsg, ServerMsg};
 
+impl From<crate::agents::AgentStatus> for protocol::AgentStatus {
+    fn from(status: crate::agents::AgentStatus) -> Self {
+        match status {
+            crate::agents::AgentStatus::Working => protocol::AgentStatus::Working,
+            crate::agents::AgentStatus::Blocked => protocol::AgentStatus::Blocked,
+            crate::agents::AgentStatus::Idle => protocol::AgentStatus::Idle,
+        }
+    }
+}
+
 /// One connected terminal client. The read half lives in a per-client reader
 /// thread; outgoing messages go through a per-client writer thread with a
 /// bounded queue, so a slow (or unread) client never blocks the daemon loop —
@@ -131,6 +141,24 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             panes: s.tree.pane_count(),
                             zoomed: s.zoom,
                             active: i == app.active,
+                            agents: app
+                                .sessions[i]
+                                .tree
+                                .pane_ids()
+                                .into_iter()
+                                .filter(|pid| {
+                                    app.panes.get(pid).map(|p| p.is_ai_cli()).unwrap_or(false)
+                                })
+                                .map(|pid| protocol::AgentInfo {
+                                    name: app.agent_label(pid),
+                                    status: app
+                                        .agent_status_cache
+                                        .get(&pid)
+                                        .copied()
+                                        .unwrap_or(crate::agents::AgentStatus::Idle)
+                                        .into(),
+                                })
+                                .collect(),
                         })
                         .collect();
                     let _ = send_to(&mut clients, id, &ServerMsg::SessionList { sessions });
@@ -465,6 +493,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_status_wire_mapping_is_lossless() {
+        use crate::agents::AgentStatus as S;
+        use protocol::AgentStatus as W;
+        assert_eq!(W::from(S::Working), W::Working);
+        assert_eq!(W::from(S::Blocked), W::Blocked);
+        assert_eq!(W::from(S::Idle), W::Idle);
+        assert_eq!(W::Working.label(), "working");
+        assert_eq!(W::Blocked.label(), "blocked");
+        assert_eq!(W::Idle.label(), "idle");
+    }
+
+    #[test]
     fn peer_owned_by_same_user_accepts_same_user_connection() {
         let dir = scratch("peercred");
         let sock = dir.join("peer.sock");
@@ -557,6 +597,10 @@ mod tests {
         assert_eq!(sessions[0].name, "session-1");
         assert!(sessions[0].active);
         assert!(sessions[0].panes >= 1);
+        assert!(
+            sessions[0].agents.is_empty(),
+            "a plain shell session has no AI agents to report"
+        );
 
         // The echo checks left `qw` pending in the shell's line buffer; submit
         // it (a harmless "command not found") so the following `exit` runs.

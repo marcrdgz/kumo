@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
 /// with a mismatched version. The daemon is unreleased, so it starts at 1;
 /// once 0.4.0 ships, wire changes must bump it.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -462,6 +462,40 @@ pub struct SessionInfo {
     pub panes: usize,
     pub zoomed: bool,
     pub active: bool,
+    /// AI CLIs running inside this session (name + lifecycle status), so a
+    /// blocked agent is visible from `kumo ls` without attaching.
+    pub agents: Vec<AgentInfo>,
+}
+
+/// One AI CLI running inside a session, as reported to `kumo ls`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AgentInfo {
+    /// Short AI CLI name, e.g. "opencode".
+    pub name: String,
+    /// Lifecycle status inferred from the pane's terminal buffer.
+    pub status: AgentStatus,
+}
+
+/// Wire copy of [`crate::agents::AgentStatus`]: the AI agent's lifecycle state.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentStatus {
+    /// Actively producing output (working on a task).
+    Working,
+    /// Quiet but waiting for a command approval.
+    Blocked,
+    /// Quiet and idle.
+    Idle,
+}
+
+impl AgentStatus {
+    /// Lowercase display label for `kumo ls` output.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentStatus::Working => "working",
+            AgentStatus::Blocked => "blocked",
+            AgentStatus::Idle => "idle",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -566,6 +600,51 @@ mod tests {
             assert_eq!(back.code, code);
             assert!(back.modifiers.contains(crossterm::event::KeyModifiers::CONTROL));
         }
+    }
+
+    #[test]
+    fn old_session_list_without_agents_is_rejected() {
+        // A pre-`agents` daemon serializes SessionInfo with 5 fields. Decoding
+        // that with the current struct must fail (the client surfaces a
+        // "restart your daemon" hint rather than a silent wrong answer).
+        #[derive(Serialize)]
+        struct OldSessionInfo {
+            name: String,
+            workspace: std::path::PathBuf,
+            panes: usize,
+            zoomed: bool,
+            active: bool,
+        }
+        let old = OldSessionInfo {
+            name: "session-1".into(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            panes: 1,
+            zoomed: false,
+            active: true,
+        };
+        let bytes = bincode::serde::encode_to_vec(vec![old], bincode::config::standard()).unwrap();
+        let decoded: Result<(Vec<SessionInfo>, usize), _> =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard());
+        assert!(decoded.is_err(), "an old-format SessionInfo must not decode as the current one");
+    }
+
+    #[test]
+    fn session_info_agents_roundtrip() {
+        let info = SessionInfo {
+            name: "session-1".into(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            panes: 2,
+            zoomed: false,
+            active: true,
+            agents: vec![
+                AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked },
+                AgentInfo { name: "claude".into(), status: AgentStatus::Working },
+            ],
+        };
+        let bytes = bincode::serde::encode_to_vec(&info, bincode::config::standard()).unwrap();
+        let (back, _): (SessionInfo, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        assert_eq!(back, info);
     }
 
     #[test]
