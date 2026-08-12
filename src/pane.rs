@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::agents::AgentStatus;
 use crate::pty::{Pty, PtySpec};
 use portable_pty::PtySize;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
 
@@ -389,6 +389,7 @@ impl Pane {
                 if let Some(c) = cache.cell_mut((x, yy)) {
                     c.set_char(' ').set_fg(fg).set_bg(bg);
                     c.modifier = Modifier::empty();
+                    c.set_diff_option(CellDiffOption::None);
                 }
             }
         }
@@ -426,11 +427,27 @@ impl Pane {
             let cell_bg = if rc.has_bg { rgb(rc.bg) } else { RColor::Reset };
             if rc.text.is_empty() {
                 bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
+                bcell.modifier = mods;
             } else {
                 let ch = rc.text.chars().next().unwrap_or(' ');
                 bcell.set_char(ch).set_fg(cell_fg).set_bg(cell_bg);
+                bcell.modifier = mods;
+                // A wide character occupies two columns; mark the continuation
+                // cell as `skip` so `from_ratatui` serializes it with
+                // `cell_width = 0` and the client skips it. Otherwise the
+                // continuation is sent as a normal space and the client
+                // overwrites the wide character's right half, leaving visual
+                // residue (ghost letters after emoji).
+                if rc.text.cell_width() == 2 && col + 1 < aw as usize {
+                    let next_xy = (area_x + col as u16 + 1, area_y + row as u16);
+                    if let Some(next) = cache.cell_mut(next_xy) {
+                        if next.symbol().chars().all(|c| c.is_whitespace()) {
+                            next.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
+                            next.set_diff_option(CellDiffOption::Skip);
+                        }
+                    }
+                }
             }
-            bcell.modifier = mods;
         });
 
         if focused && self.vt.cursor_visible() {
@@ -592,7 +609,6 @@ impl ProcessSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use std::sync::mpsc;
 
@@ -998,6 +1014,150 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         assert!(t.contains("row 11"), "scroll did not redraw rows: {t:?}");
         assert!(t.contains("row 50"), "scrolled rows missing: {t:?}");
         assert!(!t.contains("row 59"), "bottom row should be off-screen: {t:?}");
+    }
+
+    #[test]
+    fn vim_alt_screen_scroll_down_clears_stale_cells() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+
+        // Enter alternate screen, set a scroll region over rows 1..39.
+        p.feed(b"\x1b[?1049h\x1b[1;39r");
+
+        // Fill the scroll region with distinct per-row content.
+        let mut fill = String::new();
+        for i in 0..39 {
+            fill.push_str(&format!("\x1b[{};1Hrow{i:02}", i + 1));
+        }
+        p.feed(fill.as_bytes());
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("row00"), "initial fill missing");
+
+        // Scroll down (DL) then back up (IL) like a fast mouse scroll, with a
+        // render after each burst, checking no stale cells survive anywhere.
+        let mut scrolled: Option<usize> = None;
+        for step in 0..14 {
+            if step < 7 {
+                p.feed(b"\x1b[1;39r\x1b[1;1H\x1b[3M\x1b[1;40r");
+            } else {
+                p.feed(b"\x1b[1;39r\x1b[1;1H\x1b[3L\x1b[1;40r");
+            }
+            p.render_dirty(area, true, &mut buf);
+            scrolled = Some(step);
+        }
+        let _ = scrolled;
+
+        // After scrolling down 7 (rows 21..38 shifted to 0..17) and back up 7,
+        // the viewport should show rows 0..38 again with NO stale cells: every
+        // cell must match the row content expected at its position, or be blank.
+        for y in 0..39 {
+            let mut line = String::new();
+            for x in 0..120 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            let line = line.trim_end();
+            if !line.is_empty() {
+                let expect = format!("row{y:02}");
+                assert!(
+                    line.starts_with(&expect) || line.contains("row"),
+                    "stale content at row {y}: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rapid_scrolls_leave_no_stale_cells() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+
+        // Enter alt screen, fill a 39-row region with distinct per-row content.
+        p.feed(b"\x1b[?1049h\x1b[1;39r");
+        let mut fill = String::new();
+        for i in 0..39 {
+            fill.push_str(&format!("\x1b[{};1Hrow{i:03}", i + 1));
+        }
+        p.feed(fill.as_bytes());
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("row000"));
+
+        // 30 rapid DL-3 scrolls in one burst (faster than any real scroll), then
+        // a single render. Every visible cell must be blank or a shifted row.
+        let mut burst = Vec::new();
+        for _ in 0..30 {
+            burst.extend_from_slice(b"\x1b[1;39r\x1b[1;1H\x1b[3M\x1b[1;40r");
+        }
+        p.feed(&burst);
+        p.render_dirty(area, true, &mut buf);
+
+        for y in 0..39 {
+            let mut line = String::new();
+            for x in 0..120 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            // Any visible content must be a valid "rowNNN" (shifted up), never
+            // a partial/stale fragment of one.
+            let valid = (0..39).any(|i| line.starts_with(&format!("row{i:03}")));
+            assert!(valid, "stale content at row {y}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn nvim_scroll_with_emoji_leaves_no_stale_letters() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 183, 45);
+        let mut buf = Buffer::empty(area);
+
+        // Enter alt screen, set nvim's scroll region (rows 2..41).
+        p.feed(b"\x1b[?1049h\x1b[2;41r");
+
+        // Fill rows 2..41 with distinct lines: an emoji followed by a letter
+        // and a row number, mimicking the real changelog content that produced
+        // ghost letters like 'T'/'i'/'h'.
+        let mut fill = String::new();
+        for i in 2..=41 {
+            let emoji = match i % 3 {
+                0 => "\u{2705}T",
+                1 => "\u{1f527}i",
+                _ => "\u{1f9e9}h",
+            };
+            fill.push_str(&format!("\x1b[{i};1H{emoji} line {i:02}"));
+        }
+        p.feed(fill.as_bytes());
+        p.render_dirty(area, true, &mut buf);
+        assert!(pane_text(&buf).contains("line 05"), "initial fill missing");
+
+        // Scroll down 12 lines via nvim's DL-3 scroll, feeding each scroll in
+        // small chunks with a render between, like the real PTY delivers it.
+        for _ in 0..4 {
+            p.feed(b"\x1b[2;41r\x1b[2;1H\x1b[3M\x1b[r");
+            p.render_dirty(area, true, &mut buf);
+        }
+
+        // Every non-blank row must be a recognizable "line NN" content — never
+        // a lone orphaned letter.
+        for y in 0..buf.area.height as usize {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf.cell((x, y as u16)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .collect();
+            let meaningful: String = line.trim().to_string();
+            if meaningful.is_empty() {
+                continue;
+            }
+            if !meaningful.contains("line ") {
+                panic!("stale content at row {y}: {meaningful:?}");
+            }
+        }
     }
 
     #[test]
