@@ -277,6 +277,37 @@ impl WireMouseEvent {
 // Render frame
 // ---------------------------------------------------------------------------
 
+/// Pack a ratatui `Color` into the wire's 0xRRGGBB form. Named ANSI colors map
+/// to the Catppuccin mocha palette (`crate::pane::PALETTE`), so chrome cells
+/// that style text with `Color::Black` (mode chips, menu items, input fields)
+/// keep a real foreground on the client instead of falling back to the
+/// terminal's default. `Reset` (and anything unnamed) stays `None`.
+fn color_to_wire(color: ratatui::style::Color) -> Option<u32> {
+    use ratatui::style::Color;
+    let (r, g, b) = match color {
+        Color::Reset => return None,
+        Color::Black => (0x45, 0x47, 0x5a),
+        Color::Red => (0xf3, 0x8b, 0xa8),
+        Color::Green => (0xa6, 0xe3, 0xa1),
+        Color::Yellow => (0xf9, 0xe2, 0xaf),
+        Color::Blue => (0x89, 0xb4, 0xfa),
+        Color::Magenta => (0xf5, 0xc2, 0xe7),
+        Color::Cyan => (0x94, 0xe2, 0xd5),
+        Color::White => (0xba, 0xc2, 0xde),
+        Color::Gray => (0x58, 0x5b, 0x70),
+        Color::DarkGray => (0x58, 0x5b, 0x70),
+        Color::LightRed => (0xf3, 0x8b, 0xa8),
+        Color::LightGreen => (0xa6, 0xe3, 0xa1),
+        Color::LightYellow => (0xf9, 0xe2, 0xaf),
+        Color::LightBlue => (0x89, 0xb4, 0xfa),
+        Color::LightMagenta => (0xf5, 0xc2, 0xe7),
+        Color::LightCyan => (0x94, 0xe2, 0xd5),
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => return None,
+    };
+    Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+}
+
 /// A serialized rendered cell (the grid the daemon draws).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct WireCell {
@@ -300,15 +331,9 @@ pub struct WireCell {
 impl WireCell {
     fn from_ratatui(cell: &ratatui::buffer::Cell) -> Self {
         use ratatui::buffer::CellWidth;
-        use ratatui::style::{Color, Modifier};
-        let fg = match cell.fg {
-            Color::Rgb(r, g, b) => Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)),
-            _ => None,
-        };
-        let bg = match cell.bg {
-            Color::Rgb(r, g, b) => Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)),
-            _ => None,
-        };
+        use ratatui::style::Modifier;
+        let fg = color_to_wire(cell.fg);
+        let bg = color_to_wire(cell.bg);
         let m = cell.modifier;
         // A `Skip` cell is a continuation after a wide grapheme (the pane marks
         // it when the emoji/CJK char occupies two columns). `Cell::cell_width()`
