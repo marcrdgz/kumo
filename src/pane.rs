@@ -35,7 +35,7 @@ const PALETTE: [ColorRgb; 16] = [
 ];
 
 pub const FG: RColor = RColor::Rgb(0xcd, 0xd6, 0xf4);
-pub const ACCENT: RColor = RColor::Rgb(0xb4, 0xbe, 0xfe);
+pub const ACCENT: RColor = RColor::Rgb(0x5e, 0x9e, 0xff); // normal blue
 
 /// A live pane: PTY + a real terminal emulator (libghostty-vt) fed from it.
 #[allow(dead_code)]

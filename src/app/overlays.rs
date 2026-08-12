@@ -596,8 +596,8 @@ impl App {
             return;
         }
         let Some(dd) = self.menu_dropdown_rect() else { return };
-        let border = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
-        fill(f, dd, RColor::Reset);
+        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
+        fill(f, dd, PANEL_SEP);
         let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
@@ -629,8 +629,8 @@ impl App {
             return;
         }
         let Some(dd) = self.ctx_menu_rect() else { return };
-        let border = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
-        fill(f, dd, RColor::Reset);
+        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
+        fill(f, dd, PANEL_SEP);
         let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
@@ -778,7 +778,7 @@ fn keybind_lines() -> Vec<KbLine<'static>> {
 /// Draw one dropdown/context-menu item as a full-width button: the whole row
 /// gets a filled background (yellow when selected, surface0 otherwise), with
 /// the `▸` marker and the item label drawn on top.
-fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool) {    let bg = if sel { YELLOW } else { PANEL_SEP };
+fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool) {    let bg = if sel { ACCENT } else { PANEL_SEP };
     for cx in (x0 + 1)..(x0 + 1 + width) {
         put(f, cx, y, " ", Style::default().bg(bg));
     }

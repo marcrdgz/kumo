@@ -37,7 +37,7 @@ mod util;
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
 /// Catppuccin mocha chrome colors (sidebars, status bar, chrome borders).
-const PANEL_SEP: RColor = RColor::Rgb(0x31, 0x32, 0x44); // surface0
+const PANEL_SEP: RColor = RColor::Rgb(0x17, 0x18, 0x26); // surface0, dark navy
 const PANEL_MUTED: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0
 const BORDER_IDLE: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0, visible on any terminal bg
 const YELLOW: RColor = RColor::Rgb(0xf9, 0xe2, 0xaf); // yellow
