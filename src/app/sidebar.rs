@@ -14,7 +14,7 @@ enum SidebarRow {
     Spacer,
     Section(String),
     Session(usize),
-    Branch(String),
+    Branch(usize, String),
     AgentDir(usize, u64),
     AgentName(usize, u64),
     NewSession,
@@ -40,7 +40,7 @@ impl App {
         for (i, _s) in self.sessions.iter().enumerate() {
             out.push(SidebarRow::Session(i));
             if let Some(branch) = self.session_branch(i) {
-                out.push(SidebarRow::Branch(branch));
+                out.push(SidebarRow::Branch(i, branch));
             }
         }
         out.push(SidebarRow::NewSession);
@@ -236,18 +236,32 @@ impl App {
                 }
                 SidebarRow::Session(i) => {
                     let active = i == self.active;
+                    let bg = if active { PANEL_SEP } else { RColor::Reset };
                     let name = &self.sessions[i].name;
-                    let (marker, fg) = if active {
-                        ("▸", ACCENT)
+                    if active {
+                        fill(f, Rect::new(x, y, max + 1, 1), bg);
+                        put(f, x + 1, y, "▸", Style::default().fg(ACCENT).bg(bg));
+                        text(f, x + 3, y, name, Style::default().fg(FG).bg(bg), max.saturating_sub(3));
                     } else {
-                        (" ", PANEL_MUTED)
-                    };
-                    let line = format!(" {marker} {}", name);
-                    text(f, x, y, &line, Style::default().fg(fg).bg(RColor::Reset), max);
+                        put(f, x + 1, y, " ", Style::default().bg(bg));
+                        text(
+                            f,
+                            x + 3,
+                            y,
+                            name,
+                            Style::default().fg(PANEL_MUTED).bg(bg),
+                            max.saturating_sub(3),
+                        );
+                    }
                 }
-                SidebarRow::Branch(b) => {
-                    let style = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
-                    text(f, x, y, &format!("    {}", b), style, max);
+                SidebarRow::Branch(i, b) => {
+                    let active = i == self.active;
+                    let bg = if active { PANEL_SEP } else { RColor::Reset };
+                    let fg = if active { FG } else { PANEL_MUTED };
+                    if active {
+                        fill(f, Rect::new(x, y, max + 1, 1), bg);
+                    }
+                    text(f, x, y, &format!("    {}", b), Style::default().fg(fg).bg(bg), max);
                 }
                 SidebarRow::AgentDir(i, pid) | SidebarRow::AgentName(i, pid) => {
                     let focused =
