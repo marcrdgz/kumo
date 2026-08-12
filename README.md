@@ -85,16 +85,18 @@ top-right with a red ✕ to dismiss it. Disable the check with
 
 ## ⚙️ Configuration
 
-Kumo reads a single config file at `~/.config/kumo/config` (a
-flat `key = value` file with `#` comments). The directory follows the XDG
-layout, so the config lives in `~/.config/kumo/`, runtime state in
-`~/.local/state/kumo/`, and the future detach server's IPC socket in
+Kumo reads a single config file at `~/.config/kumo/config.toml`. The old
+flat `key = value` file at `~/.config/kumo/config` (and the legacy `~/.kumo`)
+still reads as a fallback, but `config.toml` wins when both exist. The
+directory follows the XDG layout, so the config lives in `~/.config/kumo/`,
+runtime state in `~/.local/state/kumo/`, and the detach server's IPC socket in
 `$XDG_RUNTIME_DIR/kumo`.
 
-```ini
-# ~/.config/kumo/config
-ai-cmd = claude --model sonnet
-shell  = /bin/zsh
+```toml
+# ~/.config/kumo/config.toml
+ai-cmd = "claude --model sonnet"
+shell  = "/bin/zsh"
+update-check = true
 ```
 
 Supported keys:
@@ -155,8 +157,8 @@ listed but always shown as idle.
 | `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
-> ⚠️ Keybindings are currently hard-coded. Remapping is on the
-> [roadmap](ROADMAP.md).
+> ⚠️ Keybindings are currently hard-coded. Data-driven keymaps + custom leader
+> keys land in 0.4.0 — see the [roadmap](ROADMAP.md).
 
 **🖱️ Mouse**
 
@@ -172,9 +174,10 @@ listed but always shown as idle.
 
 ## 🗺️ Roadmap
 
-Kumo is on a path to become fully customizable — theme & colors, keybinding
-remapping (including a `LEADER+?` keybind showcase), config expansion, layout &
-chrome, and a plugin system. See [ROADMAP.md](ROADMAP.md) for the details.
+Kumo is on a path to become fully customizable — TOML config, data-driven
+keybinding remapping (including the `LEADER+?` keybind showcase), follow-workspace
+(your cwd follows the focused pane, PID-based), themes & status-bar widgets, and
+a thin plugin system. See [ROADMAP.md](ROADMAP.md) for the details.
 
 Until then, kumo stays opinionated: it picks good defaults for you so it just
 works, and you can follow the roadmap above as the knobs land. 🔧

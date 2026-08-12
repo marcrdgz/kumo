@@ -38,6 +38,7 @@ log = "0.4"
 semver = "1"
 ureq = "3"
 libc = "0.2"
+toml = "0.8"
 
 [profile.release]
 panic = "abort"

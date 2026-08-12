@@ -61,6 +61,13 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config")
 }
 
+/// The canonical TOML configuration file (0.4.0+, the schema 1.0 freezes):
+/// `config_dir()/config.toml`. Wins over the flat `config` file when both
+/// exist.
+pub fn config_file_toml() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
 /// The persisted session state (0.3.0 detach/re-attach): `state_dir()/state.json`.
 /// Written atomically by `state::save`; a missing or unreadable file simply
 /// means a fresh start.
@@ -138,10 +145,47 @@ impl Config {
             .unwrap_or(true);
         cfg
     }
+
+    /// Overlay typed TOML values on top of the flat-merged config. Only keys
+    /// present in the TOML file are touched, so flat and legacy fallbacks keep
+    /// supplying everything else.
+    fn apply_toml(&mut self, toml: TomlConfig) {
+        if let Some(v) = toml.ai_cmd {
+            if !v.is_empty() {
+                self.ai_cmd = Some(split_cmd(&v));
+            }
+        }
+        if let Some(v) = toml.shell {
+            if !v.is_empty() {
+                self.shell = Some(v);
+            }
+        }
+        if let Some(v) = toml.update_check {
+            self.update_check = v;
+        }
+        if let Some(v) = toml.agent_sound {
+            self.agent_sound = v;
+        }
+    }
 }
 
-/// Load and merge the configuration. The main `config` file wins over the
-/// legacy `~/.kumo` file; keys absent from the main file fall back to legacy.
+/// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
+/// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
+#[derive(Default, serde::Deserialize)]
+struct TomlConfig {
+    #[serde(rename = "ai-cmd", alias = "ai_cmd")]
+    ai_cmd: Option<String>,
+    shell: Option<String>,
+    #[serde(rename = "update-check")]
+    update_check: Option<bool>,
+    #[serde(rename = "agent-sound")]
+    agent_sound: Option<bool>,
+}
+
+/// Load and merge the configuration. Precedence: `config.toml` wins over the
+/// flat `config` file, which wins over the legacy `~/.kumo` file; keys absent
+/// from a higher-priority source fall back to the next. The flat formats keep
+/// reading as fallbacks for back-compat.
 fn load_config() -> Config {
     let mut map = HashMap::new();
     if let Some(legacy) = legacy_config_file() {
@@ -152,7 +196,29 @@ fn load_config() -> Config {
     if let Ok(parsed) = parse_flat(&config_file()) {
         map.extend(parsed);
     }
-    Config::from_map(&map)
+    let mut cfg = Config::from_map(&map);
+    if let Some(toml) = parse_toml(&config_file_toml()) {
+        cfg.apply_toml(toml);
+    }
+    cfg
+}
+
+// ---------------------------------------------------------------------------
+// TOML parser (canonical format)
+// ---------------------------------------------------------------------------
+
+/// Parse `config.toml`. Missing files return `None` (no TOML present); invalid
+/// TOML logs a warning and falls back to the flat files so a broken file never
+/// bricks the terminal.
+fn parse_toml(path: &Path) -> Option<TomlConfig> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match toml::from_str(&content) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            log::warn!("kumo: ignoring invalid config.toml: {e}");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -652,5 +718,87 @@ mod tests {
     fn resolve_program_falls_back_when_not_found() {
         let name = "definitely-not-a-real-cmd-xyz-123";
         assert_eq!(resolve_program(name), name);
+    }
+
+    #[test]
+    fn toml_parses_native_types() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-toml");
+        let home = scratch_dir("home-toml");
+        write(
+            &cfg_dir.join("config.toml"),
+            "ai-cmd = \"claude --model sonnet\"\nshell = \"/opt/homebrew/bin/fish\"\nupdate-check = false\nagent-sound = false\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::unset("KUMO_NO_UPDATE"),
+            EnvGuard::unset("KUMO_NO_SOUND"),
+        );
+        let (prog, args) = ai_command();
+        assert_eq!(prog, "claude");
+        assert_eq!(args, vec!["--model", "sonnet"]);
+        assert_eq!(default_shell(), "/opt/homebrew/bin/fish");
+        assert!(!update_check_enabled());
+        assert!(!agent_sound_enabled());
+    }
+
+    #[test]
+    fn toml_wins_over_flat_config() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-toml-wins");
+        let home = scratch_dir("home-toml-wins");
+        write(&cfg_dir.join("config"), "ai-cmd = codex\nshell = /bin/bash\n");
+        write(&cfg_dir.join("config.toml"), "ai-cmd = \"claude\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let (prog, _) = ai_command();
+        assert_eq!(prog, "claude", "TOML must override the flat file");
+        assert_eq!(default_shell(), "/bin/bash", "unset TOML keys fall back to flat");
+    }
+
+    #[test]
+    fn toml_accepts_ai_cmd_alias() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-toml-alias");
+        let home = scratch_dir("home-toml-alias");
+        write(&cfg_dir.join("config.toml"), "ai_cmd = \"gemini\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let (prog, _) = ai_command();
+        assert_eq!(prog, "gemini");
+    }
+
+    #[test]
+    fn invalid_toml_falls_back_to_flat() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-toml-bad");
+        let home = scratch_dir("home-toml-bad");
+        write(&cfg_dir.join("config"), "ai-cmd = codex\n");
+        write(&cfg_dir.join("config.toml"), "shell = /unquoted/path\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let (prog, _) = ai_command();
+        assert_eq!(prog, "codex", "unparsable TOML must fall back to the flat file");
+    }
+
+    #[test]
+    fn missing_toml_uses_flat_only() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-no-toml");
+        let home = scratch_dir("home-no-toml");
+        write(&cfg_dir.join("config"), "ai-cmd = opencode\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let (prog, _) = ai_command();
+        assert_eq!(prog, "opencode");
     }
 }
