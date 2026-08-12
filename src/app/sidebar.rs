@@ -4,6 +4,7 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 
 use super::ui::{fill, put, text};
 use super::{App, GREEN, ORANGE, PANEL_MUTED, PANEL_SEP};
+use super::tasks::BranchInfo;
 use crate::agents::AgentStatus;
 use crate::pane::{ACCENT, FG};
 
@@ -14,7 +15,7 @@ enum SidebarRow {
     Spacer,
     Section(String),
     Session(usize),
-    Branch(usize, String),
+    Branch(usize, BranchInfo),
     AgentDir(usize, u64),
     AgentName(usize, u64),
     NewSession,
@@ -257,11 +258,50 @@ impl App {
                 SidebarRow::Branch(i, b) => {
                     let active = i == self.active;
                     let bg = if active { PANEL_SEP } else { RColor::Reset };
-                    let fg = if active { FG } else { PANEL_MUTED };
+                    let name_color = if active { FG } else { PANEL_MUTED };
                     if active {
                         fill(f, Rect::new(x, y, max + 1, 1), bg);
                     }
-                    text(f, x, y, &format!("    {}", b), Style::default().fg(fg).bg(bg), max);
+                    let avail = max.saturating_sub(4) as usize;
+                    // Full ahead/behind suffix, e.g. ` ↑2 ~3`.
+                    let suffix = match (b.ahead, b.behind) {
+                        (0, 0) => String::new(),
+                        (a, 0) => format!(" \u{2191}{}", a),
+                        (0, be) => format!(" ~{}", be),
+                        (a, be) => format!(" \u{2191}{}~{}", a, be),
+                    };
+                    // The suffix always keeps its space; the name gets an
+                    // ellipsis if it would otherwise cover it.
+                    let suffix_w = suffix.chars().count().min(avail);
+                    let name_avail = avail.saturating_sub(suffix_w);
+                    let shown = fit_branch_name(&b.name, name_avail);
+                    text(
+                        f,
+                        x + 4,
+                        y,
+                        &shown,
+                        Style::default().fg(name_color).bg(bg),
+                        avail as u16,
+                    );
+                    let mut cx = x + 4 + shown.chars().count() as u16;
+                    let mut remaining = (avail as u16).saturating_sub(shown.chars().count() as u16);
+                    if b.ahead > 0 && remaining > 1 {
+                        put(f, cx, y, " ", Style::default().bg(bg));
+                        cx += 1;
+                        remaining -= 1;
+                        let s = format!("\u{2191}{}", b.ahead);
+                        let w = (s.chars().count() as u16).min(remaining);
+                        text(f, cx, y, &s, Style::default().fg(GREEN).bg(bg), remaining);
+                        cx += w;
+                        remaining = remaining.saturating_sub(w);
+                    }
+                    if b.behind > 0 && remaining > 1 {
+                        put(f, cx, y, " ", Style::default().bg(bg));
+                        cx += 1;
+                        remaining -= 1;
+                        let s = format!("~{}", b.behind);
+                        text(f, cx, y, &s, Style::default().fg(ORANGE).bg(bg), remaining);
+                    }
                 }
                 SidebarRow::AgentDir(i, pid) | SidebarRow::AgentName(i, pid) => {
                     let focused =
@@ -341,6 +381,20 @@ impl App {
     }
 }
 
+/// Truncate a git branch name to `avail` columns, appending `…` when it is
+/// cut, so the reserved ahead/behind suffix is never covered.
+fn fit_branch_name(name: &str, avail: usize) -> String {
+    if name.chars().count() <= avail {
+        name.to_string()
+    } else if avail == 0 {
+        String::new()
+    } else {
+        let mut s: String = name.chars().take(avail - 1).collect();
+        s.push('…');
+        s
+    }
+}
+
 /// Short display form of a workspace path, e.g. `.../kumo`.
 fn short_workspace(ws: &std::path::Path) -> String {
     let text = ws.to_string_lossy();
@@ -388,6 +442,51 @@ mod tests {
     use crate::app::{Mode, NamePopup, Session};
     use crate::layout::LayoutTree;
     use crate::pane::Pane;
+
+    #[test]
+    fn branch_name_fits_untouched_when_short() {
+        assert_eq!(fit_branch_name("fix/domain", 20), "fix/domain");
+    }
+
+    #[test]
+    fn long_branch_row_keeps_ahead_suffix() {
+        let mut app = build_app(1);
+        app.branch_cache.insert(
+            PathBuf::from("/tmp"),
+            (
+                Some(BranchInfo {
+                    name: "fixfixfixfixfixfix".into(),
+                    ahead: 1,
+                    behind: 0,
+                }),
+                Instant::now(),
+            ),
+        );
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| app.render_sidebar(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        // Branch row for session 0 sits at y=4 (header, spacer, section, session).
+        let line: String = (0..26).map(|x| buf.cell((x, 4)).unwrap().symbol()).collect();
+        assert_eq!(line.trim_end(), "    fixfixfixfixfixf… ↑1");
+        let up = buf.cell((22, 4)).unwrap();
+        assert_eq!(up.style().fg, Some(GREEN));
+    }
+
+    #[test]
+    fn branch_name_truncates_with_ellipsis() {
+        assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/lo…");
+    }
+
+    #[test]
+    fn branch_name_keeps_suffix_room_when_exact() {
+        assert_eq!(fit_branch_name("fix/domain", 8), "fix/dom…");
+    }
+
+    #[test]
+    fn branch_name_empty_when_no_room() {
+        assert_eq!(fit_branch_name("anything", 0), "");
+    }
 
     fn build_app(n: usize) -> App {
         let (tx, rx) = mpsc::channel();

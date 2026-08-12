@@ -37,7 +37,7 @@ impl App {
     }
 
     /// Cached git branch for a session's workspace.
-    pub(super) fn session_branch(&self, idx: usize) -> Option<String> {
+    pub(super) fn session_branch(&self, idx: usize) -> Option<BranchInfo> {
         let ws = &self.sessions[idx].workspace;
         self.branch_cache.get(ws).and_then(|(b, _)| b.clone())
     }
@@ -142,21 +142,51 @@ impl App {
     }
 }
 
-/// Current git branch of `ws`, if it is a git repository.
-fn git_branch(ws: &std::path::Path) -> Option<String> {
+/// Current git branch of a session's workspace, plus how far it is from its
+/// upstream: `ahead` commits not yet pushed, `behind` commits not yet pulled.
+#[derive(Debug, Clone, Default)]
+pub(super) struct BranchInfo {
+    pub(super) name: String,
+    pub(super) ahead: u32,
+    pub(super) behind: u32,
+}
+
+/// Current git branch and ahead/behind counts of `ws`, if it is a git
+/// repository on a named branch.
+fn git_branch(ws: &std::path::Path) -> Option<BranchInfo> {
     let out = std::process::Command::new("git")
-        .args(["-C", ws.to_str().unwrap_or_default(), "branch", "--show-current"])
+        .args(["-C", ws.to_str().unwrap_or_default(), "status", "--porcelain=v2", "--branch"])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        None
-    } else {
-        Some(branch)
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut name = None;
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    for line in stdout.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            let head = head.trim();
+            if head.is_empty() || head == "(detached)" {
+                return None;
+            }
+            name = Some(head.to_string());
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut parts = ab.split_whitespace();
+            if let Some(rest) = parts.next() {
+                if let Some(n) = rest.strip_prefix('+') {
+                    ahead = n.parse().unwrap_or(0);
+                }
+            }
+            if let Some(rest) = parts.next() {
+                if let Some(n) = rest.strip_prefix('-') {
+                    behind = n.parse().unwrap_or(0);
+                }
+            }
+        }
     }
+    name.map(|name| BranchInfo { name, ahead, behind })
 }
 
 /// The alert a status transition deserves, if any. A Working agent that goes
@@ -174,6 +204,58 @@ fn should_alert(old: AgentStatus, new: AgentStatus) -> Option<AlertKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    /// Make a temp git repo on branch `name` with a bare `origin` remote.
+    /// Returns the working tree path. The upstream points at `origin/<name>`.
+    fn temp_repo(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kumo_git_test_{}_{}",
+            name.replace('/', "_"),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let remote = dir.join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        let run = |args: &[&str]| {
+            assert!(Command::new("git").args(args).status().unwrap().success(), "{args:?}");
+        };
+        run(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+        run(&["init", "-q", "-b", name, dir.to_str().unwrap()]);
+        run(&["-C", dir.to_str().unwrap(), "config", "user.email", "t@t"]);
+        run(&["-C", dir.to_str().unwrap(), "config", "user.name", "t"]);
+        let commit = || {
+            run(&["-C", dir.to_str().unwrap(), "commit", "-q", "--allow-empty", "-m", "x"]);
+        };
+        commit();
+        run(&["-C", dir.to_str().unwrap(), "remote", "add", "origin", remote.to_str().unwrap()]);
+        run(&["-C", dir.to_str().unwrap(), "push", "-q", "-u", "origin", name]);
+        commit();
+        commit();
+        dir
+    }
+
+    #[test]
+    fn git_branch_reports_name() {
+        let dir = temp_repo("fix/domain");
+        let info = git_branch(&dir).unwrap();
+        assert_eq!(info.name, "fix/domain");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_branch_reports_ahead_behind() {
+        let dir = temp_repo("main");
+        let info = git_branch(&dir).unwrap();
+        assert_eq!(info.ahead, 2, "two unpushed commits");
+        assert_eq!(info.behind, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_branch_none_outside_repo() {
+        assert!(git_branch(std::path::Path::new("/nonexistent")).is_none());
+    }
 
     #[test]
     fn alerts_blocked_when_working_agent_blocks() {

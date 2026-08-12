@@ -21,6 +21,7 @@ use crate::state::{self, SavedState};
 use self::mouse::{Drag, PendingClick, Sel};
 use self::overlays::{is_leader, CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
 use self::sidebar::SidebarScroll;
+use self::tasks::BranchInfo;
 
 mod bindings;
 mod mouse;
@@ -98,8 +99,8 @@ pub struct App {
     last_sizes: HashMap<u64, (u16, u16)>,
     sidebar_open: bool,
     sidebar_width: u16,
-    /// Cached git branch per workspace, refreshed periodically.
-    branch_cache: HashMap<PathBuf, (Option<String>, Instant)>,
+    /// Cached git branch (name + ahead/behind) per workspace, refreshed periodically.
+    branch_cache: HashMap<PathBuf, (Option<BranchInfo>, Instant)>,
     /// When the pane process tree was last scanned for an AI CLI.
     last_ai_scan: Instant,
     /// When the agent-status debug log was last written (throttle).
