@@ -1,16 +1,47 @@
 # Changelog
 
-## [0.2.1] - 2026-08-11
+## v0.3.0
+
+### 🚀 Features
+
+- *(ui)* Add zoom/unzoom to pane context menu
+- *(state)* Detach saves state and re-attach restores sessions
+- *(ui)* Rename exit to detach in leader key and menu
+- *(daemon)* Headless server renders frames for thin clients
+- *(daemon)* Dirty-row diffs and kumo ls/kill control CLI
+- *(daemon)* Kumo new creates a session in a running daemon
+- *(daemon)* Reject socket connections from other users
+- *(daemon)* Surface agent status in kumo ls
+- *(daemon)* Restart in place so kumo update keeps panes alive
+
+### 🐛 Bug Fixes
+
+- *(render)* Skip wide-char continuations so scrolls leave no ghost cells
+- *(render)* Keep full emoji graphemes through the daemon pipeline
+- *(render)* Stop trailing erase from deleting the right pane border
+- *(daemon)* Build server module on unix only
+- *(release)* Gate resume path to unix so 0.3.0 builds on windows
+
+### 💼 Other
+
+- Prefix changelog headings with v for release titles
+- Exclude docs commits from changelog
+- Add libc and bincode for the daemon client-server
+
+### 🎨 Styling
+
+- Navy menu backgrounds and normal blue accent
+## v0.2.1
 
 ### 🐛 Bug Fixes
 
 - *(update)* Pick platform-appropriate cargo-dist installer
 - *(app)* Open context menu down-right, flipping up/left when needed
 
-### 📚 Documentation
+### ⚙️ Miscellaneous Tasks
 
-- Update roadmap for 0.2.0 release and 0.3.0 follow-workspace
-## [0.2.0] - 2026-08-10
+- Release 0.2.1
+## v0.2.0
 
 ### 🚀 Features
 
@@ -28,15 +59,11 @@
 
 - *(update)* Replace gh with direct https
 
-### 📚 Documentation
-
-- Tighten commit convention and list roadmap
-
 ### ⚙️ Miscellaneous Tasks
 
 - Generate changelog with git-cliff on release
 - Release 0.2.0
-## [0.1.0] - 2026-08-10
+## v0.1.0
 
 ### 🚀 Features
 
@@ -100,13 +127,6 @@
 - Migrate from zig to tauri v2 stack
 - Merge kumo-core and move manifest to workspace root
 - Split app.rs into app/mouse, ui, sidebar, overlays, tasks, util
-
-### 📚 Documentation
-
-- Add README
-- Add rule to never commit without asking
-- Add customization roadmap to README
-- Reorder README sections and note negligible resource usage
 
 ### ⚡ Performance
 
