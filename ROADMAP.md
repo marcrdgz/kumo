@@ -36,9 +36,7 @@ persistent kumo.
 
 ## 🧬 0.3.0 — Daemon core 
 
-> In progress — the daemon core works end-to-end; the remaining bullets close
-> the milestone. Ships as `v0.3.0` (the old light 0.3.0 detach work is folded
-> in: its `state.rs` contract is the daemon's snapshot contract).
+> ✅ **Released** — `v0.3.0`, 2026-08-12.
 
 - ✅ **State contract** (`src/state.rs`): serialize sessions, the layout tree, and
   per-pane identity (cwd, title, shell, AI program) into `state_dir()/state.json`.
@@ -56,7 +54,7 @@ persistent kumo.
   is exact, and several terminals can watch the same session at once.
 - ✅ `leader+d` detaches the terminal; the daemon keeps running. The daemon
   **auto-stops** when the last session closes — no lingering background process.
-- ✅ `kumo attach` / `kumo ls` / `kumo kill` (protocol v3: framed bincode, full
+- ✅ `kumo attach` / `kumo ls` / `kumo kill` (protocol v1: framed bincode, full
   frames on attach/resize, row diffs otherwise).
 - ✅ **`kumo new` creates a new session in the running daemon** via a `NewSession`
   IPC message; a fresh daemon still spawns with the session in the given
@@ -75,8 +73,6 @@ persistent kumo.
   restores them). The daemon execs the new binary in place (`daemon --resume`),
   adopting each pane's PTY master descriptor from a transient resume file;
   attached terminals auto-reconnect over the fresh socket.
-- 🧩 Control CLI / scripting (`kumo send-keys`, `kumo split`, …) lands as a
-  follow-up once the socket is in place.
 
 ## ⚙️ 0.4.0 — Config & keymaps
 
@@ -107,6 +103,8 @@ persistent kumo.
   traceback needs, no blind scrollback parsing. The snippet is **idempotent and
   reversible**, and skips shells that already emit OSC 7 (several distros /
   Oh My Zsh do).
+- 🧩 Control CLI / scripting (`kumo send-keys`, `kumo split`, …) lands as a
+  follow-up on the daemon socket, driven by the same keymap tables.
 
 ## 🎨 0.5.0 — Theme & chrome
 
