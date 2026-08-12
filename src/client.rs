@@ -284,3 +284,59 @@ fn wait_for_daemon(path: &std::path::Path) -> Result<()> {
     }
     anyhow::bail!("kumo daemon did not start in time")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(text: &str, width: u16) -> protocol::WireCell {
+        protocol::WireCell {
+            text: text.to_string(),
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+            faint: false,
+            cell_width: width,
+        }
+    }
+
+    #[test]
+    fn write_row_emits_full_emoji_grapheme() {
+        // Row: wide emoji (width 2), then its continuation cell (width 0),
+        // then plain text.
+        let row = vec![
+            cell("\u{1f1ea}\u{1f1f8}", 2), // 🇪🇸
+            cell(" ", 0),                  // continuation, must be skipped
+            cell("hi", 1),
+        ];
+        let mut out = String::new();
+        write_row(&mut out, 0, &row);
+        assert!(
+            out.contains("\u{1f1ea}\u{1f1f8}"),
+            "emoji missing from client bytes: {out:?}"
+        );
+        // The continuation cell must not write over the emoji's right half.
+        assert!(
+            !out.contains("\x1b[1;2H"),
+            "continuation cell emitted a position: {out:?}"
+        );
+    }
+
+    #[test]
+    fn write_row_skips_continuation_after_wide_char() {
+        // The emoji at col 0 occupies cols 1-2 (1-indexed); the next real cell
+        // at col 2 must be positioned at col 3, past the emoji.
+        let row = vec![
+            cell("\u{1f600}", 2),
+            cell(" ", 0),
+            cell("x", 1),
+        ];
+        let mut out = String::new();
+        write_row(&mut out, 3, &row);
+        assert!(out.contains("\x1b[4;1H\u{1f600}"), "wide cell wrong: {out:?}");
+        assert!(out.contains("\x1b[4;3Hx"), "text after emoji mispositioned: {out:?}");
+    }
+}

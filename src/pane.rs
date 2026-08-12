@@ -429,8 +429,10 @@ impl Pane {
                 bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
             } else {
-                let ch = rc.text.chars().next().unwrap_or(' ');
-                bcell.set_char(ch).set_fg(cell_fg).set_bg(cell_bg);
+                // Write the full grapheme cluster (not just its first
+                // codepoint) so multi-codepoint emoji survive: flags, skin
+                // tones, and ZWJ sequences like family emoji.
+                bcell.set_symbol(&rc.text).set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
                 // A wide character occupies two columns; mark the continuation
                 // cell as `skip` so `from_ratatui` serializes it with
@@ -1157,6 +1159,43 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             if !meaningful.contains("line ") {
                 panic!("stale content at row {y}: {meaningful:?}");
             }
+        }
+    }
+
+    #[test]
+    fn multi_codepoint_emoji_survive_rendering_whole() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+
+        // One grapheme per row: a flag (two regional indicators), a family
+        // (ZWJ sequence), and a thumbs-up with a skin tone modifier. Each
+        // occupies a single terminal cell but is multiple codepoints, so
+        // truncating to the first `char` would break them.
+        let rows = [
+            ("\u{1f1ea}\u{1f1f8}", "flag-es"),
+            ("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", "family"),
+            ("\u{1f44d}\u{1f3fb}", "thumbs-skin"),
+        ];
+        let mut feed = String::new();
+        for (i, (emoji, label)) in rows.iter().enumerate() {
+            feed.push_str(&format!("\x1b[{};1H{emoji} {label}", i + 1));
+        }
+        p.feed(feed.as_bytes());
+        p.render_dirty(area, true, &mut buf);
+
+        for (y, (emoji, label)) in rows.iter().enumerate() {
+            // The full grapheme must land in the buffer as a single cell,
+            // not truncated to its first codepoint.
+            let cell = buf.cell((0, y as u16)).unwrap();
+            assert_eq!(cell.symbol(), *emoji, "row {y} truncated the grapheme");
+            let row_text: String = (0..buf.area.width)
+                .map(|x| buf.cell((x, y as u16)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .collect();
+            assert!(
+                row_text.contains(label),
+                "row {y} lost the label: {row_text:?}"
+            );
         }
     }
 

@@ -309,6 +309,15 @@ impl WireCell {
             _ => None,
         };
         let m = cell.modifier;
+        // A `Skip` cell is a continuation after a wide grapheme (the pane marks
+        // it when the emoji/CJK char occupies two columns). `Cell::cell_width()`
+        // would report the width of its blank symbol (1), so map it to 0 here to
+        // let the client skip it instead of overwriting the wide char's right half.
+        let cell_width = if cell.diff_option == ratatui::buffer::CellDiffOption::Skip {
+            0
+        } else {
+            cell.cell_width()
+        };
         Self {
             text: cell.symbol().to_string(),
             fg,
@@ -318,7 +327,7 @@ impl WireCell {
             underline: m.contains(Modifier::UNDERLINED),
             inverse: m.contains(Modifier::REVERSED),
             faint: m.contains(Modifier::DIM),
-            cell_width: cell.cell_width(),
+            cell_width,
         }
     }
 }
@@ -374,11 +383,32 @@ impl FrameMsg {
     }
 }
 
-/// The cells of one row, in column order.
+/// The cells of one row, in column order. A cell that follows a wide grapheme
+/// (a CJK char or emoji occupying two columns) is a continuation cell; it is
+/// forced to `cell_width = 0` so the client skips it instead of overwriting
+/// the wide char's right half.
+///
+/// This cannot rely on ratatui's `CellDiffOption::Skip`: by the time the
+/// daemon serializes `terminal.backend().buffer()`, `Terminal::draw` has
+/// already diffed and normalized those cells to plain blanks, losing the flag.
+/// The row's own cell widths are the only reliable signal.
 fn row_cells(buf: &ratatui::buffer::Buffer, row: u16, cols: u16) -> Vec<WireCell> {
     let s = row as usize * cols as usize;
     let e = s + cols as usize;
-    buf.content[s..e].iter().map(WireCell::from_ratatui).collect()
+    let cells: Vec<WireCell> = buf.content[s..e].iter().map(WireCell::from_ratatui).collect();
+    let mut out = Vec::with_capacity(cells.len());
+    let mut prev_wide = false;
+    for mut cell in cells {
+        if prev_wide {
+            cell.cell_width = 0;
+            out.push(cell);
+            prev_wide = false;
+        } else {
+            prev_wide = cell.cell_width == 2;
+            out.push(cell);
+        }
+    }
+    out
 }
 
 /// Whether any cell in `row` differs between the two buffers.
@@ -585,5 +615,49 @@ mod tests {
         let frame = FrameMsg::full_frame(&buf, None);
         assert!(frame.full);
         assert_eq!(frame.rows_dirty.len(), 3);
+    }
+
+    #[test]
+    fn skip_continuation_cell_serializes_width_zero() {
+        // A wide emoji followed by a `Skip` continuation cell: the client must
+        // see cell_width 0 on the continuation so it does not overwrite the
+        // emoji's right half.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f1ea}\u{1f1f8}"); // 🇪🇸
+        buf.cell_mut((1, 0))
+            .unwrap()
+            .set_symbol(" ")
+            .set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+        let frame = FrameMsg::full_frame(&buf, None);
+        let cells = &frame.rows_dirty[0].cells;
+        assert_eq!(cells[0].text, "\u{1f1ea}\u{1f1f8}", "wide grapheme must be sent whole");
+        assert_eq!(cells[1].cell_width, 0, "continuation cell must be skipped by the client");
+    }
+
+    #[test]
+    fn continuation_after_wide_char_serializes_width_zero_post_draw() {
+        // After `Terminal::draw` normalizes the buffer, the continuation cell
+        // is a plain blank with no `Skip` flag — only the preceding wide cell's
+        // width reveals it. The row must still mark it as cell_width 0.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
+        buf.cell_mut((1, 0)).unwrap().set_symbol(" ");
+        buf.cell_mut((2, 0)).unwrap().set_symbol("x");
+        let frame = FrameMsg::full_frame(&buf, None);
+        let cells = &frame.rows_dirty[0].cells;
+        assert_eq!(cells[0].text, "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
+        assert_eq!(cells[0].cell_width, 2);
+        assert_eq!(cells[1].cell_width, 0, "continuation cell must stay width 0");
+        assert_eq!(cells[2].cell_width, 1);
+    }
+
+    #[test]
+    fn wide_char_at_row_end_needs_no_continuation() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f600}");
+        let frame = FrameMsg::full_frame(&buf, None);
+        let cells = &frame.rows_dirty[0].cells;
+        assert_eq!(cells[0].cell_width, 2);
+        assert_eq!(cells[1].cell_width, 0, "trailing empty cell is a blank, not content");
     }
 }
