@@ -18,8 +18,9 @@ use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
 use crate::state::{self, SavedState};
 
+use self::bindings::{Action, BINDINGS, Chord, LEADER};
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{is_leader, CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
+use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
 use self::sidebar::SidebarScroll;
 use self::tasks::BranchInfo;
 
@@ -61,7 +62,7 @@ enum Mode {
     Leader,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Dir {
     Left,
     Right,
@@ -740,7 +741,7 @@ impl App {
             return Ok(());
         }
 
-        let leader = is_leader(key);
+        let leader = LEADER.is_leader(key);
         match self.mode {
             Mode::Normal => {
                 if leader {
@@ -766,40 +767,44 @@ impl App {
         Ok(())
     }
 
+    /// Look up the pressed chord in the canonical binding table and run its
+    /// action. Unknown chords are ignored.
     fn leader_command(&mut self, key: KeyEvent) -> Result<()> {
         self.mode = Mode::Normal;
-        match key.code {
-            KeyCode::Char('v') => self.split_active(SplitDir::V, false)?,
-            KeyCode::Char('-') => self.split_active(SplitDir::H, false)?,
-            KeyCode::Char('a') => self.split_active(SplitDir::V, true)?,
-            KeyCode::Char('c') => self.open_session_popup(),
-            KeyCode::Char('x') => self.close_focused(),
-            KeyCode::Char('z') => {
-                self.sessions[self.active].zoom = !self.sessions[self.active].zoom;
+        let chord = Chord::new(key.code, key.modifiers);
+        if let Some(binding) = BINDINGS.iter().find(|b| b.key == chord) {
+            self.run_action(binding.action)?;
+        }
+        Ok(())
+    }
+
+    /// Run a leader action. The single dispatch point for every binding.
+    fn run_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::SplitVertical => self.split_active(SplitDir::V, false)?,
+            Action::SplitHorizontal => self.split_active(SplitDir::H, false)?,
+            Action::SplitAi => self.split_active(SplitDir::V, true)?,
+            Action::NewSession => self.open_session_popup(),
+            Action::ClosePane => self.close_focused(),
+            Action::Zoom => self.sessions[self.active].zoom = !self.sessions[self.active].zoom,
+            Action::Focus(dir) => self.focus_dir(dir),
+            Action::CyclePane => self.cycle_pane(),
+            Action::NextSession => self.cycle_session(1),
+            Action::PrevSession => self.cycle_session(-1),
+            Action::JumpSession(n) => {
+                // leader + 1-9 jumps to the session at that list position.
+                if n as usize <= self.sessions.len() {
+                    self.active = n as usize - 1;
+                }
             }
-            KeyCode::Char('h') => self.focus_dir(Dir::Left),
-            KeyCode::Char('j') => self.focus_dir(Dir::Down),
-            KeyCode::Char('k') => self.focus_dir(Dir::Up),
-            KeyCode::Char('l') => self.focus_dir(Dir::Right),
-            KeyCode::Char('b') => self.sidebar_open = !self.sidebar_open,
-            KeyCode::Char('d') => {
+            Action::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            Action::Detach => {
                 // detach: save the session state and exit (light restore for
                 // now; 0.4.0's daemon turns this into a real client detach).
                 self.detach_requested = true;
                 self.quit = true;
             }
-            KeyCode::Char('n') => self.cycle_session(1),
-            KeyCode::Char('p') => self.cycle_session(-1),
-            KeyCode::Char('?') => self.open_keybind_overlay(),
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                // leader + 1-9 jumps to the session at that list position.
-                let n = c.to_digit(10).unwrap_or(0) as usize;
-                if n <= self.sessions.len() {
-                    self.active = n - 1;
-                }
-            }
-            KeyCode::Tab => self.cycle_pane(),
-            _ => {}
+            Action::ShowKeybinds => self.open_keybind_overlay(),
         }
         Ok(())
     }

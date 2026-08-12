@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 
-use super::bindings::{Binding, Group, KEYBINDINGS};
+use super::bindings::{Binding, Group, BINDINGS, LEADER};
 use super::ui::{fill, put, text};
 use super::{App, MAUVE, ORANGE, PANEL_MUTED, PANEL_SEP};
 use crate::layout::SplitDir;
@@ -216,7 +216,7 @@ impl App {
 
     /// Handle a key while the session-name popup is open.
     pub(super) fn on_popup_key(&mut self, key: KeyEvent) {
-        if is_leader(key) || key.code == KeyCode::Esc {
+        if LEADER.is_leader(key) || key.code == KeyCode::Esc {
             self.popup.open = false;
             return;
         }
@@ -239,7 +239,7 @@ impl App {
 
     /// Handle a key while the status-bar menu is open.
     pub(super) fn on_menu_key(&mut self, key: KeyEvent) {
-        if is_leader(key) || key.code == KeyCode::Esc {
+        if LEADER.is_leader(key) || key.code == KeyCode::Esc {
             self.menu.open = false;
             return;
         }
@@ -327,7 +327,7 @@ impl App {
 
     /// Handle a key while the right-click context menu is open.
     pub(super) fn on_ctx_menu_key(&mut self, key: KeyEvent) -> Result<()> {
-        if is_leader(key) || key.code == KeyCode::Esc {
+        if LEADER.is_leader(key) || key.code == KeyCode::Esc {
             self.ctx_menu.open = false;
             return Ok(());
         }
@@ -353,7 +353,7 @@ impl App {
 
     /// Handle a key while the keybind showcase is open.
     pub(super) fn on_overlay_key(&mut self, key: KeyEvent) {
-        if is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
+        if LEADER.is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
             self.keybind_overlay.open = false;
             return;
         }
@@ -382,8 +382,8 @@ impl App {
     /// Centered rect of the keybind showcase, sized to fit the longest row.
     fn keybind_overlay_rect(&self) -> Option<Rect> {
         let (w, h) = self.term_size;
-        let max_keys = KEYBINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let max_desc = KEYBINDINGS.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
+        let max_keys = BINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
+        let max_desc = BINDINGS.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
         let lines = keybind_lines().len();
@@ -423,7 +423,7 @@ impl App {
             .add_modifier(Modifier::BOLD);
         text(f, x0 + 2, y0 + 1, "keybindings", title, inner_w);
 
-        let max_keys = KEYBINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
+        let max_keys = BINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
         let scroll = self.keybind_overlay.scroll as usize;
         let body_top = y0 + 2;
         let body_bottom = y1 - 1; // footer row
@@ -743,31 +743,31 @@ impl App {
     }
 }
 
-/// True when `key` is the leader chord: Ctrl+Space. Terminals report it as
-/// NUL, space-with-ctrl, or a literal space in the enhanced keyboard protocol.
-pub(super) fn is_leader(key: KeyEvent) -> bool {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('\0') | KeyCode::Null)
-}
-
 /// One display row of the keybind showcase: a group header or a binding.
 enum KbLine<'a> {
     Header(&'a str),
     Bind(&'a Binding),
 }
 
-/// Flatten `KEYBINDINGS` into showcase rows, one header per group followed by
-/// its bindings, in `Group::ALL` order.
+/// Flatten `BINDINGS` into showcase rows, one header per group followed by
+/// its bindings, in `Group::ALL` order. Bindings sharing a display string
+/// (e.g. the four `h/j/k/l` focus chords, the nine `1-9` jumps) collapse into
+/// a single grouped row.
 fn keybind_lines() -> Vec<KbLine<'static>> {
     let mut lines = Vec::new();
     for group in Group::ALL {
         let mut pushed = false;
-        for b in KEYBINDINGS {
+        let mut last_keys: Option<&str> = None;
+        for b in BINDINGS {
             if b.group == group {
                 if !pushed {
                     lines.push(KbLine::Header(group.label()));
                     pushed = true;
                 }
+                if last_keys == Some(b.keys) {
+                    continue;
+                }
+                last_keys = Some(b.keys);
                 lines.push(KbLine::Bind(b));
             }
         }
