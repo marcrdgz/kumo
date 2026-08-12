@@ -187,6 +187,10 @@ fn write_row(buf: &mut String, row: u16, cells: &[protocol::WireCell]) {
         .rposition(|c| !c.text.trim().is_empty())
         .unwrap_or(usize::MAX);
     let mut prev_style: Option<StyleKey> = None;
+    // Physical (0-indexed) column the terminal cursor lands on after the last
+    // written cell; used to erase only the stale tail beyond the content.
+    let mut cursor_col: u16 = 0;
+    let mut wrote_any = false;
     for (col, cell) in cells.iter().enumerate() {
         if col > last {
             break;
@@ -212,8 +216,17 @@ fn write_row(buf: &mut String, row: u16, cells: &[protocol::WireCell]) {
         // Blank cells still reset to a space so previously drawn content in the
         // row is cleared.
         buf.push_str(if cell.text.trim().is_empty() { " " } else { &cell.text });
+        cursor_col = col as u16 + cell.cell_width;
+        wrote_any = true;
     }
-    buf.push_str("\x1b[K");
+    // Erase the stale tail only when the content does not already reach the
+    // row's end: `\x1b[K` clears from the cursor to the end of the line
+    // *inclusive*, so emitting it while the cursor is on the last column (the
+    // pane's right border) would erase that border cell.
+    if wrote_any && cursor_col < cells.len() as u16 {
+        buf.push_str(&format!("\x1b[{};{}H", row + 1, cursor_col + 1));
+        buf.push_str("\x1b[K");
+    }
 }
 
 fn push_sgr(
@@ -338,5 +351,33 @@ mod tests {
         write_row(&mut out, 3, &row);
         assert!(out.contains("\x1b[4;1H\u{1f600}"), "wide cell wrong: {out:?}");
         assert!(out.contains("\x1b[4;3Hx"), "text after emoji mispositioned: {out:?}");
+    }
+
+    #[test]
+    fn write_row_does_not_erase_last_column_border() {
+        // Full-width row whose last non-blank cell is the right border at the
+        // final column. `\x1b[K` erases from the cursor to EOL inclusive, so it
+        // must NOT be emitted here or it would delete the border we just wrote.
+        let mut row = Vec::new();
+        for _ in 0..79 {
+            row.push(cell(" ", 1));
+        }
+        row.push(cell("\u{2502}", 1)); // │ border at the last column (80th)
+        let mut out = String::new();
+        write_row(&mut out, 2, &row);
+        assert!(out.contains("\x1b[3;80H\u{2502}"), "border not written: {out:?}");
+        assert!(
+            !out.contains("\x1b[K"),
+            "trailing erase must be skipped when content fills the row: {out:?}"
+        );
+    }
+
+    #[test]
+    fn write_row_erases_tail_after_short_content() {
+        // Content ends at col 2 of 4; the stale tail (cols 3-4) must be erased.
+        let row = vec![cell("a", 1), cell("b", 1), cell("c", 1), cell(" ", 1)];
+        let mut out = String::new();
+        write_row(&mut out, 0, &row);
+        assert!(out.contains("\x1b[1;4H\x1b[K"), "tail not erased after content: {out:?}");
     }
 }
