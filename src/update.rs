@@ -407,8 +407,31 @@ pub fn update(opts: &UpdateOpts) -> Result<Outcome> {
     write_cache(&cache);
 
     println!("kumo updated to {}", latest.tag);
-    println!("restart kumo to use the new version");
+    if restart_running_daemon() {
+        println!("the kumo daemon is restarting with the new version (panes stay alive)");
+    } else {
+        println!("restart kumo to use the new version");
+    }
     Ok(Outcome::Updated)
+}
+
+/// Tell a running daemon to restart itself in place for `kumo update` (exec the
+/// freshly-swapped binary, inheriting the live PTY masters). Returns whether a
+/// daemon was actually running and asked to restart.
+fn restart_running_daemon() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        let path = crate::config::ipc_socket_path();
+        let Ok(mut stream) = UnixStream::connect(&path) else { return false };
+        // No `Hello`: the daemon handles `Restart` regardless, and handshaking
+        // would resize its render terminal to the client's (1x1) size first.
+        crate::protocol::write_framed(&mut stream, &crate::protocol::ClientMsg::Restart).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 // ----- startup notification -----

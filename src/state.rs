@@ -58,6 +58,12 @@ pub enum SavedNode {
 
 /// Everything needed to respawn a pane (or, later, hand it to the daemon).
 /// `id` is the *saved* id used to correlate with the tree before remapping.
+///
+/// The `master_fd`/`child_pid`/`cols`/`rows` fields are resume-only: they are
+/// set by the daemon when it snapshots its live panes for `kumo update`, so the
+/// restarted daemon can adopt the inherited PTY master descriptors. They are
+/// `#[serde(default)]` so ordinary persisted state (and 0.4.0's snapshots)
+/// round-trip unchanged.
 #[derive(Serialize, Deserialize)]
 pub struct SavedPane {
     pub id: u64,
@@ -66,6 +72,14 @@ pub struct SavedPane {
     pub program: Option<(String, Vec<String>)>,
     pub cwd: PathBuf,
     pub custom_name: Option<String>,
+    #[serde(default)]
+    pub master_fd: Option<i64>,
+    #[serde(default)]
+    pub child_pid: Option<i64>,
+    #[serde(default)]
+    pub cols: u16,
+    #[serde(default)]
+    pub rows: u16,
 }
 
 /// Write `state` to `path` atomically (temp file + rename) so a crash mid-write
@@ -193,6 +207,10 @@ mod tests {
                         program: None,
                         cwd: PathBuf::from("/work"),
                         custom_name: None,
+                        master_fd: None,
+                        child_pid: None,
+                        cols: 80,
+                        rows: 24,
                     },
                     SavedPane {
                         id: 12,
@@ -201,6 +219,10 @@ mod tests {
                         program: Some(("opencode".into(), Vec::new())),
                         cwd: PathBuf::from("/work"),
                         custom_name: Some("ai".into()),
+                        master_fd: None,
+                        child_pid: None,
+                        cols: 80,
+                        rows: 24,
                     },
                 ],
             }],
@@ -222,6 +244,40 @@ mod tests {
         assert_eq!(s.panes.len(), 2);
         assert_eq!(s.panes[1].program, Some(("opencode".into(), Vec::new())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_fields_round_trip() {
+        // The resume-only fields (master fd / child pid / size) survive a
+        // save+load, so the restarted daemon can adopt the inherited PTYs.
+        let mut state = sample_state();
+        state.sessions[0].panes[0].master_fd = Some(7);
+        state.sessions[0].panes[0].child_pid = Some(4242);
+        state.sessions[0].panes[0].cols = 120;
+        state.sessions[0].panes[0].rows = 30;
+        let dir = std::env::temp_dir().join(format!("kumo-state-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("resume.json");
+        save(&path, &state).unwrap();
+        let loaded = load(&path).unwrap().expect("resume present");
+        let p = &loaded.sessions[0].panes[0];
+        assert_eq!(p.master_fd, Some(7));
+        assert_eq!(p.child_pid, Some(4242));
+        assert_eq!((p.cols, p.rows), (120, 30));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_state_without_resume_fields_loads() {
+        // A pre-resume `state.json` (no fd/pid/size fields) must still load via
+        // the serde defaults, so nothing written before breaks a later update.
+        let json = r#"{"version":1,"active":0,"sessions":[{"name":"session-1","workspace":"/tmp","zoom":false,"focus":11,"tree":{"Pane":{"id":11}},"panes":[{"id":11,"is_ai":false,"shell":"/bin/sh","program":null,"cwd":"/tmp","custom_name":null}]}]}"#;
+        let loaded = serde_json::from_str::<SavedState>(json).unwrap();
+        let p = &loaded.sessions[0].panes[0];
+        assert_eq!(p.master_fd, None);
+        assert_eq!(p.child_pid, None);
+        assert_eq!((p.cols, p.rows), (0, 0));
     }
 
     #[test]

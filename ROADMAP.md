@@ -34,7 +34,7 @@ persistent kumo.
 - ✅ `leader+?` keybind showcase; the leader-mode status-bar hint is generated
   from the same table (`src/app/bindings.rs`), so the two never drift
 
-## 🧬 0.3.0 — Daemon real
+## 🧬 0.3.0 — Daemon core 
 
 > In progress — the daemon core works end-to-end; the remaining bullets close
 > the milestone. Ships as `v0.3.0` (the old light 0.3.0 detach work is folded
@@ -69,10 +69,12 @@ persistent kumo.
   alerts already run server-side (visible in the sidebar of any attached
   terminal). `kumo ls` surfaces each AI CLI's status (name + working/blocked/idle)
   so a blocked agent is noticeable from outside the TUI.
-- ⏳ **Update without losing the web** (final phase): `kumo update` swaps the
+- ✅ **Update without losing the web** (final phase): `kumo update` swaps the
   binary and the daemon restarts **inheriting the live terminals** — running
   agents survive the update (screens come back fresh until 0.4.0's persistence
-  restores them).
+  restores them). The daemon execs the new binary in place (`daemon --resume`),
+  adopting each pane's PTY master descriptor from a transient resume file;
+  attached terminals auto-reconnect over the fresh socket.
 - 🧩 Control CLI / scripting (`kumo send-keys`, `kumo split`, …) lands as a
   follow-up once the socket is in place.
 

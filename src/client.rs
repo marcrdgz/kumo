@@ -5,6 +5,8 @@
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -21,7 +23,7 @@ use crate::protocol::{self, ClientMsg, FrameMsg, ServerMsg};
 pub fn run(launch: Launch) -> Result<()> {
     let path = crate::config::ipc_socket_path();
     let mut spawned = false;
-    let mut stream = match UnixStream::connect(&path) {
+    let stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(_) => match launch {
             Launch::Attach => {
@@ -45,7 +47,7 @@ pub fn run(launch: Launch) -> Result<()> {
     } else {
         Vec::new()
     };
-    client_loop(&mut stream, &pre)
+    client_loop(stream, &pre)
 }
 
 fn workspace_for(launch: &Launch) -> Option<PathBuf> {
@@ -120,15 +122,22 @@ fn agent_line(name: &str, status: protocol::AgentStatus, color: bool) -> String 
 /// Read one `ServerMsg`, mapping a decode failure (a reply from an older,
 /// incompatible daemon) to a friendly restart hint instead of a raw bincode
 /// error. `kumo ls` never handshakes, so it cannot rely on the `Hello` version
-/// check the attach path uses.
+/// check the attach path uses. A pre-restart daemon's `SessionList` (variant
+/// index 4, five-field `SessionInfo`) happens to decode as `Restarting` in the
+/// current protocol, so that reply is treated as the same stale-daemon case.
 fn read_server(stream: &mut UnixStream) -> Result<ServerMsg> {
-    protocol::read_framed::<ServerMsg>(stream).map_err(|e| {
+    let stale = |e: anyhow::Error| {
         anyhow::anyhow!(
             "the running kumo daemon is from an older, incompatible kumo.\n\
              Restart it with:  pkill -f 'kumo daemon'\n\
              ({e})"
         )
-    })
+    };
+    match protocol::read_framed::<ServerMsg>(stream) {
+        Ok(ServerMsg::Restarting) => Err(stale(anyhow::anyhow!("stale session list reply"))),
+        Ok(msg) => Ok(msg),
+        Err(e) => Err(stale(e)),
+    }
 }
 
 /// `kumo kill`: stop the daemon (and the processes in its panes).
@@ -138,7 +147,34 @@ pub fn kill_server() -> Result<()> {
     Ok(())
 }
 
-fn client_loop(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<()> {
+fn client_loop(mut stream: UnixStream, pre: &[ClientMsg]) -> Result<()> {
+    let mut pre = pre.to_vec();
+    loop {
+        match client_once(&mut stream, &pre) {
+            Ok(Exit::Clean) => return Ok(()),
+            Ok(Exit::Restarting) => {
+                // The daemon exec'd a new binary for `kumo update`; reconnect
+                // (with retries) and re-handshake, keeping the TUI intact.
+                stream = reconnect()?;
+                pre.clear();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Outcome of one attach (one handshake + render loop) to the daemon.
+enum Exit {
+    /// `leader+d` detach or a graceful daemon stop (last session / `kumo kill`).
+    Clean,
+    /// The daemon is restarting itself (`kumo update`); drop the socket and
+    /// reconnect.
+    Restarting,
+}
+
+/// One attach session: handshake, render loop, teardown. On `Restarting` the
+/// terminal is left in raw mode so the reconnect is seamless (no flicker).
+fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
     let (cols, rows) = crossterm::terminal::size()?;
     protocol::write_framed(
         stream,
@@ -155,11 +191,14 @@ fn client_loop(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<()> {
     execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture, Hide, Clear(ClearType::All))?;
 
     // Input thread: reads crossterm events and writes them straight to the
-    // daemon over its own socket clone.
+    // daemon over its own socket clone. Stopped via the flag so a restart can
+    // hand the event reader back to the next connection.
     let write_half = stream.try_clone()?;
-    std::thread::spawn(move || input_loop(write_half));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let input = std::thread::spawn(move || input_loop(write_half, stop2));
 
-    let result: Result<()> = (|| {
+    let result: Result<Exit> = (|| {
         let mut saw_frame = false;
         loop {
             match protocol::read_framed::<ServerMsg>(stream)? {
@@ -169,7 +208,8 @@ fn client_loop(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<()> {
                     blit(&mut stdout, &frame)?;
                 }
                 ServerMsg::SessionList { .. } => {}
-                ServerMsg::Detach => break,
+                ServerMsg::Detach => return Ok(Exit::Clean),
+                ServerMsg::Restarting => return Ok(Exit::Restarting),
                 ServerMsg::Shutdown => {
                     // A shutdown before any frame means the daemon rejected the
                     // handshake (protocol mismatch with an old lingering daemon)
@@ -180,34 +220,68 @@ fn client_loop(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<()> {
                              Restart it with:  pkill -f 'kumo daemon'\nthen run `kumo` again"
                         );
                     }
-                    break;
+                    return Ok(Exit::Clean);
                 }
             }
         }
-        Ok(())
     })();
 
-    let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, LeaveAlternateScreen);
-    let _ = disable_raw_mode();
-    let _ = stdout.flush();
-    result
+    // Release the crossterm event reader before a reconnect spawns a new one.
+    stop.store(true, Ordering::Relaxed);
+    let _ = input.join();
+
+    match result {
+        Ok(Exit::Restarting) => {
+            let _ = stdout.flush();
+            Ok(Exit::Restarting)
+        }
+        other => {
+            let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            let _ = stdout.flush();
+            other
+        }
+    }
 }
 
-/// Read crossterm events and forward them to the daemon.
-fn input_loop(mut stream: UnixStream) {
-    while let Ok(ev) = crossterm::event::read() {
-        match ev {
-            crossterm::event::Event::Key(k) => {
-                let _ = protocol::write_framed(&mut stream, &ClientMsg::Input { key: k.into() });
-            }
-            crossterm::event::Event::Mouse(m) => {
-                let _ = protocol::write_framed(&mut stream, &ClientMsg::Mouse { event: m.into() });
-            }
-            crossterm::event::Event::Resize(w, h) => {
-                let _ = protocol::write_framed(&mut stream, &ClientMsg::Resize { cols: w, rows: h });
-            }
-            _ => {}
+/// Read crossterm events and forward them to the daemon. Exits when `stop` is
+/// set (restart/reconnect) or once the socket becomes unwritable (daemon gone).
+fn input_loop(mut stream: UnixStream, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        if !crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
+            continue;
         }
+        let ok = match crossterm::event::read() {
+            Ok(crossterm::event::Event::Key(k)) => {
+                protocol::write_framed(&mut stream, &ClientMsg::Input { key: k.into() })
+            }
+            Ok(crossterm::event::Event::Mouse(m)) => {
+                protocol::write_framed(&mut stream, &ClientMsg::Mouse { event: m.into() })
+            }
+            Ok(crossterm::event::Event::Resize(w, h)) => {
+                protocol::write_framed(&mut stream, &ClientMsg::Resize { cols: w, rows: h })
+            }
+            _ => continue,
+        };
+        if ok.is_err() {
+            return;
+        }
+    }
+}
+
+/// Reconnect to the daemon socket, retrying while the restarted daemon comes
+/// back up (it rebinds the socket shortly after the `kumo update` exec).
+fn reconnect() -> Result<UnixStream> {
+    let path = crate::config::ipc_socket_path();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(s) = UnixStream::connect(&path) {
+            return Ok(s);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("kumo daemon did not come back after the update restart");
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -389,10 +463,11 @@ mod tests {
             zoomed: bool,
             active: bool,
         }
-        // Mirrors `ServerMsg`: `SessionList` is the 5th variant (index 4), so
-        // bincode encodes the exact bytes an old daemon would send. Only
-        // `SessionList` is ever constructed here; the leading variants exist
-        // solely to match its variant index.
+        // Mirrors the OLD `ServerMsg`: `SessionList` is the 5th variant (index
+        // 4) — exactly the bytes a pre-`Restarting` daemon sends — so the
+        // current client must treat that decode as a stale, incompatible
+        // daemon. Only `SessionList` is ever constructed here; the leading
+        // variants exist solely to match its variant index.
         #[allow(dead_code)]
         #[derive(Serialize)]
         enum OldServerMsg {

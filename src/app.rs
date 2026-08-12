@@ -75,6 +75,9 @@ pub enum Launch {
     Attach,
     /// `kumo new [WORKSPACE]` / `kumo [WORKSPACE]`: start fresh, never attach.
     New(Option<PathBuf>),
+    /// Daemon restarted by `kumo update` (`daemon --resume <file>`): adopt the
+    /// inherited PTY masters recorded in the resume file.
+    Resume(PathBuf),
 }
 
 pub struct App {
@@ -245,6 +248,30 @@ impl App {
                 }
             }
             Launch::New(_) => app.new_session()?,
+            Launch::Resume(path) => {
+                let resumed = match state::load(&path)? {
+                    Some(state) => app.resume(state),
+                    None => Ok(false),
+                };
+                // A missing/corrupt resume file (or an unadoptable pane) must
+                // never take the daemon down mid-update: fall back to a fresh
+                // session so the daemon still comes up.
+                match resumed {
+                    Ok(true) => {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    Ok(false) => {
+                        log::warn!("kumo: resume had nothing to adopt; starting fresh");
+                        let _ = std::fs::remove_file(&path);
+                        app.new_session()?;
+                    }
+                    Err(e) => {
+                        log::warn!("kumo: resume failed ({e:#}); starting fresh");
+                        let _ = std::fs::remove_file(&path);
+                        app.new_session()?;
+                    }
+                }
+            }
         }
         Ok(app)
     }
@@ -311,6 +338,78 @@ impl App {
         Ok(())
     }
 
+    /// Rebuild sessions/panes from a resume file (daemon restart for `kumo
+    /// update`), adopting each pane's inherited PTY master descriptor. Terminal
+    /// screens come back fresh — the live child processes keep running inside
+    /// the PTYs. Returns whether any pane/session was actually resumed.
+    #[cfg(unix)]
+    fn resume(&mut self, mut state: SavedState) -> Result<bool> {
+        // Assign a fresh pane id per saved id, consistently across sessions.
+        let mut map = std::collections::HashMap::new();
+        for session in &state.sessions {
+            let mut ids = Vec::new();
+            state::tree_pane_ids(&session.tree, &mut ids);
+            for old in ids {
+                map.entry(old).or_insert_with(Pty::next_pane_id);
+            }
+        }
+        state::remap_pane_ids(&mut state, &map);
+
+        self.panes.clear();
+        self.sessions.clear();
+        let saved_active = state.active;
+        for (i, saved) in state.sessions.into_iter().enumerate() {
+            let sid = self.next_session_id();
+            let mut missing = Vec::new();
+            for sp in saved.panes {
+                let Some(fd) = sp.master_fd else {
+                    missing.push(sp.id);
+                    continue;
+                };
+                let mut pane = Pane::resume(
+                    sid,
+                    sp.id,
+                    sp.shell,
+                    sp.program,
+                    sp.cwd.clone(),
+                    sp.cols,
+                    sp.rows,
+                    sp.is_ai,
+                    fd as i32,
+                    sp.child_pid.map(|p| p as i32),
+                    self.events_tx.clone(),
+                )?;
+                pane.custom_name = sp.custom_name;
+                self.panes.insert(sp.id, pane);
+            }
+            let mut tree = LayoutTree::from_node(state::to_layout_node(&saved.tree), saved.focus);
+            // A pane with no recordable master fd was skipped: drop it from the
+            // tree so no dangling pane id is ever rendered.
+            for pid in missing {
+                tree.remove_pane(pid);
+            }
+            if !tree.contains(tree.focus) {
+                if let Some(&first) = tree.pane_ids().first() {
+                    tree.focus = first;
+                }
+            }
+            self.sessions.push(Session {
+                id: sid,
+                name: saved.name,
+                tree,
+                zoom: saved.zoom,
+                workspace: saved.workspace,
+            });
+            self.active = i;
+        }
+        if self.sessions.is_empty() {
+            return Ok(false);
+        }
+        self.active = saved_active.min(self.sessions.len() - 1);
+        self.workspace = self.sessions[self.active].workspace.clone();
+        Ok(true)
+    }
+
     /// Serialize the current sessions/panes for `state::save`. Dormant until
     /// 0.5.0 persistence revives it on the daemon side.
     #[cfg_attr(unix, allow(dead_code))]
@@ -331,6 +430,52 @@ impl App {
                     program: pane.program.clone(),
                     cwd: pane.cwd.clone(),
                     custom_name: pane.custom_name.clone(),
+                    master_fd: None,
+                    child_pid: None,
+                    cols: 0,
+                    rows: 0,
+                });
+            }
+            sessions.push(state::SavedSession {
+                name: session.name.clone(),
+                workspace: session.workspace.clone(),
+                zoom: session.zoom,
+                focus: session.tree.focus,
+                tree: state::from_layout_node(root),
+                panes,
+            });
+        }
+        if sessions.is_empty() {
+            return None;
+        }
+        Some(state::SavedState { version: state::STATE_VERSION, active: self.active, sessions })
+    }
+
+    /// Serialize the current sessions/panes into a resume file, recording each
+    /// pane's raw PTY master descriptor + child pid so a restarted daemon can
+    /// adopt the live terminals (`kumo update`).
+    #[cfg(unix)]
+    fn to_resume_state(&self) -> Option<SavedState> {
+        if self.sessions.is_empty() {
+            return None;
+        }
+        let mut sessions = Vec::new();
+        for session in &self.sessions {
+            let root = session.tree.root.as_ref()?;
+            let mut panes = Vec::new();
+            for pid in session.tree.pane_ids() {
+                let Some(pane) = self.panes.get(&pid) else { continue };
+                panes.push(state::SavedPane {
+                    id: pid,
+                    is_ai: pane.is_ai,
+                    shell: pane.pty.shell.clone(),
+                    program: pane.program.clone(),
+                    cwd: pane.cwd.clone(),
+                    custom_name: pane.custom_name.clone(),
+                    master_fd: pane.pty.raw_fd().map(|fd| fd as i64),
+                    child_pid: pane.pty.process_id().map(|p| p as i64),
+                    cols: pane.pty.cols,
+                    rows: pane.pty.rows,
                 });
             }
             sessions.push(state::SavedSession {
@@ -519,7 +664,7 @@ impl App {
     fn poll_exits(&mut self) {
         let mut exited: Vec<u64> = Vec::new();
         for (pid, pane) in self.panes.iter_mut() {
-            if !pane.dead && matches!(pane.pty.child.try_wait(), Ok(Some(_))) {
+            if !pane.dead && matches!(pane.pty.try_wait(), Ok(Some(_))) {
                 pane.dead = true;
                 exited.push(*pid);
             }

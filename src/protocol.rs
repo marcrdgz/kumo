@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
 /// with a mismatched version. The daemon is unreleased, so it starts at 1;
 /// once 0.4.0 ships, wire changes must bump it.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -452,6 +452,10 @@ pub enum ClientMsg {
     NewSession {
         workspace: Option<std::path::PathBuf>,
     },
+    /// `kumo update` after swapping the binary: ask the daemon to restart
+    /// itself (exec the new binary) inheriting the live PTY masters, so the
+    /// running panes and agents survive the update.
+    Restart,
 }
 
 /// One session, as reported to `kumo ls`.
@@ -510,6 +514,9 @@ pub enum ServerMsg {
     Detach,
     /// The daemon is stopping (last session closed / `kumo kill`).
     Shutdown,
+    /// The daemon is restarting itself for `kumo update`: drop the socket and
+    /// reconnect (with retries) instead of erroring out.
+    Restarting,
     /// Response to `ListSessions`.
     SessionList {
         sessions: Vec<SessionInfo>,

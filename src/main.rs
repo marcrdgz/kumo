@@ -60,15 +60,25 @@ fn main() -> Result<()> {
     }
     if args.first().map(|s| s.as_str()) == Some("daemon") {
         // Hidden subcommand: run the headless daemon. Spawned detached by the
-        // client; also available to start manually.
-        let workspace = args.get(1).map(PathBuf::from);
+        // client; also available to start manually. `--resume <file>` makes it
+        // adopt the live PTY masters inherited from a `kumo update` restart.
+        let mut workspace = args.get(1).map(PathBuf::from);
+        let mut resume = None;
+        if workspace.as_deref().and_then(|w| w.to_str()) == Some("--resume") {
+            resume = args.get(2).map(PathBuf::from);
+            workspace = None;
+        }
         #[cfg(unix)]
         {
-            return app::server::run_daemon(Launch::New(workspace));
+            let launch = match resume {
+                Some(path) => app::Launch::Resume(path),
+                None => app::Launch::New(workspace),
+            };
+            return app::server::run_daemon(launch);
         }
         #[cfg(not(unix))]
         {
-            let _ = workspace;
+            let _ = (workspace, resume);
             anyhow::bail!("the kumo daemon is unix-only for now");
         }
     }

@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crate::agents::AgentStatus;
 use crate::pty::{Pty, PtySpec};
-use portable_pty::PtySize;
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
@@ -213,7 +212,53 @@ impl Pane {
             cols,
             rows,
         })?;
+        Self::finish(
+            id,
+            session_id,
+            is_ai,
+            program,
+            cwd.unwrap_or_else(|| PathBuf::from("/")),
+            cols,
+            rows,
+            pty,
+            events_tx,
+        )
+    }
 
+    /// Adopt a PTY master inherited across a daemon restart (`kumo update`):
+    /// the child process is still alive inside the PTY, so this pane comes up
+    /// with a fresh (blank) terminal emulator connected to the live process.
+    #[cfg(unix)]
+    pub fn resume(
+        session_id: u64,
+        id: u64,
+        shell: String,
+        program: Option<(String, Vec<String>)>,
+        cwd: PathBuf,
+        cols: u16,
+        rows: u16,
+        is_ai: bool,
+        master_fd: i32,
+        child_pid: Option<i32>,
+        events_tx: Sender<PtyEvent>,
+    ) -> Result<Pane> {
+        let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
+        Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx)
+    }
+
+    /// Shared tail of `spawn`/`resume`: create the terminal emulator, wire the
+    /// PTY writer as its query-response sink, and start the read loop.
+    fn finish(
+        id: u64,
+        session_id: u64,
+        is_ai: bool,
+        program: Option<(String, Vec<String>)>,
+        cwd: PathBuf,
+        cols: u16,
+        rows: u16,
+        pty: Pty,
+        events_tx: Sender<PtyEvent>,
+    ) -> Result<Pane> {
         let vt = vt::Terminal::new(cols.max(1), rows.max(1), 10_000, &PALETTE)?;
 
         let mut pane = Pane {
@@ -221,7 +266,7 @@ impl Pane {
             session_id,
             is_ai,
             program,
-            cwd: cwd.unwrap_or_else(|| PathBuf::from("/")),
+            cwd,
             custom_name: None,
             detected_ai: false,
             detected_ai_name: None,
@@ -240,7 +285,7 @@ impl Pane {
         // Route query responses (DA, size reports, etc.) back to the PTY.
         pane.vt.set_write_sink(&mut *pane.pty.writer as *mut (dyn std::io::Write + Send));
 
-        let reader = pane.pty.master.try_clone_reader()?;
+        let reader = pane.pty.reader()?;
         let tx = events_tx.clone();
         let pid = id;
         Pty::read_loop(reader, move |data| {
@@ -277,7 +322,7 @@ impl Pane {
 
     /// Name of the AI CLI currently running in this pane's process tree.
     pub fn ai_cli_name(&self) -> Option<String> {
-        let root = self.pty.child.process_id()?;
+        let root = self.pty.process_id()?;
         ProcessSnapshot::capture()?.ai_cli_in_tree(root)
     }
 
@@ -299,12 +344,7 @@ impl Pane {
         self.vt.resize(cols, rows);
         self.dirty = true;
         self.full_redraw = true;
-        let _ = self.pty.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        let _ = self.pty.resize(cols, rows);
     }
 
     pub fn write(&mut self, data: &[u8]) {

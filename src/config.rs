@@ -75,6 +75,14 @@ pub fn ipc_socket_path() -> PathBuf {
     runtime_dir().join("kumo.sock")
 }
 
+/// The transient resume file the daemon writes before `kumo update` restarts
+/// it (`runtime_dir()/resume.json`): the sessions/layout plus each pane's
+/// inherited PTY master descriptor, so the restarted daemon adopts the live
+/// terminals instead of losing them.
+pub fn resume_file() -> PathBuf {
+    runtime_dir().join("resume.json")
+}
+
 /// Legacy config file (`~/.kumo`) read as a fallback for back-compat.
 fn legacy_config_file() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".kumo"))

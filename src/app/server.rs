@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -166,6 +166,31 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 ClientMsg::KillServer => {
                     kill = true;
                 }
+                ClientMsg::Restart => {
+                    // `kumo update` swapped the binary on disk: restart this
+                    // process so the new version serves the sessions, inheriting
+                    // the live PTY masters so panes and agents survive.
+                    match restart_daemon(&app) {
+                        Ok(()) => {
+                            // The prep is done: tell the attached terminals to
+                            // reconnect, give their writer threads a beat to
+                            // flush the message (local unix socket, effectively
+                            // instant), then exec the new binary. A successful
+                            // exec never returns to this loop.
+                            for client in clients.values_mut() {
+                                let _ = client.tx.try_send(ServerMsg::Restarting);
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                            let resume = crate::config::resume_file();
+                            if let Err(e) = exec_new_binary(&resume) {
+                                log::warn!("daemon: restart exec failed: {e:#}");
+                                let _ = std::fs::remove_file(&resume);
+                            }
+                        }
+                        Err(e) => log::warn!("daemon: restart prep failed: {e:#}"),
+                    }
+                    render_dirty = true;
+                }
                 ClientMsg::NewSession { workspace } => {
                     // `kumo new` against a running daemon: create a fresh
                     // session and focus it. The client resolved its own cwd
@@ -264,6 +289,44 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
 
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+/// Prepare an in-place daemon restart for `kumo update`: snapshot the live
+/// sessions into the resume file (each pane's PTY master descriptor + child
+/// pid) and clear `FD_CLOEXEC` on those descriptors so they survive the exec.
+/// `portable-pty` sets the flag at openpty; without clearing it, the masters
+/// would close at exec and the panes (and their processes) would die.
+fn restart_daemon(app: &App) -> Result<()> {
+    let Some(state) = app.to_resume_state() else {
+        anyhow::bail!("nothing to resume (no live sessions)");
+    };
+    let path = crate::config::resume_file();
+    crate::state::save(&path, &state)?;
+    for pane in app.panes.values() {
+        if let Some(fd) = pane.pty.raw_fd() {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags >= 0 {
+                let _ = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace the current process image with the `kumo` binary at the current
+/// executable path — which `kumo update` already swapped for the new release —
+/// asking it to resume the sessions from `resume`. The open PTY master
+/// descriptors (now without `FD_CLOEXEC`) are inherited. Never returns on
+/// success; `Err` means exec failed and the old daemon keeps running.
+fn exec_new_binary(resume: &std::path::Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().context("cannot determine the current executable path")?;
+    let err = std::process::Command::new(&exe)
+        .arg("daemon")
+        .arg("--resume")
+        .arg(resume)
+        .exec();
+    Err(err.into())
 }
 
 /// Resize both the `TestBackend` buffer (which `Terminal::size()` reports) and
