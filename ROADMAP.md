@@ -107,15 +107,19 @@ persistent kumo.
 - ✅ **Follow workspace**: with `new-cwd = "follow"`, the workspace follows the
   focused pane's actual cwd, so new panes open where you are and the sidebar /
   git-branch follow along. **Primary mechanism is PID-based** with zero shell
-  setup: kumo walks the pane's process tree (`ProcessSnapshot` in
-  `src/pane.rs`) to the deepest descendant and reads `/proc/<pid>/cwd` on Linux
-  and `lsof -d cwd` on macOS. **OSC 7 / OSC 9 / OSC 1337 is wired as a passive
-  complement** (`pwd_changed` now enabled in `src/vt.rs`): shells that already
-  emit OSC 7 (oh-my-zsh, kitty distros, …) report their cwd directly, which is
-  the only signal that works inside remote `ssh` panes. **ON by default**,
-  `new-cwd = "follow"`, no leader binding. The one-shot **snippet installer**
-  for shells that don't emit OSC 7 is deferred to 0.7.0 (with the command
-  traceback work).
+  setup: kumo asks **which process group controls the pane's terminal right
+  now** (`tcgetpgrp` on the PTY master, falling back to `e_tpgid` via
+  `proc_pidinfo` on macOS / `tpgid` in `/proc/<pid>/stat` on Linux) and reads
+  the **foreground job leader's** cwd (`/proc/<pid>/cwd` on Linux,
+  `proc_pidinfo(PROC_PIDVNODEPATHINFO)` with an `lsof` fallback on macOS).
+  Because it tracks the foreground group — not the deepest process — a
+  lingering background job never hijacks the reported location. **OSC 7 /
+  OSC 9 / OSC 1337 is wired as a passive complement** (`pwd_changed` now
+  enabled in `src/vt.rs`): shells that already emit OSC 7 (oh-my-zsh, kitty
+  distros, fish, …) report their cwd directly, which is the only signal that
+  works inside remote `ssh` panes. **ON by default**, `new-cwd = "follow"`, no
+  leader binding. The one-shot **snippet installer** for shells that don't
+  emit OSC 7 is deferred to 0.7.0 (with the command traceback work).
 - ✅ **Config reload**: `kumo reload` (CLI) and the MENU `reload` item re-read
   the config and apply `shell`, `ai-cmd`, `leader`, and `keymap.bindings` live
   to panes spawned from then on. `new-cwd` and `agent-sound` apply instantly
