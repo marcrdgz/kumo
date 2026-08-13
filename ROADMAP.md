@@ -77,6 +77,8 @@ persistent kumo.
 
 ## ⚙️ 0.4.0 — Config & keymaps
 
+> ✅ **Released** — `v0.4.0`, 2026-08-13.
+
 - ✅ **Config → TOML**: the flat `key = value` file (Ghostty-style) migrates to
   TOML so keymaps, themes, and status-bar widget lists get real structure and
   native types (arrays, tables, booleans). The flat format still reads as a
@@ -98,30 +100,36 @@ persistent kumo.
   show-pane-numbers (`leader+q`). Mouse gestures stay fixed: drag-resize, the
   context menu, and selection are positional hit-testing, not key sequences,
   so they are deliberately **not** remappable.
-- ✳️ **Config expansion** (`src/config.rs`): `leader` and `keymap.bindings`
-  landed with validation; `follow-workspace` still pending.
-- The `config` item in the MENU dropdown (today "coming soon") opens the config
-  file for editing.
-- **Follow workspace** — the daemon holds each pane's cwd and the workspace
-  follows the focused pane across any re-attach: new panes open where you are,
-  and the sidebar / git-branch / AI context follow along. **Primary mechanism
-  is PID-based detection**, with zero shell setup: kumo already owns each
-  pane's child PID and walks the process tree (`ProcessSnapshot` in
-  `src/pane.rs`), so it reads `/proc/<pid>/cwd` on Linux and `proc_pidinfo` on
-  macOS. **OSC 7 is an optional complement** (`pwd_changed` already exists in
-  `libghostty-vt`, not yet wired in `src/vt.rs`) for remote `ssh` panes, where
-  the local process is the ssh client and the remote cwd is invisible: a
-  one-shot snippet installer (zsh / bash / fish, with confirmation) is offered
-  only then. The snippet is **idempotent and reversible**, and skips shells
-  that already emit OSC 7 (several distros / Oh My Zsh do). **ON by default**,
-  `follow-workspace = true` in the config, no leader binding.
+- ✅ **`[terminal]` section**: `shell` (canonical home; a top-level `shell`
+  stays as a deprecated alias) plus the **`new-cwd` session working-directory
+  policy** — `follow` (default, live), `home`, `current`, or `fixed` (with a
+  `fixed-cwd` path). An explicit `kumo new [dir]` always wins over the policy.
+- ✅ **Follow workspace**: with `new-cwd = "follow"`, the workspace follows the
+  focused pane's actual cwd, so new panes open where you are and the sidebar /
+  git-branch follow along. **Primary mechanism is PID-based** with zero shell
+  setup: kumo walks the pane's process tree (`ProcessSnapshot` in
+  `src/pane.rs`) to the deepest descendant and reads `/proc/<pid>/cwd` on Linux
+  and `lsof -d cwd` on macOS. **OSC 7 / OSC 9 / OSC 1337 is wired as a passive
+  complement** (`pwd_changed` now enabled in `src/vt.rs`): shells that already
+  emit OSC 7 (oh-my-zsh, kitty distros, …) report their cwd directly, which is
+  the only signal that works inside remote `ssh` panes. **ON by default**,
+  `new-cwd = "follow"`, no leader binding. The one-shot **snippet installer**
+  for shells that don't emit OSC 7 is deferred to 0.7.0 (with the command
+  traceback work).
+- ✅ **Config reload**: `kumo reload` (CLI) and the MENU `reload` item re-read
+  the config and apply `shell`, `ai-cmd`, `leader`, and `keymap.bindings` live
+  to panes spawned from then on. `new-cwd` and `agent-sound` apply instantly
+  (read live on use). The auto-reload **file watcher** stays in 0.5.0.
+- ✅ **MENU `config`** opens the config file in an editor pane (split) inside
+  the session — `$VISUAL` → `$EDITOR` → `vi`, preferring `config.toml`.
 
 **Deferred from 0.4.0**: full screen+scrollback restore after update/restart
 (only processes and layout survive today; the lossy ANSI replay becomes
 lossless with 0.6.0's copy-mode/scrollback work), OSC 133 semantic prompts
-(only 0.7.0's command traceback consumes them), status-bar layout (lands whole
-with 0.5.0's widgets), and the control CLI / scripting (`kumo send-keys`,
-`kumo split`, … — now 0.6.0).
+(only 0.7.0's command traceback consumes them), the **OSC 7 snippet installer**
+(follow-workspace works without it; it only adds remote-ssh coverage — 0.7.0),
+status-bar layout (lands whole with 0.5.0's widgets), and the control CLI /
+scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
 
 ## 🎨 0.5.0 — Theme & chrome
 
