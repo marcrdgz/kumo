@@ -63,10 +63,33 @@ pub(crate) fn blocked(snap: &Snapshot) -> bool {
     .any(|m| sl.contains(m))
 }
 
-/// Whether Claude is actively working: a braille spinner leading the OSC
-/// window title, or the `/btw` reasoning overlay.
+/// Dingbat spinner glyphs newer Claude paints inside the prompt box while
+/// working (the braille OSC-title spinner moved into the UI). Each is a single
+/// codepoint in the U+2700 block, so a scan of the form/footer region catches
+/// whatever frame the spinner is on.
+const DINGBAT_SPINNER: &[char] = &[
+    '\u{2722}', // ✢
+    '\u{2733}', // ✳
+    '\u{2736}', // ✶
+    '\u{273b}', // ✻
+    '\u{273d}', // ✽
+];
+
+/// Whether Claude is actively working. Signals, oldest to newest:
+/// - a braille spinner leading the OSC window title (older claude);
+/// - the `/btw` reasoning overlay;
+/// - newer claude's working prompt box: a `· esc to interrupt ·` hint or a
+///   dingbat spinner in the live form/footer region.
 pub(crate) fn working(snap: &Snapshot) -> bool {
     if snap.title.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
+        return true;
+    }
+    // The working prompt box pins `· esc to interrupt ·` only while a task
+    // runs; at idle it shows `? for shortcuts · ← for agents` instead.
+    if snap.form_lower.contains("esc to interrupt") || snap.footer_lower.contains("esc to interrupt") {
+        return true;
+    }
+    if DINGBAT_SPINNER.iter().any(|c| snap.form.contains(*c) || snap.footer.contains(*c)) {
         return true;
     }
     btw_overlay(&snap.screen)
@@ -183,6 +206,45 @@ mod tests {
     fn working_on_btw_overlay() {
         let s = snap("/btw reasoning about the bug\n  esc to close\n", "");
         assert!(working(&s));
+    }
+
+    #[test]
+    fn working_on_prompt_box_interrupt_hint() {
+        // Newer claude pins `· esc to interrupt ·` in the working prompt box,
+        // below the last horizontal rule.
+        let s = snap("─────\n❯  · esc to interrupt · ← for agents\n", "");
+        assert!(working(&s));
+    }
+
+    #[test]
+    fn working_on_prompt_box_dingbat_spinner() {
+        // Newer claude spins dingbats (✢✳✶✻✽) in the prompt box while working.
+        let s = snap("─────\n✢\n✳\n✶\nNoodling…\n", "");
+        assert!(working(&s));
+    }
+
+    #[test]
+    fn not_working_on_idle_prompt_box() {
+        // Idle prompt box shows the shortcuts hint, never `esc to interrupt`
+        // or a spinner.
+        let s = snap("─────\n❯\n? for shortcuts · ← for agents\n", "");
+        assert!(!working(&s));
+    }
+
+    #[test]
+    fn working_on_interrupt_hint_in_footer() {
+        let s = snap("─────\n❯\n", "");
+        let form = after_last_rule(&s.screen);
+        let snap = Snapshot {
+            screen: s.screen.clone(),
+            screen_lower: s.screen_lower.clone(),
+            form: form.clone(),
+            form_lower: form.to_lowercase(),
+            footer: "  · esc to interrupt ·".to_string(),
+            footer_lower: "  · esc to interrupt ·".to_string(),
+            title: String::new(),
+        };
+        assert!(working(&snap));
     }
 
     #[test]
