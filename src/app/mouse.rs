@@ -78,7 +78,7 @@ impl App {
                 }
                 if self.menu.open {
                     if let Some(i) = self.menu_item_at(x, y) {
-                        self.menu_select(i);
+                        self.menu_select(i)?;
                         return Ok(());
                     }
                     if self.menu_btn_at(x, y) {

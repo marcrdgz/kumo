@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -15,7 +13,7 @@ use crate::pane::{ACCENT, FG};
 /// Label of the MENU button in the status bar.
 pub(super) const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
-const MENU_ITEMS: [&str; 3] = ["config", "keybinds", "detach"];
+const MENU_ITEMS: [&str; 4] = ["config", "reload", "keybinds", "detach"];
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
@@ -238,10 +236,10 @@ impl App {
     }
 
     /// Handle a key while the status-bar menu is open.
-    pub(super) fn on_menu_key(&mut self, key: KeyEvent) {
+    pub(super) fn on_menu_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.menu.open = false;
-            return;
+            return Ok(());
         }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -250,20 +248,19 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.menu.selected = self.menu.selected.saturating_sub(1);
             }
-            KeyCode::Enter => self.menu_select(self.menu.selected),
+            KeyCode::Enter => self.menu_select(self.menu.selected)?,
             _ => {}
         }
+        Ok(())
     }
 
     /// Run the action for menu item `idx` and close the menu.
-    pub(super) fn menu_select(&mut self, idx: usize) {
+    pub(super) fn menu_select(&mut self, idx: usize) -> Result<()> {
         let action = MENU_ITEMS.get(idx).copied().unwrap_or("detach");
         self.menu.open = false;
         match action {
-            "config" => {
-                // Placeholder until the config editor lands.
-                self.notice = Some(("config: coming soon".to_string(), Instant::now()));
-            }
+            "config" => self.open_config()?,
+            "reload" => self.reload_config(),
             "keybinds" => self.open_keybind_overlay(),
             "detach" => {
                 // Save the session state and exit (same as leader+d).
@@ -272,6 +269,7 @@ impl App {
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Open (or reposition) the right-click context menu for `target` at

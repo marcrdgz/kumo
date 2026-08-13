@@ -697,6 +697,40 @@ impl App {
         Ok(())
     }
 
+    /// MENU `config`: open the config file in an editor pane inside the active
+    /// session. Uses `$VISUAL`, then `$EDITOR`, then `vi`; the canonical
+    /// `config.toml` wins over the flat `config` file. Closing the pane
+    /// collapses the layout.
+    pub(super) fn open_config(&mut self) -> Result<()> {
+        let (prog, mut args) = config_editor();
+        let path = crate::config::config_file_toml();
+        let path = if path.is_file() { path } else { crate::config::config_file() };
+        args.push(path.to_string_lossy().into_owned());
+        let focus = self.sessions[self.active].tree.focus;
+        let sid = self.sessions[self.active].id;
+        let pid = Pty::next_pane_id();
+        let (cols, rows) = self.active_pane_dims(focus).unwrap_or(self.pane_dims());
+        let pane = Pane::spawn(
+            sid,
+            pid,
+            self.shell.clone(),
+            Some((prog, args)),
+            Some(self.sessions[self.active].workspace.clone()),
+            cols,
+            rows,
+            false,
+            self.events_tx.clone(),
+        )?;
+        self.panes.insert(pid, pane);
+        if !self.sessions[self.active].tree.split(focus, pid, SplitDir::V) {
+            if let Some(mut p) = self.panes.remove(&pid) {
+                p.pty.kill();
+            }
+            self.notice = Some(("no room to open the editor".to_string(), Instant::now()));
+        }
+        Ok(())
+    }
+
     fn close_focused(&mut self) {
         let focus = self.sessions[self.active].tree.focus;
         self.close_pane(focus);
@@ -810,7 +844,7 @@ impl App {
             return Ok(());
         }
         if self.menu.open {
-            self.on_menu_key(key);
+            self.on_menu_key(key)?;
             return Ok(());
         }
         if self.ctx_menu.open {
@@ -1087,5 +1121,135 @@ impl App {
     pub(super) fn update_notice_close_at(&self, x: u16, y: u16) -> bool {
         let Some(r) = self.update_notice_rect() else { return false };
         x == r.x + 2 && y == r.y + 1
+    }
+}
+
+/// The editor used by MENU `config`: `$VISUAL`, then `$EDITOR` (command
+/// strings may carry args, e.g. `code --wait`), then `vi`.
+fn config_editor() -> (String, Vec<String>) {
+    let raw = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "vi".to_string());
+    let mut it = raw.split_whitespace();
+    let program = it.next().unwrap_or("vi").to_string();
+    let args: Vec<String> = it.map(|s| s.to_string()).collect();
+    (program, args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Restore env vars on drop so tests never leak mutations.
+    struct EnvGuard(Vec<(&'static str, Option<String>)>);
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            EnvGuard(vec![(key, prev)])
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kumo-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_workspace_applies_new_cwd_policy() {
+        let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("ws-cfg");
+        let home = scratch("ws-home");
+        let work = scratch("ws-work");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+
+        let launch = std::env::current_dir().unwrap();
+        let app = App::new(Launch::New(None)).unwrap();
+        assert_eq!(app.resolve_workspace(None), launch, "follow/current defaults to the launch dir");
+        assert_eq!(app.resolve_workspace(Some(&work)), work, "explicit dir always wins");
+        drop(app);
+
+        std::fs::write(cfg.join("config.toml"), "[terminal]\nnew-cwd = \"home\"\n").unwrap();
+        let app = App::new(Launch::New(None)).unwrap();
+        assert_eq!(app.resolve_workspace(None), home, "new-cwd = home resolves to $HOME");
+        drop(app);
+
+        std::fs::write(
+            cfg.join("config.toml"),
+            &format!("[terminal]\nnew-cwd = \"fixed\"\nfixed-cwd = \"{}\"\n", work.display()),
+        )
+        .unwrap();
+        let app = App::new(Launch::New(None)).unwrap();
+        assert_eq!(app.resolve_workspace(None), work, "new-cwd = fixed resolves to fixed-cwd");
+        drop(app);
+
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn reload_config_applies_keymap_changes() {
+        let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("reload-cfg");
+        let home = scratch("reload-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let mut app = App::new(Launch::New(None)).unwrap();
+        assert!(
+            !app.keymap.iter().any(|b| b.keys == "v" && b.action == Action::ClosePane),
+            "stock keymap has no v = close-pane"
+        );
+        std::fs::write(
+            cfg.join("config.toml"),
+            "[keymap]\nleader = \"ctrl+space\"\n[keymap.bindings]\nv = \"close-pane\"\n",
+        )
+        .unwrap();
+        app.reload_config();
+        assert!(
+            app.keymap.iter().any(|b| b.keys == "v" && b.action == Action::ClosePane),
+            "reload must rebuild the keymap from the config"
+        );
+        assert_eq!(app.shell, "/bin/sh", "reload keeps the current shell");
+        drop(app);
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn config_editor_parses_editor_command() {
+        let _g = EnvGuard::set("VISUAL", "code --wait");
+        let (prog, args) = config_editor();
+        assert_eq!(prog, "code");
+        assert_eq!(args, vec!["--wait"]);
+
+        let _g2 = EnvGuard::set("VISUAL", "");
+        let _h2 = EnvGuard::set("EDITOR", "nvim");
+        let (prog, args) = config_editor();
+        assert_eq!(prog, "nvim", "an empty VISUAL falls through to EDITOR");
+        assert!(args.is_empty());
     }
 }
