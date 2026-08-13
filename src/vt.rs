@@ -707,18 +707,16 @@ impl Terminal {
         }
         let raw = String::from_utf8_lossy(&self.cell.pwd);
         let path = if let Some(rest) = raw.strip_prefix("file://") {
-            // `file:///tmp/x` -> `/tmp/x`; `file://localhost/tmp/x` -> `/tmp/x`.
-            // A non-local authority (remote ssh pane) is kept as-is: it is not
-            // a local directory, so the follow logic will not adopt it.
-            let path = if let Some((authority, tail)) = rest.split_once('/') {
-                if authority.is_empty() || authority == "localhost" {
-                    format!("/{tail}")
-                } else {
-                    format!("{authority}/{tail}")
-                }
-            } else {
-                rest.to_string()
-            };
+            // `file:///tmp/x` and `file://host/tmp/x` both mean `/tmp/x`: the
+            // authority is the machine that owns the path. For a local shell
+            // it is this machine (fish reports its hostname, not
+            // "localhost"); for a remote ssh pane it is the remote host, whose
+            // path will not exist locally — the follow logic's is_dir guard
+            // drops it, so the decoded path is still the right value to report.
+            let path = rest
+                .split_once('/')
+                .map(|(_, p)| format!("/{p}"))
+                .unwrap_or_else(|| rest.to_string());
             percent_decode(&path)
         } else {
             raw.into_owned()
@@ -1285,6 +1283,15 @@ mod tests {
         let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
         t.write(b"\x1b]7;file://localhost/Users/my%20dir/proj\x07");
         assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/my dir/proj").as_path()));
+    }
+
+    #[test]
+    fn pwd_ignores_authority_hostname() {
+        // fish reports its own hostname as the authority, e.g.
+        // `file://My-Mac.local/Users/x`, not `localhost`.
+        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        t.write(b"\x1b]7;file://My-Mac.local/Users/marc/proj\x07");
+        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/marc/proj").as_path()));
     }
 
     #[test]

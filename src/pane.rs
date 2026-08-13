@@ -327,14 +327,21 @@ impl Pane {
     }
 
     /// The current working directory this pane is *actually* in, used by
-    /// follow-workspace. Prefers the shell-reported pwd (OSC 7 / OSC 9 /
-    /// OSC 1337), which is authoritative and the only signal that works for
-    /// remote `ssh` panes; falls back to reading the deepest descendant
-    /// process's OS-level cwd (zero shell setup).
+    /// follow-workspace. PID-based detection comes first — it is always
+    /// accurate for a local shell with zero setup. The shell-reported pwd
+    /// (OSC 7 / OSC 9 / OSC 1337) is the fallback: its value can go stale
+    /// when a shell reports its pwd only once, and for a remote `ssh` pane
+    /// it is a path that does not exist locally anyway.
     pub fn detected_cwd(&self) -> Option<PathBuf> {
-        if let Some(p) = self.vt.pwd() {
+        if let Some(p) = self.pid_cwd() {
             return Some(p);
         }
+        self.vt.pwd()
+    }
+
+    /// OS-level cwd of the deepest living descendant of the pane's root
+    /// process — the process you are "in".
+    fn pid_cwd(&self) -> Option<PathBuf> {
         let root = self.pty.process_id()?;
         let snap = ProcessSnapshot::capture()?;
         let leaf = snap.deepest_descendant(root).unwrap_or(root);
@@ -1419,6 +1426,22 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
     fn process_cwd_reads_current_process() {
         let cwd = process_cwd(std::process::id()).expect("our own cwd must be readable");
         assert_eq!(cwd, std::env::current_dir().unwrap(), "process_cwd(self) must match current_dir");
+    }
+
+    #[test]
+    fn detected_cwd_follows_shell_cd() {
+        let dir = std::env::temp_dir().join(format!("kumo-pane-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx).unwrap();
+        pane.write(format!("cd {}\n", dir.display()).as_bytes());
+        std::thread::sleep(Duration::from_millis(600));
+        // macOS /var and /tmp resolve to /private; compare canonical paths.
+        let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        let cwd = pane.detected_cwd().map(|p| canon(&p));
+        assert_eq!(cwd, Some(canon(&dir)), "detected_cwd must follow a shell cd");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
