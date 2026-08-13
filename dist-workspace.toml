@@ -22,4 +22,5 @@ github-attestations = true
 # Cache cargo builds between CI runs (libghostty-vt is slow to compile)
 cache-builds = true
 # Steps run before `dist build` on every build job (installs Zig for build.rs)
-github-build-setup = "dist-build-setup.yml"
+# Kept outside .github/workflows so GitHub doesn't parse it as a workflow file.
+github-build-setup = "../dist-build-setup.yml"
