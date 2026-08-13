@@ -114,6 +114,22 @@ fn main() -> Result<()> {
                 anyhow::bail!("`kumo reload` needs the unix daemon");
             }
         }
+        Some("server") => {
+            #[cfg(unix)]
+            {
+                match args.get(1).map(|s| s.as_str()) {
+                    Some("restart") => return client::server_restart(),
+                    Some(other) => anyhow::bail!(
+                        "unknown kumo server subcommand {other:?} (try `kumo server restart`)"
+                    ),
+                    None => anyhow::bail!("missing kumo server subcommand (try `kumo server restart`)"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("`kumo server restart` needs the unix daemon");
+            }
+        }
         _ => {}
     }
 
@@ -168,6 +184,7 @@ fn print_help() {
     println!("    kumo ls                    list the daemon's sessions");
     println!("    kumo kill                  stop the daemon (and its panes)");
     println!("    kumo reload                re-read the config and apply it live");
+    println!("    kumo server restart        restart the daemon in place (panes survive)");
     println!("    kumo update [--nightly] [--check]");
     println!();
     println!("ARGS:");
@@ -183,6 +200,7 @@ fn print_help() {
     println!("    ls             List the daemon's sessions");
     println!("    kill           Stop the daemon (kills its panes)");
     println!("    reload         Re-read the config and apply it live");
+    println!("    server restart Restart the daemon in place (execs the current binary, panes survive)");
     println!("    update         Update to the latest release (needs gh)");
     println!("                   --nightly  update to the latest nightly build");
     println!("                   --check    report availability (exit 0 = up to date, 1 = update)");

@@ -160,6 +160,16 @@ pub fn reload() -> Result<()> {
     }
 }
 
+/// `kumo server restart`: ask the daemon to restart itself in place — exec the
+/// current binary (which `cargo build` / `kumo update` may have just replaced)
+/// with `--resume`, inheriting the live PTY masters so panes and agents
+/// survive. Attached terminals reconnect automatically.
+pub fn server_restart() -> Result<()> {
+    let mut stream = connect_daemon()?;
+    protocol::write_framed(&mut stream, &ClientMsg::Restart)?;
+    Ok(())
+}
+
 fn client_loop(mut stream: UnixStream, pre: &[ClientMsg]) -> Result<()> {
     let mut pre = pre.to_vec();
     loop {
