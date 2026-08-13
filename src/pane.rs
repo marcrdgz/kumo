@@ -327,25 +327,37 @@ impl Pane {
     }
 
     /// The current working directory this pane is *actually* in, used by
-    /// follow-workspace. PID-based detection comes first — it is always
-    /// accurate for a local shell with zero setup. The shell-reported pwd
-    /// (OSC 7 / OSC 9 / OSC 1337) is the fallback: its value can go stale
-    /// when a shell reports its pwd only once, and for a remote `ssh` pane
-    /// it is a path that does not exist locally anyway.
+    /// follow-workspace. Priority: the **foreground process group leader's**
+    /// cwd (what is running in the terminal right now — the shell at a prompt
+    /// or the active command), then the shell-reported pwd (OSC 7 / OSC 9 /
+    /// OSC 1337, only when it is a real local directory), then the deepest
+    /// living descendant's OS-level cwd as a last resort.
     pub fn detected_cwd(&self) -> Option<PathBuf> {
-        if let Some(p) = self.pid_cwd() {
-            return Some(p);
+        #[cfg(unix)]
+        {
+            if let Some(p) = self.foreground_cwd() {
+                return Some(p);
+            }
         }
-        self.vt.pwd()
-    }
-
-    /// OS-level cwd of the deepest living descendant of the pane's root
-    /// process — the process you are "in".
-    fn pid_cwd(&self) -> Option<PathBuf> {
+        if let Some(p) = self.vt.pwd() {
+            if p.is_absolute() && p.is_dir() {
+                return Some(p);
+            }
+        }
         let root = self.pty.process_id()?;
         let snap = ProcessSnapshot::capture()?;
         let leaf = snap.deepest_descendant(root).unwrap_or(root);
         process_cwd(leaf)
+    }
+
+    /// The cwd of the process group currently controlling this pane's PTY —
+    /// the foreground job (the shell at a prompt, or the running command).
+    /// Unlike "deepest descendant", a lingering background process does not
+    /// hijack the reported location.
+    #[cfg(unix)]
+    fn foreground_cwd(&self) -> Option<PathBuf> {
+        let pgid = foreground_pgid(self.pty.raw_fd(), self.pty.process_id())?;
+        process_cwd(pgid)
     }
 
     /// Milliseconds since the pane last produced output. Debug/diagnostics.
@@ -695,9 +707,9 @@ impl ProcessSnapshot {
 }
 
 /// OS-level working directory of `pid`. Linux reads `/proc/<pid>/cwd`; macOS
-/// asks `lsof` for the process's `cwd` file descriptor (a reliable full path,
-/// unlike the partial vnode paths `proc_pidinfo` returns). Other platforms
-/// have no supported mechanism.
+/// prefers `proc_pidinfo(PROC_PIDVNODEPATHINFO)` (no subprocess spawn) and
+/// falls back to `lsof` when that path is not a usable local directory.
+/// Other platforms have no supported mechanism.
 fn process_cwd(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -705,33 +717,126 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        let out = std::process::Command::new("lsof")
-            .arg("-a")
-            .arg("-p")
-            .arg(pid.to_string())
-            .arg("-d")
-            .arg("cwd")
-            .arg("-Fn")
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        for line in out.stdout.split(|&b| b == b'\n') {
-            let line = String::from_utf8_lossy(line);
-            if let Some(path) = line.strip_prefix('n') {
-                if path.starts_with('/') {
-                    return Some(PathBuf::from(path));
-                }
-            }
-        }
-        None
+        proc_pidinfo_cwd(pid)
+            .filter(|p| p.is_absolute() && p.is_dir())
+            .or_else(|| lsof_cwd(pid))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
     }
+}
+
+/// The foreground process group of the pane's controlling terminal: which
+/// process group is currently running in it. Primary: `tcgetpgrp` on the PTY
+/// master fd. Fallbacks: `e_tpgid` from `proc_pidinfo` (macOS) and the `tpgid`
+/// field of `/proc/<pid>/stat` (Linux).
+#[cfg(unix)]
+fn foreground_pgid(master_fd: Option<i32>, child_pid: Option<u32>) -> Option<u32> {
+    if let Some(fd) = master_fd {
+        let pgid = unsafe { libc::tcgetpgrp(fd) };
+        if pgid > 0 {
+            return Some(pgid as u32);
+        }
+    }
+    let pid = child_pid?;
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if ret == size && info.e_tpgid > 0 {
+            Some(info.e_tpgid as u32)
+        } else {
+            None
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `/proc/<pid>/stat` field 8 (tpgid); `comm` may contain spaces, so
+        // split after the last `)` and index the fields that follow.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.rsplit_once(')').map(|(_, r)| r)?;
+        // After `)`: state(3) ppid(4) pgrp(5) session(6) tty_nr(7) tpgid(8).
+        rest.split_whitespace().nth(5).and_then(|f| f.parse().ok())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Read `pvi_cdir.vip_path` via `proc_pidinfo(PROC_PIDVNODEPATHINFO)` — no
+/// subprocess. The path can be a partial tail for deeply nested directories,
+/// so the caller validates it before trusting it.
+#[cfg(target_os = "macos")]
+fn proc_pidinfo_cwd(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    if pid == 0 {
+        return None;
+    }
+    let mut pathinfo: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            &mut pathinfo as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret != size {
+        return None;
+    }
+    let vip_path = unsafe {
+        std::slice::from_raw_parts(
+            &pathinfo.pvi_cdir.vip_path as *const _ as *const u8,
+            libc::MAXPATHLEN as usize,
+        )
+    };
+    let nul = vip_path.iter().position(|&b| b == 0)?;
+    if nul == 0 {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&vip_path[..nul])))
+}
+
+/// Read the `cwd` file descriptor of `pid` via `lsof` (a guaranteed full
+/// path, unlike the possibly-partial `proc_pidinfo` vnode path).
+#[cfg(target_os = "macos")]
+fn lsof_cwd(pid: u32) -> Option<PathBuf> {
+    let out = std::process::Command::new("lsof")
+        .arg("-a")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-d")
+        .arg("cwd")
+        .arg("-Fn")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    for line in out.stdout.split(|&b| b == b'\n') {
+        let line = String::from_utf8_lossy(line);
+        if let Some(path) = line.strip_prefix('n') {
+            if path.starts_with('/') {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1442,6 +1547,34 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         let cwd = pane.detected_cwd().map(|p| canon(&p));
         assert_eq!(cwd, Some(canon(&dir)), "detected_cwd must follow a shell cd");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detected_cwd_follows_shell_not_background_job() {
+        // A lingering background process must not hijack follow-workspace:
+        // `sleep 3 &` then `cd` — the foreground process group is still the
+        // shell, so the reported cwd is the shell's, not the sleep's.
+        let root = std::env::temp_dir().join(format!("kumo-pane-bg-{}", std::process::id()));
+        let bg = root.join("bg");
+        let cwd_dir = root.join("cwd");
+        for d in [&bg, &cwd_dir] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (tx, _rx) = mpsc::channel();
+        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx).unwrap();
+        pane.write(format!("cd {}\nsleep 3 &\ncd {}\n", bg.display(), cwd_dir.display()).as_bytes());
+        std::thread::sleep(Duration::from_millis(900));
+        let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        let cwd = pane.detected_cwd().map(|p| canon(&p));
+        assert_eq!(
+            cwd,
+            Some(canon(&cwd_dir)),
+            "follow must report the shell's cwd, not the background job's"
+        );
+        for d in [&bg, &cwd_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     #[test]
