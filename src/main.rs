@@ -104,6 +104,16 @@ fn main() -> Result<()> {
                 anyhow::bail!("`kumo kill` needs the unix daemon");
             }
         }
+        Some("reload") => {
+            #[cfg(unix)]
+            {
+                return client::reload();
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("`kumo reload` needs the unix daemon");
+            }
+        }
         _ => {}
     }
 
@@ -157,6 +167,7 @@ fn print_help() {
     println!("    kumo [WORKSPACE]           start fresh inside this directory");
     println!("    kumo ls                    list the daemon's sessions");
     println!("    kumo kill                  stop the daemon (and its panes)");
+    println!("    kumo reload                re-read the config and apply it live");
     println!("    kumo update [--nightly] [--check]");
     println!();
     println!("ARGS:");
@@ -171,6 +182,7 @@ fn print_help() {
     println!("    new            Start a fresh session in the daemon");
     println!("    ls             List the daemon's sessions");
     println!("    kill           Stop the daemon (kills its panes)");
+    println!("    reload         Re-read the config and apply it live");
     println!("    update         Update to the latest release (needs gh)");
     println!("                   --nightly  update to the latest nightly build");
     println!("                   --check    report availability (exit 0 = up to date, 1 = update)");

@@ -481,6 +481,9 @@ pub enum ClientMsg {
     /// itself (exec the new binary) inheriting the live PTY masters, so the
     /// running panes and agents survive the update.
     Restart,
+    /// `kumo reload`: re-read the config and apply it live (shell, leader,
+    /// keymap bindings); new panes and future actions pick it up.
+    ReloadConfig,
 }
 
 /// One session, as reported to `kumo ls`.
@@ -545,6 +548,10 @@ pub enum ServerMsg {
     /// Response to `ListSessions`.
     SessionList {
         sessions: Vec<SessionInfo>,
+    },
+    /// Response to `ReloadConfig`: the outcome, as a status-bar/CLI notice.
+    ConfigReloaded {
+        notice: String,
     },
 }
 
@@ -703,6 +710,21 @@ mod tests {
         write_framed(&mut buf, &msg).unwrap();
         let decoded: ServerMsg = read_framed(&mut &buf[..]).unwrap();
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn reload_messages_roundtrip() {
+        let req = ClientMsg::ReloadConfig;
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &req).unwrap();
+        let decoded: ClientMsg = read_framed(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = ServerMsg::ConfigReloaded { notice: "config reloaded".into() };
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &resp).unwrap();
+        let decoded: ServerMsg = read_framed(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]

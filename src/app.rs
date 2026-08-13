@@ -634,6 +634,34 @@ impl App {
         Ok(())
     }
 
+    /// Re-apply the config to live state (`kumo reload` / MENU `reload`).
+    /// `shell`, `ai-cmd`, `leader`, and `keymap.bindings` are cached at
+    /// startup, so they refresh here; `new-cwd` and `agent-sound` are read
+    /// live from the config on each use. Applies to panes spawned from now on
+    /// — existing panes keep their PTY.
+    pub(super) fn reload_config(&mut self) {
+        let shell = crate::config::default_shell();
+        let (ai_prog, ai_args) = crate::config::ai_command();
+        let ai_prog = crate::config::resolve_program(&ai_prog);
+        let leader = match crate::config::leader() {
+            Some(raw) => match bindings::parse_chord(&raw) {
+                Some(chord) => chord,
+                None => {
+                    log::warn!("kumo: invalid leader key {:?}; falling back to ctrl+b", raw);
+                    LEADER
+                }
+            },
+            None => LEADER,
+        };
+        let keymap = build_keymap(&crate::config::keymap_bindings());
+        self.shell = shell;
+        self.ai = (ai_prog, ai_args);
+        self.leader = leader;
+        self.keymap = keymap;
+        self.mode = Mode::Normal;
+        self.notice = Some(("config reloaded".to_string(), Instant::now()));
+    }
+
     fn next_session_id(&mut self) -> u64 {
         let max = self.sessions.iter().map(|s| s.id).max().unwrap_or(0);
         max + 1

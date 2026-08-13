@@ -166,6 +166,12 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 ClientMsg::KillServer => {
                     kill = true;
                 }
+                ClientMsg::ReloadConfig => {
+                    app.reload_config();
+                    let notice = "config reloaded".to_string();
+                    let _ = send_to(&mut clients, id, &ServerMsg::ConfigReloaded { notice });
+                    render_dirty = true;
+                }
                 ClientMsg::Restart => {
                     // `kumo update` swapped the binary on disk: restart this
                     // process so the new version serves the sessions, inheriting
@@ -592,7 +598,7 @@ mod tests {
         // the user's interactive shell) and no update check. The env must be
         // mutated under the same lock config tests use, or they race.
         let cfg = scratch("daemon-cfg");
-        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\n").unwrap();
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\nnew-cwd = current\n").unwrap();
         let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
         let prev_cfg = std::env::var("KUMO_CONFIG_DIR").ok();
         let prev_update = std::env::var("KUMO_NO_UPDATE").ok();
@@ -664,6 +670,16 @@ mod tests {
             sessions[0].agents.is_empty(),
             "a plain shell session has no AI agents to report"
         );
+
+        // `kumo reload`: the daemon re-reads its config and confirms live.
+        protocol::write_framed(&mut stream2, &ClientMsg::ReloadConfig).unwrap();
+        let notice = loop {
+            match protocol::read_framed::<ServerMsg>(&mut stream2).unwrap() {
+                ServerMsg::ConfigReloaded { notice } => break notice,
+                _ => {}
+            }
+        };
+        assert_eq!(notice, "config reloaded");
 
         // The echo checks left `qw` pending in the shell's line buffer; submit
         // it (a harmless "command not found") so the following `exit` runs.

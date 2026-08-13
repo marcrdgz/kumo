@@ -147,6 +147,19 @@ pub fn kill_server() -> Result<()> {
     Ok(())
 }
 
+/// `kumo reload`: re-read the config on the daemon and apply it live.
+pub fn reload() -> Result<()> {
+    let mut stream = connect_daemon()?;
+    protocol::write_framed(&mut stream, &ClientMsg::ReloadConfig)?;
+    match read_server(&mut stream)? {
+        ServerMsg::ConfigReloaded { notice } => {
+            println!("{notice}");
+            Ok(())
+        }
+        other => Err(anyhow::anyhow!("unexpected daemon reply: {other:?}")),
+    }
+}
+
 fn client_loop(mut stream: UnixStream, pre: &[ClientMsg]) -> Result<()> {
     let mut pre = pre.to_vec();
     loop {
@@ -208,6 +221,7 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
                     blit(&mut stdout, &frame)?;
                 }
                 ServerMsg::SessionList { .. } => {}
+                ServerMsg::ConfigReloaded { .. } => {}
                 ServerMsg::Detach => return Ok(Exit::Clean),
                 ServerMsg::Restarting => return Ok(Exit::Restarting),
                 ServerMsg::Shutdown => {
