@@ -11,11 +11,53 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::Dir;
 
-/// The leader chord that enters leader mode: Ctrl+Space.
+/// The default leader chord that enters leader mode: Ctrl+B.
 ///
-/// Terminals report it as NUL, space-with-ctrl, or a literal space in the
-/// enhanced keyboard protocol; `Chord::is_leader` normalizes all three.
-pub(super) const LEADER: Chord = Chord::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+/// Overridable via the `leader` config key; `App::new` parses it with
+/// [`parse_leader`] and falls back to this default.
+pub(super) const LEADER: Chord = Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+/// Parse a `leader` config value into a chord, e.g. `ctrl+b`, `ctrl+space`,
+/// `f12`. Returns `None` for unrecognized modifiers or keys.
+pub(super) fn parse_leader(raw: &str) -> Option<Chord> {
+    let mut modifiers = KeyModifiers::NONE;
+    let mut parts: Vec<&str> = raw.split('+').map(|s| s.trim()).collect();
+    let key = parts.pop()?.to_ascii_lowercase();
+    for part in parts {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+            "shift" => modifiers |= KeyModifiers::SHIFT,
+            "alt" | "opt" | "option" => modifiers |= KeyModifiers::ALT,
+            "super" | "cmd" | "command" | "meta" => modifiers |= KeyModifiers::SUPER,
+            _ => return None,
+        }
+    }
+    let code = match key.as_str() {
+        "space" | "spc" => KeyCode::Char(' '),
+        "enter" | "return" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "tab" => KeyCode::Tab,
+        "backspace" => KeyCode::Backspace,
+        "delete" => KeyCode::Delete,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        _ if key.len() == 1 => KeyCode::Char(key.chars().next().unwrap()),
+        f if f.starts_with('f') && f.len() > 1 && f[1..].chars().all(|c| c.is_ascii_digit()) => {
+            let n: u8 = f[1..].parse().unwrap_or(0);
+            if (1..=12).contains(&n) {
+                KeyCode::F(n)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(Chord::new(code, modifiers))
+}
 
 /// The keys a user presses: a [`KeyCode`] plus its modifiers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -210,12 +252,40 @@ mod tests {
     }
 
     #[test]
-    fn leader_matches_all_ctrl_space_spellings() {
-        let chord = LEADER;
+    fn default_leader_is_ctrl_b() {
+        assert_eq!(LEADER, Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn ctrl_space_leader_matches_all_spellings() {
+        let chord = parse_leader("ctrl+space").expect("ctrl+space parses");
+        assert_eq!(chord, Chord::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
         assert!(chord.is_leader(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
         assert!(chord.is_leader(KeyEvent::new(KeyCode::Char('\0'), KeyModifiers::CONTROL)));
         assert!(chord.is_leader(KeyEvent::new(KeyCode::Null, KeyModifiers::CONTROL)));
         assert!(!chord.is_leader(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
         assert!(!chord.is_leader(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn ctrl_b_leader_matches_ctrl_b_only() {
+        let chord = parse_leader("ctrl+b").expect("ctrl+b parses");
+        assert_eq!(chord, LEADER);
+        assert!(chord.is_leader(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+        assert!(!chord.is_leader(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
+        assert!(!chord.is_leader(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn parse_leader_accepts_and_rejects() {
+        assert_eq!(parse_leader("F12"), Some(Chord::new(KeyCode::F(12), KeyModifiers::NONE)));
+        assert_eq!(parse_leader("ctrl+f1"), Some(Chord::new(KeyCode::F(1), KeyModifiers::CONTROL)));
+        assert_eq!(parse_leader("ctrl+shift+tab"), Some(Chord::new(KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+        assert_eq!(parse_leader("ctrl+b"), Some(Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+        assert_eq!(parse_leader("x"), Some(Chord::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(parse_leader("ctrl+banana"), None, "unknown key rejected");
+        assert_eq!(parse_leader("nonsense+ctrl"), None, "unknown modifier rejected");
+        assert_eq!(parse_leader(""), None, "empty string rejected");
+        assert_eq!(parse_leader("f13"), None, "f13 is out of range");
     }
 }

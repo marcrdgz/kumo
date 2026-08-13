@@ -94,6 +94,9 @@ runtime state in `~/.local/state/kumo/`, and the detach server's IPC socket in
 
 ```toml
 # ~/.config/kumo/config.toml
+[keymap]
+leader = "ctrl+b"
+
 ai-cmd = "claude --model sonnet"
 shell  = "/bin/zsh"
 update-check = true
@@ -103,6 +106,7 @@ Supported keys:
 
 | Key | Description | Default |
 | --- | --- | --- |
+| `keymap.leader` | Leader chord that enters leader mode (`ctrl+b`, `ctrl+space`, `f12`, …). A top-level `leader` also reads as a deprecated alias. | `ctrl+b` |
 | `ai-cmd` | AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat. | `opencode` |
 | `shell` | Login shell used to spawn panes. | `$SHELL` → `/bin/zsh` |
 | `update-check` | Whether the startup update check runs (also `KUMO_NO_UPDATE=1`). | `true` |
@@ -142,7 +146,7 @@ listed but always shown as idle.
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+Space` | Leader key (shows all bindings in the status bar) |
+| `Ctrl+B` | Leader key (configurable via `leader`; shows all bindings in the status bar) |
 | `v` / `-` | Vertical / horizontal split 🪓 |
 | `a` | AI CLI pane (vertical split) 🤖 |
 | `c` | New session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
@@ -157,8 +161,9 @@ listed but always shown as idle.
 | `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
-> ⚠️ Keybindings are currently hard-coded. Data-driven keymaps + custom leader
-> keys land in 0.4.0 — see the [roadmap](ROADMAP.md).
+> ⚠️ Keybindings are currently hard-coded, but the **leader key** is already
+> configurable (`leader = "ctrl+b"` in `config.toml`). Data-driven keymaps land
+> in 0.4.0 — see the [roadmap](ROADMAP.md).
 
 **🖱️ Mouse**
 

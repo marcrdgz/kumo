@@ -522,6 +522,7 @@ mod tests {
             active: 0,
             panes,
             mode: Mode::Normal,
+            leader: super::super::bindings::LEADER,
             drag: None,
             sel: None,
             pending_click: None,

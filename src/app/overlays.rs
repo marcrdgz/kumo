@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 
-use super::bindings::{Binding, Group, BINDINGS, LEADER};
+use super::bindings::{Binding, Group, BINDINGS};
 use super::ui::{fill, put, text};
 use super::{App, MAUVE, ORANGE, PANEL_MUTED, PANEL_SEP};
 use crate::layout::SplitDir;
@@ -216,7 +216,7 @@ impl App {
 
     /// Handle a key while the session-name popup is open.
     pub(super) fn on_popup_key(&mut self, key: KeyEvent) {
-        if LEADER.is_leader(key) || key.code == KeyCode::Esc {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.popup.open = false;
             return;
         }
@@ -239,7 +239,7 @@ impl App {
 
     /// Handle a key while the status-bar menu is open.
     pub(super) fn on_menu_key(&mut self, key: KeyEvent) {
-        if LEADER.is_leader(key) || key.code == KeyCode::Esc {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.menu.open = false;
             return;
         }
@@ -327,7 +327,7 @@ impl App {
 
     /// Handle a key while the right-click context menu is open.
     pub(super) fn on_ctx_menu_key(&mut self, key: KeyEvent) -> Result<()> {
-        if LEADER.is_leader(key) || key.code == KeyCode::Esc {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.ctx_menu.open = false;
             return Ok(());
         }
@@ -353,7 +353,7 @@ impl App {
 
     /// Handle a key while the keybind showcase is open.
     pub(super) fn on_overlay_key(&mut self, key: KeyEvent) {
-        if LEADER.is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
             self.keybind_overlay.open = false;
             return;
         }

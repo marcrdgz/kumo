@@ -118,6 +118,9 @@ pub struct Config {
     /// Whether agent lifecycle transitions (blocked / finished) play a sound
     /// (default: true).
     pub agent_sound: bool,
+    /// The leader chord, e.g. `ctrl+b` or `ctrl+space`. `None` means the
+    /// built-in default (Ctrl+B).
+    pub leader: Option<String>,
 }
 
 impl Config {
@@ -143,6 +146,12 @@ impl Config {
             .get("agent-sound")
             .map(|v| !matches!(unquote(v).trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
             .unwrap_or(true);
+        if let Some(v) = map.get("leader") {
+            let v = unquote(v);
+            if !v.is_empty() {
+                cfg.leader = Some(v.to_string());
+            }
+        }
         cfg
     }
 
@@ -166,7 +175,26 @@ impl Config {
         if let Some(v) = toml.agent_sound {
             self.agent_sound = v;
         }
+        // The leader lives in the `[keymap]` table; a top-level `leader` is
+        // accepted as a deprecated alias, but the table wins.
+        if let Some(v) = toml
+            .keymap
+            .and_then(|k| k.leader)
+            .or(toml.leader_alias)
+        {
+            if !v.is_empty() {
+                self.leader = Some(v);
+            }
+        }
     }
+}
+
+/// The `[keymap]` table: keyboard configuration (leader chord today, bindings
+/// later). Unknown keys are ignored (serde default).
+#[derive(Default, serde::Deserialize)]
+struct Keymap {
+    /// Leader chord that enters leader mode, e.g. `ctrl+b` or `ctrl+space`.
+    leader: Option<String>,
 }
 
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
@@ -180,6 +208,11 @@ struct TomlConfig {
     update_check: Option<bool>,
     #[serde(rename = "agent-sound")]
     agent_sound: Option<bool>,
+    #[serde(rename = "keymap")]
+    keymap: Option<Keymap>,
+    /// Deprecated top-level alias of `[keymap].leader`.
+    #[serde(rename = "leader")]
+    leader_alias: Option<String>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -318,6 +351,12 @@ pub fn agent_sound_enabled() -> bool {
         return false;
     }
     load_config().agent_sound
+}
+
+/// The leader chord from the config (`leader = "ctrl+b"`), if set. `None`
+/// means the built-in default (Ctrl+B).
+pub fn leader() -> Option<String> {
+    load_config().leader
 }
 
 /// Split a command line string into program + args (space separated).
@@ -786,6 +825,60 @@ mod tests {
         );
         let (prog, _) = ai_command();
         assert_eq!(prog, "codex", "unparsable TOML must fall back to the flat file");
+    }
+
+    #[test]
+    fn leader_reads_from_keymap_table() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-leader");
+        let home = scratch_dir("home-leader");
+        write(&cfg_dir.join("config.toml"), "[keymap]\nleader = \"ctrl+space\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(leader().as_deref(), Some("ctrl+space"));
+    }
+
+    #[test]
+    fn leader_keymap_wins_over_top_level_alias() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-leader-wins");
+        let home = scratch_dir("home-leader-wins");
+        write(
+            &cfg_dir.join("config.toml"),
+            "leader = \"f12\"\n[keymap]\nleader = \"ctrl+space\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(leader().as_deref(), Some("ctrl+space"), "[keymap].leader must win");
+    }
+
+    #[test]
+    fn leader_reads_top_level_alias_as_fallback() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-leader-alias");
+        let home = scratch_dir("home-leader-alias");
+        write(&cfg_dir.join("config.toml"), "leader = \"f12\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(leader().as_deref(), Some("f12"));
+    }
+
+    #[test]
+    fn leader_defaults_to_none() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-leader-none");
+        let home = scratch_dir("home-leader-none");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(leader(), None, "no leader key means the built-in default");
     }
 
     #[test]

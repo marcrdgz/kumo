@@ -88,6 +88,8 @@ pub struct App {
     active: usize,
     panes: HashMap<u64, Pane>,
     mode: Mode,
+    /// The leader chord (default Ctrl+B, overridable via `leader` config).
+    leader: Chord,
     drag: Option<Drag>,
     sel: Option<Sel>,
     pending_click: Option<PendingClick>,
@@ -185,6 +187,16 @@ impl App {
         let shell = crate::config::default_shell();
         let (ai_prog, ai_args) = crate::config::ai_command();
         let ai_prog = crate::config::resolve_program(&ai_prog);
+        let leader = match crate::config::leader() {
+            Some(raw) => match bindings::parse_leader(&raw) {
+                Some(chord) => chord,
+                None => {
+                    log::warn!("kumo: invalid leader key {:?}; falling back to ctrl+b", raw);
+                    LEADER
+                }
+            },
+            None => LEADER,
+        };
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let cwd = std::env::current_dir().ok();
         // Workspace for a fresh session: the explicit `kumo new [dir]` arg, else
@@ -205,6 +217,7 @@ impl App {
             active: 0,
             panes: HashMap::new(),
             mode: Mode::Normal,
+            leader,
             drag: None,
             sel: None,
             pending_click: None,
@@ -741,7 +754,7 @@ impl App {
             return Ok(());
         }
 
-        let leader = LEADER.is_leader(key);
+        let leader = self.leader.is_leader(key);
         match self.mode {
             Mode::Normal => {
                 if leader {
