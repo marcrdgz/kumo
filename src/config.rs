@@ -121,6 +121,9 @@ pub struct Config {
     /// The leader chord, e.g. `ctrl+b` or `ctrl+space`. `None` means the
     /// built-in default (Ctrl+B).
     pub leader: Option<String>,
+    /// `[keymap.bindings]` overrides: key/chord string → action id
+    /// (e.g. `"s"` → `"split-vertical"`).
+    pub keymap_bindings: HashMap<String, String>,
 }
 
 impl Config {
@@ -177,14 +180,18 @@ impl Config {
         }
         // The leader lives in the `[keymap]` table; a top-level `leader` is
         // accepted as a deprecated alias, but the table wins.
-        if let Some(v) = toml
+        let leader = toml
             .keymap
-            .and_then(|k| k.leader)
-            .or(toml.leader_alias)
-        {
+            .as_ref()
+            .and_then(|k| k.leader.clone())
+            .or(toml.leader_alias);
+        if let Some(v) = leader {
             if !v.is_empty() {
                 self.leader = Some(v);
             }
+        }
+        if let Some(v) = toml.keymap.and_then(|k| k.bindings) {
+            self.keymap_bindings.extend(v);
         }
     }
 }
@@ -195,6 +202,9 @@ impl Config {
 struct Keymap {
     /// Leader chord that enters leader mode, e.g. `ctrl+b` or `ctrl+space`.
     leader: Option<String>,
+    /// Binding overrides: key/chord string → action id.
+    #[serde(rename = "bindings")]
+    bindings: Option<HashMap<String, String>>,
 }
 
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
@@ -357,6 +367,12 @@ pub fn agent_sound_enabled() -> bool {
 /// means the built-in default (Ctrl+B).
 pub fn leader() -> Option<String> {
     load_config().leader
+}
+
+/// `[keymap.bindings]` overrides: chord string → action id. Empty when the
+/// config sets no bindings (the stock keymap applies).
+pub fn keymap_bindings() -> HashMap<String, String> {
+    load_config().keymap_bindings
 }
 
 /// Split a command line string into program + args (space separated).
@@ -867,6 +883,37 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
         assert_eq!(leader().as_deref(), Some("f12"));
+    }
+
+    #[test]
+    fn keymap_bindings_reads_from_toml() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-keymap");
+        let home = scratch_dir("home-keymap");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[keymap]\nleader = \"ctrl+b\"\n[keymap.bindings]\ns = \"split-vertical\"\nv = \"close-pane\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let bindings = keymap_bindings();
+        assert_eq!(bindings.get("s").map(String::as_str), Some("split-vertical"));
+        assert_eq!(bindings.get("v").map(String::as_str), Some("close-pane"));
+        assert_eq!(bindings.len(), 2);
+    }
+
+    #[test]
+    fn keymap_bindings_default_to_empty() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-keymap-empty");
+        let home = scratch_dir("home-keymap-empty");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert!(keymap_bindings().is_empty(), "no bindings table means the stock keymap");
     }
 
     #[test]

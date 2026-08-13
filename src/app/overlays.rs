@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 
-use super::bindings::{Binding, Group, BINDINGS};
+use super::bindings::{Binding, Group};
 use super::ui::{fill, put, text};
 use super::{App, MAUVE, ORANGE, PANEL_MUTED, PANEL_SEP};
 use crate::layout::SplitDir;
@@ -374,7 +374,7 @@ impl App {
     /// Max scroll offset of the showcase body, so the last row stays reachable.
     fn keybind_overlay_scroll_max(&self) -> u16 {
         let Some(dd) = self.keybind_overlay_rect() else { return 0 };
-        let lines = keybind_lines().len();
+        let lines = keybind_lines(&self.keymap).len();
         let visible = dd.height.saturating_sub(4) as usize;
         lines.saturating_sub(visible) as u16
     }
@@ -382,11 +382,11 @@ impl App {
     /// Centered rect of the keybind showcase, sized to fit the longest row.
     fn keybind_overlay_rect(&self) -> Option<Rect> {
         let (w, h) = self.term_size;
-        let max_keys = BINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let max_desc = BINDINGS.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
+        let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
+        let max_desc = self.keymap.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
-        let lines = keybind_lines().len();
+        let lines = keybind_lines(&self.keymap).len();
         let height = ((lines + 4) as u16).min(h.saturating_sub(4)).max(3);
         if w < width || h < height {
             return None;
@@ -423,11 +423,11 @@ impl App {
             .add_modifier(Modifier::BOLD);
         text(f, x0 + 2, y0 + 1, "keybindings", title, inner_w);
 
-        let max_keys = BINDINGS.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
+        let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
         let scroll = self.keybind_overlay.scroll as usize;
         let body_top = y0 + 2;
         let body_bottom = y1 - 1; // footer row
-        for (i, line) in keybind_lines().iter().skip(scroll).enumerate() {
+        for (i, line) in keybind_lines(&self.keymap).iter().skip(scroll).enumerate() {
             let y = body_top + i as u16;
             if y >= body_bottom {
                 break;
@@ -446,8 +446,8 @@ impl App {
                         .bg(PANEL_SEP)
                         .add_modifier(Modifier::BOLD);
                     let desc = Style::default().fg(FG).bg(PANEL_SEP);
-                    text(f, x0 + 2, y, b.keys, keys, max_keys);
-                    text(f, x0 + 2 + max_keys + 2, y, b.desc, desc, inner_w.saturating_sub(max_keys + 2));
+                    text(f, x0 + 2, y, &b.keys, keys, max_keys);
+                    text(f, x0 + 2 + max_keys + 2, y, &b.desc, desc, inner_w.saturating_sub(max_keys + 2));
                 }
             }
         }
@@ -749,25 +749,25 @@ enum KbLine<'a> {
     Bind(&'a Binding),
 }
 
-/// Flatten `BINDINGS` into showcase rows, one header per group followed by
-/// its bindings, in `Group::ALL` order. Bindings sharing a display string
+/// Flatten a keymap into showcase rows, one header per group followed by its
+/// bindings, in `Group::ALL` order. Bindings sharing a display string
 /// (e.g. the four `h/j/k/l` focus chords, the nine `1-9` jumps) collapse into
 /// a single grouped row.
-fn keybind_lines() -> Vec<KbLine<'static>> {
+fn keybind_lines<'a>(keymap: &'a [Binding]) -> Vec<KbLine<'a>> {
     let mut lines = Vec::new();
     for group in Group::ALL {
         let mut pushed = false;
         let mut last_keys: Option<&str> = None;
-        for b in BINDINGS {
+        for b in keymap {
             if b.group == group {
                 if !pushed {
                     lines.push(KbLine::Header(group.label()));
                     pushed = true;
                 }
-                if last_keys == Some(b.keys) {
+                if last_keys == Some(b.keys.as_str()) {
                     continue;
                 }
-                last_keys = Some(b.keys);
+                last_keys = Some(&b.keys);
                 lines.push(KbLine::Bind(b));
             }
         }

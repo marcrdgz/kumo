@@ -1,11 +1,12 @@
-//! Canonical leader-keymap table: the single source of truth for dispatch,
-//! the leader-mode status-bar hint, and the `leader+?` keybind showcase.
+//! Leader keymap: the single source of truth for dispatch, the leader-mode
+//! status-bar hint, and the `leader+?` keybind showcase.
 //!
-//! Each [`Binding`] pairs a dispatch [`Chord`] (the key pressed after the
-//! leader) with an [`Action`] and its showcase row. `App::leader_command`
-//! looks up the chord and runs the action; the hint and the showcase read the
-//! same table, so dispatch, hint, and showcase can never drift. Adding a
-//! binding is a one-line table entry, no code elsewhere.
+//! [`BINDING_SPECS`] holds the stock bindings (chord + action + showcase row).
+//! [`build_keymap`] turns them into the runtime table the app actually uses,
+//! applying any `[keymap.bindings]` overrides from the config. Dispatch, hint,
+//! and showcase all read the same runtime table, so they can never drift.
+
+use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -14,50 +15,8 @@ use super::Dir;
 /// The default leader chord that enters leader mode: Ctrl+B.
 ///
 /// Overridable via the `leader` config key; `App::new` parses it with
-/// [`parse_leader`] and falls back to this default.
+/// [`parse_chord`] and falls back to this default.
 pub(super) const LEADER: Chord = Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
-
-/// Parse a `leader` config value into a chord, e.g. `ctrl+b`, `ctrl+space`,
-/// `f12`. Returns `None` for unrecognized modifiers or keys.
-pub(super) fn parse_leader(raw: &str) -> Option<Chord> {
-    let mut modifiers = KeyModifiers::NONE;
-    let mut parts: Vec<&str> = raw.split('+').map(|s| s.trim()).collect();
-    let key = parts.pop()?.to_ascii_lowercase();
-    for part in parts {
-        match part.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
-            "shift" => modifiers |= KeyModifiers::SHIFT,
-            "alt" | "opt" | "option" => modifiers |= KeyModifiers::ALT,
-            "super" | "cmd" | "command" | "meta" => modifiers |= KeyModifiers::SUPER,
-            _ => return None,
-        }
-    }
-    let code = match key.as_str() {
-        "space" | "spc" => KeyCode::Char(' '),
-        "enter" | "return" => KeyCode::Enter,
-        "esc" | "escape" => KeyCode::Esc,
-        "tab" => KeyCode::Tab,
-        "backspace" => KeyCode::Backspace,
-        "delete" => KeyCode::Delete,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        _ if key.len() == 1 => KeyCode::Char(key.chars().next().unwrap()),
-        f if f.starts_with('f') && f.len() > 1 && f[1..].chars().all(|c| c.is_ascii_digit()) => {
-            let n: u8 = f[1..].parse().unwrap_or(0);
-            if (1..=12).contains(&n) {
-                KeyCode::F(n)
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    };
-    Some(Chord::new(code, modifiers))
-}
 
 /// The keys a user presses: a [`KeyCode`] plus its modifiers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -128,67 +87,316 @@ impl Group {
     }
 }
 
-/// One leader binding: the dispatch chord, its action, and the showcase row.
-/// `keys` is the compact display string — several bindings may share one (e.g.
-/// `h/j/k/l`, `1-9`) so the showcase shows a single grouped row for them.
+/// One leader binding in the runtime keymap: the dispatch chord, its action,
+/// and the showcase row. `keys` is the compact display string — several
+/// bindings may share one (e.g. `h/j/k/l`, `1-9`) so the showcase shows a
+/// single grouped row for them.
+#[derive(Clone)]
 pub(super) struct Binding {
     /// Key pressed after the leader to run `action`.
     pub(super) key: Chord,
     /// Compact showcase keys, e.g. "h/j/k/l" or "1-9".
-    pub(super) keys: &'static str,
+    pub(super) keys: String,
     /// Longer description for the showcase.
-    pub(super) desc: &'static str,
+    pub(super) desc: String,
     pub(super) group: Group,
     pub(super) action: Action,
+}
+
+/// Static stock-binding spec: same fields as [`Binding`] but `&'static str`,
+/// so the whole table stays a `const`.
+#[derive(Clone, Copy)]
+struct BindingSpec {
+    key: Chord,
+    keys: &'static str,
+    desc: &'static str,
+    group: Group,
+    action: Action,
+}
+
+impl Binding {
+    fn from_spec(s: &BindingSpec) -> Binding {
+        Binding {
+            key: s.key,
+            keys: s.keys.to_string(),
+            desc: s.desc.to_string(),
+            group: s.group,
+            action: s.action,
+        }
+    }
 }
 
 const fn chord(code: KeyCode) -> Chord {
     Chord::new(code, KeyModifiers::NONE)
 }
 
-/// All leader bindings, in showcase order. Bindings that share a `keys`
+/// Stock leader bindings, in showcase order. Bindings that share a `keys`
 /// display string must stay adjacent so the showcase collapses them into one
 /// grouped row.
-pub(super) const BINDINGS: &[Binding] = &[
-    Binding { key: chord(KeyCode::Char('v')), keys: "v", desc: "split the focused pane vertically", group: Group::Layout, action: Action::SplitVertical },
-    Binding { key: chord(KeyCode::Char('-')), keys: "-", desc: "split the focused pane horizontally", group: Group::Layout, action: Action::SplitHorizontal },
-    Binding { key: chord(KeyCode::Char('z')), keys: "z", desc: "zoom the focused pane", group: Group::Layout, action: Action::Zoom },
-    Binding { key: chord(KeyCode::Char('h')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Left) },
-    Binding { key: chord(KeyCode::Char('j')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Down) },
-    Binding { key: chord(KeyCode::Char('k')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Up) },
-    Binding { key: chord(KeyCode::Char('l')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Right) },
-    Binding { key: chord(KeyCode::Char('a')), keys: "a", desc: "spawn an AI CLI pane in a vertical split", group: Group::Panes, action: Action::SplitAi },
-    Binding { key: chord(KeyCode::Char('x')), keys: "x", desc: "close the focused pane", group: Group::Panes, action: Action::ClosePane },
-    Binding { key: chord(KeyCode::Tab), keys: "Tab", desc: "cycle focus between panes", group: Group::Panes, action: Action::CyclePane },
-    Binding { key: chord(KeyCode::Char('c')), keys: "c", desc: "create a new session (name it in the popup)", group: Group::Sessions, action: Action::NewSession },
-    Binding { key: chord(KeyCode::Char('n')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::NextSession },
-    Binding { key: chord(KeyCode::Char('p')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::PrevSession },
-    Binding { key: chord(KeyCode::Char('1')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(1) },
-    Binding { key: chord(KeyCode::Char('2')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(2) },
-    Binding { key: chord(KeyCode::Char('3')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(3) },
-    Binding { key: chord(KeyCode::Char('4')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(4) },
-    Binding { key: chord(KeyCode::Char('5')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(5) },
-    Binding { key: chord(KeyCode::Char('6')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(6) },
-    Binding { key: chord(KeyCode::Char('7')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(7) },
-    Binding { key: chord(KeyCode::Char('8')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(8) },
-    Binding { key: chord(KeyCode::Char('9')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(9) },
-    Binding { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
-    Binding { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
-    Binding { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
+const BINDING_SPECS: &[BindingSpec] = &[
+    BindingSpec { key: chord(KeyCode::Char('v')), keys: "v", desc: "split the focused pane vertically", group: Group::Layout, action: Action::SplitVertical },
+    BindingSpec { key: chord(KeyCode::Char('-')), keys: "-", desc: "split the focused pane horizontally", group: Group::Layout, action: Action::SplitHorizontal },
+    BindingSpec { key: chord(KeyCode::Char('z')), keys: "z", desc: "zoom the focused pane", group: Group::Layout, action: Action::Zoom },
+    BindingSpec { key: chord(KeyCode::Char('h')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Left) },
+    BindingSpec { key: chord(KeyCode::Char('j')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Down) },
+    BindingSpec { key: chord(KeyCode::Char('k')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Up) },
+    BindingSpec { key: chord(KeyCode::Char('l')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Right) },
+    BindingSpec { key: chord(KeyCode::Char('a')), keys: "a", desc: "spawn an AI CLI pane in a vertical split", group: Group::Panes, action: Action::SplitAi },
+    BindingSpec { key: chord(KeyCode::Char('x')), keys: "x", desc: "close the focused pane", group: Group::Panes, action: Action::ClosePane },
+    BindingSpec { key: chord(KeyCode::Tab), keys: "Tab", desc: "cycle focus between panes", group: Group::Panes, action: Action::CyclePane },
+    BindingSpec { key: chord(KeyCode::Char('c')), keys: "c", desc: "create a new session (name it in the popup)", group: Group::Sessions, action: Action::NewSession },
+    BindingSpec { key: chord(KeyCode::Char('n')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::NextSession },
+    BindingSpec { key: chord(KeyCode::Char('p')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::PrevSession },
+    BindingSpec { key: chord(KeyCode::Char('1')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(1) },
+    BindingSpec { key: chord(KeyCode::Char('2')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(2) },
+    BindingSpec { key: chord(KeyCode::Char('3')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(3) },
+    BindingSpec { key: chord(KeyCode::Char('4')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(4) },
+    BindingSpec { key: chord(KeyCode::Char('5')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(5) },
+    BindingSpec { key: chord(KeyCode::Char('6')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(6) },
+    BindingSpec { key: chord(KeyCode::Char('7')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(7) },
+    BindingSpec { key: chord(KeyCode::Char('8')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(8) },
+    BindingSpec { key: chord(KeyCode::Char('9')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(9) },
+    BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
+    BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
+    BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
 ];
 
-/// The dispatch chord bound to `action`, if any. Useful to validate config
-/// remaps ("is this action remappable?") and to show an action's current key.
+/// The stock bindings as a runtime table.
+fn stock_bindings() -> Vec<Binding> {
+    BINDING_SPECS.iter().map(Binding::from_spec).collect()
+}
+
+/// Build the effective keymap: the stock bindings with `[keymap.bindings]`
+/// overrides applied. An override rebinds an existing chord or adds a new one;
+/// chords that fail to parse and unknown action ids are ignored with a warning.
+pub(super) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> {
+    let mut out = stock_bindings();
+    for (key_str, action_str) in overrides {
+        let Some(chord) = parse_chord(key_str) else {
+            log::warn!("kumo: ignoring keymap binding with invalid key {:?}", key_str);
+            continue;
+        };
+        let Some(action) = action_from_id(action_str) else {
+            log::warn!("kumo: ignoring keymap binding with unknown action {:?}", action_str);
+            continue;
+        };
+        out.retain(|b| b.key != chord);
+        out.push(Binding {
+            key: chord,
+            keys: chord_display(chord),
+            desc: action_desc(action).to_string(),
+            group: action_group(action),
+            action,
+        });
+    }
+    out
+}
+
+/// Parse a key or chord string from the config, e.g. `v`, `tab`, `f12`,
+/// `ctrl+b`, `ctrl+space`, `ctrl+shift+tab`. An uppercase letter implies
+/// Shift (so `H` parses to the same chord a terminal reports for Shift+h).
+pub(super) fn parse_chord(raw: &str) -> Option<Chord> {
+    let mut modifiers = KeyModifiers::NONE;
+    let mut parts: Vec<&str> = raw.split('+').map(|s| s.trim()).collect();
+    let key_raw = parts.pop()?;
+    let key = key_raw.to_ascii_lowercase();
+    for part in parts {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+            "shift" => modifiers |= KeyModifiers::SHIFT,
+            "alt" | "opt" | "option" => modifiers |= KeyModifiers::ALT,
+            "super" | "cmd" | "command" | "meta" => modifiers |= KeyModifiers::SUPER,
+            _ => return None,
+        }
+    }
+    let code = match key.as_str() {
+        "space" | "spc" => KeyCode::Char(' '),
+        "enter" | "return" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "tab" => KeyCode::Tab,
+        "backspace" => KeyCode::Backspace,
+        "delete" => KeyCode::Delete,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        _ if key.len() == 1 => {
+            let ch = key_raw.chars().next().unwrap();
+            if ch.is_ascii_uppercase() {
+                modifiers |= KeyModifiers::SHIFT;
+            }
+            KeyCode::Char(ch)
+        }
+        f if f.starts_with('f') && f.len() > 1 && f[1..].chars().all(|c| c.is_ascii_digit()) => {
+            let n: u8 = f[1..].parse().unwrap_or(0);
+            if (1..=12).contains(&n) {
+                KeyCode::F(n)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(Chord::new(code, modifiers))
+}
+
+/// Canonical `[keymap.bindings]` id for an action, e.g. `split-vertical`.
+#[allow(dead_code)]
+pub(super) fn action_id(action: Action) -> &'static str {
+    match action {
+        Action::SplitVertical => "split-vertical",
+        Action::SplitHorizontal => "split-horizontal",
+        Action::SplitAi => "split-ai",
+        Action::NewSession => "new-session",
+        Action::ClosePane => "close-pane",
+        Action::Zoom => "zoom",
+        Action::Focus(Dir::Left) => "focus-left",
+        Action::Focus(Dir::Down) => "focus-down",
+        Action::Focus(Dir::Up) => "focus-up",
+        Action::Focus(Dir::Right) => "focus-right",
+        Action::CyclePane => "cycle-pane",
+        Action::NextSession => "next-session",
+        Action::PrevSession => "prev-session",
+        Action::JumpSession(n) => match n {
+            1 => "jump-session-1",
+            2 => "jump-session-2",
+            3 => "jump-session-3",
+            4 => "jump-session-4",
+            5 => "jump-session-5",
+            6 => "jump-session-6",
+            7 => "jump-session-7",
+            8 => "jump-session-8",
+            9 => "jump-session-9",
+            _ => unreachable!("jump-session only supports 1-9"),
+        },
+        Action::ToggleSidebar => "toggle-sidebar",
+        Action::Detach => "detach",
+        Action::ShowKeybinds => "show-keybinds",
+    }
+}
+
+/// Reverse of [`action_id`]. `None` for unknown ids.
+pub(super) fn action_from_id(id: &str) -> Option<Action> {
+    Some(match id {
+        "split-vertical" => Action::SplitVertical,
+        "split-horizontal" => Action::SplitHorizontal,
+        "split-ai" => Action::SplitAi,
+        "new-session" => Action::NewSession,
+        "close-pane" => Action::ClosePane,
+        "zoom" => Action::Zoom,
+        "focus-left" => Action::Focus(Dir::Left),
+        "focus-down" => Action::Focus(Dir::Down),
+        "focus-up" => Action::Focus(Dir::Up),
+        "focus-right" => Action::Focus(Dir::Right),
+        "cycle-pane" => Action::CyclePane,
+        "next-session" => Action::NextSession,
+        "prev-session" => Action::PrevSession,
+        "jump-session-1" => Action::JumpSession(1),
+        "jump-session-2" => Action::JumpSession(2),
+        "jump-session-3" => Action::JumpSession(3),
+        "jump-session-4" => Action::JumpSession(4),
+        "jump-session-5" => Action::JumpSession(5),
+        "jump-session-6" => Action::JumpSession(6),
+        "jump-session-7" => Action::JumpSession(7),
+        "jump-session-8" => Action::JumpSession(8),
+        "jump-session-9" => Action::JumpSession(9),
+        "toggle-sidebar" => Action::ToggleSidebar,
+        "detach" => Action::Detach,
+        "show-keybinds" => Action::ShowKeybinds,
+        _ => return None,
+    })
+}
+
+/// Showcase description for an action (used for config-added bindings).
+pub(super) fn action_desc(action: Action) -> &'static str {
+    match action {
+        Action::SplitVertical => "split the focused pane vertically",
+        Action::SplitHorizontal => "split the focused pane horizontally",
+        Action::SplitAi => "spawn an AI CLI pane in a vertical split",
+        Action::NewSession => "create a new session (name it in the popup)",
+        Action::ClosePane => "close the focused pane",
+        Action::Zoom => "zoom the focused pane",
+        Action::Focus(_) => "move focus left / down / up / right",
+        Action::CyclePane => "cycle focus between panes",
+        Action::NextSession | Action::PrevSession => "cycle to the next / previous session",
+        Action::JumpSession(_) => "jump to the session at that list position",
+        Action::ToggleSidebar => "toggle the sidebar",
+        Action::Detach => "detach (daemon keeps running)",
+        Action::ShowKeybinds => "show all keybindings",
+    }
+}
+
+/// Showcase group for an action (used for config-added bindings).
+pub(super) fn action_group(action: Action) -> Group {
+    match action {
+        Action::SplitVertical | Action::SplitHorizontal | Action::Zoom | Action::Focus(_) => {
+            Group::Layout
+        }
+        Action::SplitAi | Action::ClosePane | Action::CyclePane => Group::Panes,
+        Action::NewSession | Action::NextSession | Action::PrevSession | Action::JumpSession(_) => {
+            Group::Sessions
+        }
+        Action::ToggleSidebar => Group::Chrome,
+        Action::Detach | Action::ShowKeybinds => Group::General,
+    }
+}
+
+/// Human-readable form of a chord, e.g. `v`, `ctrl+b`, `H`. Used for the
+/// showcase row of config-added bindings.
+pub(super) fn chord_display(c: Chord) -> String {
+    let implicit_shift = matches!(c.code, KeyCode::Char(ch) if ch.is_ascii_uppercase());
+    let mut s = String::new();
+    if c.modifiers.contains(KeyModifiers::CONTROL) {
+        s.push_str("ctrl+");
+    }
+    if !implicit_shift && c.modifiers.contains(KeyModifiers::SHIFT) {
+        s.push_str("shift+");
+    }
+    if c.modifiers.contains(KeyModifiers::ALT) {
+        s.push_str("alt+");
+    }
+    if c.modifiers.contains(KeyModifiers::SUPER) {
+        s.push_str("super+");
+    }
+    s.push_str(&key_name(c.code));
+    s
+}
+
+fn key_name(code: KeyCode) -> String {
+    match code {
+        KeyCode::Char(' ') => "space".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Esc => "esc".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The dispatch chord bound to `action` in the stock keymap, if any. Useful to
+/// validate config remaps ("is this action remappable?") and to show an
+/// action's default key.
 #[allow(dead_code)]
 pub(super) fn key_for(action: Action) -> Option<Chord> {
-    BINDINGS.iter().find(|b| b.action == action).map(|b| b.key)
+    stock_bindings().iter().find(|b| b.action == action).map(|b| b.key)
 }
 
 /// The leader-mode status-bar hint: just the `?` pointer to the keybind
 /// showcase. Everything else lives in the showcase, so the strip stays tiny and
 /// never drifts from the table.
-pub(super) fn leader_hint() -> String {
-    let help = BINDINGS.iter().find(|b| b.keys == "?").expect("help binding present");
+pub(super) fn leader_hint(keymap: &[Binding]) -> String {
+    let help = keymap.iter().find(|b| b.keys == "?").expect("help binding present");
     format!(" {}: {} ", help.keys, help.desc)
 }
 
@@ -198,10 +406,11 @@ mod tests {
 
     #[test]
     fn table_is_non_empty_and_has_all_groups() {
-        assert!(!BINDINGS.is_empty());
+        let bindings = stock_bindings();
+        assert!(!bindings.is_empty());
         for group in Group::ALL {
             assert!(
-                BINDINGS.iter().any(|b| b.group == group),
+                bindings.iter().any(|b| b.group == group),
                 "no binding in group {:?}",
                 group
             );
@@ -210,7 +419,7 @@ mod tests {
 
     #[test]
     fn every_binding_has_a_dispatch_chord() {
-        for b in BINDINGS {
+        for b in stock_bindings() {
             assert!(
                 b.key.code != KeyCode::Null && b.key.code != KeyCode::Char('\0'),
                 "binding {:?} has no dispatch key",
@@ -223,7 +432,7 @@ mod tests {
     fn dispatch_chords_are_unique() {
         // A duplicated dispatch key would silently shadow one of its bindings;
         // config remaps would make that ambiguity worse.
-        let mut chords: Vec<Chord> = BINDINGS.iter().map(|b| b.key).collect();
+        let mut chords: Vec<Chord> = stock_bindings().iter().map(|b| b.key).collect();
         chords.sort_by_key(|c| format!("{:?}{:?}", c.code, c.modifiers));
         for pair in chords.windows(2) {
             assert_ne!(pair[0], pair[1], "duplicate dispatch chord {:?}", pair[0]);
@@ -232,7 +441,7 @@ mod tests {
 
     #[test]
     fn key_for_reverses_dispatch() {
-        for b in BINDINGS {
+        for b in stock_bindings() {
             assert_eq!(
                 key_for(b.action),
                 Some(b.key),
@@ -244,7 +453,7 @@ mod tests {
 
     #[test]
     fn hint_points_to_the_showcase_only() {
-        let hint = leader_hint();
+        let hint = leader_hint(&stock_bindings());
         assert!(hint.contains("?: show all keybindings"));
         // The hint no longer lists every binding; the showcase is the reference.
         assert!(!hint.contains("v-split"));
@@ -258,7 +467,7 @@ mod tests {
 
     #[test]
     fn ctrl_space_leader_matches_all_spellings() {
-        let chord = parse_leader("ctrl+space").expect("ctrl+space parses");
+        let chord = parse_chord("ctrl+space").expect("ctrl+space parses");
         assert_eq!(chord, Chord::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
         assert!(chord.is_leader(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
         assert!(chord.is_leader(KeyEvent::new(KeyCode::Char('\0'), KeyModifiers::CONTROL)));
@@ -269,7 +478,7 @@ mod tests {
 
     #[test]
     fn ctrl_b_leader_matches_ctrl_b_only() {
-        let chord = parse_leader("ctrl+b").expect("ctrl+b parses");
+        let chord = parse_chord("ctrl+b").expect("ctrl+b parses");
         assert_eq!(chord, LEADER);
         assert!(chord.is_leader(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
         assert!(!chord.is_leader(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
@@ -277,15 +486,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_leader_accepts_and_rejects() {
-        assert_eq!(parse_leader("F12"), Some(Chord::new(KeyCode::F(12), KeyModifiers::NONE)));
-        assert_eq!(parse_leader("ctrl+f1"), Some(Chord::new(KeyCode::F(1), KeyModifiers::CONTROL)));
-        assert_eq!(parse_leader("ctrl+shift+tab"), Some(Chord::new(KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
-        assert_eq!(parse_leader("ctrl+b"), Some(Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
-        assert_eq!(parse_leader("x"), Some(Chord::new(KeyCode::Char('x'), KeyModifiers::NONE)));
-        assert_eq!(parse_leader("ctrl+banana"), None, "unknown key rejected");
-        assert_eq!(parse_leader("nonsense+ctrl"), None, "unknown modifier rejected");
-        assert_eq!(parse_leader(""), None, "empty string rejected");
-        assert_eq!(parse_leader("f13"), None, "f13 is out of range");
+    fn parse_chord_accepts_and_rejects() {
+        assert_eq!(parse_chord("F12"), Some(Chord::new(KeyCode::F(12), KeyModifiers::NONE)));
+        assert_eq!(parse_chord("ctrl+f1"), Some(Chord::new(KeyCode::F(1), KeyModifiers::CONTROL)));
+        assert_eq!(parse_chord("ctrl+shift+tab"), Some(Chord::new(KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+        assert_eq!(parse_chord("ctrl+b"), Some(Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+        assert_eq!(parse_chord("x"), Some(Chord::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        // Uppercase implies Shift, matching the chord a terminal reports.
+        assert_eq!(parse_chord("H"), Some(Chord::new(KeyCode::Char('H'), KeyModifiers::SHIFT)));
+        assert_eq!(parse_chord("ctrl+banana"), None, "unknown key rejected");
+        assert_eq!(parse_chord("nonsense+ctrl"), None, "unknown modifier rejected");
+        assert_eq!(parse_chord(""), None, "empty string rejected");
+        assert_eq!(parse_chord("f13"), None, "f13 is out of range");
+    }
+
+    #[test]
+    fn action_ids_round_trip() {
+        for b in stock_bindings() {
+            assert_eq!(
+                action_from_id(action_id(b.action)),
+                Some(b.action),
+                "id round-trip failed for {:?}",
+                b.action
+            );
+        }
+    }
+
+    #[test]
+    fn build_keymap_overrides_and_adds_bindings() {
+        let mut overrides = HashMap::new();
+        overrides.insert("s".to_string(), "split-vertical".to_string());
+        overrides.insert("v".to_string(), "close-pane".to_string()); // rebind v
+        let keymap = build_keymap(&overrides);
+        assert!(keymap.iter().any(|b| b.action == Action::ClosePane && b.key.code == KeyCode::Char('v')));
+        assert!(keymap.iter().any(|b| b.action == Action::SplitVertical && b.key.code == KeyCode::Char('s')));
+        // A config-added binding gets a showcase row with the parsed chord.
+        let added = keymap.iter().find(|b| b.key.code == KeyCode::Char('s')).unwrap();
+        assert_eq!(added.keys, "s");
+        assert_eq!(added.desc, action_desc(Action::SplitVertical));
+    }
+
+    #[test]
+    fn build_keymap_ignores_invalid_entries() {
+        let mut overrides = HashMap::new();
+        overrides.insert("ctrl+banana".to_string(), "zoom".to_string());
+        overrides.insert("s".to_string(), "no-such-action".to_string());
+        let keymap = build_keymap(&overrides);
+        let stock = stock_bindings();
+        assert_eq!(keymap.len(), stock.len(), "invalid entries must be ignored");
     }
 }

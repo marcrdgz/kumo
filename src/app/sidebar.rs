@@ -523,6 +523,7 @@ mod tests {
             panes,
             mode: Mode::Normal,
             leader: super::super::bindings::LEADER,
+            keymap: super::super::bindings::build_keymap(&HashMap::new()),
             drag: None,
             sel: None,
             pending_click: None,

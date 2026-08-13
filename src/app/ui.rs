@@ -306,7 +306,7 @@ impl App {
         }
 
         if self.mode == Mode::Leader {
-            let hint = leader_hint();
+            let hint = leader_hint(&self.keymap);
             let avail = area.width.saturating_sub(start.saturating_add(left_w));
             if avail > 0 {
                 // Clip the hint to the available width instead of hiding it: on

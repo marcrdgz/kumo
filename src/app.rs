@@ -18,7 +18,7 @@ use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
 use crate::state::{self, SavedState};
 
-use self::bindings::{Action, BINDINGS, Chord, LEADER};
+use self::bindings::{build_keymap, Action, Binding, Chord, LEADER};
 use self::mouse::{Drag, PendingClick, Sel};
 use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
 use self::sidebar::SidebarScroll;
@@ -90,6 +90,9 @@ pub struct App {
     mode: Mode,
     /// The leader chord (default Ctrl+B, overridable via `leader` config).
     leader: Chord,
+    /// The effective leader keymap: stock bindings plus `[keymap.bindings]`
+    /// overrides. Drives dispatch, the leader hint, and the showcase.
+    keymap: Vec<Binding>,
     drag: Option<Drag>,
     sel: Option<Sel>,
     pending_click: Option<PendingClick>,
@@ -188,7 +191,7 @@ impl App {
         let (ai_prog, ai_args) = crate::config::ai_command();
         let ai_prog = crate::config::resolve_program(&ai_prog);
         let leader = match crate::config::leader() {
-            Some(raw) => match bindings::parse_leader(&raw) {
+            Some(raw) => match bindings::parse_chord(&raw) {
                 Some(chord) => chord,
                 None => {
                     log::warn!("kumo: invalid leader key {:?}; falling back to ctrl+b", raw);
@@ -197,6 +200,7 @@ impl App {
             },
             None => LEADER,
         };
+        let keymap = build_keymap(&crate::config::keymap_bindings());
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let cwd = std::env::current_dir().ok();
         // Workspace for a fresh session: the explicit `kumo new [dir]` arg, else
@@ -218,6 +222,7 @@ impl App {
             panes: HashMap::new(),
             mode: Mode::Normal,
             leader,
+            keymap,
             drag: None,
             sel: None,
             pending_click: None,
@@ -785,7 +790,7 @@ impl App {
     fn leader_command(&mut self, key: KeyEvent) -> Result<()> {
         self.mode = Mode::Normal;
         let chord = Chord::new(key.code, key.modifiers);
-        if let Some(binding) = BINDINGS.iter().find(|b| b.key == chord) {
+        if let Some(binding) = self.keymap.iter().find(|b| b.key == chord) {
             self.run_action(binding.action)?;
         }
         Ok(())
