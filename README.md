@@ -97,6 +97,11 @@ runtime state in `~/.local/state/kumo/`, and the detach server's IPC socket in
 [keymap]
 leader = "ctrl+b"
 
+# Leader bindings are remappable: override a stock key or add a new one.
+[keymap.bindings]
+s = "split-vertical"   # now leader+s splits vertically
+x = "close-pane"
+
 ai-cmd = "claude --model sonnet"
 shell  = "/bin/zsh"
 update-check = true
@@ -107,6 +112,7 @@ Supported keys:
 | Key | Description | Default |
 | --- | --- | --- |
 | `keymap.leader` | Leader chord that enters leader mode (`ctrl+b`, `ctrl+space`, `f12`, …). A top-level `leader` also reads as a deprecated alias. | `ctrl+b` |
+| `keymap.bindings` | Overrides/additions to the leader bindings: `chord = "action-id"` (e.g. `s = "split-vertical"`). Invalid chords/actions are ignored with a warning. | stock keymap |
 | `ai-cmd` | AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat. | `opencode` |
 | `shell` | Login shell used to spawn panes. | `$SHELL` → `/bin/zsh` |
 | `update-check` | Whether the startup update check runs (also `KUMO_NO_UPDATE=1`). | `true` |
@@ -153,6 +159,10 @@ listed but always shown as idle.
 | `x` | Close focused pane ❌ |
 | `z` | Zoom pane 🔍 |
 | `h`/`j`/`k`/`l` | Move focus left / down / up / right 🎯 |
+| `H`/`J`/`K`/`L` | Resize the focused pane (Shift+h/j/k/l) 📐 |
+| `s` | Swap the focused pane with its sibling 🔀 |
+| `o` | Rotate (mirror) the pane layout 🔄 |
+| `q` | Show pane numbers — press a number to jump 🔢 |
 | `n` / `p` | Cycle session next / previous ⏭️ |
 | `1`–`9` | Jump to the session at that sidebar position 🎯 |
 | `Tab` | Cycle pane ↹ |
@@ -161,9 +171,9 @@ listed but always shown as idle.
 | `?` | Keybind showcase — every leader binding at a glance 📖 |
 | `Esc` | Exit leader mode ↩️ |
 
-> ⚠️ Keybindings are currently hard-coded, but the **leader key** is already
-> configurable (`leader = "ctrl+b"` in `config.toml`). Data-driven keymaps land
-> in 0.4.0 — see the [roadmap](ROADMAP.md).
+> The **leader key** and the leader **bindings** are configurable via
+> `[keymap]` in `config.toml` (see above). Mouse gestures are deliberately
+> **not** remappable — they are positional hit-testing, not key sequences.
 
 **🖱️ Mouse**
 

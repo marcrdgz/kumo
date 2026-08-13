@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::layout::ResizeDir;
+
 use super::Dir;
 
 /// The default leader chord that enters leader mode: Ctrl+B.
@@ -53,7 +55,11 @@ pub(super) enum Action {
     ClosePane,
     Zoom,
     Focus(Dir),
+    Resize(ResizeDir),
     CyclePane,
+    SwapPanes,
+    RotateLayout,
+    ShowPaneNumbers,
     NextSession,
     PrevSession,
     JumpSession(u8),
@@ -130,6 +136,10 @@ const fn chord(code: KeyCode) -> Chord {
     Chord::new(code, KeyModifiers::NONE)
 }
 
+const fn chord_shift(code: KeyCode) -> Chord {
+    Chord::new(code, KeyModifiers::SHIFT)
+}
+
 /// Stock leader bindings, in showcase order. Bindings that share a `keys`
 /// display string must stay adjacent so the showcase collapses them into one
 /// grouped row.
@@ -141,9 +151,16 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('j')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Down) },
     BindingSpec { key: chord(KeyCode::Char('k')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Up) },
     BindingSpec { key: chord(KeyCode::Char('l')), keys: "h/j/k/l", desc: "move focus left / down / up / right", group: Group::Layout, action: Action::Focus(Dir::Right) },
+    BindingSpec { key: chord_shift(KeyCode::Char('H')), keys: "H/J/K/L", desc: "resize the focused pane", group: Group::Layout, action: Action::Resize(ResizeDir::Left) },
+    BindingSpec { key: chord_shift(KeyCode::Char('J')), keys: "H/J/K/L", desc: "resize the focused pane", group: Group::Layout, action: Action::Resize(ResizeDir::Down) },
+    BindingSpec { key: chord_shift(KeyCode::Char('K')), keys: "H/J/K/L", desc: "resize the focused pane", group: Group::Layout, action: Action::Resize(ResizeDir::Up) },
+    BindingSpec { key: chord_shift(KeyCode::Char('L')), keys: "H/J/K/L", desc: "resize the focused pane", group: Group::Layout, action: Action::Resize(ResizeDir::Right) },
     BindingSpec { key: chord(KeyCode::Char('a')), keys: "a", desc: "spawn an AI CLI pane in a vertical split", group: Group::Panes, action: Action::SplitAi },
     BindingSpec { key: chord(KeyCode::Char('x')), keys: "x", desc: "close the focused pane", group: Group::Panes, action: Action::ClosePane },
     BindingSpec { key: chord(KeyCode::Tab), keys: "Tab", desc: "cycle focus between panes", group: Group::Panes, action: Action::CyclePane },
+    BindingSpec { key: chord(KeyCode::Char('s')), keys: "s", desc: "swap the focused pane with its sibling", group: Group::Panes, action: Action::SwapPanes },
+    BindingSpec { key: chord(KeyCode::Char('o')), keys: "o", desc: "rotate the pane layout", group: Group::Panes, action: Action::RotateLayout },
+    BindingSpec { key: chord(KeyCode::Char('q')), keys: "q", desc: "show pane numbers (press a number to jump)", group: Group::Panes, action: Action::ShowPaneNumbers },
     BindingSpec { key: chord(KeyCode::Char('c')), keys: "c", desc: "create a new session (name it in the popup)", group: Group::Sessions, action: Action::NewSession },
     BindingSpec { key: chord(KeyCode::Char('n')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::NextSession },
     BindingSpec { key: chord(KeyCode::Char('p')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::PrevSession },
@@ -256,7 +273,14 @@ pub(super) fn action_id(action: Action) -> &'static str {
         Action::Focus(Dir::Down) => "focus-down",
         Action::Focus(Dir::Up) => "focus-up",
         Action::Focus(Dir::Right) => "focus-right",
+        Action::Resize(ResizeDir::Left) => "resize-left",
+        Action::Resize(ResizeDir::Down) => "resize-down",
+        Action::Resize(ResizeDir::Up) => "resize-up",
+        Action::Resize(ResizeDir::Right) => "resize-right",
         Action::CyclePane => "cycle-pane",
+        Action::SwapPanes => "swap-panes",
+        Action::RotateLayout => "rotate-layout",
+        Action::ShowPaneNumbers => "show-pane-numbers",
         Action::NextSession => "next-session",
         Action::PrevSession => "prev-session",
         Action::JumpSession(n) => match n {
@@ -290,7 +314,14 @@ pub(super) fn action_from_id(id: &str) -> Option<Action> {
         "focus-down" => Action::Focus(Dir::Down),
         "focus-up" => Action::Focus(Dir::Up),
         "focus-right" => Action::Focus(Dir::Right),
+        "resize-left" => Action::Resize(ResizeDir::Left),
+        "resize-down" => Action::Resize(ResizeDir::Down),
+        "resize-up" => Action::Resize(ResizeDir::Up),
+        "resize-right" => Action::Resize(ResizeDir::Right),
         "cycle-pane" => Action::CyclePane,
+        "swap-panes" => Action::SwapPanes,
+        "rotate-layout" => Action::RotateLayout,
+        "show-pane-numbers" => Action::ShowPaneNumbers,
         "next-session" => Action::NextSession,
         "prev-session" => Action::PrevSession,
         "jump-session-1" => Action::JumpSession(1),
@@ -319,7 +350,11 @@ pub(super) fn action_desc(action: Action) -> &'static str {
         Action::ClosePane => "close the focused pane",
         Action::Zoom => "zoom the focused pane",
         Action::Focus(_) => "move focus left / down / up / right",
+        Action::Resize(_) => "resize the focused pane",
         Action::CyclePane => "cycle focus between panes",
+        Action::SwapPanes => "swap the focused pane with its sibling",
+        Action::RotateLayout => "rotate the pane layout",
+        Action::ShowPaneNumbers => "show pane numbers (press a number to jump)",
         Action::NextSession | Action::PrevSession => "cycle to the next / previous session",
         Action::JumpSession(_) => "jump to the session at that list position",
         Action::ToggleSidebar => "toggle the sidebar",
@@ -331,10 +366,13 @@ pub(super) fn action_desc(action: Action) -> &'static str {
 /// Showcase group for an action (used for config-added bindings).
 pub(super) fn action_group(action: Action) -> Group {
     match action {
-        Action::SplitVertical | Action::SplitHorizontal | Action::Zoom | Action::Focus(_) => {
-            Group::Layout
-        }
-        Action::SplitAi | Action::ClosePane | Action::CyclePane => Group::Panes,
+        Action::SplitVertical
+        | Action::SplitHorizontal
+        | Action::Zoom
+        | Action::Focus(_)
+        | Action::Resize(_) => Group::Layout,
+        Action::SplitAi | Action::ClosePane | Action::CyclePane | Action::SwapPanes
+        | Action::RotateLayout | Action::ShowPaneNumbers => Group::Panes,
         Action::NewSession | Action::NextSession | Action::PrevSession | Action::JumpSession(_) => {
             Group::Sessions
         }

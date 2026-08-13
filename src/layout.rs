@@ -8,6 +8,15 @@ pub enum SplitDir {
     H,
 }
 
+/// Direction of a keyboard pane resize (mirrors the `Dir` focus directions).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResizeDir {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
 /// Layout tree node. `Split` carries a stable id so mouse drags can target it.
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -84,6 +93,29 @@ impl LayoutTree {
         self.root.as_ref().is_some_and(|r| pane_ids(r, &mut Vec::new()).contains(&pane_id))
     }
 
+    /// Nudge the ratio of the split that separates `pane_id` from its neighbor
+    /// in `dir`. Only splits whose axis matches the direction move (Left/Right
+    /// for vertical splits, Up/Down for horizontal); the nearest matching
+    /// ancestor split wins. Returns false when no pane or no matching split.
+    pub fn resize_pane(&mut self, pane_id: u64, dir: ResizeDir, delta: f32) -> bool {
+        let Some(root) = self.root.as_mut() else { return false };
+        resize_pane_at(root, pane_id, dir, delta)
+    }
+
+    /// Swap the focused pane with its sibling: exchange the two children of the
+    /// pane's nearest ancestor split. Returns false when there is no sibling.
+    pub fn swap_with_sibling(&mut self, pane_id: u64) -> bool {
+        let Some(root) = self.root.as_mut() else { return false };
+        swap_sibling_at(root, pane_id)
+    }
+
+    /// Rotate the layout: mirror every split left/right and top/bottom.
+    pub fn mirror(&mut self) {
+        if let Some(root) = self.root.as_mut() {
+            mirror_at(root);
+        }
+    }
+
     /// Pane ids in tree (depth-first) order.
     pub fn pane_ids(&self) -> Vec<u64> {
         match &self.root {
@@ -153,6 +185,82 @@ fn remove_from(n: Node, pane_id: u64) -> Option<Node> {
                 (None, None) => None,
             }
         }
+    }
+}
+
+/// True when the subtree `n` contains `pane_id`.
+fn tree_contains(n: &Node, pane_id: u64) -> bool {
+    match n {
+        Node::Pane { id } => *id == pane_id,
+        Node::Split { a, b, .. } => tree_contains(a, pane_id) || tree_contains(b, pane_id),
+    }
+}
+
+/// Sign of the ratio change for `dir` given which side of its split the pane
+/// sits on (`a` = left/top, `b` = right/bottom). Negative shrinks the pane.
+fn resize_sign(dir: ResizeDir, in_a: bool) -> f32 {
+    match (dir, in_a) {
+        (ResizeDir::Left, true)
+        | (ResizeDir::Right, false)
+        | (ResizeDir::Up, true)
+        | (ResizeDir::Down, false) => -1.0,
+        _ => 1.0,
+    }
+}
+
+fn resize_pane_at(n: &mut Node, pane_id: u64, dir: ResizeDir, delta: f32) -> bool {
+    match n {
+        Node::Split { dir: split_dir, ratio, a, b, .. } => {
+            let axis_matches = match split_dir {
+                SplitDir::V => matches!(dir, ResizeDir::Left | ResizeDir::Right),
+                SplitDir::H => matches!(dir, ResizeDir::Up | ResizeDir::Down),
+            };
+            if !axis_matches {
+                return false;
+            }
+            let in_a = tree_contains(a, pane_id);
+            let in_b = tree_contains(b, pane_id);
+            if !in_a && !in_b {
+                return false;
+            }
+            // The nearest ancestor split with a matching axis wins: try the
+            // deeper split first, fall back to adjusting here.
+            if (in_a && resize_pane_at(a, pane_id, dir, delta))
+                || (in_b && resize_pane_at(b, pane_id, dir, delta))
+            {
+                return true;
+            }
+            *ratio = (*ratio + resize_sign(dir, in_a) * delta).clamp(0.05, 0.95);
+            true
+        }
+        Node::Pane { .. } => false,
+    }
+}
+
+fn swap_sibling_at(n: &mut Node, pane_id: u64) -> bool {
+    match n {
+        Node::Split { a, b, .. } => {
+            let a_is_pane = matches!(&**a, Node::Pane { id } if *id == pane_id);
+            let b_is_pane = matches!(&**b, Node::Pane { id } if *id == pane_id);
+            if a_is_pane || b_is_pane {
+                std::mem::swap(a, b);
+                return true;
+            }
+            (tree_contains(a, pane_id) && swap_sibling_at(a, pane_id))
+                || (tree_contains(b, pane_id) && swap_sibling_at(b, pane_id))
+        }
+        Node::Pane { .. } => false,
+    }
+}
+
+fn mirror_at(n: &mut Node) {
+    match n {
+        Node::Split { a, b, .. } => {
+            std::mem::swap(a, b);
+            mirror_at(a);
+            mirror_at(b);
+        }
+        Node::Pane { .. } => {}
     }
 }
 
@@ -287,6 +395,102 @@ mod tests {
         // A second close of the same (now stale) pane is a no-op, not empty.
         assert!(!tree.remove_pane(2));
         assert_eq!(tree.pane_count(), 1);
+    }
+
+    fn split_ratio(tree: &LayoutTree, split_id: u64) -> f32 {
+        let mut r = -1.0;
+        let mut find = |n: &Node| {
+            if let Node::Split { id, ratio, .. } = n {
+                if *id == split_id {
+                    r = *ratio;
+                }
+            }
+        };
+        // Walk the tree manually (tests-only helper).
+        fn walk(n: &Node, f: &mut impl FnMut(&Node)) {
+            f(n);
+            if let Node::Split { a, b, .. } = n {
+                walk(a, f);
+                walk(b, f);
+            }
+        }
+        walk(tree.root.as_ref().unwrap(), &mut find);
+        r
+    }
+
+    #[test]
+    fn resize_left_shrinks_pane_on_left_side() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V); // split id 1, ratio 0.5, pane 1 in a
+        let before = split_ratio(&tree, 1);
+        assert!(tree.resize_pane(1, ResizeDir::Left, 0.05));
+        assert!(split_ratio(&tree, 1) < before, "left child resizing left must shrink");
+        let mid = split_ratio(&tree, 1);
+        assert!(tree.resize_pane(2, ResizeDir::Left, 0.05));
+        assert!(split_ratio(&tree, 1) > mid, "right child resizing left must grow");
+    }
+
+    #[test]
+    fn resize_right_is_the_mirror_of_left() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        let before = split_ratio(&tree, 1);
+        assert!(tree.resize_pane(1, ResizeDir::Right, 0.05));
+        assert!(split_ratio(&tree, 1) > before);
+        let mid = split_ratio(&tree, 1);
+        assert!(tree.resize_pane(2, ResizeDir::Right, 0.05));
+        assert!(split_ratio(&tree, 1) < mid);
+    }
+
+    #[test]
+    fn resize_vertical_dir_does_nothing_on_h_split() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::H);
+        let before = split_ratio(&tree, 1);
+        assert!(!tree.resize_pane(1, ResizeDir::Left, 0.05), "axis mismatch must no-op");
+        assert_eq!(split_ratio(&tree, 1), before);
+        assert!(tree.resize_pane(1, ResizeDir::Up, 0.05), "axis match must work");
+    }
+
+    #[test]
+    fn resize_on_single_pane_noops() {
+        let mut tree = LayoutTree::new(1);
+        assert!(!tree.resize_pane(1, ResizeDir::Left, 0.05));
+    }
+
+    #[test]
+    fn resize_nudges_nearest_ancestor_split() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V); // id 1: 1 | 2
+        tree.split(2, 3, SplitDir::V); // id 2: (1|2) then split 2 into 2|3? split pane 2 -> tree 1 | (2|3)
+        // Resize pane 3 left: nearest V-split ancestor is split 2 (2|3).
+        let before = split_ratio(&tree, 2);
+        assert!(tree.resize_pane(3, ResizeDir::Left, 0.05));
+        assert!(split_ratio(&tree, 2) > before, "pane 3 is the right child of split 2; left must grow it");
+    }
+
+    #[test]
+    fn swap_with_sibling_exchanges_pane_sides() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        assert!(tree.swap_with_sibling(1));
+        // Both panes survive; their order swapped (pane 1 now right of 2).
+        assert_eq!(tree.pane_ids(), vec![2, 1]);
+        assert!(tree.swap_with_sibling(1), "swapping twice swaps back to the original order");
+        assert_eq!(tree.pane_ids(), vec![1, 2]);
+    }
+
+    #[test]
+    fn mirror_flips_whole_layout() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        tree.split(1, 3, SplitDir::V); // 1 -> (1|3) then split 1? order of ids
+        let before: Vec<u64> = tree.pane_ids();
+        tree.mirror();
+        let after: Vec<u64> = tree.pane_ids();
+        assert_eq!(after.len(), before.len());
+        assert_ne!(after, before, "mirror must reorder panes");
+        assert_eq!(after.iter().copied().sum::<u64>(), before.iter().copied().sum::<u64>());
     }
 
     #[test]

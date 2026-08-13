@@ -82,23 +82,24 @@ persistent kumo.
   native types (arrays, tables, booleans). The flat format still reads as a
   fallback (same merge pattern as the legacy `~/.kumo`); the v1 schema that
   1.0 freezes is the TOML schema.
-- ✳️ **Custom leader keys**: the leader chord is configurable via
+- ✅ **Custom leader keys**: the leader chord is configurable via
   `[keymap] leader = "ctrl+b"` (`src/config.rs`, parsed in `src/app/bindings.rs`),
-  with clear fallback + warning on invalid values. **Per-mode keymaps**
-  (leader / popup — normal mode is pure passthrough to the PTY, so it has no
-  command surface to remap) still pending.
-- ✳️ **Keymap data-driven** (plumbing done, config-facing remap pending): the
-  hard-coded `leader_command` dispatch (`src/app.rs`) is now a single
-  `BINDINGS` table in `src/app/bindings.rs` — each entry a dispatch chord +
-  action, and the same table feeds the dispatch, the leader-mode hint, and the
-  `leader+?` showcase, so they never drift. Making bindings remappable from
-  `config.toml` is still to do, as are the **missing stock bindings**:
-  **keyboard resize** (`leader+H/J/K/L` — today only mouse-drag resize exists),
-  swap/rotate panes, and show-pane-numbers (`leader+q`). Mouse gestures stay
-  fixed: drag-resize, the context menu, and selection are positional
-  hit-testing, not key sequences, so they are deliberately **not** remappable.
-- ✳️ **Config expansion** (`src/config.rs`): `leader` landed with validation;
-  `keymap` bindings and `follow-workspace` still pending.
+  with clear fallback + warning on invalid values. Per-mode keymaps for
+  **popups** (menu / context-menu / popup navigation) stay deliberately fixed —
+  like tmux, only the command bindings are remappable.
+- ✅ **Keymap data-driven**: the hard-coded `leader_command` dispatch
+  (`src/app.rs`) is now a single keymap table in `src/app/bindings.rs` — each
+  entry a dispatch chord + action, and the same table feeds the dispatch, the
+  leader-mode hint, and the `leader+?` showcase, so they never drift. Bindings
+  are remappable from `config.toml` (`[keymap.bindings]`, e.g.
+  `s = "split-vertical"`), with invalid chords/actions ignored after a warning.
+  The **missing stock bindings** landed too: **keyboard resize**
+  (`leader+H/J/K/L`), swap-panes (`leader+s`), rotate-layout (`leader+o`), and
+  show-pane-numbers (`leader+q`). Mouse gestures stay fixed: drag-resize, the
+  context menu, and selection are positional hit-testing, not key sequences,
+  so they are deliberately **not** remappable.
+- ✳️ **Config expansion** (`src/config.rs`): `leader` and `keymap.bindings`
+  landed with validation; `follow-workspace` still pending.
 - The `config` item in the MENU dropdown (today "coming soon") opens the config
   file for editing.
 - **Follow workspace** — the daemon holds each pane's cwd and the workspace

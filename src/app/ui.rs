@@ -118,6 +118,8 @@ impl App {
             }
         }
 
+        self.render_pane_numbers(f);
+
         if self.sidebar_open {
             self.render_sidebar(f, size);
         }
@@ -128,6 +130,28 @@ impl App {
         self.render_name_popup(f);
         self.render_update_notice(f);
         self.render_keybind_overlay(f);
+    }
+
+    /// Draw the `leader+q` pane-number overlay: a numbered badge on each pane.
+    /// Expires after `PANE_NUMBERS_TIMEOUT` even without a keypress.
+    fn render_pane_numbers(&mut self, f: &mut Frame) {
+        let Some(started) = self.pane_numbers else { return };
+        if started.elapsed() > super::PANE_NUMBERS_TIMEOUT {
+            self.pane_numbers = None;
+            return;
+        }
+        let ids = self.sessions[self.active].tree.pane_ids();
+        if ids.len() < 2 {
+            return;
+        }
+        let style = Style::default().fg(RColor::Black).bg(ACCENT).add_modifier(Modifier::BOLD);
+        let geom = self.active_geom();
+        for (i, pid) in ids.iter().enumerate() {
+            let Some(digit) = char::from_digit((i + 1) as u32, 10) else { continue };
+            let Some(pg) = geom.panes.iter().find(|p| p.pane_id == *pid) else { continue };
+            let inner = pg.inner();
+            put(f, inner.x + inner.width / 2, inner.y + inner.height / 2, &digit.to_string(), style);
+        }
     }
 
     /// Display label of a pane in the active session, without the focus/zoom

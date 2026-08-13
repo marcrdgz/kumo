@@ -524,6 +524,7 @@ mod tests {
             mode: Mode::Normal,
             leader: super::super::bindings::LEADER,
             keymap: super::super::bindings::build_keymap(&HashMap::new()),
+            pane_numbers: None,
             drag: None,
             sel: None,
             pending_click: None,

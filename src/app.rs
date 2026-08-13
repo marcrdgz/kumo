@@ -12,7 +12,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Color as RColor;
 use ratatui::Terminal;
 
-use crate::layout::{self, LayoutTree, SplitDir};
+use crate::layout::{self, LayoutTree, ResizeDir, SplitDir};
 use crate::agents::AgentStatus;
 use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
@@ -38,6 +38,11 @@ mod util;
 /// (`App::run`); the daemon renders to a `TestBackend` instead.
 #[cfg_attr(unix, allow(dead_code))]
 type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
+const RESIZE_STEP: f32 = 0.05;
+/// How long the `leader+q` pane-number overlay stays up without a keypress.
+const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Catppuccin mocha chrome colors (sidebars, status bar, chrome borders).
 const PANEL_SEP: RColor = RColor::Rgb(0x17, 0x18, 0x26); // surface0, dark navy
@@ -93,6 +98,8 @@ pub struct App {
     /// The effective leader keymap: stock bindings plus `[keymap.bindings]`
     /// overrides. Drives dispatch, the leader hint, and the showcase.
     keymap: Vec<Binding>,
+    /// When the `leader+q` pane-number overlay is up (`Some(deadline)`).
+    pane_numbers: Option<Instant>,
     drag: Option<Drag>,
     sel: Option<Sel>,
     pending_click: Option<PendingClick>,
@@ -223,6 +230,7 @@ impl App {
             mode: Mode::Normal,
             leader,
             keymap,
+            pane_numbers: None,
             drag: None,
             sel: None,
             pending_click: None,
@@ -758,6 +766,12 @@ impl App {
             self.on_overlay_key(key);
             return Ok(());
         }
+        // The `leader+q` overlay grabs keys while up: a digit jumps to that
+        // pane, any other key just dismisses it.
+        if self.pane_numbers.is_some() {
+            self.on_pane_number_key(key);
+            return Ok(());
+        }
 
         let leader = self.leader.is_leader(key);
         match self.mode {
@@ -806,7 +820,16 @@ impl App {
             Action::ClosePane => self.close_focused(),
             Action::Zoom => self.sessions[self.active].zoom = !self.sessions[self.active].zoom,
             Action::Focus(dir) => self.focus_dir(dir),
+            Action::Resize(dir) => self.resize_focused(dir),
             Action::CyclePane => self.cycle_pane(),
+            Action::SwapPanes => {
+                let focus = self.sessions[self.active].tree.focus;
+                if !self.sessions[self.active].tree.swap_with_sibling(focus) {
+                    self.notice = Some(("no sibling pane to swap".to_string(), Instant::now()));
+                }
+            }
+            Action::RotateLayout => self.sessions[self.active].tree.mirror(),
+            Action::ShowPaneNumbers => self.pane_numbers = Some(Instant::now()),
             Action::NextSession => self.cycle_session(1),
             Action::PrevSession => self.cycle_session(-1),
             Action::JumpSession(n) => {
@@ -825,6 +848,30 @@ impl App {
             Action::ShowKeybinds => self.open_keybind_overlay(),
         }
         Ok(())
+    }
+
+    /// Nudge the focused pane's split in `dir` (`leader+H/J/K/L`).
+    fn resize_focused(&mut self, dir: ResizeDir) {
+        let focus = self.sessions[self.active].tree.focus;
+        if !self.sessions[self.active].tree.resize_pane(focus, dir, RESIZE_STEP) {
+            self.notice = Some(("nothing to resize in that direction".to_string(), Instant::now()));
+        }
+    }
+
+    /// Handle a key while the `leader+q` pane-number overlay is up: a digit
+    /// focuses that pane, any other key dismisses.
+    fn on_pane_number_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                let ids = self.sessions[self.active].tree.pane_ids();
+                if let Some(&pid) = ids.get(n - 1) {
+                    self.set_focus(pid);
+                }
+            }
+            _ => {}
+        }
+        self.pane_numbers = None;
     }
 
     fn cycle_session(&mut self, delta: isize) {
