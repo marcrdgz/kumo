@@ -326,6 +326,21 @@ impl Pane {
         ProcessSnapshot::capture()?.ai_cli_in_tree(root)
     }
 
+    /// The current working directory this pane is *actually* in, used by
+    /// follow-workspace. Prefers the shell-reported pwd (OSC 7 / OSC 9 /
+    /// OSC 1337), which is authoritative and the only signal that works for
+    /// remote `ssh` panes; falls back to reading the deepest descendant
+    /// process's OS-level cwd (zero shell setup).
+    pub fn detected_cwd(&self) -> Option<PathBuf> {
+        if let Some(p) = self.vt.pwd() {
+            return Some(p);
+        }
+        let root = self.pty.process_id()?;
+        let snap = ProcessSnapshot::capture()?;
+        let leaf = snap.deepest_descendant(root).unwrap_or(root);
+        process_cwd(leaf)
+    }
+
     /// Milliseconds since the pane last produced output. Debug/diagnostics.
     pub fn last_output_age(&self) -> Duration {
         self.last_output.elapsed()
@@ -644,6 +659,70 @@ impl ProcessSnapshot {
                 stack.extend(kids);
             }
         }
+        None
+    }
+
+    /// The deepest living descendant of `root` (a process with no children),
+    /// or `root` itself when it is a leaf. The leaf is where you *are*: a
+    /// shell's cwd only moves when a child (editor, `cd`ed tool) forked from
+    /// it, so its deepest child is the most current location.
+    pub fn deepest_descendant(&self, root: u32) -> Option<u32> {
+        let mut best: Option<(usize, u32)> = None;
+        let mut stack = vec![(root, 0usize)];
+        let mut seen = HashSet::new();
+        while let Some((pid, depth)) = stack.pop() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            if best.map(|(d, _)| depth > d).unwrap_or(true) {
+                best = Some((depth, pid));
+            }
+            if let Some(kids) = self.children.get(&pid) {
+                for &k in kids {
+                    stack.push((k, depth + 1));
+                }
+            }
+        }
+        best.map(|(_, pid)| pid)
+    }
+}
+
+/// OS-level working directory of `pid`. Linux reads `/proc/<pid>/cwd`; macOS
+/// asks `lsof` for the process's `cwd` file descriptor (a reliable full path,
+/// unlike the partial vnode paths `proc_pidinfo` returns). Other platforms
+/// have no supported mechanism.
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("lsof")
+            .arg("-a")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-d")
+            .arg("cwd")
+            .arg("-Fn")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        for line in out.stdout.split(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(line);
+            if let Some(path) = line.strip_prefix('n') {
+                if path.starts_with('/') {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
         None
     }
 }
@@ -1323,6 +1402,23 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         let snap = snap.expect("ps should run on this platform");
         assert!(!snap.children.is_empty());
         assert!(!snap.names.is_empty());
+    }
+
+    #[test]
+    fn deepest_descendant_returns_leaf() {
+        let snap = ProcessSnapshot {
+            children: HashMap::from([(1, vec![2, 3]), (2, vec![4]), (4, vec![5])]),
+            names: HashMap::new(),
+        };
+        assert_eq!(snap.deepest_descendant(1), Some(5), "deepest child wins");
+        assert_eq!(snap.deepest_descendant(3), Some(3), "a leaf is its own deepest descendant");
+        assert_eq!(snap.deepest_descendant(2), Some(5));
+    }
+
+    #[test]
+    fn process_cwd_reads_current_process() {
+        let cwd = process_cwd(std::process::id()).expect("our own cwd must be readable");
+        assert_eq!(cwd, std::env::current_dir().unwrap(), "process_cwd(self) must match current_dir");
     }
 
     #[test]

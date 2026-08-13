@@ -8,6 +8,8 @@ use super::App;
 
 /// How often the sidebar re-reads the git branch of each session's workspace.
 const BRANCH_REFRESH: Duration = Duration::from_secs(3);
+/// How often to re-scan the focused pane's cwd for follow-workspace.
+const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
 /// How often to re-scan pane process trees for an AI CLI (opencode/claude).
 const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// How often to recompute agent status from the terminal buffer even when the
@@ -40,6 +42,36 @@ impl App {
     pub(super) fn session_branch(&self, idx: usize) -> Option<BranchInfo> {
         let ws = &self.sessions[idx].workspace;
         self.branch_cache.get(ws).and_then(|(b, _)| b.clone())
+    }
+
+    /// Follow the workspace to the focused pane's actual cwd (`[terminal]
+    /// new-cwd = "follow"`, the default), at most every `FOLLOW_INTERVAL`.
+    /// The session workspace drives new splits, the sidebar, and the git
+    /// branch, so updating it here makes all of them follow. Only real local
+    /// directories are adopted (a remote `ssh` pane's OSC 7 path is not), so
+    /// new panes never spawn into a nonexistent cwd.
+    pub(super) fn refresh_workspace_follow(&mut self) {
+        if !matches!(crate::config::new_cwd(), crate::config::NewCwd::Follow) {
+            return;
+        }
+        if self.last_follow_scan.elapsed() < FOLLOW_INTERVAL {
+            return;
+        }
+        self.last_follow_scan = Instant::now();
+        let focus = self.sessions[self.active].tree.focus;
+        let cwd = {
+            let Some(pane) = self.panes.get_mut(&focus) else { return };
+            pane.detected_cwd()
+        };
+        let Some(cwd) = cwd else { return };
+        if !cwd.is_dir() {
+            return;
+        }
+        let session = &mut self.sessions[self.active];
+        if session.workspace != cwd {
+            session.workspace = cwd.clone();
+        }
+        self.workspace = cwd;
     }
 
     /// Mark plain shell panes as AI CLI panes when opencode/claude is running

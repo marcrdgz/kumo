@@ -116,6 +116,8 @@ pub struct App {
     branch_cache: HashMap<PathBuf, (Option<BranchInfo>, Instant)>,
     /// When the pane process tree was last scanned for an AI CLI.
     last_ai_scan: Instant,
+    /// When the follow-workspace scan last ran (only meaningful in Follow mode).
+    last_follow_scan: Instant,
     /// When the agent-status debug log was last written (throttle).
     last_agent_debug: Instant,
     /// When agent status was last recomputed from the terminal buffer (so a
@@ -245,6 +247,7 @@ impl App {
             sidebar_width: 26,
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
+            last_follow_scan: Instant::now(),
             last_agent_debug: Instant::now(),
             last_status_refresh: Instant::now(),
             agent_status_cache: HashMap::new(),
@@ -276,6 +279,7 @@ impl App {
                     app.new_session()?;
                 }
             }
+            Launch::New(Some(p)) if p.is_dir() => app.new_session_in(p)?,
             Launch::New(_) => app.new_session()?,
             #[cfg(unix)]
             Launch::Resume(path) => {
@@ -560,10 +564,33 @@ impl App {
 
     /// Create a fresh session in `workspace` and focus it. The workspace is the
     /// `kumo new [WORKSPACE]` dir, or (against a running daemon) the client's
-    /// cwd sent over the wire.
+    /// cwd sent over the wire; an explicit dir always wins over the
+    /// `[terminal] new-cwd` policy.
     fn new_session_in(&mut self, workspace: PathBuf) -> Result<()> {
-        self.workspace = workspace;
+        self.workspace = self.resolve_workspace(Some(&workspace));
         self.new_session()
+    }
+
+    /// Resolve where a session's panes should open, applying the `[terminal]
+    /// new-cwd` policy. An explicit directory (CLI arg / client cwd) always
+    /// wins; otherwise `Follow`/`Current` use the launch directory, `Home`
+    /// uses `$HOME`, and `Fixed(path)` uses the configured path.
+    fn resolve_workspace(&self, explicit: Option<&PathBuf>) -> PathBuf {
+        if let Some(p) = explicit {
+            if p.is_dir() {
+                return p.clone();
+            }
+        }
+        match crate::config::new_cwd() {
+            crate::config::NewCwd::Follow | crate::config::NewCwd::Current => self.workspace.clone(),
+            crate::config::NewCwd::Home => std::env::var("HOME")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|p| p.is_dir())
+                .unwrap_or_else(|| self.workspace.clone()),
+            crate::config::NewCwd::Fixed(p) if p.is_dir() => p,
+            _ => self.workspace.clone(),
+        }
     }
 
     /// Smallest free `session-N` name (N = 1, 2, ...).
@@ -582,7 +609,7 @@ impl App {
     fn new_session_with_name(&mut self, name: String) -> Result<()> {
         let sid = self.next_session_id();
         let pid = Pty::next_pane_id();
-        let workspace = self.workspace.clone();
+        let workspace = self.resolve_workspace(None);
         let (cols, rows) = self.pane_dims();
         let pane = Pane::spawn(
             sid,

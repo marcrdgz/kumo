@@ -539,6 +539,7 @@ mod tests {
             sidebar_width: 26,
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
+            last_follow_scan: Instant::now(),
             last_agent_debug: Instant::now(),
             last_status_refresh: Instant::now(),
             agent_status_cache: HashMap::new(),

@@ -124,9 +124,66 @@ pub struct Config {
     /// `[keymap.bindings]` overrides: key/chord string → action id
     /// (e.g. `"s"` → `"split-vertical"`).
     pub keymap_bindings: HashMap<String, String>,
+    /// Policy for the session's working directory (`[terminal] new-cwd`),
+    /// defaulting to `Follow`.
+    pub new_cwd: NewCwdMode,
+    /// Fixed working directory used when `new-cwd = "fixed"`
+    /// (`[terminal] fixed-cwd`).
+    pub fixed_cwd: Option<PathBuf>,
+}
+
+/// How the session's working directory is chosen (`[terminal] new-cwd`). The
+/// resolved [`NewCwd`] (where the fixed path lives) is produced by
+/// [`new_cwd()`].
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NewCwdMode {
+    /// Follow the focused pane's detected cwd live (default).
+    #[default]
+    Follow,
+    /// The directory kumo was launched from, frozen at session creation.
+    Current,
+    /// `$HOME`.
+    Home,
+    /// An explicit `[terminal] fixed-cwd` path.
+    Fixed,
+}
+
+/// Resolved `new-cwd` policy, carrying the fixed path when configured.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewCwd {
+    Follow,
+    Current,
+    Home,
+    Fixed(PathBuf),
+}
+
+/// Parse a `new-cwd` value. Unknown values warn and fall back to `Follow`.
+fn parse_new_cwd(v: &str) -> NewCwdMode {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "follow" => NewCwdMode::Follow,
+        "current" => NewCwdMode::Current,
+        "home" => NewCwdMode::Home,
+        "fixed" => NewCwdMode::Fixed,
+        other => {
+            log::warn!("kumo: ignoring invalid new-cwd {other:?}; using follow");
+            NewCwdMode::Follow
+        }
+    }
 }
 
 impl Config {
+    /// Normalize the new-cwd policy: a `Fixed` mode needs a valid `fixed-cwd`
+    /// directory, else it falls back to `Current` with a warning.
+    fn normalize_new_cwd(&mut self) {
+        if self.new_cwd == NewCwdMode::Fixed {
+            let ok = self.fixed_cwd.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+            if !ok {
+                log::warn!("kumo: new-cwd = \"fixed\" needs a valid fixed-cwd; using current");
+                self.new_cwd = NewCwdMode::Current;
+            }
+        }
+    }
+
     fn from_map(map: &HashMap<String, String>) -> Self {
         let mut cfg = Config::default();
         if let Some(v) = map.get("ai-cmd").or_else(|| map.get("ai_cmd")) {
@@ -155,6 +212,19 @@ impl Config {
                 cfg.leader = Some(v.to_string());
             }
         }
+        if let Some(v) = map.get("new-cwd") {
+            let v = unquote(v);
+            if !v.is_empty() {
+                cfg.new_cwd = parse_new_cwd(v);
+            }
+        }
+        if let Some(v) = map.get("fixed-cwd") {
+            let v = unquote(v);
+            if !v.is_empty() {
+                cfg.fixed_cwd = Some(PathBuf::from(v));
+            }
+        }
+        cfg.normalize_new_cwd();
         cfg
     }
 
@@ -167,7 +237,14 @@ impl Config {
                 self.ai_cmd = Some(split_cmd(&v));
             }
         }
-        if let Some(v) = toml.shell {
+        // `[terminal] shell` is canonical; a top-level `shell` is accepted as a
+        // deprecated alias, but the section wins (same pattern as `leader`).
+        let shell = toml
+            .terminal
+            .as_ref()
+            .and_then(|t| t.shell.clone())
+            .or(toml.shell);
+        if let Some(v) = shell {
             if !v.is_empty() {
                 self.shell = Some(v);
             }
@@ -193,6 +270,17 @@ impl Config {
         if let Some(v) = toml.keymap.and_then(|k| k.bindings) {
             self.keymap_bindings.extend(v);
         }
+        if let Some(terminal) = toml.terminal {
+            if let Some(v) = terminal.new_cwd {
+                if !v.is_empty() {
+                    self.new_cwd = parse_new_cwd(&v);
+                }
+            }
+            if let Some(v) = terminal.fixed_cwd {
+                self.fixed_cwd = Some(v);
+            }
+        }
+        self.normalize_new_cwd();
     }
 }
 
@@ -207,12 +295,29 @@ struct Keymap {
     bindings: Option<HashMap<String, String>>,
 }
 
+/// The `[terminal]` table: terminal-behavior knobs (shell, session cwd
+/// policy). Unknown keys are ignored (serde default).
+#[derive(Default, serde::Deserialize)]
+struct TerminalSection {
+    /// Login shell used to spawn panes (canonical home; a top-level `shell`
+    /// is a deprecated alias).
+    shell: Option<String>,
+    /// Session working-directory policy: `follow` (default), `home`,
+    /// `current`, or `fixed`.
+    #[serde(rename = "new-cwd")]
+    new_cwd: Option<String>,
+    /// Directory used when `new-cwd = "fixed"`.
+    #[serde(rename = "fixed-cwd")]
+    fixed_cwd: Option<PathBuf>,
+}
+
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
 /// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
 #[derive(Default, serde::Deserialize)]
 struct TomlConfig {
     #[serde(rename = "ai-cmd", alias = "ai_cmd")]
     ai_cmd: Option<String>,
+    /// Deprecated top-level alias of `[terminal].shell`.
     shell: Option<String>,
     #[serde(rename = "update-check")]
     update_check: Option<bool>,
@@ -223,6 +328,8 @@ struct TomlConfig {
     /// Deprecated top-level alias of `[keymap].leader`.
     #[serde(rename = "leader")]
     leader_alias: Option<String>,
+    #[serde(rename = "terminal")]
+    terminal: Option<TerminalSection>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -373,6 +480,22 @@ pub fn leader() -> Option<String> {
 /// config sets no bindings (the stock keymap applies).
 pub fn keymap_bindings() -> HashMap<String, String> {
     load_config().keymap_bindings
+}
+
+/// The resolved session working-directory policy (`[terminal] new-cwd`):
+/// `Follow` (default), `Home`, `Current`, or `Fixed(path)`. A `Fixed` mode
+/// without a usable `fixed-cwd` was already normalized to `Current` at load.
+pub fn new_cwd() -> NewCwd {
+    let cfg = load_config();
+    match cfg.new_cwd {
+        NewCwdMode::Follow => NewCwd::Follow,
+        NewCwdMode::Current => NewCwd::Current,
+        NewCwdMode::Home => NewCwd::Home,
+        NewCwdMode::Fixed => match cfg.fixed_cwd {
+            Some(p) if p.is_dir() => NewCwd::Fixed(p),
+            _ => NewCwd::Current,
+        },
+    }
 }
 
 /// Split a command line string into program + args (space separated).
@@ -940,5 +1063,111 @@ mod tests {
         );
         let (prog, _) = ai_command();
         assert_eq!(prog, "opencode");
+    }
+
+    #[test]
+    fn new_cwd_defaults_to_follow() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-nc-default");
+        let home = scratch_dir("home-nc-default");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(new_cwd(), NewCwd::Follow, "new-cwd should default to follow");
+    }
+
+    #[test]
+    fn new_cwd_parses_flat_values() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let home = scratch_dir("home-nc-flat");
+        let cases = [
+            ("new-cwd = home\n", NewCwd::Home),
+            ("new-cwd = current\n", NewCwd::Current),
+            ("new-cwd = follow\n", NewCwd::Follow),
+        ];
+        for (i, (body, expect)) in cases.iter().enumerate() {
+            let cfg_dir = scratch_dir(&format!("cfg-nc-flat-{i}"));
+            write(&cfg_dir.join("config"), body);
+            let _guards = (
+                EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+                EnvGuard::set("HOME", &home.to_string_lossy()),
+            );
+            assert_eq!(&new_cwd(), expect, "flat {body:?}");
+        }
+    }
+
+    #[test]
+    fn new_cwd_fixed_uses_fixed_cwd_path() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-nc-fixed");
+        let home = scratch_dir("home-nc-fixed");
+        let project = scratch_dir("project-nc-fixed");
+        write(
+            &cfg_dir.join("config.toml"),
+            &format!("[terminal]\nnew-cwd = \"fixed\"\nfixed-cwd = \"{}\"\n", project.display()),
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(new_cwd(), NewCwd::Fixed(project));
+    }
+
+    #[test]
+    fn new_cwd_fixed_without_path_falls_back_to_current() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-nc-fixed-none");
+        let home = scratch_dir("home-nc-fixed-none");
+        write(&cfg_dir.join("config"), "new-cwd = fixed\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(new_cwd(), NewCwd::Current, "fixed without fixed-cwd must fall back to current");
+    }
+
+    #[test]
+    fn new_cwd_invalid_value_falls_back_to_follow() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-nc-bad");
+        let home = scratch_dir("home-nc-bad");
+        write(&cfg_dir.join("config.toml"), "[terminal]\nnew-cwd = \"banana\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(new_cwd(), NewCwd::Follow, "invalid new-cwd must fall back to follow");
+    }
+
+    #[test]
+    fn terminal_shell_wins_over_top_level_alias() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-term-shell");
+        let home = scratch_dir("home-term-shell");
+        write(
+            &cfg_dir.join("config.toml"),
+            "shell = \"/bin/bash\"\n[terminal]\nshell = \"/bin/fish\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("SHELL", "/bin/zsh"),
+        );
+        assert_eq!(default_shell(), "/bin/fish", "[terminal] shell must win over the top-level alias");
+    }
+
+    #[test]
+    fn top_level_shell_alias_still_read() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-shell-alias");
+        let home = scratch_dir("home-shell-alias");
+        write(&cfg_dir.join("config.toml"), "shell = \"/bin/bash\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("SHELL", "/bin/zsh"),
+        );
+        assert_eq!(default_shell(), "/bin/bash", "deprecated top-level shell must keep working");
     }
 }

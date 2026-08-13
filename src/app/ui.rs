@@ -27,6 +27,7 @@ impl App {
         let size = terminal.size()?;
         self.term_size = (size.width, size.height);
         self.refresh_branches();
+        self.refresh_workspace_follow();
         self.refresh_ai_cli();
         self.refresh_agent_statuses();
         self.log_agent_statuses();

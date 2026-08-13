@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr;
 
 // ---------------------------------------------------------------------------
@@ -335,6 +336,7 @@ pub const TERMINAL_OPT_COLOR_FOREGROUND: i32 = 11;
 pub const TERMINAL_OPT_COLOR_BACKGROUND: i32 = 12;
 pub const TERMINAL_OPT_COLOR_CURSOR: i32 = 13;
 pub const TERMINAL_OPT_COLOR_PALETTE: i32 = 14;
+pub const TERMINAL_OPT_PWD_CHANGED: i32 = 25;
 
 pub const TERMINAL_DATA_COLS: i32 = 1;
 pub const TERMINAL_DATA_ROWS: i32 = 2;
@@ -343,6 +345,7 @@ pub const TERMINAL_DATA_MOUSE_TRACKING: i32 = 11;
 /// Window title set via OSC 0 / OSC 2 (borrowed `GhosttyString`). Claude Code
 /// paints its live state here: a braille spinner while working, `✳ ` idle.
 pub const TERMINAL_DATA_TITLE: i32 = 12;
+pub const TERMINAL_DATA_PWD: i32 = 13;
 pub const TERMINAL_DATA_TOTAL_ROWS: i32 = 14;
 pub const TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
 pub const TERMINAL_DATA_COLOR_FOREGROUND: i32 = 18;
@@ -460,6 +463,16 @@ unsafe extern "C" {
 // Safe wrapper
 // ---------------------------------------------------------------------------
 
+/// Shared callback cell installed as the terminal's USERDATA. Holds the
+/// current pty writer (for query responses) and the last OSC 7 / OSC 9 /
+/// OSC 1337 reported pwd.
+struct CbCell {
+    writer: Option<*mut (dyn std::io::Write + Send)>,
+    /// Raw pwd bytes the shell reported (a `file://` URI for OSC 7, a bare
+    /// path for OSC 9 / OSC 1337). Empty when cleared or never reported.
+    pwd: Vec<u8>,
+}
+
 /// Write pty callback: forwards query responses to the installed pty writer.
 unsafe extern "C" fn write_pty_cb(
     _term: TerminalHandle,
@@ -470,15 +483,32 @@ unsafe extern "C" fn write_pty_cb(
     if userdata.is_null() {
         return;
     }
-    // USERDATA points at a heap `Option<*mut dyn Write + Send>` slot (None =
-    // no writer installed yet).
-    let cell: *mut Option<*mut (dyn std::io::Write + Send)> = userdata as *mut _;
-    let Some(writer) = *cell else {
+    // USERDATA points at a heap `CbCell`; `writer` is None until a writer is
+    // installed (`set_write_sink`).
+    let cell = userdata as *mut CbCell;
+    let Some(writer) = (*cell).writer else {
         return;
     };
     let writer = &mut *writer;
     let bytes = std::slice::from_raw_parts(data, len);
     let _ = writer.write_all(bytes);
+}
+
+/// Pwd changed callback (OSC 7 / OSC 9 / OSC 1337): record the reported value
+/// into the callback cell so `Terminal::pwd` can hand it out.
+unsafe extern "C" fn pwd_changed_cb(term: TerminalHandle, userdata: *mut c_void) {
+    if userdata.is_null() {
+        return;
+    }
+    let cell = userdata as *mut CbCell;
+    let mut slice = StringSlice { ptr: ptr::null(), len: 0 };
+    if ghostty_terminal_get(term, TERMINAL_DATA_PWD, &mut slice as *mut StringSlice as *mut c_void).is_ok() {
+        (*cell).pwd = if slice.ptr.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(slice.ptr, slice.len).to_vec()
+        };
+    }
 }
 
 /// Size callback: report the current terminal geometry for XTWINOPS queries.
@@ -520,6 +550,35 @@ unsafe extern "C" fn enquiry_cb(_term: TerminalHandle, _userdata: *mut c_void) -
     StringSlice { ptr: EMPTY.as_ptr(), len: 0 }
 }
 
+/// Percent-decode a `file://` URI path (`%20` → space, `%2F` → `/`).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode one hex nibble.
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// A viewport cell with resolved colors and a UTF-8 grapheme.
 #[derive(Clone, Debug)]
 pub struct RenderCell {
@@ -556,10 +615,9 @@ pub struct Terminal {
     default_bg: ColorRgb,
     /// Cached scrollbar state from the last `refresh`.
     scrollbar: TerminalScrollbar,
-    /// Heap cell holding the active pty writer as an `Option` (None = not
-    /// installed). Its address is the USERDATA passed to the write_pty
-    /// callback, which writes responses through the current writer.
-    sink_cell: Box<Option<*mut (dyn std::io::Write + Send)>>,
+    /// Heap cell holding the callback state (active pty writer + last reported
+    /// pwd). Its address is the USERDATA passed to the callbacks.
+    cell: Box<CbCell>,
 }
 
 impl Terminal {
@@ -605,13 +663,15 @@ impl Terminal {
             ghostty_terminal_set(term, TERMINAL_OPT_COLOR_PALETTE, full_palette.as_ptr() as *const c_void);
         }
 
-        // The write_pty callback needs a stable place to find the current pty
-        // writer. Allocate a heap cell and use it as the USERDATA pointer.
-        let sink_cell: Box<Option<*mut (dyn std::io::Write + Send)>> = Box::new(None);
-        let userdata = (&*sink_cell) as *const Option<*mut (dyn std::io::Write + Send)> as *mut c_void;
+        // The callbacks need a stable place to find the current pty writer
+        // and the last reported pwd. Allocate a heap cell and use it as the
+        // USERDATA pointer.
+        let cell: Box<CbCell> = Box::new(CbCell { writer: None, pwd: Vec::new() });
+        let userdata = (&*cell) as *const CbCell as *mut c_void;
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_PWD_CHANGED, pwd_changed_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const c_void);
@@ -627,7 +687,7 @@ impl Terminal {
             default_fg: fg,
             default_bg: bg,
             scrollbar: TerminalScrollbar::default(),
-            sink_cell,
+            cell,
         })
     }
 
@@ -635,7 +695,36 @@ impl Terminal {
     /// must point into a stable heap allocation (e.g. a `Box`'s contents) and
     /// stay valid for the lifetime of the terminal.
     pub fn set_write_sink(&mut self, writer: *mut (dyn std::io::Write + Send)) {
-        *self.sink_cell = Some(writer);
+        self.cell.writer = Some(writer);
+    }
+
+    /// The last working directory reported by the pane's shell via OSC 7
+    /// (`file://` URI), OSC 9, or OSC 1337, decoded to a local path. Returns
+    /// `None` when the shell never reported one (or cleared it).
+    pub fn pwd(&self) -> Option<PathBuf> {
+        if self.cell.pwd.is_empty() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&self.cell.pwd);
+        let path = if let Some(rest) = raw.strip_prefix("file://") {
+            // `file:///tmp/x` -> `/tmp/x`; `file://localhost/tmp/x` -> `/tmp/x`.
+            // A non-local authority (remote ssh pane) is kept as-is: it is not
+            // a local directory, so the follow logic will not adopt it.
+            let path = if let Some((authority, tail)) = rest.split_once('/') {
+                if authority.is_empty() || authority == "localhost" {
+                    format!("/{tail}")
+                } else {
+                    format!("{authority}/{tail}")
+                }
+            } else {
+                rest.to_string()
+            };
+            percent_decode(&path)
+        } else {
+            raw.into_owned()
+        };
+        let pb = PathBuf::from(path);
+        (!pb.as_os_str().is_empty()).then_some(pb)
     }
 
     /// Install a linear selection covering two viewport coordinates
@@ -1175,6 +1264,27 @@ mod tests {
         let cells = collect(&mut t);
         let texts: Vec<&str> = cells.iter().map(|(_, _, s)| s.as_str()).collect();
         assert_eq!(texts, vec!["r", "e", "d", "b", "o", "l", "d", "p", "l", "a", "i", "n"]);
+    }
+
+    #[test]
+    fn reports_pwd_from_osc7_uri() {
+        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        assert_eq!(t.pwd(), None, "no pwd before any OSC 7");
+        t.write(b"\x1b]7;file:///tmp/example\x07");
+        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/tmp/example").as_path()));
+        // A bare OSC 9 path also counts.
+        t.write(b"\x1b]9;9;/tmp/osc9\x1b\\");
+        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/tmp/osc9").as_path()));
+        // Clearing the pwd (empty OSC 7) yields None again.
+        t.write(b"\x1b]7;\x07");
+        assert_eq!(t.pwd(), None);
+    }
+
+    #[test]
+    fn pwd_decodes_localhost_and_percent_encoding() {
+        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        t.write(b"\x1b]7;file://localhost/Users/my%20dir/proj\x07");
+        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/my dir/proj").as_path()));
     }
 
     #[test]
