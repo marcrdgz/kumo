@@ -158,7 +158,7 @@ fn main() -> Result<()> {
 fn run_foreground(launch: Launch) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, crossterm::event::EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -166,7 +166,7 @@ fn run_foreground(launch: Launch) -> Result<()> {
 
     // Restore the terminal regardless of how the app exits.
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     let _ = terminal.show_cursor();
     let _ = terminal.flush();
 

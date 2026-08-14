@@ -146,10 +146,21 @@ scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
   no restart to pick up changes; lands here so themes are instantly tweakable.
 - **Status bar**: customizable widgets (branch, session, agent status, hostname,
   clock) — includes the status-bar **layout** config deferred from 0.4.0.
-- **Sidebar**: toggle/order sections; pane titles and border styling.
+- **Sidebar**: toggle/order sections; pane titles and border styling. The
+  SESSIONS and AGENTS sections become two full **tabs** in the panel (today two
+  stacked, independently-scrolling regions in `src/app/sidebar.rs`).
+- **Popup input editing**: `cmd+backspace` / `ctrl+backspace` (delete word)
+  and `cmd+delete` / `ctrl+delete` (delete forward word) in the rename / new
+  popups. Popup keymaps stay deliberately fixed (see 0.4.0) — this is editing
+  nicety, not remapping.
 
 ## 🔍 0.6.0 — Copy-mode, search & pane plumbing
 
+- **Tabs (windows) per session**: each session owns an ordered list of tabs,
+  each tab its own named pane tree — one session can hold several workspaces /
+  worktrees under a single leader. Adds the intermediate "window" level the
+  flat model (sessions → panes) skipped; the layout tree, split keys, and the
+  state contract `v1` (0.3.0) are extended here, before the 1.0 schema freeze.
 - **Copy-mode**: vi-style keyboard selection over scrollback + `/` search — the
   biggest missing multiplexer feature (the scrollback already exists in ghostty;
   only the selection/search UI is missing).
@@ -183,9 +194,9 @@ scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
 
 Full customization + solid persistence, meeting the gate criteria above — the
 **TOML** config schema is the frozen v1, macOS + Linux are first-class, Windows
-stays experimental. The deliberately **flat model** (sessions → pane tree, no
-intermediate "windows") gets documented as an explicit design decision, so it
-never resurfaces as a perpetual issue.
+stays experimental. The layout model — **sessions → tabs → panes**, tabs
+landing in 0.6.0 — gets documented as an explicit design decision, so it never
+resurfaces as a perpetual issue.
 
 ---
 

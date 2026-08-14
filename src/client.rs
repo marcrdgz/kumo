@@ -16,6 +16,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 
 use crate::app::Launch;
 use crate::protocol::{self, ClientMsg, FrameMsg, ServerMsg};
@@ -211,7 +212,7 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture, Hide, Clear(ClearType::All))?;
+    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture, EnableBracketedPaste, Hide, Clear(ClearType::All))?;
 
     // Input thread: reads crossterm events and writes them straight to the
     // daemon over its own socket clone. Stopped via the flag so a restart can
@@ -260,7 +261,7 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
             Ok(Exit::Restarting)
         }
         other => {
-            let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, LeaveAlternateScreen);
+            let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
             let _ = disable_raw_mode();
             let _ = stdout.flush();
             other
@@ -278,6 +279,9 @@ fn input_loop(mut stream: UnixStream, stop: Arc<AtomicBool>) {
         let ok = match crossterm::event::read() {
             Ok(crossterm::event::Event::Key(k)) => {
                 protocol::write_framed(&mut stream, &ClientMsg::Input { key: k.into() })
+            }
+            Ok(crossterm::event::Event::Paste(text)) => {
+                protocol::write_framed(&mut stream, &ClientMsg::Paste { text })
             }
             Ok(crossterm::event::Event::Mouse(m)) => {
                 protocol::write_framed(&mut stream, &ClientMsg::Mouse { event: m.into() })

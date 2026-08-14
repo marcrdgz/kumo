@@ -177,6 +177,7 @@ pub fn run(terminal: &mut Term, launch: Launch) -> Result<()> {
             loop {
                 match event::read()? {
                     crossterm::event::Event::Key(k) => app.on_key(k)?,
+                    crossterm::event::Event::Paste(text) => app.on_paste(&text),
                     crossterm::event::Event::Mouse(m) => app.on_mouse(m)?,
                     crossterm::event::Event::Resize(w, h) => {
                         app.term_size = (w, h);
@@ -888,6 +889,32 @@ impl App {
         Ok(())
     }
 
+    /// Handle bracketed-paste text: write it to the focused pane with trailing
+    /// newlines stripped, so pasting text copied with a trailing line break
+    /// never auto-submits the command. Interior newlines (multi-line pastes)
+    /// are kept, translated to `\r` like the Enter key.
+    fn on_paste(&mut self, text: &str) {
+        if self.popup.open
+            || self.menu.open
+            || self.ctx_menu.open
+            || self.keybind_overlay.open
+            || self.pane_numbers.is_some()
+            || self.mode == Mode::Leader
+        {
+            return;
+        }
+        let text = strip_trailing_newlines(text);
+        if text.is_empty() {
+            return;
+        }
+        // `\n` -> `\r` so multi-line pastes behave like real Enter presses.
+        let bytes = text.replace('\n', "\r");
+        let focus = self.sessions[self.active].tree.focus;
+        if let Some(pane) = self.panes.get_mut(&focus) {
+            pane.write(bytes.as_bytes());
+        }
+    }
+
     /// Look up the pressed chord in the canonical binding table and run its
     /// action. Unknown chords are ignored.
     fn leader_command(&mut self, key: KeyEvent) -> Result<()> {
@@ -1138,6 +1165,12 @@ fn config_editor() -> (String, Vec<String>) {
     (program, args)
 }
 
+/// Remove every trailing `\r` / `\n` from pasted text so a paste copied with a
+/// trailing line break never auto-submits the command.
+fn strip_trailing_newlines(text: &str) -> &str {
+    text.trim_end_matches(['\r', '\n'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,5 +1284,18 @@ mod tests {
         let (prog, args) = config_editor();
         assert_eq!(prog, "nvim", "an empty VISUAL falls through to EDITOR");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn strip_trailing_newlines_removes_line_breaks() {
+        assert_eq!(strip_trailing_newlines("git status\n"), "git status");
+        assert_eq!(strip_trailing_newlines("git status\r\n"), "git status");
+        assert_eq!(
+            strip_trailing_newlines("one\ntwo\n\n\r\n"),
+            "one\ntwo",
+            "interior newlines survive; all trailing ones go"
+        );
+        assert_eq!(strip_trailing_newlines("plain"), "plain", "no trailing break is untouched");
+        assert_eq!(strip_trailing_newlines("\n\n"), "", "all-newline paste becomes empty");
     }
 }

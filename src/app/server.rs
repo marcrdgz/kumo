@@ -117,6 +117,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                     render_dirty = true;
                 }
+                ClientMsg::Paste { text } => {
+                    app.on_paste(&text);
+                    render_dirty = true;
+                }
                 ClientMsg::Mouse { event } => {
                     if let Err(e) = app.on_mouse(event.to_crossterm()) {
                         log::warn!("daemon: mouse error: {e:#}");

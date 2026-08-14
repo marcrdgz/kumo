@@ -458,6 +458,12 @@ pub enum ClientMsg {
     Input {
         key: WireKeyEvent,
     },
+    /// Text pasted into the client (bracketed paste), e.g. from the OS
+    /// clipboard. Carried as raw text so the daemon can strip trailing
+    /// newlines and route it to the focused pane.
+    Paste {
+        text: String,
+    },
     Mouse {
         event: WireMouseEvent,
     },
