@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use super::bindings::{Binding, Group};
 use super::ui::{fill, put, text};
+use super::worktrees::WorktreeInfo;
 use super::App;
 use crate::layout::SplitDir;
 use crate::theme::{Theme, THEMES};
@@ -36,8 +37,9 @@ pub(super) enum CtxTarget {
 
 /// Right-click context menu items for the current target: a pane gets rename,
 /// zoom (or unzoom, when the session is already zoomed), both split directions
-/// and close; a session gets rename and close. The right-clicked pane is
-/// focused before the menu opens, so `zoom` state always refers to it.
+/// and close; a session gets rename, new worktree, open worktree and close.
+/// The right-clicked pane is focused before the menu opens, so `zoom` state
+/// always refers to it.
 impl App {
     fn ctx_items(&self) -> &'static [&'static str] {
         match self.ctx_menu.target {
@@ -45,7 +47,7 @@ impl App {
                 &["rename", "unzoom", "split vertical", "split horizontal", "close"]
             }
             CtxTarget::Pane(_) => &["rename", "zoom", "split vertical", "split horizontal", "close"],
-            CtxTarget::Session(_) => &["rename", "close"],
+            CtxTarget::Session(_) => &["rename", "new worktree", "open worktree", "close"],
         }
     }
 }
@@ -71,6 +73,8 @@ pub(super) enum PopupBtn {
 pub(super) enum PopupTarget {
     /// Naming a brand-new session.
     NewSession,
+    /// Naming a new git worktree, based on the repo of the session at `idx`.
+    NewWorktree(usize),
     /// Renaming the pane `pid`.
     RenamePane(u64),
     /// Renaming the session at index `idx`.
@@ -126,6 +130,32 @@ pub(super) struct SettingsPanel {
     pub(super) selected: usize,
 }
 
+/// Modal picker listing every git worktree of a session's repository
+/// (opened via the session's right-click context menu `open worktree`).
+pub(super) struct WorktreePicker {
+    pub(super) open: bool,
+    /// Session index whose repository the list was loaded from.
+    pub(super) session: usize,
+    pub(super) items: Vec<PickerWorktree>,
+    /// Row selected within `items`.
+    pub(super) selected: usize,
+    /// First visible row (scroll offset into `items`).
+    pub(super) scroll: u16,
+    /// Load error (not a repo, git failure), shown instead of the list.
+    pub(super) error: Option<String>,
+}
+
+/// One picker row: the git worktree plus kumo-side flags computed when the
+/// picker opens (whether the repository's main worktree, and whether a kumo
+/// session is already open on it).
+pub(super) struct PickerWorktree {
+    pub(super) info: WorktreeInfo,
+    /// True when this is the repository's main worktree.
+    pub(super) is_main: bool,
+    /// True when a kumo session is already open in this worktree.
+    pub(super) open: bool,
+}
+
 impl App {
     /// Open the modal popup to name a new session, pre-filled with the next
     /// free default name.
@@ -165,6 +195,295 @@ impl App {
         self.ctx_menu.open = false;
     }
 
+    /// Open the modal popup to create a git worktree from the repo of the
+    /// session at `idx`, based on its workspace. Fails fast when that
+    /// workspace is not inside a git repository.
+    pub(super) fn open_worktree_popup(&mut self, idx: usize) {
+        self.ctx_menu.open = false;
+        let Some(ws) = self.sessions.get(idx).map(|s| s.workspace.clone()) else { return };
+        if super::worktrees::repo_root(&ws).is_none() {
+            self.notice =
+                Some((format!("{}: not a git repository", ws.display()), Instant::now()));
+            return;
+        }
+        self.popup.name = String::new();
+        self.popup.cursor = 0;
+        self.popup.error = None;
+        self.popup.hover = None;
+        self.popup.target = Some(PopupTarget::NewWorktree(idx));
+        self.popup.open = true;
+    }
+
+    /// Open the modal picker listing every worktree of the repo of the session
+    /// at `idx`. A git failure (or a non-repo workspace) shows the error inside
+    /// the picker instead of a list.
+    pub(super) fn open_worktree_picker(&mut self, idx: usize) {
+        self.ctx_menu.open = false;
+        self.worktree_picker.session = idx;
+        self.worktree_picker.selected = 0;
+        self.worktree_picker.scroll = 0;
+        match self.sessions.get(idx).map(|s| s.workspace.clone()) {
+            Some(ws) => match super::worktrees::list_worktrees(&ws) {
+                Ok(items) => {
+                    // Mark the main worktree (the repo top-level) and any tree
+                    // a kumo session is already open on, once per open.
+                    let root = super::worktrees::repo_root(&ws);
+                    let rows = items
+                        .into_iter()
+                        .map(|info| {
+                            let canon = std::fs::canonicalize(&info.path).ok();
+                            let is_main = match (&root, &canon) {
+                                (Some(r), Some(c)) => *r == *c,
+                                _ => false,
+                            };
+                            let open = self.session_for_workspace(&info.path).is_some();
+                            PickerWorktree { info, is_main, open }
+                        })
+                        .collect();
+                    self.worktree_picker.items = rows;
+                    self.worktree_picker.error = None;
+                }
+                Err(e) => {
+                    self.worktree_picker.items.clear();
+                    self.worktree_picker.error = Some(e);
+                }
+            },
+            None => {
+                self.worktree_picker.items.clear();
+                self.worktree_picker.error = Some("no such session".to_string());
+            }
+        }
+        self.worktree_picker.open = true;
+    }
+
+    /// Confirm a worktree-picker row: focus the session already on that path,
+    /// or open a new one there.
+    pub(super) fn pick_worktree(&mut self, idx: usize) {
+        self.worktree_picker.open = false;
+        let Some(row) = self.worktree_picker.items.get(idx) else { return };
+        let info = row.info.clone();
+        if let Err(e) = self.open_session_in_worktree(&info.path, info.branch.as_deref()) {
+            self.notice = Some((format!("worktree: {e:#}"), Instant::now()));
+        }
+    }
+
+    /// Move the picker selection by `delta` (wrapping), keeping the selected
+    /// row within the visible region.
+    pub(super) fn worktree_picker_move(&mut self, delta: isize) {
+        let n = self.worktree_picker.items.len();
+        if n == 0 {
+            return;
+        }
+        let idx = (self.worktree_picker.selected as isize + delta).rem_euclid(n as isize) as usize;
+        self.worktree_picker.selected = idx;
+        self.worktree_picker_keep_visible();
+    }
+
+    /// Clamp the scroll offset so the selected row stays on screen.
+    fn worktree_picker_keep_visible(&mut self) {
+        let visible = self.worktree_picker_visible_rows();
+        let sel = self.worktree_picker.selected as u16;
+        if sel < self.worktree_picker.scroll {
+            self.worktree_picker.scroll = sel;
+        } else if sel >= self.worktree_picker.scroll + visible {
+            self.worktree_picker.scroll = sel - visible + 1;
+        }
+    }
+
+    /// Number of picker rows that fit between the column header and the footer.
+    fn worktree_picker_visible_rows(&self) -> u16 {
+        let Some(dd) = self.worktree_picker_rect() else { return 0 };
+        dd.height.saturating_sub(5)
+    }
+
+    /// Handle a key while the worktree picker is open.
+    pub(super) fn on_picker_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            self.worktree_picker.open = false;
+            return;
+        }
+        if self.worktree_picker.items.is_empty() {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.worktree_picker_move(1),
+            KeyCode::Char('k') | KeyCode::Up => self.worktree_picker_move(-1),
+            KeyCode::Enter => self.pick_worktree(self.worktree_picker.selected),
+            _ => {}
+        }
+    }
+
+    /// Rect of the worktree picker: a centered modal sized to fit the rows,
+    /// capped to the terminal. Always tall enough for the title + column
+    /// header + footer (5 fixed rows).
+    pub(super) fn worktree_picker_rect(&self) -> Option<Rect> {
+        if !self.worktree_picker.open {
+            return None;
+        }
+        let (w, h) = self.term_size;
+        let width = 72u16.min(w.saturating_sub(4)).max(24);
+        let height = (self.worktree_picker.items.len() as u16 + 5)
+            .min(h.saturating_sub(4))
+            .max(6);
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    /// Worktree-picker row index under `(x, y)`, if the picker covers it.
+    pub(super) fn worktree_picker_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let dd = self.worktree_picker_rect()?;
+        let body_top = dd.y + 3; // title + column header
+        let end = dd.bottom().saturating_sub(2); // footer
+        if x < dd.x + 1 || x >= dd.right().saturating_sub(1) || y < body_top || y >= end {
+            return None;
+        }
+        let idx = self.worktree_picker.scroll as usize + (y - body_top) as usize;
+        (idx < self.worktree_picker.items.len()).then_some(idx)
+    }
+
+    /// Draw the worktree picker while it is open: a column header, one row per
+    /// worktree (branch + path, `▸` on the selection, `●` when a session is
+    /// already open on it) with a scrollbar when the list overflows, or the
+    /// load error.
+    pub(super) fn render_worktree_picker(&self, f: &mut Frame) {
+        if !self.worktree_picker.open {
+            return;
+        }
+        let Some(dd) = self.worktree_picker_rect() else { return };
+        let border = Style::default().fg(self.theme.accent).bg(self.theme.panel_sep);
+        fill(f, dd, self.theme.panel_sep);
+        let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default()
+            .fg(self.theme.fg)
+            .bg(self.theme.panel_sep)
+            .add_modifier(Modifier::BOLD);
+        let count = self.worktree_picker.items.len();
+        let title_text =
+            if count == 0 { "worktrees".to_string() } else { format!("worktrees · {count}") };
+        text(f, x0 + 2, y0 + 1, &title_text, title, inner_w);
+
+        if let Some(err) = &self.worktree_picker.error {
+            let st = Style::default().fg(self.theme.orange).bg(self.theme.panel_sep);
+            text(f, x0 + 2, y0 + 2, err, st, inner_w);
+            let footer = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
+            text(f, x0 + 2, y1 - 1, "esc: close", footer, inner_w);
+            return;
+        }
+
+        // Layout: the selection marker (x0+1), the open-session dot (x0+2),
+        // then a fixed branch column, then the path column (only when the box
+        // is wide enough to leave room after it).
+        const BRANCH_COL: u16 = 24;
+        let branch_x = x0 + 3;
+        let path_x = branch_x + BRANCH_COL + 1;
+        let path_w = inner_w.saturating_sub(path_x - x0 + 1);
+
+        // Column header.
+        let header = Style::default()
+            .fg(self.theme.panel_muted)
+            .bg(self.theme.panel_sep)
+            .add_modifier(Modifier::BOLD);
+        text(f, branch_x, y0 + 2, "branch", header, BRANCH_COL.saturating_sub(2));
+        if path_w > 0 {
+            text(f, path_x, y0 + 2, "path", header, path_w);
+        }
+
+        let body_top = y0 + 3;
+        let body_bottom = y1 - 1; // footer row
+        let scroll = self.worktree_picker.scroll as usize;
+        for (i, row) in self.worktree_picker.items.iter().enumerate().skip(scroll) {
+            let y = body_top + (i - scroll) as u16;
+            if y >= body_bottom {
+                break;
+            }
+            let sel = i == self.worktree_picker.selected;
+            let bg = if sel { self.theme.accent } else { self.theme.panel_sep };
+            for cx in (x0 + 1)..(x0 + 1 + inner_w) {
+                put(f, cx, y, " ", Style::default().bg(bg));
+            }
+            let fg = if sel { RColor::Black } else { self.theme.fg };
+            put(
+                f,
+                x0 + 1,
+                y,
+                if sel { "▸" } else { " " },
+                Style::default()
+                    .fg(if sel { RColor::Black } else { self.theme.accent })
+                    .bg(bg)
+                    .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+            );
+            let wt = &row.info;
+            if row.open {
+                // A session already works in this tree: picking it reuses it.
+                put(
+                    f,
+                    x0 + 2,
+                    y,
+                    "●",
+                    Style::default().fg(if sel { fg } else { self.theme.green }).bg(bg),
+                );
+            }
+            let branch = wt.branch.as_deref().unwrap_or("(detached)");
+            let branch_style = Style::default()
+                .fg(fg)
+                .bg(bg)
+                .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() });
+            text(f, branch_x, y, branch, branch_style, BRANCH_COL.saturating_sub(2));
+            if path_w > 0 {
+                let path = fit_worktree_path(&wt.path, path_w as usize);
+                let path_style = Style::default()
+                    .fg(if row.is_main { fg } else { self.theme.panel_muted })
+                    .bg(bg);
+                text(f, path_x, y, &path, path_style, path_w);
+            }
+        }
+
+        // Scrollbar when the list overflows the visible region.
+        let items = self.worktree_picker.items.len();
+        let visible = self.worktree_picker_visible_rows() as usize;
+        if items > visible {
+            let bar_h = body_bottom.saturating_sub(body_top);
+            let thumb = ((visible * bar_h as usize) / items).max(1).min(bar_h as usize);
+            let y_max = (bar_h as usize).saturating_sub(thumb);
+            let y_start = self.worktree_picker.scroll as usize * y_max / (items - visible);
+            for i in 0..bar_h as usize {
+                let y = body_top + i as u16;
+                let ch = if i >= y_start && i < y_start + thumb { "▐" } else { "░" };
+                put(
+                    f,
+                    x1.saturating_sub(1),
+                    y,
+                    ch,
+                    Style::default()
+                        .fg(if i >= y_start && i < y_start + thumb {
+                            self.theme.secondary
+                        } else {
+                            self.theme.panel_sep
+                        }),
+                );
+            }
+        }
+
+        let footer = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
+        text(f, x0 + 2, y1 - 1, "j/k: move · enter: open · esc: close", footer, inner_w);
+    }
+
     /// Confirm the popup: create the session or rename the pane if valid.
     pub(super) fn commit_name(&mut self) {
         let name = self.popup.name.trim().to_string();
@@ -181,6 +500,10 @@ impl App {
                 self.popup.open = false;
                 let _ = self.new_session_with_name(name);
             }
+            Some(PopupTarget::NewWorktree(idx)) => match self.new_worktree_session(idx, &name) {
+                Ok(()) => self.popup.open = false,
+                Err(e) => self.popup.error = Some(e),
+            },
             Some(PopupTarget::RenamePane(pid)) => {
                 let taken = self
                     .sessions[self.active]
@@ -392,6 +715,16 @@ impl App {
                 CtxTarget::Pane(pid) => self.open_rename_popup(pid),
                 CtxTarget::Session(idx) => self.open_rename_session_popup(idx),
             },
+            "new worktree" => {
+                if let CtxTarget::Session(idx) = target {
+                    self.open_worktree_popup(idx);
+                }
+            }
+            "open worktree" => {
+                if let CtxTarget::Session(idx) = target {
+                    self.open_worktree_picker(idx);
+                }
+            }
             "split vertical" => {
                 if let CtxTarget::Pane(pid) = target {
                     self.set_focus(pid);
@@ -970,13 +1303,18 @@ impl App {
         let title_text = match self.popup.target {
             Some(PopupTarget::RenamePane(_)) => "rename pane",
             Some(PopupTarget::RenameSession(_)) => "rename session",
+            Some(PopupTarget::NewWorktree(_)) => "new worktree",
             _ => "new session",
         };
         text(f, x0 + 2, y0 + 1, title_text, title, dd.width.saturating_sub(4));
 
-        // "name:" label.
+        // Input field label: the branch name for a worktree, a name otherwise.
         let label = Style::default().fg(self.theme.fg).bg(self.theme.panel_sep);
-        text(f, x0 + 2, y0 + 2, "name:", label, dd.width.saturating_sub(4));
+        let label_text = match self.popup.target {
+            Some(PopupTarget::NewWorktree(_)) => "branch:",
+            _ => "name:",
+        };
+        text(f, x0 + 2, y0 + 2, label_text, label, dd.width.saturating_sub(4));
 
         // Light input field, right-scrolled to keep the cursor visible.
         let field = Style::default().fg(RColor::Black).bg(self.theme.input_bg);
@@ -1087,4 +1425,20 @@ fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: 
 /// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).
 fn char_idx_to_byte(s: &str, ci: usize) -> usize {
     s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Short display form of a worktree path for the picker, trimmed to `avail`
+/// columns. When cut, the head is replaced by `…` so the distinguishing tail
+/// (the branch directory) stays visible.
+fn fit_worktree_path(path: &std::path::Path, avail: usize) -> String {
+    let text = path.to_string_lossy();
+    let n = text.chars().count();
+    if n <= avail {
+        return text.into_owned();
+    }
+    if avail == 0 {
+        return String::new();
+    }
+    let tail: String = text.chars().skip(n.saturating_sub(avail - 1)).collect();
+    format!("…{tail}")
 }

@@ -59,7 +59,37 @@ impl App {
             // Modal settings panel: a click on a tab switches to it, a click on
             // a theme applies it live (the panel stays open), a click outside
             // cancels; hovering moves the selection.
+        if self.worktree_picker.open {
+            // Modal picker: a click on a row opens it, a click outside cancels,
+            // hovering and scrolling move the selection.
             match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(i) = self.worktree_picker_item_at(x, y) {
+                        self.worktree_picker.selected = i;
+                        self.pick_worktree(i);
+                    } else if self
+                        .worktree_picker_rect()
+                        .map(|r| r.contains(Position::new(x, y)))
+                        .unwrap_or(false)
+                    {
+                        // Inside the picker but off a row: modal no-op.
+                    } else {
+                        self.worktree_picker.open = false;
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Moved => {
+                    if let Some(i) = self.worktree_picker_item_at(x, y) {
+                        self.worktree_picker.selected = i;
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::ScrollDown => self.worktree_picker_move(1),
+                MouseEventKind::ScrollUp => self.worktree_picker_move(-1),
+                _ => return Ok(()),
+            }
+        }
+        match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(tab) = self.settings_tab_at(x, y) {
                         self.settings_set_tab(tab);

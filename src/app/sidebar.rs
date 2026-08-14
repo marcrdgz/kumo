@@ -595,6 +595,14 @@ mod tests {
                 tab: 0,
                 selected: crate::theme::DEFAULT_THEME_IDX,
             },
+            worktree_picker: super::super::WorktreePicker {
+                open: false,
+                session: 0,
+                items: Vec::new(),
+                selected: 0,
+                scroll: 0,
+                error: None,
+            },
             theme: crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX],
             theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
@@ -717,5 +725,55 @@ mod tests {
             .collect();
         // Blocked (pane 2) first, then working (pane 1), then idle (pane 3).
         assert_eq!(dirs, vec![(1, 2), (0, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn worktree_picker_scroll_keeps_selection_visible() {
+        use super::super::overlays::PickerWorktree;
+        use super::super::worktrees::WorktreeInfo;
+
+        let mut app = build_app(1);
+        app.term_size = (80, 12);
+        app.worktree_picker.open = true;
+        // h=12 -> picker height 8 -> 3 visible rows (title, header, 3 rows,
+        // footer).
+        let items: Vec<PickerWorktree> = (0..10)
+            .map(|i| PickerWorktree {
+                info: WorktreeInfo {
+                    path: PathBuf::from(format!("/work/wt{i}")),
+                    branch: Some(format!("b{i}")),
+                },
+                is_main: i == 0,
+                open: false,
+            })
+            .collect();
+        app.worktree_picker.items = items;
+        app.worktree_picker.selected = 0;
+
+        // Moving within the visible region does not scroll.
+        app.worktree_picker_move(1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (1, 0));
+        app.worktree_picker_move(1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (2, 0));
+
+        // Row 3 is past the visible bottom: the scroll follows it.
+        app.worktree_picker_move(1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (3, 1));
+
+        // Moving back keeps the selected row visible; only the top is clamped
+        // once the selection reaches it.
+        app.worktree_picker_move(-1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (2, 1));
+        app.worktree_picker_move(-1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (1, 1));
+        app.worktree_picker_move(-1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (0, 0));
+
+        // Wrapping past the end lands on the last row (scrolled into view),
+        // and past the top wraps back to row 0 with the scroll reset.
+        app.worktree_picker_move(-1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (9, 7));
+        app.worktree_picker_move(1);
+        assert_eq!((app.worktree_picker.selected, app.worktree_picker.scroll), (0, 0));
     }
 }

@@ -52,6 +52,7 @@ pub(super) enum Action {
     SplitHorizontal,
     SplitAi,
     NewSession,
+    NewWorktree,
     ClosePane,
     Zoom,
     Focus(Dir),
@@ -162,6 +163,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('o')), keys: "o", desc: "rotate the pane layout", group: Group::Panes, action: Action::RotateLayout },
     BindingSpec { key: chord(KeyCode::Char('q')), keys: "q", desc: "show pane numbers (press a number to jump)", group: Group::Panes, action: Action::ShowPaneNumbers },
     BindingSpec { key: chord(KeyCode::Char('c')), keys: "c", desc: "create a new session (name it in the popup)", group: Group::Sessions, action: Action::NewSession },
+    BindingSpec { key: chord(KeyCode::Char('w')), keys: "w", desc: "create a git worktree in a new session", group: Group::Sessions, action: Action::NewWorktree },
     BindingSpec { key: chord(KeyCode::Char('n')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::NextSession },
     BindingSpec { key: chord(KeyCode::Char('p')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::PrevSession },
     BindingSpec { key: chord(KeyCode::Char('1')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(1) },
@@ -267,6 +269,7 @@ pub(super) fn action_id(action: Action) -> &'static str {
         Action::SplitHorizontal => "split-horizontal",
         Action::SplitAi => "split-ai",
         Action::NewSession => "new-session",
+        Action::NewWorktree => "new-worktree",
         Action::ClosePane => "close-pane",
         Action::Zoom => "zoom",
         Action::Focus(Dir::Left) => "focus-left",
@@ -308,6 +311,7 @@ pub(super) fn action_from_id(id: &str) -> Option<Action> {
         "split-horizontal" => Action::SplitHorizontal,
         "split-ai" => Action::SplitAi,
         "new-session" => Action::NewSession,
+        "new-worktree" => Action::NewWorktree,
         "close-pane" => Action::ClosePane,
         "zoom" => Action::Zoom,
         "focus-left" => Action::Focus(Dir::Left),
@@ -347,6 +351,7 @@ pub(super) fn action_desc(action: Action) -> &'static str {
         Action::SplitHorizontal => "split the focused pane horizontally",
         Action::SplitAi => "spawn an AI CLI pane in a vertical split",
         Action::NewSession => "create a new session (name it in the popup)",
+        Action::NewWorktree => "create a git worktree in a new session",
         Action::ClosePane => "close the focused pane",
         Action::Zoom => "zoom the focused pane",
         Action::Focus(_) => "move focus left / down / up / right",
@@ -373,9 +378,8 @@ pub(super) fn action_group(action: Action) -> Group {
         | Action::Resize(_) => Group::Layout,
         Action::SplitAi | Action::ClosePane | Action::CyclePane | Action::SwapPanes
         | Action::RotateLayout | Action::ShowPaneNumbers => Group::Panes,
-        Action::NewSession | Action::NextSession | Action::PrevSession | Action::JumpSession(_) => {
-            Group::Sessions
-        }
+        Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
+        | Action::JumpSession(_) => Group::Sessions,
         Action::ToggleSidebar => Group::Chrome,
         Action::Detach | Action::ShowKeybinds => Group::General,
     }

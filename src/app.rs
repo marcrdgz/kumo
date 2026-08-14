@@ -20,7 +20,7 @@ use crate::theme::{Theme, THEMES};
 
 use self::bindings::{build_keymap, Action, Binding, Chord, LEADER};
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, SettingsPanel};
+use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, SettingsPanel, WorktreePicker};
 use self::sidebar::{SidebarScroll, SidebarTab};
 use self::tasks::BranchInfo;
 
@@ -33,6 +33,7 @@ mod sidebar;
 mod tasks;
 mod ui;
 mod util;
+mod worktrees;
 
 /// Foreground TUI terminal backend, used only by the non-unix fallback path
 /// (`App::run`); the daemon renders to a `TestBackend` instead.
@@ -145,6 +146,8 @@ pub struct App {
     keybind_overlay: KeybindOverlay,
     /// Settings panel (tabbed preferences) opened from the status-bar menu.
     settings: SettingsPanel,
+    /// Worktree picker (`open worktree` on a session's context menu).
+    worktree_picker: WorktreePicker,
     /// Active theme + its index in `THEMES`; switching applies it to all panes.
     theme: Theme,
     theme_idx: usize,
@@ -265,6 +268,7 @@ impl App {
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: crate::theme::DEFAULT_THEME_IDX },
+            worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             theme: THEMES[crate::theme::DEFAULT_THEME_IDX],
             theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
@@ -643,6 +647,105 @@ impl App {
         Ok(())
     }
 
+    /// Create a session with an explicit name and workspace, and focus it. The
+    /// workspace is used verbatim (no `new-cwd` policy): this is the shared
+    /// tail for worktree sessions, whose path is chosen by git, not kumo.
+    fn new_session_in_workspace(&mut self, name: String, workspace: PathBuf) -> Result<()> {
+        let name = self.unique_session_name(&name);
+        let sid = self.next_session_id();
+        let pid = Pty::next_pane_id();
+        let (cols, rows) = self.pane_dims();
+        let pane = Pane::spawn(
+            sid,
+            pid,
+            self.shell.clone(),
+            None,
+            Some(workspace.clone()),
+            cols,
+            rows,
+            false,
+            self.events_tx.clone(),
+            &self.theme,
+        )?;
+        self.panes.insert(pid, pane);
+        self.sessions.push(Session {
+            id: sid,
+            name,
+            tree: LayoutTree::new(pid),
+            zoom: false,
+            workspace,
+        });
+        self.active = self.sessions.len() - 1;
+        Ok(())
+    }
+
+    /// `base` unless a session already uses it, then `base-2`, `base-3`, …
+    fn unique_session_name(&self, base: &str) -> String {
+        if !self.sessions.iter().any(|s| s.name == base) {
+            return base.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let cand = format!("{base}-{n}");
+            if !self.sessions.iter().any(|s| s.name == cand) {
+                return cand;
+            }
+            n += 1;
+        }
+    }
+
+    /// Create a git worktree from the repo of the session at `idx` and open a
+    /// new session inside it. `branch` is a new branch created from the
+    /// current HEAD; the worktree lands at git's default sibling path. Returns
+    /// a displayable error (kept in the popup) when the workspace is not a git
+    /// repository or git rejects the branch/path.
+    fn new_worktree_session(&mut self, idx: usize, branch: &str) -> Result<(), String> {
+        let Some(session) = self.sessions.get(idx) else {
+            return Err("no such session".to_string());
+        };
+        let Some(root) = worktrees::repo_root(&session.workspace) else {
+            return Err(format!("{} is not a git repository", session.workspace.display()));
+        };
+        let path = worktrees::worktree_path(&root, branch);
+        worktrees::add_worktree(&root, &path, branch)?;
+        self.new_session_in_workspace(branch.to_string(), path)
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    /// Open the session already working in `path` (matching the exact path or
+    /// its canonicalized form), or create a new one named after `branch` (or
+    /// the directory name) with that workspace. Used by the worktree picker.
+    pub(super) fn open_session_in_worktree(
+        &mut self,
+        path: &std::path::Path,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        if let Some(i) = self.session_for_workspace(path) {
+            self.active = i;
+            return Ok(());
+        }
+        let name = branch.map(str::to_string).unwrap_or_else(|| {
+            path.file_name()
+                .map(|b| b.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "worktree".to_string())
+        });
+        self.new_session_in_workspace(name, path.to_path_buf())
+    }
+
+    /// Index of the session already using `path` as its workspace, if any.
+    fn session_for_workspace(&self, path: &std::path::Path) -> Option<usize> {
+        let canon = std::fs::canonicalize(path).ok();
+        self.sessions.iter().position(|s| {
+            if s.workspace == path {
+                return true;
+            }
+            match (&canon, std::fs::canonicalize(&s.workspace).ok()) {
+                (Some(a), Some(b)) => *a == b,
+                _ => false,
+            }
+        })
+    }
+
     /// Re-apply the config to live state (`kumo reload` / MENU `reload`).
     /// `shell`, `ai-cmd`, `leader`, and `keymap.bindings` are cached at
     /// startup, so they refresh here; `new-cwd` and `agent-sound` are read
@@ -870,6 +973,10 @@ impl App {
             self.on_settings_key(key);
             return Ok(());
         }
+        if self.worktree_picker.open {
+            self.on_picker_key(key);
+            return Ok(());
+        }
         // The `leader+q` overlay grabs keys while up: a digit jumps to that
         // pane, any other key just dismisses it.
         if self.pane_numbers.is_some() {
@@ -913,6 +1020,7 @@ impl App {
             || self.ctx_menu.open
             || self.keybind_overlay.open
             || self.settings.open
+            || self.worktree_picker.open
             || self.pane_numbers.is_some()
             || self.mode == Mode::Leader
         {
@@ -948,6 +1056,7 @@ impl App {
             Action::SplitHorizontal => self.split_active(SplitDir::H, false)?,
             Action::SplitAi => self.split_active(SplitDir::V, true)?,
             Action::NewSession => self.open_session_popup(),
+            Action::NewWorktree => self.open_worktree_popup(self.active),
             Action::ClosePane => self.close_focused(),
             Action::Zoom => self.sessions[self.active].zoom = !self.sessions[self.active].zoom,
             Action::Focus(dir) => self.focus_dir(dir),
@@ -1283,6 +1392,54 @@ mod tests {
         );
         assert_eq!(app.shell, "/bin/sh", "reload keeps the current shell");
         drop(app);
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Make a temp git repo on branch `main`. Returns the working tree path.
+    fn temp_git_repo() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kumo-wt-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let run = |args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).status().unwrap().success(), "{args:?}");
+        };
+        run(&["init", "-q", "-b", "main", dir.to_str().unwrap()]);
+        run(&["-C", dir.to_str().unwrap(), "config", "user.email", "t@t"]);
+        run(&["-C", dir.to_str().unwrap(), "config", "user.name", "t"]);
+        run(&["-C", dir.to_str().unwrap(), "commit", "-q", "--allow-empty", "-m", "x"]);
+        dir
+    }
+
+    #[test]
+    fn worktree_session_creates_and_reuses() {
+        let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("wt-app-cfg");
+        let home = scratch("wt-app-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let repo = temp_git_repo();
+        let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
+        assert_eq!(app.sessions.len(), 1);
+
+        // Creating a worktree opens a new session in it, named after the branch.
+        app.new_worktree_session(0, "feat/test").unwrap();
+        assert_eq!(app.sessions.len(), 2, "a worktree creates a new session");
+        assert_eq!(app.active, 1, "the new worktree session is focused");
+        assert_eq!(app.sessions[1].name, "feat/test");
+        let wt_path = app.sessions[1].workspace.clone();
+        assert!(wt_path.to_string_lossy().ends_with("feat/test"), "sibling path: {wt_path:?}");
+
+        // Re-opening the same worktree reuses the existing session instead of
+        // duplicating it, and refocuses it from any other session.
+        app.open_session_in_worktree(&wt_path, Some("feat/test")).unwrap();
+        assert_eq!(app.sessions.len(), 2, "reuse, not duplicate");
+        assert_eq!(app.active, 1);
+
+        let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&home);
     }

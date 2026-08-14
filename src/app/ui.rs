@@ -131,6 +131,7 @@ impl App {
         self.render_update_notice(f);
         self.render_keybind_overlay(f);
         self.render_settings(f);
+        self.render_worktree_picker(f);
     }
 
     /// Draw the `leader+q` pane-number overlay: a numbered badge on each pane.
