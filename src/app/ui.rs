@@ -271,7 +271,7 @@ impl App {
         let n = session.tree.pane_count();
         let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
         let mode_style = if self.mode == Mode::Leader {
-            Style::default().fg(RColor::Black).bg(self.theme.mauve).add_modifier(Modifier::BOLD)
+            Style::default().fg(RColor::Black).bg(self.theme.secondary).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(RColor::Black).bg(self.theme.accent)
         };
@@ -288,7 +288,7 @@ impl App {
         let btn_w = MENU_BTN.chars().count() as u16;
         let btn_x = self.menu_btn_x();
         let btn_style = if self.menu.open {
-            Style::default().fg(RColor::Black).bg(self.theme.mauve).add_modifier(Modifier::BOLD)
+            Style::default().fg(RColor::Black).bg(self.theme.secondary).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(self.theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         };
@@ -302,7 +302,7 @@ impl App {
         if session.zoom {
             spans.push(Span::styled(
                 " · zoomed",
-                Style::default().fg(self.theme.mauve).bg(RColor::Reset),
+                Style::default().fg(self.theme.secondary).bg(RColor::Reset),
             ));
         }
         if !self.sidebar_open {
@@ -315,7 +315,7 @@ impl App {
             if t.elapsed() < std::time::Duration::from_secs(2) {
                 spans.push(Span::styled(
                     format!(" ⚠ {msg} "),
-                    Style::default().fg(self.theme.mauve).bg(RColor::Reset),
+                    Style::default().fg(self.theme.secondary).bg(RColor::Reset),
                 ));
             }
         }
@@ -341,7 +341,7 @@ impl App {
                 let x = area.width.saturating_sub(hint_w);
                 let hint_style = Style::default()
                     .fg(RColor::Black)
-                    .bg(self.theme.mauve)
+                    .bg(self.theme.secondary)
                     .add_modifier(Modifier::BOLD);
                 f.render_widget(
                     Paragraph::new(Line::from(vec![Span::styled(hint, hint_style)])),

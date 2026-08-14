@@ -854,7 +854,7 @@ impl App {
             let st = if hovered {
                 Style::default()
                     .fg(RColor::Black)
-                    .bg(self.theme.mauve)
+                    .bg(self.theme.secondary)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(self.theme.fg).bg(self.theme.panel_sep).add_modifier(Modifier::BOLD)
