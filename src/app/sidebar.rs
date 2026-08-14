@@ -181,7 +181,7 @@ impl App {
                 continue;
             }
             match row {
-                SidebarRow::Session(i) => {
+                SidebarRow::Session(i) | SidebarRow::Branch(i, _) => {
                     self.active = i;
                     return true;
                 }
@@ -634,6 +634,38 @@ mod tests {
         assert_eq!(app.sidebar_session_at(0, y), Some(1), "right-click sess-2 row");
         assert_eq!(app.sidebar_session_at(0, 2), None, "the tab bar is not a session");
         assert_eq!(app.sidebar_session_at(99, y), None, "outside the sidebar");
+    }
+
+    #[test]
+    fn clicking_branch_row_switches_active() {
+        let mut app = build_app(3);
+        app.branch_cache.insert(
+            PathBuf::from("/tmp"),
+            (
+                Some(BranchInfo {
+                    name: "fix/domain".into(),
+                    ahead: 0,
+                    behind: 0,
+                }),
+                Instant::now(),
+            ),
+        );
+        // Each session gets a branch row: session 1 sits at y=5 (header,
+        // spacer, tabs, sess-1, branch) and its branch at y=6.
+        let rows = app.sidebar_rows();
+        let branch_rows: Vec<(u16, usize)> = rows
+            .iter()
+            .filter_map(|(y, r)| match r {
+                SidebarRow::Branch(i, _) => Some((*y, *i)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(branch_rows, vec![(4, 0), (6, 1), (8, 2)]);
+
+        let (y, _) = branch_rows[1];
+        assert!(app.sidebar_hit(0, y), "click on a branch row should be handled");
+        assert_eq!(app.active, 1, "clicking a branch row must activate its session");
+        assert_eq!(app.sidebar_session_at(0, y), None, "a branch row is not a session row");
     }
 
     #[test]
