@@ -246,7 +246,7 @@ impl App {
             term_size: (80, 24),
             last_sizes: HashMap::new(),
             sidebar_open: true,
-            sidebar_width: 26,
+            sidebar_width: 25,
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
             last_follow_scan: Instant::now(),

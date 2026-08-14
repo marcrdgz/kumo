@@ -498,9 +498,9 @@ mod tests {
         term.draw(|f| app.render_sidebar(f, f.area())).unwrap();
         let buf = term.backend().buffer();
         // Branch row for session 0 sits at y=4 (header, spacer, tabs, session).
-        let line: String = (0..26).map(|x| buf.cell((x, 4)).unwrap().symbol()).collect();
-        assert_eq!(line.trim_end(), "    fixfixfixfixfixf… ↑1");
-        let up = buf.cell((22, 4)).unwrap();
+        let line: String = (0..25).map(|x| buf.cell((x, 4)).unwrap().symbol()).collect();
+        assert_eq!(line.trim_end(), "    fixfixfixfixfix… ↑1");
+        let up = buf.cell((21, 4)).unwrap();
         assert_eq!(up.style().fg, Some(app.theme.green));
     }
 
@@ -572,7 +572,7 @@ mod tests {
             term_size: (80, 24),
             last_sizes: HashMap::new(),
             sidebar_open: true,
-            sidebar_width: 26,
+            sidebar_width: 25,
             branch_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
             last_follow_scan: Instant::now(),
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn clicking_tab_bar_switches_section() {
         let mut app = build_app(1);
-        // y=2 is the tab bar; with sidebar_width 26 the split is at x=13.
+        // y=2 is the tab bar; with sidebar_width 25 the split is at x=12.
         assert!(app.sidebar_hit(15, 2), "click on the AGENTS tab must be handled");
         assert_eq!(app.sidebar_tab, SidebarTab::Agents, "clicking the tab must switch");
         assert!(

@@ -1,4 +1,4 @@
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
 /// Split orientation. `V` = side-by-side columns, `H` = stacked rows.
@@ -300,9 +300,15 @@ pub struct PaneGeom {
 }
 
 impl PaneGeom {
-    /// Inner area where the emulator renders: the slot rect inset by the border.
+    /// Inner area where the emulator renders: the slot rect inset by the
+    /// border, with one extra cell of breathing room on the left.
     pub fn inner(&self) -> Rect {
-        self.rect.inner(Margin { horizontal: 1, vertical: 1 })
+        Rect::new(
+            self.rect.x + 2,
+            self.rect.y + 1,
+            self.rect.width.saturating_sub(3),
+            self.rect.height.saturating_sub(2),
+        )
     }
 }
 
