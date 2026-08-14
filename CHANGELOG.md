@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0
+
+### 🚀 Features
+
+- *(ui)* Highlight active session row in sidebar
+- *(ui)* Show git ahead/behind on sidebar branch
+- *(config)* Migrate config to TOML
+- *(config)* Make the leader chord configurable
+- *(keymap)* Make leader bindings configurable
+- *(keymap)* Add resize, swap/rotate and pane numbers
+- *(config)* [terminal] new-cwd policy with follow-workspace
+- *(reload)* Kumo reload applies config live
+- *(ui)* MENU config opens editor, adds reload item
+- *(cli)* Kumo server restart restarts the daemon in place
+- *(paste)* Strip trailing newline on paste
+
+### 🐛 Bug Fixes
+
+- *(ui)* Replace chrome yellow with mauve and wire named colors
+- *(follow)* Prefer process-tree cwd over OSC 7
+- *(follow)* Track the foreground process group for cwd
+- *(ci)* Move dist build-setup outside workflows dir
+- *(agents)* Detect claude working from prompt-box markers
+- *(daemon)* Recover lagging clients instead of freezing them
+
+### 🚜 Refactor
+
+- *(bindings)* Drive dispatch from the shared keymap table
 ## v0.3.0
 
 ### 🚀 Features
@@ -31,6 +59,10 @@
 ### 🎨 Styling
 
 - Navy menu backgrounds and normal blue accent
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.3.0
 ## v0.2.1
 
 ### 🐛 Bug Fixes
