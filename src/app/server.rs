@@ -283,12 +283,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let msg = if send_full {
                     client.needs_full = false;
                     full_msg.get_or_insert_with(|| {
-                        ServerMsg::Frame { frame: protocol::FrameMsg::full_frame(&new_buf, cursor) }
+                        ServerMsg::Frame {
+                            frame: protocol::FrameMsg::full_frame(&new_buf, cursor, &app.theme.palette),
+                        }
                     })
                 } else {
                     let Some(last) = &last_buffer else { continue };
                     diff_msg.get_or_insert_with(|| {
-                        ServerMsg::Frame { frame: protocol::FrameMsg::diff_frame(&new_buf, last, cursor) }
+                        ServerMsg::Frame {
+                            frame: protocol::FrameMsg::diff_frame(&new_buf, last, cursor, &app.theme.palette),
+                        }
                     })
                 };
                 // A full queue means the client is lagging (not reading), never

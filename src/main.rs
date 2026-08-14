@@ -10,6 +10,7 @@ mod pane;
 mod protocol;
 mod pty;
 mod state;
+mod theme;
 mod update;
 mod vt;
 mod xtgettcap;

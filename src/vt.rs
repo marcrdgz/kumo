@@ -620,10 +620,36 @@ pub struct Terminal {
     cell: Box<CbCell>,
 }
 
+/// Build a full 256-entry palette from the ghostty default and override the
+/// ANSI 0-15 entries with the theme colors, then install foreground,
+/// background, cursor, and palette on `term`.
+fn set_terminal_colors(term: TerminalHandle, palette: &[ColorRgb; 16], fg: ColorRgb, bg: ColorRgb, cursor: ColorRgb) {
+    let mut full_palette = [ColorRgb::new(0, 0, 0); 256];
+    unsafe {
+        ghostty_color_palette_default(full_palette.as_mut_ptr());
+    }
+    full_palette[..16].copy_from_slice(palette);
+    unsafe {
+        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_FOREGROUND, &fg as *const _ as *const c_void);
+        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void);
+        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_CURSOR, &cursor as *const _ as *const c_void);
+        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_PALETTE, full_palette.as_ptr() as *const c_void);
+    }
+}
+
 impl Terminal {
     /// Create a terminal of `cols` x `rows` with `max_scrollback` history rows
-    /// and configure the Catppuccin theme as default colors.
-    pub fn new(cols: u16, rows: u16, max_scrollback: usize, palette: &[ColorRgb; 16]) -> anyhow::Result<Terminal> {
+    /// and configure the given theme colors (ANSI palette + defaults) as its
+    /// starting colors.
+    pub fn new(
+        cols: u16,
+        rows: u16,
+        max_scrollback: usize,
+        palette: &[ColorRgb; 16],
+        fg: ColorRgb,
+        bg: ColorRgb,
+        cursor: ColorRgb,
+    ) -> anyhow::Result<Terminal> {
         let mut term: TerminalHandle = ptr::null_mut();
         let options = TerminalOptions {
             cols: cols.max(1),
@@ -644,24 +670,7 @@ impl Terminal {
             }
         }
 
-        // Build a full 256-entry palette from the ghostty default and override
-        // the ANSI 0-15 entries with the theme colors.
-        let mut full_palette = [ColorRgb::new(0, 0, 0); 256];
-        unsafe {
-            ghostty_color_palette_default(full_palette.as_mut_ptr());
-        }
-        full_palette[..16].copy_from_slice(palette);
-
-        let fg = ColorRgb::new(0xcd, 0xd6, 0xf4);
-        let bg = ColorRgb::new(0x1e, 0x1e, 0x2e);
-        let cursor = ColorRgb::new(0xb4, 0xbe, 0xfe);
-
-        unsafe {
-            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_FOREGROUND, &fg as *const _ as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_CURSOR, &cursor as *const _ as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_PALETTE, full_palette.as_ptr() as *const c_void);
-        }
+        set_terminal_colors(term, palette, fg, bg, cursor);
 
         // The callbacks need a stable place to find the current pty writer
         // and the last reported pwd. Allocate a heap cell and use it as the
@@ -689,6 +698,15 @@ impl Terminal {
             scrollbar: TerminalScrollbar::default(),
             cell,
         })
+    }
+
+    /// Swap the terminal's default colors and ANSI palette to `theme`. Called
+    /// on every pane when the active theme changes; the next `refresh` picks
+    /// up the new defaults.
+    pub fn apply_theme(&mut self, palette: &[ColorRgb; 16], fg: ColorRgb, bg: ColorRgb, cursor: ColorRgb) {
+        set_terminal_colors(self.term, palette, fg, bg, cursor);
+        self.default_fg = fg;
+        self.default_bg = bg;
     }
 
     /// Install the writer that query responses are written to. The pointer
@@ -1234,6 +1252,11 @@ mod tests {
         [ColorRgb::new(0x00, 0x00, 0x00); 16]
     }
 
+    fn new_term(cols: u16, rows: u16, max: usize) -> Terminal {
+        let black = ColorRgb::new(0, 0, 0);
+        Terminal::new(cols, rows, max, &palette(), black, black, black).unwrap()
+    }
+
     fn collect(t: &mut Terminal) -> Vec<(usize, usize, String)> {
         let mut out = Vec::new();
         t.for_each_cell(|r, c, rc, _selected, _row_dirty| {
@@ -1246,7 +1269,7 @@ mod tests {
 
     #[test]
     fn renders_plain_text() {
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         t.write(b"hello");
         t.refresh();
         let cells = collect(&mut t);
@@ -1256,7 +1279,7 @@ mod tests {
 
     #[test]
     fn renders_ansi_colors_and_styles() {
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         t.write(b"\x1b[31mred\x1b[1mbold\x1b[0mplain");
         t.refresh();
         let cells = collect(&mut t);
@@ -1266,7 +1289,7 @@ mod tests {
 
     #[test]
     fn reports_pwd_from_osc7_uri() {
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         assert_eq!(t.pwd(), None, "no pwd before any OSC 7");
         t.write(b"\x1b]7;file:///tmp/example\x07");
         assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/tmp/example").as_path()));
@@ -1280,7 +1303,7 @@ mod tests {
 
     #[test]
     fn pwd_decodes_localhost_and_percent_encoding() {
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         t.write(b"\x1b]7;file://localhost/Users/my%20dir/proj\x07");
         assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/my dir/proj").as_path()));
     }
@@ -1289,7 +1312,7 @@ mod tests {
     fn pwd_ignores_authority_hostname() {
         // fish reports its own hostname as the authority, e.g.
         // `file://My-Mac.local/Users/x`, not `localhost`.
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         t.write(b"\x1b]7;file://My-Mac.local/Users/marc/proj\x07");
         assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/marc/proj").as_path()));
     }
@@ -1312,7 +1335,7 @@ mod tests {
         }
         let mut buf = BufWriter { buf: Vec::new() };
         let sink: *mut (dyn std::io::Write + Send) = &mut buf as *mut _;
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         t.set_write_sink(sink);
         t.write(b"\x1b[c"); // DA1
         let s = String::from_utf8_lossy(&buf.buf);
@@ -1325,7 +1348,7 @@ mod tests {
 
     #[test]
     fn writes_cursor_and_scroll() {
-        let mut t = Terminal::new(10, 4, 100, &palette()).unwrap();
+        let mut t = new_term(10, 4, 100);
         t.write(b"line1\nline2\nline3\nline4\nline5");
         t.refresh();
         assert!(t.cursor_pos().is_some());
@@ -1336,7 +1359,7 @@ mod tests {
 
     #[test]
     fn bottom_text_reads_buffer_tail_independent_of_scroll() {
-        let mut t = Terminal::new(20, 5, 100, &palette()).unwrap();
+        let mut t = new_term(20, 5, 100);
         t.write(b"top\nmid\nbottom\n\nexit shell mode");
         t.refresh();
         let before = t.bottom_text(5);
@@ -1350,7 +1373,7 @@ mod tests {
 
     #[test]
     fn native_selection_highlights_and_extracts() {
-        let mut t = Terminal::new(20, 5, 100, &palette()).unwrap();
+        let mut t = new_term(20, 5, 100);
         t.write(b"hello world\nsecond line");
         t.refresh();
         assert!(t.set_selection((0, 0), (4, 0)), "set_selection should succeed");

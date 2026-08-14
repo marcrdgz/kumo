@@ -3,10 +3,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier, Style};
 
 use super::ui::{fill, put, text};
-use super::{App, GREEN, ORANGE, PANEL_MUTED, PANEL_SEP};
+use super::App;
 use super::tasks::BranchInfo;
 use crate::agents::AgentStatus;
-use crate::pane::{ACCENT, FG};
+use crate::theme::Theme;
 
 /// Stable rows of the left sidebar, shared by rendering and mouse hit-testing.
 #[derive(Clone)]
@@ -210,7 +210,7 @@ impl App {
         fill(f, area, RColor::Reset);
         // Separator between sidebar and panes.
         for y in area.y..(area.y + area.height) {
-            put(f, area.x + area.width, y, "│", Style::default().fg(PANEL_SEP));
+            put(f, area.x + area.width, y, "│", Style::default().fg(self.theme.panel_sep));
         }
         for (y, row) in self.sidebar_rows() {
             if y > area.y + area.height {
@@ -222,7 +222,7 @@ impl App {
             match row {
                 SidebarRow::Header(t) => {
                     let style = Style::default()
-                        .fg(ACCENT)
+                        .fg(self.theme.accent)
                         .bg(RColor::Reset)
                         .add_modifier(Modifier::BOLD);
                     let pad = max.saturating_sub(t.chars().count() as u16) / 2;
@@ -232,17 +232,17 @@ impl App {
                     put(f, x, y, " ", Style::default().bg(RColor::Reset));
                 }
                 SidebarRow::Section(t) => {
-                    let style = Style::default().fg(PANEL_MUTED).bg(RColor::Reset);
+                    let style = Style::default().fg(self.theme.panel_muted).bg(RColor::Reset);
                     text(f, x, y, &format!("  {}", t.to_uppercase()), style, max);
                 }
                 SidebarRow::Session(i) => {
                     let active = i == self.active;
-                    let bg = if active { PANEL_SEP } else { RColor::Reset };
+                    let bg = if active { self.theme.panel_sep } else { RColor::Reset };
                     let name = &self.sessions[i].name;
                     if active {
                         fill(f, Rect::new(x, y, max + 1, 1), bg);
-                        put(f, x + 1, y, "▸", Style::default().fg(ACCENT).bg(bg));
-                        text(f, x + 3, y, name, Style::default().fg(FG).bg(bg), max.saturating_sub(3));
+                        put(f, x + 1, y, "▸", Style::default().fg(self.theme.accent).bg(bg));
+                        text(f, x + 3, y, name, Style::default().fg(self.theme.fg).bg(bg), max.saturating_sub(3));
                     } else {
                         put(f, x + 1, y, " ", Style::default().bg(bg));
                         text(
@@ -250,15 +250,15 @@ impl App {
                             x + 3,
                             y,
                             name,
-                            Style::default().fg(PANEL_MUTED).bg(bg),
+                            Style::default().fg(self.theme.panel_muted).bg(bg),
                             max.saturating_sub(3),
                         );
                     }
                 }
                 SidebarRow::Branch(i, b) => {
                     let active = i == self.active;
-                    let bg = if active { PANEL_SEP } else { RColor::Reset };
-                    let name_color = if active { FG } else { PANEL_MUTED };
+                    let bg = if active { self.theme.panel_sep } else { RColor::Reset };
+                    let name_color = if active { self.theme.fg } else { self.theme.panel_muted };
                     if active {
                         fill(f, Rect::new(x, y, max + 1, 1), bg);
                     }
@@ -291,7 +291,7 @@ impl App {
                         remaining -= 1;
                         let s = format!("\u{2191}{}", b.ahead);
                         let w = (s.chars().count() as u16).min(remaining);
-                        text(f, cx, y, &s, Style::default().fg(GREEN).bg(bg), remaining);
+                        text(f, cx, y, &s, Style::default().fg(self.theme.green).bg(bg), remaining);
                         cx += w;
                         remaining = remaining.saturating_sub(w);
                     }
@@ -300,22 +300,22 @@ impl App {
                         cx += 1;
                         remaining -= 1;
                         let s = format!("~{}", b.behind);
-                        text(f, cx, y, &s, Style::default().fg(ORANGE).bg(bg), remaining);
+                        text(f, cx, y, &s, Style::default().fg(self.theme.orange).bg(bg), remaining);
                     }
                 }
                 SidebarRow::AgentDir(i, pid) | SidebarRow::AgentName(i, pid) => {
                     let focused =
                         i == self.active && self.sessions[self.active].tree.focus == pid;
-                    let bg = if focused { PANEL_SEP } else { RColor::Reset };
+                    let bg = if focused { self.theme.panel_sep } else { RColor::Reset };
                     // Light up the whole sidebar row when this agent pane is focused.
                     if focused {
                         fill(f, Rect::new(x, y, max + 1, 1), bg);
                     }
                     let status = self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle);
                     let status_color = match status {
-                        AgentStatus::Working => GREEN,
-                        AgentStatus::Blocked => ORANGE,
-                        AgentStatus::Idle => PANEL_MUTED,
+                        AgentStatus::Working => self.theme.green,
+                        AgentStatus::Blocked => self.theme.orange,
+                        AgentStatus::Idle => self.theme.panel_muted,
                     };
                     // Blocked agents get a filled dot and a bold label so the
                     // waiting state stands out even at a glance.
@@ -329,7 +329,7 @@ impl App {
                         SidebarRow::AgentDir(_, _) => {
                             put(f, x + 2, y, dot, Style::default().fg(status_color).bg(bg));
                             let path = short_workspace(&self.sessions[i].workspace);
-                            let path_color = if focused { FG } else { PANEL_MUTED };
+                            let path_color = if focused { self.theme.fg } else { self.theme.panel_muted };
                             text(f, x + 4, y, &path, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
                         }
                         SidebarRow::AgentName(_, _) => {
@@ -350,7 +350,7 @@ impl App {
                 }
                 SidebarRow::NewSession => {
                     let style = Style::default()
-                        .fg(FG)
+                        .fg(self.theme.fg)
                         .bg(RColor::Reset)
                         .add_modifier(Modifier::BOLD);
                     text(f, x, y, "  + NEW SESSION", style, max);
@@ -368,7 +368,7 @@ impl App {
         if sess_items.len() > sess_region as usize {
             let offset = (self.sidebar_scroll.sessions as usize)
                 .min(sess_items.len() - sess_region as usize);
-            draw_scrollbar(f, scroll_x, 3, sess_region, offset, sess_items.len());
+            draw_scrollbar(f, scroll_x, 3, sess_region, offset, sess_items.len(), &self.theme);
         }
 
         let agent_region = footer_y.saturating_sub(agents_y);
@@ -376,7 +376,7 @@ impl App {
         if agent_items.len() > agent_region as usize {
             let offset = (self.sidebar_scroll.agents as usize)
                 .min(agent_items.len() - agent_region as usize);
-            draw_scrollbar(f, scroll_x, agents_y + 1, agent_region, offset, agent_items.len());
+            draw_scrollbar(f, scroll_x, agents_y + 1, agent_region, offset, agent_items.len(), &self.theme);
         }
     }
 }
@@ -412,7 +412,7 @@ fn short_workspace(ws: &std::path::Path) -> String {
 
 /// Draw a vertical scrollbar in a `region_h`-tall strip starting at
 /// `(x, y_top)`, with `offset` of `total` items scrolled into view.
-fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usize, total: usize) {
+fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usize, total: usize, theme: &Theme) {
     if total <= region_h as usize || region_h == 0 {
         return;
     }
@@ -424,9 +424,9 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
     for i in 0..bar_h {
         let y = y_top + i as u16;
         if i >= y_start && i < y_start + thumb {
-            put(f, x, y, "▐", Style::default().fg(ACCENT));
+            put(f, x, y, "▐", Style::default().fg(theme.secondary));
         } else {
-            put(f, x, y, "░", Style::default().fg(PANEL_SEP));
+            put(f, x, y, "░", Style::default().fg(theme.panel_sep));
         }
     }
 }
@@ -470,7 +470,7 @@ mod tests {
         let line: String = (0..26).map(|x| buf.cell((x, 4)).unwrap().symbol()).collect();
         assert_eq!(line.trim_end(), "    fixfixfixfixfixf… ↑1");
         let up = buf.cell((22, 4)).unwrap();
-        assert_eq!(up.style().fg, Some(GREEN));
+        assert_eq!(up.style().fg, Some(app.theme.green));
     }
 
     #[test]
@@ -506,6 +506,7 @@ mod tests {
                 24,
                 false,
                 tx.clone(),
+                &crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX],
             )
             .unwrap();
             panes.insert(pid, pane);
@@ -554,6 +555,12 @@ mod tests {
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: super::super::KeybindOverlay { open: false, scroll: 0 },
+            settings: super::super::SettingsPopup {
+                open: false,
+                selected: crate::theme::DEFAULT_THEME_IDX,
+            },
+            theme: crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX],
+            theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
             update_notice: None,
             update_rx,

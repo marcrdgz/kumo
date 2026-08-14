@@ -10,6 +10,8 @@ use std::io::{self, Read};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::vt::ColorRgb;
+
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
 /// with a mismatched version. The daemon is unreleased, so it starts at 1;
 /// once 0.4.0 ships, wire changes must bump it.
@@ -278,30 +280,30 @@ impl WireMouseEvent {
 // ---------------------------------------------------------------------------
 
 /// Pack a ratatui `Color` into the wire's 0xRRGGBB form. Named ANSI colors map
-/// to the Catppuccin mocha palette (`crate::pane::PALETTE`), so chrome cells
+/// to the active theme's palette (the ANSI 0-15 entries), so chrome cells
 /// that style text with `Color::Black` (mode chips, menu items, input fields)
 /// keep a real foreground on the client instead of falling back to the
 /// terminal's default. `Reset` (and anything unnamed) stays `None`.
-fn color_to_wire(color: ratatui::style::Color) -> Option<u32> {
+fn color_to_wire(color: ratatui::style::Color, palette: &[ColorRgb; 16]) -> Option<u32> {
     use ratatui::style::Color;
     let (r, g, b) = match color {
         Color::Reset => return None,
-        Color::Black => (0x45, 0x47, 0x5a),
-        Color::Red => (0xf3, 0x8b, 0xa8),
-        Color::Green => (0xa6, 0xe3, 0xa1),
-        Color::Yellow => (0xf9, 0xe2, 0xaf),
-        Color::Blue => (0x89, 0xb4, 0xfa),
-        Color::Magenta => (0xf5, 0xc2, 0xe7),
-        Color::Cyan => (0x94, 0xe2, 0xd5),
-        Color::White => (0xba, 0xc2, 0xde),
-        Color::Gray => (0x58, 0x5b, 0x70),
-        Color::DarkGray => (0x58, 0x5b, 0x70),
-        Color::LightRed => (0xf3, 0x8b, 0xa8),
-        Color::LightGreen => (0xa6, 0xe3, 0xa1),
-        Color::LightYellow => (0xf9, 0xe2, 0xaf),
-        Color::LightBlue => (0x89, 0xb4, 0xfa),
-        Color::LightMagenta => (0xf5, 0xc2, 0xe7),
-        Color::LightCyan => (0x94, 0xe2, 0xd5),
+        Color::Black => (palette[0].r, palette[0].g, palette[0].b),
+        Color::Red => (palette[1].r, palette[1].g, palette[1].b),
+        Color::Green => (palette[2].r, palette[2].g, palette[2].b),
+        Color::Yellow => (palette[3].r, palette[3].g, palette[3].b),
+        Color::Blue => (palette[4].r, palette[4].g, palette[4].b),
+        Color::Magenta => (palette[5].r, palette[5].g, palette[5].b),
+        Color::Cyan => (palette[6].r, palette[6].g, palette[6].b),
+        Color::White => (palette[7].r, palette[7].g, palette[7].b),
+        Color::Gray => (palette[8].r, palette[8].g, palette[8].b),
+        Color::DarkGray => (palette[8].r, palette[8].g, palette[8].b),
+        Color::LightRed => (palette[9].r, palette[9].g, palette[9].b),
+        Color::LightGreen => (palette[10].r, palette[10].g, palette[10].b),
+        Color::LightYellow => (palette[11].r, palette[11].g, palette[11].b),
+        Color::LightBlue => (palette[12].r, palette[12].g, palette[12].b),
+        Color::LightMagenta => (palette[13].r, palette[13].g, palette[13].b),
+        Color::LightCyan => (palette[14].r, palette[14].g, palette[14].b),
         Color::Rgb(r, g, b) => (r, g, b),
         _ => return None,
     };
@@ -329,11 +331,11 @@ pub struct WireCell {
 }
 
 impl WireCell {
-    fn from_ratatui(cell: &ratatui::buffer::Cell) -> Self {
+    fn from_ratatui(cell: &ratatui::buffer::Cell, palette: &[ColorRgb; 16]) -> Self {
         use ratatui::buffer::CellWidth;
         use ratatui::style::Modifier;
-        let fg = color_to_wire(cell.fg);
-        let bg = color_to_wire(cell.bg);
+        let fg = color_to_wire(cell.fg, palette);
+        let bg = color_to_wire(cell.bg, palette);
         let m = cell.modifier;
         // A `Skip` cell is a continuation after a wide grapheme (the pane marks
         // it when the emoji/CJK char occupies two columns). `Cell::cell_width()`
@@ -381,13 +383,17 @@ pub struct FrameMsg {
 impl FrameMsg {
     /// A frame containing every row (`full = true`): for a client's first
     /// attach or after a resize.
-    pub fn full_frame(buf: &ratatui::buffer::Buffer, cursor: Option<(u16, u16)>) -> Self {
+    pub fn full_frame(
+        buf: &ratatui::buffer::Buffer,
+        cursor: Option<(u16, u16)>,
+        palette: &[ColorRgb; 16],
+    ) -> Self {
         let cols = buf.area.width;
         let rows = buf.area.height;
         let rows_dirty = (0..rows)
             .map(|row| RowPatch {
                 row,
-                cells: row_cells(buf, row, cols),
+                cells: row_cells(buf, row, cols, palette),
             })
             .collect();
         Self { cols, rows, full: true, rows_dirty, cursor }
@@ -398,12 +404,13 @@ impl FrameMsg {
         buf: &ratatui::buffer::Buffer,
         last: &ratatui::buffer::Buffer,
         cursor: Option<(u16, u16)>,
+        palette: &[ColorRgb; 16],
     ) -> Self {
         let cols = buf.area.width;
         let rows = buf.area.height;
         let rows_dirty = (0..rows)
             .filter(|row| row_changed(buf, last, *row, cols))
-            .map(|row| RowPatch { row, cells: row_cells(buf, row, cols) })
+            .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
             .collect();
         Self { cols, rows, full: false, rows_dirty, cursor }
     }
@@ -418,10 +425,10 @@ impl FrameMsg {
 /// daemon serializes `terminal.backend().buffer()`, `Terminal::draw` has
 /// already diffed and normalized those cells to plain blanks, losing the flag.
 /// The row's own cell widths are the only reliable signal.
-fn row_cells(buf: &ratatui::buffer::Buffer, row: u16, cols: u16) -> Vec<WireCell> {
+fn row_cells(buf: &ratatui::buffer::Buffer, row: u16, cols: u16, palette: &[ColorRgb; 16]) -> Vec<WireCell> {
     let s = row as usize * cols as usize;
     let e = s + cols as usize;
-    let cells: Vec<WireCell> = buf.content[s..e].iter().map(WireCell::from_ratatui).collect();
+    let cells: Vec<WireCell> = buf.content[s..e].iter().map(|c| WireCell::from_ratatui(c, palette)).collect();
     let mut out = Vec::with_capacity(cells.len());
     let mut prev_wide = false;
     for mut cell in cells {
@@ -631,6 +638,10 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+    fn palette() -> [ColorRgb; 16] {
+        [ColorRgb::new(0, 0, 0); 16]
+    }
+
     #[test]
     fn key_roundtrip() {
         for code in [
@@ -738,7 +749,7 @@ mod tests {
         let mut a = Buffer::empty(Rect::new(0, 0, 4, 3));
         let mut b = Buffer::empty(Rect::new(0, 0, 4, 3));
         b.cell_mut((1, 0)).unwrap().set_symbol("X");
-        let frame = FrameMsg::diff_frame(&b, &a, None);
+        let frame = FrameMsg::diff_frame(&b, &a, None, &palette());
         assert!(!frame.full);
         assert_eq!(frame.rows_dirty.len(), 1, "only the touched row should be dirty");
         assert_eq!(frame.rows_dirty[0].row, 0);
@@ -750,7 +761,7 @@ mod tests {
     fn diff_frame_all_rows_equal_is_empty() {
         let a = Buffer::empty(Rect::new(0, 0, 4, 3));
         let b = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let frame = FrameMsg::diff_frame(&b, &a, None);
+        let frame = FrameMsg::diff_frame(&b, &a, None, &palette());
         assert!(!frame.full);
         assert!(frame.rows_dirty.is_empty());
     }
@@ -758,7 +769,7 @@ mod tests {
     #[test]
     fn full_frame_includes_every_row() {
         let buf = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let frame = FrameMsg::full_frame(&buf, None);
+        let frame = FrameMsg::full_frame(&buf, None, &palette());
         assert!(frame.full);
         assert_eq!(frame.rows_dirty.len(), 3);
     }
@@ -774,7 +785,7 @@ mod tests {
             .unwrap()
             .set_symbol(" ")
             .set_diff_option(ratatui::buffer::CellDiffOption::Skip);
-        let frame = FrameMsg::full_frame(&buf, None);
+        let frame = FrameMsg::full_frame(&buf, None, &palette());
         let cells = &frame.rows_dirty[0].cells;
         assert_eq!(cells[0].text, "\u{1f1ea}\u{1f1f8}", "wide grapheme must be sent whole");
         assert_eq!(cells[1].cell_width, 0, "continuation cell must be skipped by the client");
@@ -789,7 +800,7 @@ mod tests {
         buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
         buf.cell_mut((1, 0)).unwrap().set_symbol(" ");
         buf.cell_mut((2, 0)).unwrap().set_symbol("x");
-        let frame = FrameMsg::full_frame(&buf, None);
+        let frame = FrameMsg::full_frame(&buf, None, &palette());
         let cells = &frame.rows_dirty[0].cells;
         assert_eq!(cells[0].text, "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
         assert_eq!(cells[0].cell_width, 2);
@@ -801,7 +812,7 @@ mod tests {
     fn wide_char_at_row_end_needs_no_continuation() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
         buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f600}");
-        let frame = FrameMsg::full_frame(&buf, None);
+        let frame = FrameMsg::full_frame(&buf, None, &palette());
         let cells = &frame.rows_dirty[0].cells;
         assert_eq!(cells[0].cell_width, 2);
         assert_eq!(cells[1].cell_width, 0, "trailing empty cell is a blank, not content");

@@ -85,7 +85,7 @@ pub fn list_sessions() -> Result<()> {
                 );
                 // One indented line per running AI CLI, so a blocked agent is
                 // noticeable from outside the TUI. Status word colored only on
-                // a real terminal (orange blocked, green working).
+                // a real terminal (amber blocked, green working).
                 let color = io::stdout().is_terminal();
                 for agent in &s.agents {
                     println!("{}", agent_line(&agent.name, agent.status, color));
@@ -104,13 +104,13 @@ pub fn list_sessions() -> Result<()> {
 /// sidebar's palette. `None` = leave the terminal's default color (idle).
 fn agent_status_color(status: protocol::AgentStatus) -> Option<(u8, u8, u8)> {
     match status {
-        protocol::AgentStatus::Blocked => Some((0xfa, 0xb3, 0x87)), // peach/orange
-        protocol::AgentStatus::Working => Some((0xa6, 0xe3, 0xa1)), // green
+        protocol::AgentStatus::Blocked => Some((0xff, 0xb8, 0x4d)), // amber
+        protocol::AgentStatus::Working => Some((0x2e, 0xe0, 0x6b)), // green
         protocol::AgentStatus::Idle => None,
     }
 }
 
-/// One `kumo ls` agent line, e.g. `    opencode · blocked`. Colored (orange
+/// One `kumo ls` agent line, e.g. `    opencode · blocked`. Colored (amber
 /// blocked, green working) only when `color` is set, so piped output stays plain.
 fn agent_line(name: &str, status: protocol::AgentStatus, color: bool) -> String {
     let label = status.label();
@@ -563,10 +563,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_line_colors_blocked_orange() {
+    fn agent_line_colors_blocked_amber() {
         assert_eq!(
             agent_line("opencode", protocol::AgentStatus::Blocked, true),
-            "    opencode · \x1b[38;2;250;179;135mblocked\x1b[0m"
+            "    opencode · \x1b[38;2;255;184;77mblocked\x1b[0m"
         );
     }
 
@@ -574,7 +574,7 @@ mod tests {
     fn agent_line_colors_working_green() {
         assert_eq!(
             agent_line("claude", protocol::AgentStatus::Working, true),
-            "    claude · \x1b[38;2;166;227;161mworking\x1b[0m"
+            "    claude · \x1b[38;2;46;224;107mworking\x1b[0m"
         );
     }
 

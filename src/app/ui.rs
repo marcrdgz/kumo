@@ -9,10 +9,9 @@ use ratatui::widgets::Paragraph;
 
 use super::bindings::leader_hint;
 use super::overlays::MENU_BTN;
-use super::{App, BORDER_IDLE, MAUVE, Mode, ORANGE, PANEL_MUTED, PANEL_SEP, RED};
+use super::{App, Mode};
 use crate::layout::TreeGeom;
 use crate::agents::AgentStatus;
-use crate::pane::{ACCENT, FG};
 use crate::vt;
 
 impl App {
@@ -131,6 +130,7 @@ impl App {
         self.render_name_popup(f);
         self.render_update_notice(f);
         self.render_keybind_overlay(f);
+        self.render_settings(f);
     }
 
     /// Draw the `leader+q` pane-number overlay: a numbered badge on each pane.
@@ -145,7 +145,7 @@ impl App {
         if ids.len() < 2 {
             return;
         }
-        let style = Style::default().fg(RColor::Black).bg(ACCENT).add_modifier(Modifier::BOLD);
+        let style = Style::default().fg(RColor::Black).bg(self.theme.accent).add_modifier(Modifier::BOLD);
         let geom = self.active_geom();
         for (i, pid) in ids.iter().enumerate() {
             let Some(digit) = char::from_digit((i + 1) as u32, 10) else { continue };
@@ -198,11 +198,11 @@ impl App {
         }
         let border = if blocked {
             // A blocked AI pane glows orange even when it does not have focus.
-            ORANGE
+            self.theme.orange
         } else if focused {
-            ACCENT
+            self.theme.accent
         } else {
-            BORDER_IDLE
+            self.theme.border_idle
         };
         // Native background: the frame is just line glyphs over the host
         // terminal's background, matching the pane content.
@@ -226,15 +226,15 @@ impl App {
         let chip = if focused {
             Style::default()
                 .fg(RColor::Black)
-                .bg(ACCENT)
+                .bg(self.theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else if blocked {
             Style::default()
                 .fg(RColor::Black)
-                .bg(ORANGE)
+                .bg(self.theme.orange)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(FG).bg(RColor::Reset)
+            Style::default().fg(self.theme.fg).bg(RColor::Reset)
         };
         for (i, ch) in title.chars().take(max).enumerate() {
             put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
@@ -257,9 +257,9 @@ impl App {
         for i in 0..bar_h {
             let y = inner.y + i as u16;
             if i >= y_start && i < y_start + thumb {
-                put(f, x, y, "▐", Style::default().fg(ACCENT));
+                put(f, x, y, "▐", Style::default().fg(self.theme.secondary));
             } else {
-                put(f, x, y, "░", Style::default().fg(PANEL_SEP));
+                put(f, x, y, "░", Style::default().fg(self.theme.panel_sep));
             }
         }
     }
@@ -271,9 +271,9 @@ impl App {
         let n = session.tree.pane_count();
         let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
         let mode_style = if self.mode == Mode::Leader {
-            Style::default().fg(RColor::Black).bg(MAUVE).add_modifier(Modifier::BOLD)
+            Style::default().fg(RColor::Black).bg(self.theme.mauve).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(RColor::Black).bg(ACCENT)
+            Style::default().fg(RColor::Black).bg(self.theme.accent)
         };
 
         // Mode chip at the left edge.
@@ -288,34 +288,34 @@ impl App {
         let btn_w = MENU_BTN.chars().count() as u16;
         let btn_x = self.menu_btn_x();
         let btn_style = if self.menu.open {
-            Style::default().fg(RColor::Black).bg(MAUVE).add_modifier(Modifier::BOLD)
+            Style::default().fg(RColor::Black).bg(self.theme.mauve).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(FG).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+            Style::default().fg(self.theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         };
         text(f, btn_x, area.y, MENU_BTN, btn_style, btn_w);
 
         let mut spans: Vec<Span> = vec![
             Span::raw(" "),
-            Span::styled(session.name.clone(), Style::default().fg(FG).bg(RColor::Reset)),
-            Span::styled(format!(" · {n} panes"), Style::default().fg(PANEL_MUTED).bg(RColor::Reset)),
+            Span::styled(session.name.clone(), Style::default().fg(self.theme.fg).bg(RColor::Reset)),
+            Span::styled(format!(" · {n} panes"), Style::default().fg(self.theme.panel_muted).bg(RColor::Reset)),
         ];
         if session.zoom {
             spans.push(Span::styled(
                 " · zoomed",
-                Style::default().fg(MAUVE).bg(RColor::Reset),
+                Style::default().fg(self.theme.mauve).bg(RColor::Reset),
             ));
         }
         if !self.sidebar_open {
             spans.push(Span::styled(
                 " · sidebar hidden",
-                Style::default().fg(PANEL_MUTED).bg(RColor::Reset),
+                Style::default().fg(self.theme.panel_muted).bg(RColor::Reset),
             ));
         }
         if let Some((msg, t)) = &self.notice {
             if t.elapsed() < std::time::Duration::from_secs(2) {
                 spans.push(Span::styled(
                     format!(" ⚠ {msg} "),
-                    Style::default().fg(MAUVE).bg(RColor::Reset),
+                    Style::default().fg(self.theme.mauve).bg(RColor::Reset),
                 ));
             }
         }
@@ -341,7 +341,7 @@ impl App {
                 let x = area.width.saturating_sub(hint_w);
                 let hint_style = Style::default()
                     .fg(RColor::Black)
-                    .bg(MAUVE)
+                    .bg(self.theme.mauve)
                     .add_modifier(Modifier::BOLD);
                 f.render_widget(
                     Paragraph::new(Line::from(vec![Span::styled(hint, hint_style)])),
@@ -357,8 +357,8 @@ impl App {
         let Some(rect) = self.update_notice_rect() else { return };
         let Some((line1, line2)) = self.update_notice_lines() else { return };
         let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
-        let border = Style::default().fg(PANEL_MUTED).bg(PANEL_SEP);
-        fill(f, rect, PANEL_SEP);
+        let border = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
+        fill(f, rect, self.theme.panel_sep);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
         put(f, x0, y1, "└", border);
@@ -376,7 +376,7 @@ impl App {
             x0 + 2,
             y0 + 1,
             "✕",
-            Style::default().fg(RED).bg(PANEL_SEP).add_modifier(Modifier::BOLD),
+            Style::default().fg(self.theme.red).bg(self.theme.panel_sep).add_modifier(Modifier::BOLD),
         );
         let inner_w = rect.width.saturating_sub(2);
         text(
@@ -384,7 +384,7 @@ impl App {
             x0 + 5,
             y0 + 1,
             &line1,
-            Style::default().fg(FG).bg(PANEL_SEP),
+            Style::default().fg(self.theme.fg).bg(self.theme.panel_sep),
             inner_w.saturating_sub(6),
         );
         text(
@@ -392,7 +392,7 @@ impl App {
             x0 + 5,
             y0 + 2,
             &line2,
-            Style::default().fg(FG).bg(PANEL_SEP),
+            Style::default().fg(self.theme.fg).bg(self.theme.panel_sep),
             inner_w.saturating_sub(5),
         );
     }

@@ -9,7 +9,6 @@ use crossterm::event::{self, KeyCode, KeyEvent};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Color as RColor;
 use ratatui::Terminal;
 
 use crate::layout::{self, LayoutTree, ResizeDir, SplitDir};
@@ -17,10 +16,11 @@ use crate::agents::AgentStatus;
 use crate::pane::{Pane, PtyEvent};
 use crate::pty::Pty;
 use crate::state::{self, SavedState};
+use crate::theme::{Theme, THEMES};
 
 use self::bindings::{build_keymap, Action, Binding, Chord, LEADER};
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup};
+use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, SettingsPopup};
 use self::sidebar::SidebarScroll;
 use self::tasks::BranchInfo;
 
@@ -43,15 +43,6 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 const RESIZE_STEP: f32 = 0.05;
 /// How long the `leader+q` pane-number overlay stays up without a keypress.
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
-
-/// Catppuccin mocha chrome colors (sidebars, status bar, chrome borders).
-const PANEL_SEP: RColor = RColor::Rgb(0x17, 0x18, 0x26); // surface0, dark navy
-const PANEL_MUTED: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0
-const BORDER_IDLE: RColor = RColor::Rgb(0x6c, 0x70, 0x86); // overlay0, visible on any terminal bg
-const MAUVE: RColor = RColor::Rgb(0xcb, 0xa6, 0xf7); // mauve
-const GREEN: RColor = RColor::Rgb(0xa6, 0xe3, 0xa1); // green
-const ORANGE: RColor = RColor::Rgb(0xfa, 0xb3, 0x87); // peach
-const RED: RColor = RColor::Rgb(0xf3, 0x8b, 0xa8); // red
 
 struct Session {
     id: u64,
@@ -150,6 +141,11 @@ pub struct App {
     popup: NamePopup,
     /// `leader+?` keybind showcase.
     keybind_overlay: KeybindOverlay,
+    /// Settings popup (theme picker) opened from the status-bar menu.
+    settings: SettingsPopup,
+    /// Active theme + its index in `THEMES`; switching applies it to all panes.
+    theme: Theme,
+    theme_idx: usize,
     /// Transient status-bar notice, e.g. "config: coming soon".
     notice: Option<(String, Instant)>,
     /// Startup update banner (top-right), when a newer release exists.
@@ -265,6 +261,9 @@ impl App {
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
+            settings: SettingsPopup { open: false, selected: crate::theme::DEFAULT_THEME_IDX },
+            theme: THEMES[crate::theme::DEFAULT_THEME_IDX],
+            theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
             update_notice: None,
             update_rx,
@@ -348,6 +347,7 @@ impl App {
                     rows,
                     sp.is_ai,
                     self.events_tx.clone(),
+                    &self.theme,
                 )?;
                 pane.custom_name = sp.custom_name;
                 self.panes.insert(sp.id, pane);
@@ -417,6 +417,7 @@ impl App {
                     fd as i32,
                     sp.child_pid.map(|p| p as i32),
                     self.events_tx.clone(),
+                    &self.theme,
                 )?;
                 pane.custom_name = sp.custom_name;
                 self.panes.insert(sp.id, pane);
@@ -622,6 +623,7 @@ impl App {
             rows,
             false,
             self.events_tx.clone(),
+            &self.theme,
         )?;
         self.panes.insert(pid, pane);
         self.sessions.push(Session {
@@ -688,6 +690,7 @@ impl App {
             rows,
             is_ai,
             self.events_tx.clone(),
+            &self.theme,
         )?;
         self.panes.insert(pid, pane);
         if !self.sessions[self.active].tree.split(focus, pid, dir) {
@@ -721,6 +724,7 @@ impl App {
             rows,
             false,
             self.events_tx.clone(),
+            &self.theme,
         )?;
         self.panes.insert(pid, pane);
         if !self.sessions[self.active].tree.split(focus, pid, SplitDir::V) {
@@ -856,6 +860,10 @@ impl App {
             self.on_overlay_key(key);
             return Ok(());
         }
+        if self.settings.open {
+            self.on_settings_key(key);
+            return Ok(());
+        }
         // The `leader+q` overlay grabs keys while up: a digit jumps to that
         // pane, any other key just dismisses it.
         if self.pane_numbers.is_some() {
@@ -898,6 +906,7 @@ impl App {
             || self.menu.open
             || self.ctx_menu.open
             || self.keybind_overlay.open
+            || self.settings.open
             || self.pane_numbers.is_some()
             || self.mode == Mode::Leader
         {

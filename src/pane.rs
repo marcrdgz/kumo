@@ -6,35 +6,13 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crate::agents::AgentStatus;
 use crate::pty::{Pty, PtySpec};
+use crate::theme::Theme;
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
 
 use crate::vt::{self, ColorRgb};
 use crate::xtgettcap::XtgettcapTracker;
-
-/// Catppuccin mocha ANSI 16-color palette.
-const PALETTE: [ColorRgb; 16] = [
-    ColorRgb::new(0x45, 0x47, 0x5a), // Black
-    ColorRgb::new(0xf3, 0x8b, 0xa8), // Red
-    ColorRgb::new(0xa6, 0xe3, 0xa1), // Green
-    ColorRgb::new(0xf9, 0xe2, 0xaf), // Yellow
-    ColorRgb::new(0x89, 0xb4, 0xfa), // Blue
-    ColorRgb::new(0xf5, 0xc2, 0xe7), // Magenta
-    ColorRgb::new(0x94, 0xe2, 0xd5), // Cyan
-    ColorRgb::new(0xba, 0xc2, 0xde), // White
-    ColorRgb::new(0x58, 0x5b, 0x70), // BrightBlack
-    ColorRgb::new(0xf3, 0x8b, 0xa8), // BrightRed
-    ColorRgb::new(0xa6, 0xe3, 0xa1), // BrightGreen
-    ColorRgb::new(0xf9, 0xe2, 0xaf), // BrightYellow
-    ColorRgb::new(0x89, 0xb4, 0xfa), // BrightBlue
-    ColorRgb::new(0xf5, 0xc2, 0xe7), // BrightMagenta
-    ColorRgb::new(0x94, 0xe2, 0xd5), // BrightCyan
-    ColorRgb::new(0xcd, 0xd6, 0xf4), // BrightWhite
-];
-
-pub const FG: RColor = RColor::Rgb(0xcd, 0xd6, 0xf4);
-pub const ACCENT: RColor = RColor::Rgb(0x5e, 0x9e, 0xff); // normal blue
 
 /// A live pane: PTY + a real terminal emulator (libghostty-vt) fed from it.
 #[allow(dead_code)]
@@ -204,6 +182,7 @@ impl Pane {
         rows: u16,
         is_ai: bool,
         events_tx: Sender<PtyEvent>,
+        theme: &Theme,
     ) -> Result<Pane> {
         let pty = Pty::spawn(&PtySpec {
             shell: shell.clone(),
@@ -222,6 +201,7 @@ impl Pane {
             rows,
             pty,
             events_tx,
+            theme,
         )
     }
 
@@ -241,9 +221,10 @@ impl Pane {
         master_fd: i32,
         child_pid: Option<i32>,
         events_tx: Sender<PtyEvent>,
+        theme: &Theme,
     ) -> Result<Pane> {
         let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
-        Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx)
+        Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)
     }
 
     /// Shared tail of `spawn`/`resume`: create the terminal emulator, wire the
@@ -258,8 +239,17 @@ impl Pane {
         rows: u16,
         pty: Pty,
         events_tx: Sender<PtyEvent>,
+        theme: &Theme,
     ) -> Result<Pane> {
-        let vt = vt::Terminal::new(cols.max(1), rows.max(1), 10_000, &PALETTE)?;
+        let vt = vt::Terminal::new(
+            cols.max(1),
+            rows.max(1),
+            10_000,
+            &theme.palette,
+            theme.term_fg,
+            theme.term_bg,
+            theme.term_cursor,
+        )?;
 
         let mut pane = Pane {
             id,
@@ -293,6 +283,14 @@ impl Pane {
         });
 
         Ok(pane)
+    }
+
+    /// Recolor the terminal emulator for a newly selected theme. Forces a full
+    /// redraw so the new background/palette reach the next render.
+    pub fn apply_theme(&mut self, theme: &Theme) {
+        self.vt.apply_theme(&theme.palette, theme.term_fg, theme.term_bg, theme.term_cursor);
+        self.dirty = true;
+        self.full_redraw = true;
     }
 
     pub fn feed(&mut self, data: &[u8]) {
@@ -845,6 +843,10 @@ mod tests {
     use ratatui::layout::Rect;
     use std::sync::mpsc;
 
+    fn test_theme() -> &'static Theme {
+        &crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX]
+    }
+
     fn test_pane(is_ai: bool) -> Pane {
         let (tx, _rx) = mpsc::channel();
         Pane::spawn(
@@ -857,6 +859,7 @@ mod tests {
             40,
             is_ai,
             tx,
+            test_theme(),
         )
         .unwrap()
     }
@@ -1539,7 +1542,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx).unwrap();
+        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, test_theme()).unwrap();
         pane.write(format!("cd {}\n", dir.display()).as_bytes());
         std::thread::sleep(Duration::from_millis(600));
         // macOS /var and /tmp resolve to /private; compare canonical paths.
@@ -1562,7 +1565,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             std::fs::create_dir_all(d).unwrap();
         }
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx).unwrap();
+        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, test_theme()).unwrap();
         pane.write(format!("cd {}\nsleep 3 &\ncd {}\n", bg.display(), cwd_dir.display()).as_bytes());
         std::thread::sleep(Duration::from_millis(900));
         let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());

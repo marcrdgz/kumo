@@ -55,6 +55,28 @@ impl App {
             }
             return Ok(());
         }
+        if self.settings.open {
+            // Modal theme picker: a click on a theme applies it (and closes),
+            // a click outside cancels; hovering moves the selection.
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(i) = self.settings_item_at(x, y) {
+                        self.select_theme(i);
+                        self.settings.open = false;
+                    } else {
+                        self.settings.open = false;
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Moved => {
+                    if let Some(i) = self.settings_item_at(x, y) {
+                        self.settings.selected = i;
+                    }
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.popup.open {

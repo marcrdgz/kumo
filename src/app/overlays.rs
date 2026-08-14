@@ -3,22 +3,21 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
+use std::time::Instant;
 
 use super::bindings::{Binding, Group};
 use super::ui::{fill, put, text};
-use super::{App, MAUVE, ORANGE, PANEL_MUTED, PANEL_SEP};
+use super::App;
 use crate::layout::SplitDir;
-use crate::pane::{ACCENT, FG};
+use crate::theme::{Theme, THEMES};
 
 /// Label of the MENU button in the status bar.
 pub(super) const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
-const MENU_ITEMS: [&str; 4] = ["config", "reload", "keybinds", "detach"];
+const MENU_ITEMS: [&str; 5] = ["config", "settings", "reload", "keybinds", "detach"];
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
-/// Light background of the popup's text input, so it reads as an editable field.
-const INPUT_BG: RColor = RColor::Rgb(0xcd, 0xd6, 0xf4); // Catppuccin lavender
 
 /// Status-bar menu: a small dropdown anchored to the MENU button.
 pub(super) struct Menu {
@@ -96,6 +95,13 @@ pub(super) struct KeybindOverlay {
     pub(super) open: bool,
     /// Scroll offset of the body rows.
     pub(super) scroll: u16,
+}
+
+/// Settings popup (theme picker) opened from the status-bar MENU button.
+pub(super) struct SettingsPopup {
+    pub(super) open: bool,
+    /// Theme row under the keyboard/mouse highlight.
+    pub(super) selected: usize,
 }
 
 impl App {
@@ -262,6 +268,7 @@ impl App {
             "config" => self.open_config()?,
             "reload" => self.reload_config(),
             "keybinds" => self.open_keybind_overlay(),
+            "settings" => self.open_settings(),
             "detach" => {
                 // Save the session state and exit (same as leader+d).
                 self.detach_requested = true;
@@ -270,6 +277,49 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Open the settings popup, highlighting the active theme.
+    pub(super) fn open_settings(&mut self) {
+        self.settings.open = true;
+        self.settings.selected = self.theme_idx;
+        self.menu.open = false;
+    }
+
+    /// Handle a key while the settings popup is open.
+    pub(super) fn on_settings_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            self.settings.open = false;
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.settings.selected = (self.settings.selected + 1).min(THEMES.len() - 1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.settings.selected = self.settings.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                self.select_theme(self.settings.selected);
+                self.settings.open = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply theme `idx` to the whole UI: store it, recolor every pane, and
+    /// leave a confirmation notice.
+    pub(super) fn select_theme(&mut self, idx: usize) {
+        if idx >= THEMES.len() {
+            return;
+        }
+        let theme = THEMES[idx];
+        for pane in self.panes.values_mut() {
+            pane.apply_theme(&theme);
+        }
+        self.theme = theme;
+        self.theme_idx = idx;
+        self.notice = Some((format!("theme: {}", theme.name), Instant::now()));
     }
 
     /// Open (or reposition) the right-click context menu for `target` at
@@ -398,8 +448,8 @@ impl App {
             return;
         }
         let Some(dd) = self.keybind_overlay_rect() else { return };
-        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
-        fill(f, dd, PANEL_SEP);
+        let border = Style::default().fg(self.theme.accent).bg(self.theme.panel_sep);
+        fill(f, dd, self.theme.panel_sep);
         let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
@@ -416,8 +466,8 @@ impl App {
 
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default()
-            .fg(FG)
-            .bg(PANEL_SEP)
+            .fg(self.theme.fg)
+            .bg(self.theme.panel_sep)
             .add_modifier(Modifier::BOLD);
         text(f, x0 + 2, y0 + 1, "keybindings", title, inner_w);
 
@@ -433,24 +483,24 @@ impl App {
             match line {
                 KbLine::Header(label) => {
                     let st = Style::default()
-                        .fg(ORANGE)
-                        .bg(PANEL_SEP)
+                        .fg(self.theme.orange)
+                        .bg(self.theme.panel_sep)
                         .add_modifier(Modifier::BOLD);
                     text(f, x0 + 2, y, label, st, inner_w);
                 }
                 KbLine::Bind(b) => {
                     let keys = Style::default()
-                        .fg(ACCENT)
-                        .bg(PANEL_SEP)
+                        .fg(self.theme.accent)
+                        .bg(self.theme.panel_sep)
                         .add_modifier(Modifier::BOLD);
-                    let desc = Style::default().fg(FG).bg(PANEL_SEP);
+                    let desc = Style::default().fg(self.theme.fg).bg(self.theme.panel_sep);
                     text(f, x0 + 2, y, &b.keys, keys, max_keys);
                     text(f, x0 + 2 + max_keys + 2, y, &b.desc, desc, inner_w.saturating_sub(max_keys + 2));
                 }
             }
         }
 
-        let footer = Style::default().fg(PANEL_MUTED).bg(PANEL_SEP);
+        let footer = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
         text(f, x0 + 2, y1 - 1, "j/k: scroll · esc / ?: close", footer, inner_w);
     }
 
@@ -594,8 +644,8 @@ impl App {
             return;
         }
         let Some(dd) = self.menu_dropdown_rect() else { return };
-        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
-        fill(f, dd, PANEL_SEP);
+        let border = Style::default().fg(self.theme.accent).bg(self.theme.panel_sep);
+        fill(f, dd, self.theme.panel_sep);
         let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
@@ -617,6 +667,7 @@ impl App {
                 dd.width.saturating_sub(2),
                 item,
                 i == self.menu.selected,
+                &self.theme,
             );
         }
     }
@@ -627,8 +678,8 @@ impl App {
             return;
         }
         let Some(dd) = self.ctx_menu_rect() else { return };
-        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
-        fill(f, dd, PANEL_SEP);
+        let border = Style::default().fg(self.theme.accent).bg(self.theme.panel_sep);
+        fill(f, dd, self.theme.panel_sep);
         let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
@@ -650,7 +701,84 @@ impl App {
                 dd.width.saturating_sub(2),
                 item,
                 i == self.ctx_menu.selected,
+                &self.theme,
             );
+        }
+    }
+
+    /// Centered rect of the settings popup, sized to fit the theme names.
+    fn settings_rect(&self) -> Option<Rect> {
+        let (w, h) = self.term_size;
+        let max_name = THEMES.iter().map(|t| t.name.chars().count()).max().unwrap_or(10) as u16;
+        let width = (max_name + 6).min(w.saturating_sub(4));
+        // Border + title + one row per theme + border.
+        let height = (THEMES.len() as u16 + 3).min(h.saturating_sub(4)).max(3);
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    /// Theme index under `(x, y)`, if the settings popup covers it.
+    pub(super) fn settings_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let dd = self.settings_rect()?;
+        THEMES
+            .iter()
+            .enumerate()
+            .position(|(i, _)| {
+                let item = Rect::new(dd.x + 1, dd.y + 1 + i as u16, dd.width.saturating_sub(2), 1);
+                item.contains(Position::new(x, y))
+            })
+    }
+
+    /// Draw the settings popup (theme picker) while it is open. The active
+    /// theme gets a filled bullet, the highlighted row a filled accent chip.
+    pub(super) fn render_settings(&self, f: &mut Frame) {
+        if !self.settings.open {
+            return;
+        }
+        let Some(dd) = self.settings_rect() else { return };
+        let border = Style::default().fg(self.theme.accent).bg(self.theme.panel_sep);
+        fill(f, dd, self.theme.panel_sep);
+        let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+
+        let title = Style::default()
+            .fg(self.theme.fg)
+            .bg(self.theme.panel_sep)
+            .add_modifier(Modifier::BOLD);
+        text(f, x0 + 2, y0 + 1, "settings", title, dd.width.saturating_sub(4));
+
+        for (i, theme) in THEMES.iter().enumerate() {
+            let sel = i == self.settings.selected;
+            let active = i == self.theme_idx;
+            let y = y0 + 2 + i as u16;
+            let bg = if sel { self.theme.accent } else { self.theme.panel_sep };
+            for cx in (x0 + 1)..x1 {
+                put(f, cx, y, " ", Style::default().bg(bg));
+            }
+            let row_fg = if sel { RColor::Black } else { self.theme.fg };
+            // Filled bullet marks the theme currently in use.
+            let marker = if active { "●" } else { "○" };
+            let marker_style = if active && !sel {
+                Style::default().fg(self.theme.accent).bg(bg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(row_fg).bg(bg).add_modifier(Modifier::BOLD)
+            };
+            put(f, x0 + 1, y, marker, marker_style);
+            let name_style = Style::default().fg(row_fg).bg(bg);
+            text(f, x0 + 3, y, theme.name, name_style, dd.width.saturating_sub(5));
         }
     }
 
@@ -661,8 +789,8 @@ impl App {
         }
         let Some(dd) = self.name_popup_rect() else { return };
         let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
-        let border = Style::default().fg(ACCENT).bg(PANEL_SEP);
-        fill(f, dd, PANEL_SEP);
+        let border = Style::default().fg(self.theme.accent).bg(self.theme.panel_sep);
+        fill(f, dd, self.theme.panel_sep);
         put(f, x0, y0, "┌", border);
         put(f, x1, y0, "┐", border);
         put(f, x0, y1, "└", border);
@@ -678,8 +806,8 @@ impl App {
 
         // Title.
         let title = Style::default()
-            .fg(FG)
-            .bg(PANEL_SEP)
+            .fg(self.theme.fg)
+            .bg(self.theme.panel_sep)
             .add_modifier(Modifier::BOLD);
         let title_text = match self.popup.target {
             Some(PopupTarget::RenamePane(_)) => "rename pane",
@@ -689,11 +817,11 @@ impl App {
         text(f, x0 + 2, y0 + 1, title_text, title, dd.width.saturating_sub(4));
 
         // "name:" label.
-        let label = Style::default().fg(FG).bg(PANEL_SEP);
+        let label = Style::default().fg(self.theme.fg).bg(self.theme.panel_sep);
         text(f, x0 + 2, y0 + 2, "name:", label, dd.width.saturating_sub(4));
 
         // Light input field, right-scrolled to keep the cursor visible.
-        let field = Style::default().fg(RColor::Black).bg(INPUT_BG);
+        let field = Style::default().fg(RColor::Black).bg(self.theme.input_bg);
         let field_w = dd.width.saturating_sub(4);
         for cx in (x0 + 2)..(x0 + 2 + field_w) {
             put(f, cx, y0 + 3, " ", field);
@@ -726,17 +854,17 @@ impl App {
             let st = if hovered {
                 Style::default()
                     .fg(RColor::Black)
-                    .bg(MAUVE)
+                    .bg(self.theme.mauve)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(FG).bg(PANEL_SEP).add_modifier(Modifier::BOLD)
+                Style::default().fg(self.theme.fg).bg(self.theme.panel_sep).add_modifier(Modifier::BOLD)
             };
             text(f, rect.x, rect.y, label, st, rect.width);
         }
 
         // Error line.
         if let Some(err) = &self.popup.error {
-            text(f, x0 + 2, y0 + 5, err, Style::default().fg(ORANGE).bg(PANEL_SEP), dd.width.saturating_sub(4));
+            text(f, x0 + 2, y0 + 5, err, Style::default().fg(self.theme.orange).bg(self.theme.panel_sep), dd.width.saturating_sub(4));
         }
     }
 }
@@ -774,9 +902,10 @@ fn keybind_lines<'a>(keymap: &'a [Binding]) -> Vec<KbLine<'a>> {
 }
 
 /// Draw one dropdown/context-menu item as a full-width button: the whole row
-/// gets a filled background (mauve when selected, surface0 otherwise), with
+/// gets a filled background (accent when selected, surface otherwise), with
 /// the `▸` marker and the item label drawn on top.
-fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool) {    let bg = if sel { ACCENT } else { PANEL_SEP };
+fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool, theme: &Theme) {
+    let bg = if sel { theme.accent } else { theme.panel_sep };
     for cx in (x0 + 1)..(x0 + 1 + width) {
         put(f, cx, y, " ", Style::default().bg(bg));
     }
@@ -789,8 +918,8 @@ fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: 
     } else {
         (
             " ",
-            Style::default().fg(ACCENT).bg(bg),
-            Style::default().fg(FG).bg(bg),
+            Style::default().fg(theme.accent).bg(bg),
+            Style::default().fg(theme.fg).bg(bg),
         )
     };
     put(f, x0 + 1, y, marker, marker_style);
