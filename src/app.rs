@@ -21,7 +21,7 @@ use crate::theme::{Theme, THEMES};
 use self::bindings::{build_keymap, Action, Binding, Chord, LEADER};
 use self::mouse::{Drag, PendingClick, Sel};
 use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, SettingsPanel};
-use self::sidebar::SidebarScroll;
+use self::sidebar::{SidebarScroll, SidebarTab};
 use self::tasks::BranchInfo;
 
 mod bindings;
@@ -135,8 +135,10 @@ pub struct App {
     menu: Menu,
     /// Right-click context menu inside a pane.
     ctx_menu: CtxMenu,
-    /// Scroll offsets for the sidebar sessions / AGENTS sections.
+    /// Scroll offsets for the sidebar's sessions and AGENTS tabs.
     sidebar_scroll: SidebarScroll,
+    /// Active sidebar tab: SESSIONS or AGENTS (each is a full tab, 0.5.0).
+    sidebar_tab: SidebarTab,
     /// Modal popup for naming a new session.
     popup: NamePopup,
     /// `leader+?` keybind showcase.
@@ -259,6 +261,7 @@ impl App {
             // AGENTS defaults to the bottom of its region (live list), so the
             // newest agents are visible without scrolling.
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
+            sidebar_tab: SidebarTab::Sessions,
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: crate::theme::DEFAULT_THEME_IDX },

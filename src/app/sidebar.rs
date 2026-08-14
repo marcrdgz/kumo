@@ -8,12 +8,19 @@ use super::tasks::BranchInfo;
 use crate::agents::AgentStatus;
 use crate::theme::Theme;
 
+/// Sidebar tabs: SESSIONS or AGENTS. Each is a full tab in the panel (0.5.0),
+/// replacing the two stacked, independently-scrolling sections.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SidebarTab {
+    Sessions,
+    Agents,
+}
+
 /// Stable rows of the left sidebar, shared by rendering and mouse hit-testing.
 #[derive(Clone)]
 enum SidebarRow {
     Header(String),
     Spacer,
-    Section(String),
     Session(usize),
     Branch(usize, BranchInfo),
     AgentDir(usize, u64),
@@ -21,18 +28,57 @@ enum SidebarRow {
     NewSession,
 }
 
-/// Scroll offsets for the sidebar's sessions and AGENTS sections.
+/// Scroll offsets for the sidebar's sessions and AGENTS tabs.
 pub(super) struct SidebarScroll {
     pub(super) sessions: u16,
     pub(super) agents: u16,
 }
 
+/// Y row of the tab bar (below the header + spacer).
+const TAB_BAR_Y: u16 = 2;
+/// First content row of the active tab (right below the tab bar).
+const CONTENT_Y: u16 = 3;
+
 impl App {
-    /// Row of the AGENTS section label: the sidebar midpoint, so the sessions
-    /// list (above it) never pushes the agents section past halfway.
-    fn sidebar_agents_y(&self) -> u16 {
-        let footer_y = self.term_size.1.saturating_sub(2);
-        (self.term_size.1 / 2).max(4).min(footer_y)
+    /// Last row of the sidebar content: the row above the status bar.
+    fn sidebar_footer_y(&self) -> u16 {
+        self.term_size.1.saturating_sub(2)
+    }
+
+    /// Height (in rows) of the active tab's content region.
+    fn content_region_h(&self) -> u16 {
+        self.sidebar_footer_y().saturating_sub(CONTENT_Y - 1)
+    }
+
+    /// Rows of the active tab's content list.
+    fn active_tab_items(&self) -> Vec<SidebarRow> {
+        match self.sidebar_tab {
+            SidebarTab::Sessions => self.sessions_content(),
+            SidebarTab::Agents => self.agents_content(),
+        }
+    }
+
+    /// Scroll offset of the active tab.
+    fn active_scroll(&self) -> u16 {
+        match self.sidebar_tab {
+            SidebarTab::Sessions => self.sidebar_scroll.sessions,
+            SidebarTab::Agents => self.sidebar_scroll.agents,
+        }
+    }
+
+    /// Max scroll offset for the active tab.
+    fn active_scroll_max(&self) -> u16 {
+        let region_h = self.content_region_h() as usize;
+        self.active_tab_items().len().saturating_sub(region_h) as u16
+    }
+
+    /// Which tab a click at `(x, y)` lands on, if the tab bar.
+    fn tab_at(&self, x: u16, y: u16) -> Option<SidebarTab> {
+        if y != TAB_BAR_Y || x >= self.sidebar_width {
+            return None;
+        }
+        let half = (self.sidebar_width / 2).max(4);
+        Some(if x < half { SidebarTab::Sessions } else { SidebarTab::Agents })
     }
 
     /// Sessions content: session rows (+ branch) followed by "+ new session".
@@ -81,91 +127,55 @@ impl App {
         out.into_iter().map(|(_, _, _, row)| row).collect()
     }
 
-    /// Max scroll offset for the sessions section.
-    fn sessions_scroll_max(&self) -> u16 {
-        let agents_y = self.sidebar_agents_y();
-        let region_h = agents_y.saturating_sub(3) as usize;
-        self.sessions_content().len().saturating_sub(region_h) as u16
-    }
-
-    /// Max scroll offset for the AGENTS section.
-    fn agents_scroll_max(&self) -> u16 {
-        let agents_y = self.sidebar_agents_y();
-        let footer_y = self.term_size.1.saturating_sub(2);
-        let region_h = footer_y.saturating_sub(agents_y) as usize;
-        self.agents_content().len().saturating_sub(region_h) as u16
-    }
-
-    /// Static rows of the sidebar (shared by render + mouse hit-testing).
-    ///
-    /// Sessions live above the midpoint and scroll once they would push the
-    /// AGENTS section past it; AGENTS scrolls once it reaches the bottom edge.
+    /// Static rows of the sidebar (shared by render + mouse hit-testing):
+    /// the header, spacer, then the active tab's content rows. The tab bar row
+    /// itself is hit-tested separately (`tab_at`).
     fn sidebar_rows(&self) -> Vec<(u16, SidebarRow)> {
-        let mut out = Vec::new();
-        let mut y: u16 = 0;
-        out.push((y, SidebarRow::Header("kumo".into())));
-        y += 1;
-        out.push((y, SidebarRow::Spacer));
-        y += 1;
-        out.push((y, SidebarRow::Section("sessions".into())));
-        y += 1;
-
-        let agents_y = self.sidebar_agents_y();
-        let footer_y = self.term_size.1.saturating_sub(2);
-
-        // Sessions region: rows 3 .. agents_y-1.
-        let region_h = agents_y.saturating_sub(3) as usize;
-        let items = self.sessions_content();
-        let offset = (self.sidebar_scroll.sessions as usize).min(items.len().saturating_sub(region_h));
-        for item in items.iter().skip(offset).take(region_h) {
-            out.push((y, item.clone()));
-            y += 1;
-        }
-
-        out.push((agents_y, SidebarRow::Section("agents".into())));
-
-        // AGENTS region: rows agents_y+1 .. footer_y.
-        let region_h = footer_y.saturating_sub(agents_y) as usize;
-        let items = self.agents_content();
-        let offset = (self.sidebar_scroll.agents as usize).min(items.len().saturating_sub(region_h));
-        for (ay, item) in (agents_y + 1..).zip(items.iter().skip(offset).take(region_h)) {
-            out.push((ay, item.clone()));
+        let mut out = vec![
+            (0, SidebarRow::Header("kumo".into())),
+            (1, SidebarRow::Spacer),
+        ];
+        let region_h = self.content_region_h() as usize;
+        let items = self.active_tab_items();
+        let offset = (self.active_scroll() as usize).min(items.len().saturating_sub(region_h));
+        for (i, item) in items.iter().skip(offset).take(region_h).enumerate() {
+            out.push((CONTENT_Y + i as u16, item.clone()));
         }
         out
     }
 
-    /// Mouse-wheel scroll for the sidebar: scrolls the sessions section above
-    /// the midpoint and the AGENTS section below it. Returns whether the
-    /// event was consumed.
+    /// Mouse-wheel scroll for the sidebar: scrolls the active tab's content.
+    /// Returns whether the event was consumed.
     pub(super) fn sidebar_wheel(&mut self, x: u16, y: u16, up: bool) -> bool {
         if !self.sidebar_open || x >= self.sidebar_width {
             return false;
         }
-        const STEP: u16 = 3;
-        let agents_y = self.sidebar_agents_y();
-        let footer_y = self.term_size.1.saturating_sub(2);
-        if y >= 3 && y < agents_y {
-            let max = self.sessions_scroll_max();
-            self.sidebar_scroll.sessions = if up {
-                self.sidebar_scroll.sessions.saturating_sub(STEP)
-            } else {
-                self.sidebar_scroll.sessions.saturating_add(STEP).min(max)
-            };
-            true
-        } else if y > agents_y && y <= footer_y {
-            let max = self.agents_scroll_max();
-            self.sidebar_scroll.agents = if up {
-                self.sidebar_scroll.agents.saturating_sub(STEP)
-            } else {
-                self.sidebar_scroll.agents.saturating_add(STEP).min(max)
-            };
-            true
-        } else {
-            false
+        if y < CONTENT_Y || y > self.sidebar_footer_y() {
+            return false;
         }
+        const STEP: u16 = 3;
+        let max = self.active_scroll_max();
+        let scroll = match self.sidebar_tab {
+            SidebarTab::Sessions => &mut self.sidebar_scroll.sessions,
+            SidebarTab::Agents => &mut self.sidebar_scroll.agents,
+        };
+        *scroll = if up {
+            scroll.saturating_sub(STEP)
+        } else {
+            scroll.saturating_add(STEP).min(max)
+        };
+        true
     }
 
-    pub(super) fn sidebar_hit(&mut self, _x: u16, y: u16) -> bool {
+    pub(super) fn sidebar_hit(&mut self, x: u16, y: u16) -> bool {
+        // A click on the tab bar switches tabs (switching to the already-active
+        // tab is a no-op but still consumes the click).
+        if let Some(tab) = self.tab_at(x, y) {
+            if tab != self.sidebar_tab {
+                self.sidebar_tab = tab;
+            }
+            return true;
+        }
         for (ry, row) in self.sidebar_rows() {
             if ry != y {
                 continue;
@@ -212,6 +222,7 @@ impl App {
         for y in area.y..(area.y + area.height) {
             put(f, area.x + area.width, y, "│", Style::default().fg(self.theme.panel_sep));
         }
+        self.render_tabs(f, area, w);
         for (y, row) in self.sidebar_rows() {
             if y > area.y + area.height {
                 break;
@@ -230,10 +241,6 @@ impl App {
                 }
                 SidebarRow::Spacer => {
                     put(f, x, y, " ", Style::default().bg(RColor::Reset));
-                }
-                SidebarRow::Section(t) => {
-                    let style = Style::default().fg(self.theme.panel_muted).bg(RColor::Reset);
-                    text(f, x, y, &format!("  {}", t.to_uppercase()), style, max);
                 }
                 SidebarRow::Session(i) => {
                     let active = i == self.active;
@@ -357,27 +364,50 @@ impl App {
                 }
             }
         }
-        // Section scrollbars (rightmost sidebar column) when the content
-        // overflows its region.
+        // Scrollbar (rightmost sidebar column) when the active tab overflows
+        // its content region.
         let scroll_x = w.saturating_sub(1);
-        let agents_y = self.sidebar_agents_y();
-        let footer_y = self.term_size.1.saturating_sub(2);
-
-        let sess_region = agents_y.saturating_sub(3);
-        let sess_items = self.sessions_content();
-        if sess_items.len() > sess_region as usize {
-            let offset = (self.sidebar_scroll.sessions as usize)
-                .min(sess_items.len() - sess_region as usize);
-            draw_scrollbar(f, scroll_x, 3, sess_region, offset, sess_items.len(), &self.theme);
+        let region_h = self.content_region_h();
+        let items = self.active_tab_items();
+        if items.len() > region_h as usize {
+            let offset = (self.active_scroll() as usize).min(items.len() - region_h as usize);
+            draw_scrollbar(f, scroll_x, CONTENT_Y, region_h, offset, items.len(), &self.theme);
         }
+    }
 
-        let agent_region = footer_y.saturating_sub(agents_y);
-        let agent_items = self.agents_content();
-        if agent_items.len() > agent_region as usize {
-            let offset = (self.sidebar_scroll.agents as usize)
-                .min(agent_items.len() - agent_region as usize);
-            draw_scrollbar(f, scroll_x, agents_y + 1, agent_region, offset, agent_items.len(), &self.theme);
+    /// Draw the tab bar: two half-width tabs, the active one highlighted. The
+    /// label of the active tab is also underlined so the selection is legible
+    /// without a highlighted background.
+    fn render_tabs(&self, f: &mut Frame, area: Rect, w: u16) {
+        let y = area.y + TAB_BAR_Y;
+        let half = (w / 2).max(4);
+        let tabs = [("sessions", SidebarTab::Sessions), ("agents", SidebarTab::Agents)];
+        for (i, (label, tab)) in tabs.iter().enumerate() {
+            let x0 = area.x + i as u16 * half;
+            let x1 = if i == 0 { x0 + half } else { area.x + w };
+            let active = *tab == self.sidebar_tab;
+            let bg = if active { self.theme.panel_sep } else { RColor::Reset };
+            fill(f, Rect::new(x0, y, x1 - x0, 1), bg);
+            let style = if active {
+                Style::default()
+                    .fg(self.theme.accent)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(self.theme.panel_muted).bg(bg)
+            };
+            let label = label.to_uppercase();
+            let pad = (x1 - x0).saturating_sub(label.chars().count() as u16) / 2;
+            text(f, x0 + pad, y, &label, style, x1 - x0);
         }
+        // Separator between the two tabs, drawn last so the fills don't cover it.
+        put(
+            f,
+            area.x + half,
+            y,
+            "│",
+            Style::default().fg(self.theme.panel_sep).bg(RColor::Reset),
+        );
     }
 }
 
@@ -466,7 +496,7 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| app.render_sidebar(f, f.area())).unwrap();
         let buf = term.backend().buffer();
-        // Branch row for session 0 sits at y=4 (header, spacer, section, session).
+        // Branch row for session 0 sits at y=4 (header, spacer, tabs, session).
         let line: String = (0..26).map(|x| buf.cell((x, 4)).unwrap().symbol()).collect();
         assert_eq!(line.trim_end(), "    fixfixfixfixfixf… ↑1");
         let up = buf.cell((22, 4)).unwrap();
@@ -489,6 +519,10 @@ mod tests {
     }
 
     fn build_app(n: usize) -> App {
+        // Tests that mutate `$HOME` (config, app, server) serialize behind
+        // `TEST_ENV_LOCK`; hold it while spawning so `Pty::spawn` never reads a
+        // concurrently-deleted home directory for the child cwd.
+        let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
         let (tx, rx) = mpsc::channel();
         let (_update_tx, update_rx) = mpsc::channel::<Option<crate::update::UpdateNotice>>();
         let mut panes = HashMap::new();
@@ -553,6 +587,7 @@ mod tests {
             menu: super::super::Menu { open: false, selected: 0 },
             ctx_menu: super::super::CtxMenu { open: false, x: 0, y: 0, selected: 0, target: super::super::CtxTarget::Pane(0) },
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
+            sidebar_tab: SidebarTab::Sessions,
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: super::super::KeybindOverlay { open: false, scroll: 0 },
             settings: super::super::SettingsPanel {
@@ -571,7 +606,7 @@ mod tests {
     #[test]
     fn clicking_session_row_switches_active() {
         let mut app = build_app(3);
-        // h=24 -> agents_y=12 -> session rows 3,4,5.
+        // h=24 -> sessions tab content rows 3,4,5.
         let rows = app.sidebar_rows();
         let sess_rows: Vec<(u16, usize)> = rows
             .iter()
@@ -588,14 +623,16 @@ mod tests {
 
         assert_eq!(app.sidebar_session_at(0, 3), Some(0), "right-click sess-1 row");
         assert_eq!(app.sidebar_session_at(0, y), Some(1), "right-click sess-2 row");
-        assert_eq!(app.sidebar_session_at(0, 2), None, "section label is not a session");
+        assert_eq!(app.sidebar_session_at(0, 2), None, "the tab bar is not a session");
         assert_eq!(app.sidebar_session_at(99, y), None, "outside the sidebar");
     }
 
     #[test]
     fn session_rows_scroll_consistently() {
         let mut app = build_app(10);
-        // 10 sessions + "new session" = 11 items, region 9 rows -> max offset 2.
+        // Shrink the terminal so 11 items overflow the sessions tab's region:
+        // h=8 -> content rows 3..6 (4 rows) -> max offset 7.
+        app.term_size = (80, 8);
         app.sidebar_scroll.sessions = 5;
         let rows = app.sidebar_rows();
         let sess_rows: Vec<(u16, usize)> = rows
@@ -605,17 +642,59 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // Offset caps at 2: first visible session is index 2 at y=3.
-        assert_eq!(sess_rows.first(), Some(&(3, 2)), "scrolled rows must match render");
-        assert_eq!(sess_rows.last(), Some(&(10, 9)));
+        // Offset 5: first visible session is index 5 at y=3, last index 8.
+        assert_eq!(sess_rows.first(), Some(&(3, 5)), "scrolled rows must match render");
+        assert_eq!(sess_rows.last(), Some(&(6, 8)));
 
         let (y, _) = sess_rows.first().unwrap();
         assert!(app.sidebar_hit(0, *y));
-        assert_eq!(app.active, 2);
+        assert_eq!(app.active, 5);
 
         let (y, _) = sess_rows.last().unwrap();
         assert!(app.sidebar_hit(0, *y));
-        assert_eq!(app.active, 9);
+        assert_eq!(app.active, 8);
+    }
+
+    #[test]
+    fn clicking_tab_bar_switches_section() {
+        let mut app = build_app(1);
+        // y=2 is the tab bar; with sidebar_width 26 the split is at x=13.
+        assert!(app.sidebar_hit(15, 2), "click on the AGENTS tab must be handled");
+        assert_eq!(app.sidebar_tab, SidebarTab::Agents, "clicking the tab must switch");
+        assert!(
+            app.sidebar_rows().iter().all(|(y, r)| *y < 3 || matches!(r, SidebarRow::AgentDir(..) | SidebarRow::AgentName(..))),
+            "the AGENTS tab lists agent rows only"
+        );
+
+        assert!(app.sidebar_hit(3, 2), "click on the SESSIONS tab must be handled");
+        assert_eq!(app.sidebar_tab, SidebarTab::Sessions);
+
+        // A click on an already-active tab is consumed but keeps the tab.
+        assert!(app.sidebar_hit(3, 2));
+        assert_eq!(app.sidebar_tab, SidebarTab::Sessions);
+        // The header row is not a tab and is not handled.
+        assert!(!app.sidebar_hit(3, 0));
+    }
+
+    #[test]
+    fn wheel_scrolls_the_active_tab() {
+        let mut app = build_app(10);
+        app.term_size = (80, 8);
+        // SESSIONS tab is active by default: wheel scrolls sessions only.
+        assert!(app.sidebar_wheel(5, 5, false), "wheel over the content region is consumed");
+        assert_eq!(app.sidebar_scroll.sessions, 3, "sessions scrolls down by STEP");
+        assert_eq!(app.sidebar_scroll.agents, u16::MAX, "agents scroll stays untouched");
+        assert!(app.sidebar_wheel(5, 5, true));
+        assert_eq!(app.sidebar_scroll.sessions, 0, "sessions scrolls back up");
+
+        // The wheel is ignored over the tab bar and below the footer rows.
+        assert!(!app.sidebar_wheel(5, 2, false));
+        assert!(!app.sidebar_wheel(5, 23, false));
+
+        // Switching to AGENTS routes the wheel to the agents offset.
+        app.sidebar_tab = SidebarTab::Agents;
+        assert!(app.sidebar_wheel(5, 5, false));
+        assert_eq!(app.sidebar_scroll.agents, 0, "an empty agents list cannot scroll");
     }
 
     #[test]

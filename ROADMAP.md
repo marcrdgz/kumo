@@ -146,9 +146,11 @@ scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
   no restart to pick up changes; lands here so themes are instantly tweakable.
 - **Status bar**: customizable widgets (branch, session, agent status, hostname,
   clock) — includes the status-bar **layout** config deferred from 0.4.0.
-- **Sidebar**: toggle/order sections; pane titles and border styling. The
-  SESSIONS and AGENTS sections become two full **tabs** in the panel (today two
-  stacked, independently-scrolling regions in `src/app/sidebar.rs`).
+- **Sidebar**: ✅ SESSIONS and AGENTS are now two full **tabs** in the panel —
+  a tab bar (click to switch, active highlighted) replaces the two stacked,
+  independently-scrolling regions; each tab scrolls and draws its own
+  scrollbar (`src/app/sidebar.rs`). Still planned: toggle/order sections, and
+  pane titles + border styling.
 - **Popup input editing**: `cmd+backspace` / `ctrl+backspace` (delete word)
   and `cmd+delete` / `ctrl+delete` (delete forward word) in the rename / new
   popups. Popup keymaps stay deliberately fixed (see 0.4.0) — this is editing
