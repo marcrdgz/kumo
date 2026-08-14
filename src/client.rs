@@ -222,20 +222,27 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
     let stop2 = stop.clone();
     let input = std::thread::spawn(move || input_loop(write_half, stop2));
 
+    // The daemon pushes a frame every ~250ms even when idle, so a read timeout
+    // (2s of silence) always means the connection is stuck: the daemon flagged
+    // this client as lagging (tab backgrounded, machine asleep) and stopped
+    // serving it. Reconnecting instead of blocking on the last frame forever
+    // (which would leave the UI frozen with no way to detach).
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+
     let result: Result<Exit> = (|| {
         let mut saw_frame = false;
         loop {
-            match protocol::read_framed::<ServerMsg>(stream)? {
-                ServerMsg::Welcome { .. } => {}
-                ServerMsg::Frame { frame } => {
+            match protocol::read_framed::<ServerMsg>(stream) {
+                Ok(ServerMsg::Welcome { .. }) => {}
+                Ok(ServerMsg::Frame { frame }) => {
                     saw_frame = true;
                     blit(&mut stdout, &frame)?;
                 }
-                ServerMsg::SessionList { .. } => {}
-                ServerMsg::ConfigReloaded { .. } => {}
-                ServerMsg::Detach => return Ok(Exit::Clean),
-                ServerMsg::Restarting => return Ok(Exit::Restarting),
-                ServerMsg::Shutdown => {
+                Ok(ServerMsg::SessionList { .. }) => {}
+                Ok(ServerMsg::ConfigReloaded { .. }) => {}
+                Ok(ServerMsg::Detach) => return Ok(Exit::Clean),
+                Ok(ServerMsg::Restarting) => return Ok(Exit::Restarting),
+                Ok(ServerMsg::Shutdown) => {
                     // A shutdown before any frame means the daemon rejected the
                     // handshake (protocol mismatch with an old lingering daemon)
                     // rather than a clean auto-stop.
@@ -247,6 +254,8 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
                     }
                     return Ok(Exit::Clean);
                 }
+                Err(e) if is_read_timeout(&e) => return Ok(Exit::Restarting),
+                Err(e) => return Err(e),
             }
         }
     })();
@@ -267,6 +276,15 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
             other
         }
     }
+}
+
+/// Whether an error is a socket read timeout: no data arrived within the
+/// client's read-timeout window. The daemon sends a frame every ~250ms even
+/// when idle, so prolonged silence always means a lost/stalled connection.
+fn is_read_timeout(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<io::Error>()
+        .map(|ioe| matches!(ioe.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
+        .unwrap_or(false)
 }
 
 /// Read crossterm events and forward them to the daemon. Exits when `stop` is
@@ -474,6 +492,26 @@ mod tests {
             faint: false,
             cell_width: width,
         }
+    }
+
+    #[test]
+    fn read_timeout_signals_a_stalled_connection() {
+        use std::os::unix::net::UnixStream;
+        let (mut a, _b) = UnixStream::pair().unwrap();
+        a.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        // Nothing is ever written: the read must time out, and the client must
+        // treat that as a lost connection (reconnect), not as a hard error.
+        let err = protocol::read_framed::<ServerMsg>(&mut a).unwrap_err();
+        assert!(
+            is_read_timeout(&err),
+            "a silent socket must be a stalled connection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn non_timeout_errors_are_not_reconnects() {
+        let err = anyhow::anyhow!("connection reset by peer");
+        assert!(!is_read_timeout(&err), "a plain error must not trigger a reconnect");
     }
 
     #[test]

@@ -33,13 +33,38 @@ impl From<crate::agents::AgentStatus> for protocol::AgentStatus {
 /// One connected terminal client. The read half lives in a per-client reader
 /// thread; outgoing messages go through a per-client writer thread with a
 /// bounded queue, so a slow (or unread) client never blocks the daemon loop —
-/// frames are dropped for lagging clients instead of stalling everyone.
+/// a lagging client is paused (and later caught up with a full frame) instead
+/// of stalling everyone. A client is only dropped when its connection is
+/// genuinely gone (writer dead or the reader thread saw EOF).
 struct Client {
     tx: mpsc::SyncSender<ServerMsg>,
     welcomed: bool,
     /// True until this client has received one full frame (its first attach);
     /// it needs a full repaint even if the daemon's own frame is a diff.
     needs_full: bool,
+}
+
+impl Client {
+    /// Queue a frame to the client's writer thread. Returns `true` when the
+    /// client must be dropped (its connection is gone: the writer thread died).
+    ///
+    /// A full queue is *not* fatal: it means the client stopped reading (tab
+    /// backgrounded, terminal busy, machine asleep) and its writer thread is
+    /// blocked writing to the socket. Dropping the client there would orphan a
+    /// live connection — the client stays frozen on its last frame, unable to
+    /// detach, with no EOF to wake it. Instead it is flagged for a full-frame
+    /// repaint and resumes with fresh state as soon as it reads again. Dead
+    /// clients are cleaned up by their reader thread (EOF -> `Detach`).
+    fn try_send_frame(&mut self, msg: ServerMsg) -> bool {
+        match self.tx.try_send(msg) {
+            Ok(()) => false,
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.needs_full = true;
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => true,
+        }
+    }
 }
 
 pub fn run_daemon(launch: Launch) -> Result<()> {
@@ -266,7 +291,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         ServerMsg::Frame { frame: protocol::FrameMsg::diff_frame(&new_buf, last, cursor) }
                     })
                 };
-                if client.tx.try_send(msg.clone()).is_err() {
+                // A full queue means the client is lagging (not reading), never
+                // that it is gone: keep it and let it catch up with a full
+                // frame. Only a disconnected writer drops the client.
+                if client.try_send_frame(msg.clone()) {
                     dead.push(*id);
                 }
             }
@@ -575,6 +603,33 @@ mod tests {
         assert_eq!(W::Working.label(), "working");
         assert_eq!(W::Blocked.label(), "blocked");
         assert_eq!(W::Idle.label(), "idle");
+    }
+
+    #[test]
+    fn full_queue_marks_full_redraw_instead_of_dropping() {
+        let (tx, rx) = mpsc::sync_channel::<ServerMsg>(1);
+        let mut client = Client { tx, welcomed: true, needs_full: false };
+        // Fill the writer's channel so the next send hits Full — exactly what
+        // happens while the writer thread is blocked on a client that stopped
+        // reading (backgrounded tab, asleep machine).
+        let filler = client.tx.clone();
+        filler.try_send(ServerMsg::Detach).unwrap();
+        assert!(
+            !client.try_send_frame(ServerMsg::Detach),
+            "a lagging client must never be dropped"
+        );
+        assert!(
+            client.needs_full,
+            "the lagging client must be flagged for a full-frame repaint"
+        );
+
+        // Once the receiver is gone (writer thread died = connection really
+        // broken), the client is dropped.
+        drop(rx);
+        assert!(
+            client.try_send_frame(ServerMsg::Detach),
+            "a disconnected client must be dropped"
+        );
     }
 
     #[test]
