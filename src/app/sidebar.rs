@@ -555,8 +555,9 @@ mod tests {
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: super::super::KeybindOverlay { open: false, scroll: 0 },
-            settings: super::super::SettingsPopup {
+            settings: super::super::SettingsPanel {
                 open: false,
+                tab: 0,
                 selected: crate::theme::DEFAULT_THEME_IDX,
             },
             theme: crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX],

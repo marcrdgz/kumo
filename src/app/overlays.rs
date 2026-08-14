@@ -97,10 +97,32 @@ pub(super) struct KeybindOverlay {
     pub(super) scroll: u16,
 }
 
-/// Settings popup (theme picker) opened from the status-bar MENU button.
-pub(super) struct SettingsPopup {
+/// Tabs of the settings panel, in sidebar order. "appearance" holds the theme
+/// picker; future tabs (keybinds, behavior, …) append here.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum SettingsTab {
+    Appearance,
+    About,
+}
+
+impl SettingsTab {
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "appearance",
+            SettingsTab::About => "about",
+        }
+    }
+}
+
+/// Settings tabs in sidebar order.
+pub(super) const SETTINGS_TABS: [SettingsTab; 2] = [SettingsTab::Appearance, SettingsTab::About];
+
+/// Settings panel (tabbed preferences) opened from the status-bar MENU button.
+pub(super) struct SettingsPanel {
     pub(super) open: bool,
-    /// Theme row under the keyboard/mouse highlight.
+    /// Active tab index into `SETTINGS_TABS`.
+    pub(super) tab: usize,
+    /// Row selected within the active tab (a theme index on "appearance").
     pub(super) selected: usize,
 }
 
@@ -279,29 +301,56 @@ impl App {
         Ok(())
     }
 
-    /// Open the settings popup, highlighting the active theme.
+    /// Open the settings panel on the appearance tab, highlighting the theme
+    /// currently in use.
     pub(super) fn open_settings(&mut self) {
         self.settings.open = true;
+        self.settings.tab = 0;
         self.settings.selected = self.theme_idx;
         self.menu.open = false;
     }
 
-    /// Handle a key while the settings popup is open.
+    /// Switch the settings panel to tab `idx`, resetting the row selection to
+    /// the current theme when returning to "appearance".
+    pub(super) fn settings_set_tab(&mut self, idx: usize) {
+        if idx >= SETTINGS_TABS.len() {
+            return;
+        }
+        self.settings.tab = idx;
+        self.settings.selected =
+            if SETTINGS_TABS[idx] == SettingsTab::Appearance { self.theme_idx } else { 0 };
+    }
+
+    /// Handle a key while the settings panel is open. Applying a theme keeps
+    /// the panel open so the change is visible immediately.
     pub(super) fn on_settings_key(&mut self, key: KeyEvent) {
         if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.settings.open = false;
             return;
         }
+        let tab = SETTINGS_TABS.get(self.settings.tab).copied().unwrap_or(SettingsTab::Appearance);
         match key.code {
+            KeyCode::Tab => self.settings_set_tab((self.settings.tab + 1) % SETTINGS_TABS.len()),
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.settings_set_tab((self.settings.tab + 1).min(SETTINGS_TABS.len() - 1));
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.settings_set_tab(self.settings.tab.saturating_sub(1));
+            }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.settings.selected = (self.settings.selected + 1).min(THEMES.len() - 1);
+                if tab == SettingsTab::Appearance {
+                    self.settings.selected = (self.settings.selected + 1).min(THEMES.len() - 1);
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.settings.selected = self.settings.selected.saturating_sub(1);
+                if tab == SettingsTab::Appearance {
+                    self.settings.selected = self.settings.selected.saturating_sub(1);
+                }
             }
-            KeyCode::Enter => {
+            KeyCode::Enter if tab == SettingsTab::Appearance => {
+                // Apply live: switching themes keeps the panel open so the new
+                // colors are immediately visible and further tweaks are easy.
                 self.select_theme(self.settings.selected);
-                self.settings.open = false;
             }
             _ => {}
         }
@@ -706,33 +755,56 @@ impl App {
         }
     }
 
-    /// Centered rect of the settings popup, sized to fit the theme names.
-    fn settings_rect(&self) -> Option<Rect> {
+    /// Centered rect of the settings panel: a generous portion of the terminal
+    /// so there is room for the tab list, the per-tab content and the footer.
+    pub(super) fn settings_rect(&self) -> Option<Rect> {
         let (w, h) = self.term_size;
-        let max_name = THEMES.iter().map(|t| t.name.chars().count()).max().unwrap_or(10) as u16;
-        let width = (max_name + 6).min(w.saturating_sub(4));
-        // Border + title + one row per theme + border.
-        let height = (THEMES.len() as u16 + 3).min(h.saturating_sub(4)).max(3);
-        if w < width || h < height {
+        if w < 30 || h < 12 {
             return None;
         }
+        let width = (w * 3 / 5).max(50).min(w.saturating_sub(4));
+        let height = (h * 3 / 5).max(18).min(h.saturating_sub(4));
         Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
     }
 
-    /// Theme index under `(x, y)`, if the settings popup covers it.
-    pub(super) fn settings_item_at(&self, x: u16, y: u16) -> Option<usize> {
+    /// Rect of the settings tab list (left column).
+    fn settings_tabs_rect(&self) -> Option<Rect> {
         let dd = self.settings_rect()?;
-        THEMES
-            .iter()
-            .enumerate()
-            .position(|(i, _)| {
-                let item = Rect::new(dd.x + 1, dd.y + 1 + i as u16, dd.width.saturating_sub(2), 1);
-                item.contains(Position::new(x, y))
-            })
+        Some(Rect::new(dd.x + 2, dd.y + 2, 16, dd.height.saturating_sub(4)))
     }
 
-    /// Draw the settings popup (theme picker) while it is open. The active
-    /// theme gets a filled bullet, the highlighted row a filled accent chip.
+    /// Rect of the settings content area, right of the tab list.
+    fn settings_content_rect(&self) -> Option<Rect> {
+        let dd = self.settings_rect()?;
+        let w = dd.width.saturating_sub(4).saturating_sub(17);
+        Some(Rect::new(dd.x + 2 + 16 + 1, dd.y + 2, w, dd.height.saturating_sub(4)))
+    }
+
+    /// Tab index under `(x, y)`, if the settings tab list covers it.
+    pub(super) fn settings_tab_at(&self, x: u16, y: u16) -> Option<usize> {
+        let tabs = self.settings_tabs_rect()?;
+        SETTINGS_TABS.iter().enumerate().position(|(i, _)| {
+            let item = Rect::new(tabs.x, tabs.y + i as u16, tabs.width, 1);
+            item.contains(Position::new(x, y))
+        })
+    }
+
+    /// Row index under `(x, y)`, if the active tab's content covers it (theme
+    /// rows on "appearance"; other tabs have no clickable rows).
+    pub(super) fn settings_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        if SETTINGS_TABS.get(self.settings.tab).copied() != Some(SettingsTab::Appearance) {
+            return None;
+        }
+        let content = self.settings_content_rect()?;
+        THEMES.iter().enumerate().position(|(i, _)| {
+            let item = Rect::new(content.x, content.y + 1 + i as u16, content.width, 1);
+            item.contains(Position::new(x, y))
+        })
+    }
+
+    /// Draw the settings panel while it is open: a title, a left tab list, the
+    /// active tab's content (theme picker, about) and a footer. Applying a
+    /// theme keeps the panel open so the change is visible immediately.
     pub(super) fn render_settings(&self, f: &mut Frame) {
         if !self.settings.open {
             return;
@@ -760,12 +832,65 @@ impl App {
             .add_modifier(Modifier::BOLD);
         text(f, x0 + 2, y0 + 1, "settings", title, dd.width.saturating_sub(4));
 
+        let Some(tabs) = self.settings_tabs_rect() else { return };
+        for (i, tab) in SETTINGS_TABS.iter().enumerate() {
+            let sel = i == self.settings.tab;
+            let y = tabs.y + i as u16;
+            let bg = if sel { self.theme.accent } else { self.theme.panel_sep };
+            for cx in tabs.x..(tabs.x + tabs.width) {
+                put(f, cx, y, " ", Style::default().bg(bg));
+            }
+            let row_fg = if sel { RColor::Black } else { self.theme.fg };
+            put(
+                f,
+                tabs.x,
+                y,
+                "▸",
+                Style::default().fg(row_fg).bg(bg).add_modifier(Modifier::BOLD),
+            );
+            text(f, tabs.x + 2, y, tab.label(), Style::default().fg(row_fg).bg(bg), tabs.width.saturating_sub(2));
+        }
+        // Separator between the tab list and the content area.
+        let sep_x = tabs.x + tabs.width;
+        for y in tabs.y..y1 {
+            put(f, sep_x, y, "│", border);
+        }
+
+        match SETTINGS_TABS.get(self.settings.tab).copied().unwrap_or(SettingsTab::Appearance) {
+            SettingsTab::Appearance => self.render_settings_appearance(f, dd),
+            SettingsTab::About => self.render_settings_about(f, dd),
+        }
+
+        let footer = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
+        text(
+            f,
+            x0 + 2,
+            y1 - 1,
+            "j/k: move · h/l: tab · enter: apply · esc: close",
+            footer,
+            dd.width.saturating_sub(4),
+        );
+    }
+
+    /// Draw the "appearance" tab: a theme section header plus one row per
+    /// theme. The active theme gets a filled bullet, the highlighted row a
+    /// filled accent chip and an "in use" tag.
+    fn render_settings_appearance(&self, f: &mut Frame, dd: Rect) {
+        let Some(content) = self.settings_content_rect() else { return };
+        let label = Style::default()
+            .fg(self.theme.secondary)
+            .bg(self.theme.panel_sep)
+            .add_modifier(Modifier::BOLD);
+        text(f, content.x, content.y, "theme", label, content.width);
         for (i, theme) in THEMES.iter().enumerate() {
             let sel = i == self.settings.selected;
             let active = i == self.theme_idx;
-            let y = y0 + 2 + i as u16;
+            let y = content.y + 1 + i as u16;
+            if y >= dd.bottom().saturating_sub(1) {
+                break;
+            }
             let bg = if sel { self.theme.accent } else { self.theme.panel_sep };
-            for cx in (x0 + 1)..x1 {
+            for cx in content.x..(content.x + content.width) {
                 put(f, cx, y, " ", Style::default().bg(bg));
             }
             let row_fg = if sel { RColor::Black } else { self.theme.fg };
@@ -776,9 +901,42 @@ impl App {
             } else {
                 Style::default().fg(row_fg).bg(bg).add_modifier(Modifier::BOLD)
             };
-            put(f, x0 + 1, y, marker, marker_style);
-            let name_style = Style::default().fg(row_fg).bg(bg);
-            text(f, x0 + 3, y, theme.name, name_style, dd.width.saturating_sub(5));
+            put(f, content.x, y, marker, marker_style);
+            text(f, content.x + 2, y, theme.name, Style::default().fg(row_fg).bg(bg), content.width.saturating_sub(2));
+            if active && content.width >= 26 {
+                text(f, content.x + content.width.saturating_sub(8), y, " in use ", Style::default().fg(row_fg).bg(bg), 8);
+            }
+        }
+    }
+
+    /// Draw the "about" tab: version and workspace facts.
+    fn render_settings_about(&self, f: &mut Frame, dd: Rect) {
+        let Some(content) = self.settings_content_rect() else { return };
+        let label = Style::default()
+            .fg(self.theme.secondary)
+            .bg(self.theme.panel_sep)
+            .add_modifier(Modifier::BOLD);
+        text(f, content.x, content.y, "kumo", label, content.width);
+
+        let rows: [(&str, String); 5] = [
+            (
+                "version",
+                format!("{} ({})", env!("CARGO_PKG_VERSION"), crate::update::current_channel_label()),
+            ),
+            ("session", self.sessions[self.active].name.clone()),
+            ("sessions", format!("{}", self.sessions.len())),
+            ("panes", format!("{}", self.panes.len())),
+            ("shell", self.shell.clone()),
+        ];
+        for (i, (k, v)) in rows.iter().enumerate() {
+            let y = content.y + 1 + i as u16;
+            if y >= dd.bottom().saturating_sub(1) {
+                break;
+            }
+            let kst = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
+            text(f, content.x, y, k, kst, 12);
+            let vst = Style::default().fg(self.theme.fg).bg(self.theme.panel_sep);
+            text(f, content.x + 12, y, v, vst, content.width.saturating_sub(14));
         }
     }
 

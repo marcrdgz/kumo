@@ -56,16 +56,28 @@ impl App {
             return Ok(());
         }
         if self.settings.open {
-            // Modal theme picker: a click on a theme applies it (and closes),
-            // a click outside cancels; hovering moves the selection.
+            // Modal settings panel: a click on a tab switches to it, a click on
+            // a theme applies it live (the panel stays open), a click outside
+            // cancels; hovering moves the selection.
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(i) = self.settings_item_at(x, y) {
-                        self.select_theme(i);
-                        self.settings.open = false;
-                    } else {
-                        self.settings.open = false;
+                    if let Some(tab) = self.settings_tab_at(x, y) {
+                        self.settings_set_tab(tab);
+                        return Ok(());
                     }
+                    if let Some(i) = self.settings_item_at(x, y) {
+                        self.settings.selected = i;
+                        self.select_theme(i);
+                        return Ok(());
+                    }
+                    if self
+                        .settings_rect()
+                        .map(|r| r.contains(Position::new(x, y)))
+                        .unwrap_or(false)
+                    {
+                        return Ok(());
+                    }
+                    self.settings.open = false;
                     return Ok(());
                 }
                 MouseEventKind::Moved => {

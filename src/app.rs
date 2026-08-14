@@ -20,7 +20,7 @@ use crate::theme::{Theme, THEMES};
 
 use self::bindings::{build_keymap, Action, Binding, Chord, LEADER};
 use self::mouse::{Drag, PendingClick, Sel};
-use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, SettingsPopup};
+use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, SettingsPanel};
 use self::sidebar::SidebarScroll;
 use self::tasks::BranchInfo;
 
@@ -141,8 +141,8 @@ pub struct App {
     popup: NamePopup,
     /// `leader+?` keybind showcase.
     keybind_overlay: KeybindOverlay,
-    /// Settings popup (theme picker) opened from the status-bar menu.
-    settings: SettingsPopup,
+    /// Settings panel (tabbed preferences) opened from the status-bar menu.
+    settings: SettingsPanel,
     /// Active theme + its index in `THEMES`; switching applies it to all panes.
     theme: Theme,
     theme_idx: usize,
@@ -261,7 +261,7 @@ impl App {
             sidebar_scroll: SidebarScroll { sessions: 0, agents: u16::MAX },
             popup: NamePopup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
-            settings: SettingsPopup { open: false, selected: crate::theme::DEFAULT_THEME_IDX },
+            settings: SettingsPanel { open: false, tab: 0, selected: crate::theme::DEFAULT_THEME_IDX },
             theme: THEMES[crate::theme::DEFAULT_THEME_IDX],
             theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
