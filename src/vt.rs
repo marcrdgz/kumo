@@ -355,6 +355,8 @@ pub const TERMINAL_DATA_COLOR_BACKGROUND: i32 = 19;
 pub const MODE_CURSOR_VISIBLE: u16 = 25;
 /// DEC private mode 1047: alternate screen.
 pub const MODE_ALT_SCREEN: u16 = 1047;
+/// DEC private mode 1000: normal mouse reporting (press/release).
+pub const MODE_MOUSE_NORMAL: u16 = 1000;
 /// ANSI mode 2004: bracketed paste.
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 
@@ -408,6 +410,7 @@ unsafe extern "C" {
     fn ghostty_terminal_scroll_viewport(terminal: TerminalHandle, behavior: ScrollViewport);
     fn ghostty_terminal_get(terminal: TerminalHandle, data: i32, out: *mut c_void) -> Result;
     fn ghostty_terminal_mode_get(terminal: TerminalHandle, mode: u16, out_value: *mut bool) -> Result;
+    fn ghostty_terminal_mode_set(terminal: TerminalHandle, mode: u16, value: bool) -> Result;
 
     fn ghostty_render_state_new(
         allocator: *const c_void,
@@ -977,6 +980,15 @@ impl Terminal {
             ghostty_terminal_mode_get(self.term, mode, &mut out);
         }
         out
+    }
+
+    /// Set a DEC private mode on/off. Used to restore mouse tracking (mode
+    /// 1000) on a pane resumed across a daemon restart: the live app still has
+    /// the mode enabled app-side, so the fresh emulator must re-learn it or
+    /// kumo would grab the mouse and its fallback (which cannot scroll a
+    /// full-screen app) would take over.
+    pub fn mode_set(&self, mode: u16, value: bool) -> bool {
+        unsafe { ghostty_terminal_mode_set(self.term, mode, value).is_ok() }
     }
 
     /// Refresh render state, viewport cursor, default colors, and scrollbar

@@ -416,6 +416,7 @@ impl App {
                     sp.is_ai,
                     fd as i32,
                     sp.child_pid.map(|p| p as i32),
+                    sp.mouse_tracking,
                     self.events_tx.clone(),
                     &self.theme,
                 )?;
@@ -474,6 +475,7 @@ impl App {
                     child_pid: None,
                     cols: 0,
                     rows: 0,
+                    mouse_tracking: pane.has_mouse_reporting(),
                 });
             }
             sessions.push(state::SavedSession {
@@ -516,6 +518,7 @@ impl App {
                     child_pid: pane.pty.process_id().map(|p| p as i64),
                     cols: pane.pty.cols,
                     rows: pane.pty.rows,
+                    mouse_tracking: pane.has_mouse_reporting(),
                 });
             }
             sessions.push(state::SavedSession {

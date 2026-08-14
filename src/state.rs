@@ -80,6 +80,10 @@ pub struct SavedPane {
     pub cols: u16,
     #[serde(default)]
     pub rows: u16,
+    /// DEC mouse-reporting state before the restart, so the resumed emulator
+    /// can re-learn it (the live app kept its mouse mode enabled app-side).
+    #[serde(default)]
+    pub mouse_tracking: bool,
 }
 
 /// Write `state` to `path` atomically (temp file + rename) so a crash mid-write
@@ -211,6 +215,7 @@ mod tests {
                         child_pid: None,
                         cols: 80,
                         rows: 24,
+                        mouse_tracking: false,
                     },
                     SavedPane {
                         id: 12,
@@ -223,6 +228,7 @@ mod tests {
                         child_pid: None,
                         cols: 80,
                         rows: 24,
+                        mouse_tracking: true,
                     },
                 ],
             }],

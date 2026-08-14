@@ -208,6 +208,10 @@ impl Pane {
     /// Adopt a PTY master inherited across a daemon restart (`kumo update`):
     /// the child process is still alive inside the PTY, so this pane comes up
     /// with a fresh (blank) terminal emulator connected to the live process.
+    /// `mouse_tracking` is the pane's DEC mouse-reporting state as snapshotted
+    /// before the restart: the app never saw the emulator reset, so its own
+    /// mouse mode is unchanged app-side and the fresh emulator must re-learn
+    /// it, or kumo would stop forwarding the mouse to the app.
     #[cfg(unix)]
     pub fn resume(
         session_id: u64,
@@ -220,11 +224,17 @@ impl Pane {
         is_ai: bool,
         master_fd: i32,
         child_pid: Option<i32>,
+        mouse_tracking: bool,
         events_tx: Sender<PtyEvent>,
         theme: &Theme,
     ) -> Result<Pane> {
         let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
-        Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)
+        let pane =
+            Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)?;
+        if mouse_tracking {
+            pane.vt.mode_set(vt::MODE_MOUSE_NORMAL, true);
+        }
+        Ok(pane)
     }
 
     /// Shared tail of `spawn`/`resume`: create the terminal emulator, wire the
@@ -1597,5 +1607,74 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         // Motion event encoding must be valid SGR.
         let motion = sgr_mouse(35, 5, 3, false);
         assert!(motion.starts_with(b"\x1b[<35;5;3M"));
+    }
+
+    #[test]
+    fn resume_restores_mouse_tracking() {
+        // A pane running a full-screen TUI has mouse reporting on; the live
+        // app keeps it app-side across a daemon restart, so a resumed pane
+        // must re-learn it from the snapshot or kumo would grab the mouse.
+        let mut p = test_pane(false);
+        p.feed(b"\x1b[?1000h");
+        assert!(p.has_mouse_reporting(), "mode 1000 enables mouse tracking");
+
+        let fd = p.pty.raw_fd().expect("spawned pty exposes its master fd");
+        let child_pid = p.pty.process_id();
+        // Simulate exec-inheritance: forget the handle so its fd stays open
+        // for `Pane::resume` to adopt (mirrors `resumed_pty_keeps_live_shell_io`).
+        std::mem::forget(p);
+
+        let (tx, _rx) = mpsc::channel();
+        let mut resumed = Pane::resume(
+            1,
+            2,
+            "/bin/sh".into(),
+            None,
+            PathBuf::from("/"),
+            120,
+            40,
+            true,
+            fd,
+            child_pid.map(|c| c as i32),
+            true,
+            tx,
+            test_theme(),
+        )
+        .unwrap();
+        assert!(
+            resumed.has_mouse_reporting(),
+            "mouse tracking must be restored on a resumed pane"
+        );
+        resumed.pty.kill();
+    }
+
+    #[test]
+    fn resume_without_mouse_tracking_stays_off() {
+        // A pane that had mouse reporting off (e.g. a plain shell) must not
+        // start forwarding the mouse after a resume.
+        let mut p = test_pane(false);
+        let fd = p.pty.raw_fd().expect("spawned pty exposes its master fd");
+        let child_pid = p.pty.process_id();
+        std::mem::forget(p);
+
+        let (tx, _rx) = mpsc::channel();
+        let mut resumed = Pane::resume(
+            1,
+            2,
+            "/bin/sh".into(),
+            None,
+            PathBuf::from("/"),
+            120,
+            40,
+            false,
+            fd,
+            child_pid.map(|c| c as i32),
+            false,
+            tx,
+            test_theme(),
+        )
+        .unwrap();
+        assert!(!resumed.has_mouse_reporting(), "mouse tracking must stay off");
+        resumed.pty.kill();
     }
 }
