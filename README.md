@@ -150,30 +150,42 @@ listed but always shown as idle.
 
 ## ⌨️ Keybindings
 
-| Key | Action |
-| --- | --- |
-| `Ctrl+B` | Leader key (configurable via `leader`; shows all bindings in the status bar) |
-| `v` / `-` | Vertical / horizontal split 🪓 |
-| `a` | AI CLI pane (vertical split) 🤖 |
-| `c` | New session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
-| `x` | Close focused pane ❌ |
-| `z` | Zoom pane 🔍 |
-| `h`/`j`/`k`/`l` | Move focus left / down / up / right 🎯 |
-| `H`/`J`/`K`/`L` | Resize the focused pane (Shift+h/j/k/l) 📐 |
-| `s` | Swap the focused pane with its sibling 🔀 |
-| `o` | Rotate (mirror) the pane layout 🔄 |
-| `q` | Show pane numbers — press a number to jump 🔢 |
-| `n` / `p` | Cycle session next / previous ⏭️ |
-| `1`–`9` | Jump to the session at that sidebar position 🎯 |
-| `Tab` | Cycle pane ↹ |
-| `b` | Toggle sidebar 📌 |
-| `d` | Detach (daemon keeps running) 🚪 |
-| `?` | Keybind showcase — every leader binding at a glance 📖 |
-| `Esc` | Exit leader mode ↩️ |
+All leader bindings are configurable — override a stock key or add a new one in
+`[keymap.bindings]` with `"chord" = "action-id"` (see [Configuration](#configuration)).
+The `action-id` column below is exactly what goes on the right-hand side.
+
+| Key | Action id (`[keymap.bindings]`) | Action |
+| --- | --- | --- |
+| `Ctrl+B` | `leader` | Leader key (configurable via `leader`; shows all bindings in the status bar) |
+| `v` | `split-vertical` | Split the focused pane vertically 🪓 |
+| `-` | `split-horizontal` | Split the focused pane horizontally 🪓 |
+| `a` | `split-ai` | Spawn an AI CLI pane (vertical split) 🤖 |
+| `z` | `zoom` | Zoom the focused pane 🔍 |
+| `h` | `focus-left` | Move focus left 🎯 |
+| `j` | `focus-down` | Move focus down 🎯 |
+| `k` | `focus-up` | Move focus up 🎯 |
+| `l` | `focus-right` | Move focus right 🎯 |
+| `H` | `resize-left` | Resize the focused pane left 📐 |
+| `J` | `resize-down` | Resize the focused pane down 📐 |
+| `K` | `resize-up` | Resize the focused pane up 📐 |
+| `L` | `resize-right` | Resize the focused pane right 📐 |
+| `Tab` | `cycle-pane` | Cycle focus between panes ↹ |
+| `s` | `swap-panes` | Swap the focused pane with its sibling 🔀 |
+| `o` | `rotate-layout` | Rotate the pane layout 🔄 |
+| `q` | `show-pane-numbers` | Show pane numbers — press a number to jump 🔢 |
+| `c` | `new-session` | Create a new session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
+| `x` | `close-pane` | Close the focused pane ❌ |
+| `n` / `p` | `next-session` / `prev-session` | Cycle to the next / previous session ⏭️ |
+| `1`–`9` | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position 🎯 |
+| `b` | `toggle-sidebar` | Toggle the sidebar 📌 |
+| `d` | `detach` | Detach (daemon keeps running) 🚪 |
+| `?` | `show-keybinds` | Keybind showcase — every leader binding at a glance 📖 |
+| `Esc` | — | Exit leader mode ↩️ |
 
 > The **leader key** and the leader **bindings** are configurable via
-> `[keymap]` in `config.toml` (see above). Mouse gestures are deliberately
-> **not** remappable — they are positional hit-testing, not key sequences.
+> `[keymap]` in `config.toml` (see above). `Esc` and the leader chord are not
+> remappable actions; mouse gestures are deliberately **not** remappable — they
+> are positional hit-testing, not key sequences.
 
 **🖱️ Mouse**
 
