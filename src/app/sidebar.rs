@@ -247,7 +247,7 @@ impl App {
                     let bg = if active { self.theme.panel_sep } else { RColor::Reset };
                     let name = &self.sessions[i].name;
                     if active {
-                        fill(f, Rect::new(x, y, max + 1, 1), bg);
+                        fill(f, Rect::new(x, y, w, 1), bg);
                         put(f, x + 1, y, "▸", Style::default().fg(self.theme.accent).bg(bg));
                         text(f, x + 3, y, name, Style::default().fg(self.theme.fg).bg(bg), max.saturating_sub(3));
                     } else {
@@ -267,7 +267,7 @@ impl App {
                     let bg = if active { self.theme.panel_sep } else { RColor::Reset };
                     let name_color = if active { self.theme.fg } else { self.theme.panel_muted };
                     if active {
-                        fill(f, Rect::new(x, y, max + 1, 1), bg);
+                        fill(f, Rect::new(x, y, w, 1), bg);
                     }
                     let avail = max.saturating_sub(4) as usize;
                     // Full ahead/behind suffix, e.g. ` ↑2 ~3`.
@@ -316,7 +316,7 @@ impl App {
                     let bg = if focused { self.theme.panel_sep } else { RColor::Reset };
                     // Light up the whole sidebar row when this agent pane is focused.
                     if focused {
-                        fill(f, Rect::new(x, y, max + 1, 1), bg);
+                        fill(f, Rect::new(x, y, w, 1), bg);
                     }
                     let status = self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle);
                     let status_color = match status {
@@ -453,10 +453,11 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
     let y_start = offset.saturating_mul(y_max) / hist.max(1);
     for i in 0..bar_h {
         let y = y_top + i as u16;
+        let cell = f.buffer_mut().cell_mut((x, y)).unwrap();
         if i >= y_start && i < y_start + thumb {
-            put(f, x, y, "▐", Style::default().fg(theme.secondary));
+            cell.set_symbol("▐").set_fg(theme.secondary);
         } else {
-            put(f, x, y, "░", Style::default().fg(theme.panel_sep));
+            cell.set_symbol("░").set_fg(theme.panel_sep);
         }
     }
 }
