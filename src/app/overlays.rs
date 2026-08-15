@@ -563,15 +563,64 @@ impl App {
         self.popup.cursor -= 1;
     }
 
-    /// Handle a key while the session-name popup is open.
+    /// Delete the word before the popup cursor (`cmd`/`ctrl`+Backspace).
+    fn popup_delete_word_backward(&mut self) {
+        let (name, cursor) = delete_word_backward(&self.popup.name, self.popup.cursor);
+        self.popup.name = name;
+        self.popup.cursor = cursor;
+    }
+
+    /// Delete the word after the popup cursor (`cmd`/`ctrl`+Delete).
+    fn popup_delete_word_forward(&mut self) {
+        let name = delete_word_forward(&self.popup.name, self.popup.cursor);
+        self.popup.name = name;
+    }
+
+    /// Delete the char after the popup cursor.
+    fn popup_delete_forward(&mut self) {
+        let len = self.popup.name.chars().count();
+        if self.popup.cursor >= len {
+            return;
+        }
+        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
+        let next_len = self.popup.name[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+        self.popup.name.replace_range(b..b + next_len, "");
+    }
+
+    /// Delete everything before the popup cursor (`ctrl+u`).
+    fn popup_delete_to_start(&mut self) {
+        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
+        self.popup.name.replace_range(..b, "");
+        self.popup.cursor = 0;
+    }
+
+    /// Handle a key while the session-name popup is open. Keymaps stay
+    /// deliberately fixed here (see the 0.4.0 roadmap): only the command
+    /// bindings are remappable, not popup editing.
+    ///
+    /// Word-delete recognizes every real-world spelling of the chord, since
+    /// terminals disagree wildly without the kitty (CSI-u) protocol:
+    ///   - `cmd`/`ctrl`+Backspace  -> CSI-u (super/control), or bare DEL,
+    ///   - `ctrl+backspace` legacy -> `\x08` = Ctrl+H = `Char('h')`+CONTROL,
+    ///   - `alt`+Backspace         -> ESC DEL = `Backspace`+ALT.
     pub(super) fn on_popup_key(&mut self, key: KeyEvent) {
         if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.popup.open = false;
             return;
         }
+        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Enter => self.commit_name(),
+            KeyCode::Backspace if key.modifiers.intersects(word_back) => self.popup_delete_word_backward(),
             KeyCode::Backspace => self.popup_backspace(),
+            // Legacy terminals report `ctrl+backspace` as `\x08` (Ctrl+H).
+            KeyCode::Char('h') if ctrl => self.popup_backspace(),
+            // Shell-style word-delete fallbacks (Ctrl+W) work everywhere.
+            KeyCode::Char('w') if ctrl => self.popup_delete_word_backward(),
+            KeyCode::Char('u') if ctrl => self.popup_delete_to_start(),
+            KeyCode::Delete if key.modifiers.intersects(word_back) => self.popup_delete_word_forward(),
+            KeyCode::Delete => self.popup_delete_forward(),
             KeyCode::Left => self.popup.cursor = self.popup.cursor.saturating_sub(1),
             KeyCode::Right => {
                 let len = self.popup.name.chars().count();
@@ -579,7 +628,7 @@ impl App {
             }
             KeyCode::Home => self.popup.cursor = 0,
             KeyCode::End => self.popup.cursor = self.popup.name.chars().count(),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if !ctrl => {
                 self.popup_insert(c);
             }
             _ => {}
@@ -1427,6 +1476,52 @@ fn char_idx_to_byte(s: &str, ci: usize) -> usize {
     s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
 }
 
+/// Delete the word before `cursor` in `s`; returns the new string and the new
+/// cursor. Whitespace between the cursor and the word is removed with it.
+fn delete_word_backward(s: &str, cursor: usize) -> (String, usize) {
+    let chars: Vec<char> = s.chars().collect();
+    let mut pos = cursor.min(chars.len());
+    while pos > 0 && chars[pos - 1].is_whitespace() {
+        pos -= 1;
+    }
+    while pos > 0 && !chars[pos - 1].is_whitespace() {
+        pos -= 1;
+    }
+    let start = pos;
+    let end = cursor.min(chars.len());
+    if start == end {
+        return (s.to_string(), cursor);
+    }
+    let sb = char_idx_to_byte(s, start);
+    let eb = char_idx_to_byte(s, end);
+    let mut out = s.to_string();
+    out.replace_range(sb..eb, "");
+    (out, start)
+}
+
+/// Delete the word after `cursor` in `s`; returns the new string. Whitespace
+/// after the cursor is removed with the word.
+fn delete_word_forward(s: &str, cursor: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut pos = cursor.min(len);
+    while pos < len && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    while pos < len && !chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    let start = cursor.min(len);
+    if pos == start {
+        return s.to_string();
+    }
+    let sb = char_idx_to_byte(s, start);
+    let eb = char_idx_to_byte(s, pos);
+    let mut out = s.to_string();
+    out.replace_range(sb..eb, "");
+    out
+}
+
 /// Short display form of a worktree path for the picker, trimmed to `avail`
 /// columns. When cut, the head is replaced by `…` so the distinguishing tail
 /// (the branch directory) stays visible.
@@ -1441,4 +1536,54 @@ fn fit_worktree_path(path: &std::path::Path, avail: usize) -> String {
     }
     let tail: String = text.chars().skip(n.saturating_sub(avail - 1)).collect();
     format!("…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_word_backward_plain() {
+        assert_eq!(delete_word_backward("foo bar", 7), ("foo ".to_string(), 4));
+    }
+
+    #[test]
+    fn delete_word_backward_mid_word() {
+        assert_eq!(delete_word_backward("foo bar", 5), ("foo ar".to_string(), 4));
+    }
+
+    #[test]
+    fn delete_word_backward_strips_whitespace() {
+        assert_eq!(delete_word_backward("foo   bar  ", 11), ("foo   ".to_string(), 6));
+    }
+
+    #[test]
+    fn delete_word_backward_at_start() {
+        assert_eq!(delete_word_backward("foo bar", 0), ("foo bar".to_string(), 0));
+    }
+
+    #[test]
+    fn delete_word_backward_unicode() {
+        assert_eq!(delete_word_backward("héllo wörld", 12), ("héllo ".to_string(), 6));
+    }
+
+    #[test]
+    fn delete_word_forward_plain() {
+        assert_eq!(delete_word_forward("foo bar", 4), "foo ".to_string());
+    }
+
+    #[test]
+    fn delete_word_forward_strips_whitespace() {
+        assert_eq!(delete_word_forward("foo    bar", 3), "foo".to_string());
+    }
+
+    #[test]
+    fn delete_word_forward_at_end() {
+        assert_eq!(delete_word_forward("foo bar", 7), "foo bar".to_string());
+    }
+
+    #[test]
+    fn delete_word_forward_unicode() {
+        assert_eq!(delete_word_forward("héllo wörld", 0), " wörld".to_string());
+    }
 }

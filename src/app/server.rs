@@ -963,4 +963,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&rt);
     }
+
+    /// The session-name popup must support word editing: `SUPER`/`CONTROL` +
+    /// Backspace deletes the previous word, `SUPER`/`CONTROL` + Delete the next
+    /// one. Regression for the popup-input-editing roadmap item (0.5.0).
+    #[test]
+    fn popup_word_editing() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let cfg = scratch("popup-cfg");
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\nnew-cwd = current\n").unwrap();
+        let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
+        let prev_cfg = std::env::var("KUMO_CONFIG_DIR").ok();
+        let prev_update = std::env::var("KUMO_NO_UPDATE").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        std::env::set_var("KUMO_NO_UPDATE", "1");
+
+        let rt = scratch("popup-rt");
+        let sock = rt.join("kumo").join("kumo.sock");
+        start_daemon(&sock);
+        let _ = wait_for_socket(&sock, Duration::from_secs(10));
+        match prev_cfg {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        match prev_update {
+            Some(v) => std::env::set_var("KUMO_NO_UPDATE", v),
+            None => std::env::remove_var("KUMO_NO_UPDATE"),
+        }
+        drop(_lock);
+
+        let mut stream = handshake(&sock);
+        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        wait_for_prompt(&mut stream);
+
+        // Open the new-session popup (`leader+c`). It pre-fills the default
+        // name, so clear it with a single word-delete first.
+        send_key_mods(&mut stream, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        send_key(&mut stream, WireKeyCode::Char('c'));
+        wait_for_text(&mut stream, "new session", "the new-session popup title");
+        send_key_mods(&mut stream, KeyCode::Backspace, KeyModifiers::SUPER);
+
+        // Type "hello world" then `cmd+backspace` -> the trailing word goes.
+        for ch in "hello world".chars() {
+            send_key(&mut stream, WireKeyCode::Char(ch));
+        }
+        send_key_mods(&mut stream, KeyCode::Backspace, KeyModifiers::SUPER);
+        wait_for_text(&mut stream, "hello", "the popup after cmd+backspace");
+
+        // `cmd+backspace` again -> "hello" goes too.
+        send_key_mods(&mut stream, KeyCode::Backspace, KeyModifiers::SUPER);
+        send_key_mods(&mut stream, KeyCode::Backspace, KeyModifiers::SUPER);
+
+        // Type "one two", then `ctrl+delete` at the end does nothing; go back to
+        // the word boundary and `ctrl+delete` removes the next word.
+        for ch in "one two".chars() {
+            send_key(&mut stream, WireKeyCode::Char(ch));
+        }
+        for _ in 0..4 {
+            send_key(&mut stream, WireKeyCode::Left);
+        }
+        send_key_mods(&mut stream, KeyCode::Delete, KeyModifiers::CONTROL);
+        wait_for_text(&mut stream, "one", "the popup after ctrl+delete");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut rows = std::collections::HashMap::new();
+            collect_rows(&mut stream, &mut rows);
+            if rows.values().any(|r| r.contains("one two")) {
+                panic!("ctrl+delete should have removed the word after the cursor");
+            }
+            if Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        protocol::write_framed(&mut stream, &ClientMsg::KillServer).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sock.exists() {
+            assert!(Instant::now() < deadline, "daemon socket not removed after kill");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&rt);
+    }
 }

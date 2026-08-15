@@ -16,7 +16,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 
 use crate::app::Launch;
 use crate::protocol::{self, ClientMsg, FrameMsg, ServerMsg};
@@ -212,7 +215,19 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture, EnableBracketedPaste, Hide, Clear(ClearType::All))?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+        EnableBracketedPaste,
+        Hide,
+        Clear(ClearType::All),
+        // CSI-u (kitty) keyboard protocol: without it the host terminal reports
+        // `cmd`/`ctrl`+backspace as a bare DEL (0x7f), indistinguishable from a
+        // plain backspace. Disambiguated escape codes let the daemon tell them
+        // apart (e.g. word-delete in the popups) and keep the leader chord.
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+    )?;
 
     // Input thread: reads crossterm events and writes them straight to the
     // daemon over its own socket clone. Stopped via the flag so a restart can
@@ -266,11 +281,15 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
 
     match result {
         Ok(Exit::Restarting) => {
+            // Leave the terminal in raw mode so the reconnect is seamless, but
+            // pop the keyboard enhancement so the next `client_once` push is
+            // balanced (kitty's protocol stack would otherwise grow unbounded).
+            let _ = execute!(stdout, PopKeyboardEnhancementFlags);
             let _ = stdout.flush();
             Ok(Exit::Restarting)
         }
         other => {
-            let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
+            let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, DisableBracketedPaste, PopKeyboardEnhancementFlags, LeaveAlternateScreen);
             let _ = disable_raw_mode();
             let _ = stdout.flush();
             other
