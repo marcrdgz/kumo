@@ -19,7 +19,7 @@ use ratatui::Terminal;
 
 use super::{App, Launch};
 use crate::frames;
-use crate::protocol::{self, AgentInfo, ClientMsg, PaneInfo, ServerMsg};
+use crate::protocol::{self, AgentInfo, ClientKind, ClientMsg, PaneInfo, ServerMsg};
 
 impl From<crate::agents::AgentStatus> for protocol::AgentStatus {
     fn from(status: crate::agents::AgentStatus) -> Self {
@@ -40,6 +40,8 @@ impl From<crate::agents::AgentStatus> for protocol::AgentStatus {
 struct Client {
     tx: mpsc::SyncSender<ServerMsg>,
     welcomed: bool,
+    /// What kind of client this is (drives which channels it gets).
+    kind: ClientKind,
     /// True until this client has received one full frame (its first attach);
     /// it needs a full repaint even if the daemon's own frame is a diff.
     needs_full: bool,
@@ -50,27 +52,43 @@ struct Client {
     /// Panes for which the client has not yet received a full `PaneFrame`
     /// (first subscribe or after a resize).
     pane_needs_full: HashSet<u64>,
+    /// A snapshot was dropped (writer queue full) and must be re-sent. Unlike
+    /// frames, snapshots are only produced when the state *changes*, so a
+    /// dropped one would otherwise be lost forever.
+    pending_snapshot: bool,
+}
+
+/// Outcome of queueing one message to a client's writer thread.
+enum SendOutcome {
+    /// Queued successfully.
+    Ok,
+    /// The writer queue is full: the client is not reading (backgrounded tab,
+    /// asleep machine). The message was dropped; the caller decides whether and
+    /// how to retry.
+    Lagging,
+    /// The client's connection is gone; it must be dropped.
+    Disconnected,
 }
 
 impl Client {
-    /// Queue a frame to the client's writer thread. Returns `true` when the
-    /// client must be dropped (its connection is gone: the writer thread died).
+    /// Queue a message to the client's writer thread.
     ///
     /// A full queue is *not* fatal: it means the client stopped reading (tab
     /// backgrounded, terminal busy, machine asleep) and its writer thread is
     /// blocked writing to the socket. Dropping the client there would orphan a
     /// live connection — the client stays frozen on its last frame, unable to
-    /// detach, with no EOF to wake it. Instead it is flagged for a full-frame
-    /// repaint and resumes with fresh state as soon as it reads again. Dead
-    /// clients are cleaned up by their reader thread (EOF -> `Detach`).
-    fn try_send_frame(&mut self, msg: ServerMsg) -> bool {
+    /// detach, with no EOF to wake it. Instead the message is dropped and the
+    /// caller flags it for a retry (full frame, pending snapshot, pane full
+    /// frame). Dead clients are cleaned up by their reader thread
+    /// (EOF -> `Detach`).
+    fn send_msg(&mut self, msg: ServerMsg) -> SendOutcome {
         match self.tx.try_send(msg) {
-            Ok(()) => false,
+            Ok(()) => SendOutcome::Ok,
             Err(mpsc::TrySendError::Full(_)) => {
                 self.needs_full = true;
-                false
+                SendOutcome::Lagging
             }
-            Err(mpsc::TrySendError::Disconnected(_)) => true,
+            Err(mpsc::TrySendError::Disconnected(_)) => SendOutcome::Disconnected,
         }
     }
 }
@@ -129,10 +147,12 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 Client {
                     tx: writer_tx,
                     welcomed: false,
+                    kind: ClientKind::Terminal,
                     needs_full: true,
                     wants_snapshot: false,
                     panes_subscribed: HashSet::new(),
                     pane_needs_full: HashSet::new(),
+                    pending_snapshot: false,
                 },
             );
             render_dirty = true;
@@ -141,7 +161,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // Input from clients.
         while let Ok((id, msg)) = input_rx.try_recv() {
             match msg {
-                ClientMsg::Hello { protocol, cols, rows, .. } => {
+                ClientMsg::Hello { protocol, cols, rows, kind } => {
                     if protocol != protocol::PROTOCOL_VERSION {
                         let _ = send_to(&mut clients, id, &ServerMsg::Shutdown);
                         clients.remove(&id);
@@ -154,6 +174,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     );
                     if let Some(c) = clients.get_mut(&id) {
                         c.welcomed = true;
+                        c.kind = kind;
                     }
                     resize_terminal(&mut terminal, cols, rows);
                     render_dirty = true;
@@ -189,9 +210,17 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     if let Some(c) = clients.get_mut(&id) {
                         c.wants_snapshot = true;
                     }
-                    // Respond immediately with the current state.
+                    // Respond immediately with the current state; a lagging
+                    // client is flagged so the snapshot is re-sent.
                     let sessions = session_list(&app);
-                    let _ = send_to(&mut clients, id, &ServerMsg::Snapshot { sessions });
+                    let snap = ServerMsg::Snapshot { sessions };
+                    if let Some(c) = clients.get_mut(&id) {
+                        match c.send_msg(snap) {
+                            SendOutcome::Ok => c.pending_snapshot = false,
+                            SendOutcome::Lagging => c.pending_snapshot = true,
+                            SendOutcome::Disconnected => {}
+                        }
+                    }
                     render_dirty = true;
                 }
                 ClientMsg::SubscribePane { pane_id } => {
@@ -306,11 +335,15 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let mut diff_msg: Option<ServerMsg> = None;
             let mut dead = Vec::new();
 
-            // Snapshot push: rebuilt only when someone subscribed, and diffed
-            // against the last sent snapshot, so idle cycles send nothing.
-            let snapshot_msg: Option<ServerMsg> = if clients.values().any(|c| c.wants_snapshot) {
+            // Snapshot push: built only when a subscriber needs it — the state
+            // changed, or a previous snapshot was dropped while the client
+            // lagged (writer queue full). Diffed against the last sent snapshot
+            // so idle cycles send nothing.
+            let any_subscriber = clients.values().any(|c| c.wants_snapshot);
+            let snapshot_msg: Option<ServerMsg> = if any_subscriber {
+                let any_pending = clients.values().any(|c| c.wants_snapshot && c.pending_snapshot);
                 let sessions = session_list(&app);
-                if last_snapshot.as_ref() != Some(&sessions) {
+                if last_snapshot.as_ref() != Some(&sessions) || any_pending {
                     last_snapshot = Some(sessions.clone());
                     Some(ServerMsg::Snapshot { sessions })
                 } else {
@@ -356,51 +389,74 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 if !client.welcomed {
                     continue;
                 }
-                let send_full = client.needs_full || area_changed;
-                let msg = if send_full {
-                    client.needs_full = false;
-                    full_msg.get_or_insert_with(|| {
-                        ServerMsg::Frame {
-                            frame: frames::full_frame(&new_buf, cursor, &app.theme.palette),
-                        }
-                    })
-                } else {
-                    let Some(last) = &last_buffer else { continue };
-                    diff_msg.get_or_insert_with(|| {
-                        ServerMsg::Frame {
-                            frame: frames::diff_frame(&new_buf, last, cursor, &app.theme.palette),
-                        }
-                    })
-                };
-                // A full queue means the client is lagging (not reading), never
-                // that it is gone: keep it and let it catch up with a full
-                // frame. Only a disconnected writer drops the client.
-                if client.try_send_frame(msg.clone()) {
-                    dead.push(*id);
-                    continue;
+                // Non-terminal clients (desktop/mobile) never consume the
+                // composed grid — they get snapshots + pane frames — so skip
+                // the composed frame to keep their writer queue free for the
+                // channels they actually use.
+                let wants_composed = client.kind == ClientKind::Terminal;
+                if wants_composed {
+                    let send_full = client.needs_full || area_changed;
+                    let msg = if send_full {
+                        client.needs_full = false;
+                        full_msg.get_or_insert_with(|| {
+                            ServerMsg::Frame {
+                                frame: frames::full_frame(&new_buf, cursor, &app.theme.palette),
+                            }
+                        })
+                    } else {
+                        let Some(last) = &last_buffer else { continue };
+                        diff_msg.get_or_insert_with(|| {
+                            ServerMsg::Frame {
+                                frame: frames::diff_frame(&new_buf, last, cursor, &app.theme.palette),
+                            }
+                        })
+                    };
+                    // A full queue means the client is lagging (not reading),
+                    // never that it is gone: keep it and let it catch up with a
+                    // full frame. Only a disconnected writer drops the client.
+                    if matches!(client.send_msg(msg.clone()), SendOutcome::Disconnected) {
+                        dead.push(*id);
+                        continue;
+                    }
                 }
                 if client.wants_snapshot {
                     if let Some(snap) = &snapshot_msg {
-                        if client.try_send_frame(snap.clone()) {
-                            dead.push(*id);
-                            continue;
+                        match client.send_msg(snap.clone()) {
+                            SendOutcome::Ok => client.pending_snapshot = false,
+                            SendOutcome::Lagging => client.pending_snapshot = true,
+                            SendOutcome::Disconnected => {
+                                dead.push(*id);
+                                continue;
+                            }
                         }
                     }
                 }
                 let pane_ids: Vec<u64> = client.panes_subscribed.iter().copied().collect();
                 for pid in pane_ids {
                     let Some((full, diff)) = pane_msgs.get(&pid) else { continue };
-                    let (needs_full, msg) = if client.pane_needs_full.remove(&pid) {
-                        (true, full)
-                    } else {
-                        (false, diff)
-                    };
-                    if client.try_send_frame(msg.clone()) {
-                        if needs_full {
-                            client.pane_needs_full.insert(pid);
+                    let was_pending = client.pane_needs_full.remove(&pid);
+                    if !was_pending {
+                        // Nothing changed for this pane since the last sent
+                        // frame; skip it so it never starves other panes.
+                        if let ServerMsg::PaneFrame { frame } = diff {
+                            if frame.rows_dirty.is_empty() {
+                                continue;
+                            }
                         }
-                        dead.push(*id);
-                        break;
+                    }
+                    let msg = if was_pending { full } else { diff };
+                    match client.send_msg(msg.clone()) {
+                        SendOutcome::Ok => {}
+                        SendOutcome::Lagging => {
+                            // Dropped while the client lagged; re-flag so it is
+                            // re-sent as a full frame when the client reads again.
+                            client.pane_needs_full.insert(pid);
+                            break;
+                        }
+                        SendOutcome::Disconnected => {
+                            dead.push(*id);
+                            break;
+                        }
                     }
                 }
             }
@@ -679,7 +735,7 @@ fn peer_owned_by_same_user(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ClientKind, WireKeyCode, WireKeyEvent, WireModifiers};
+    use crate::protocol::{WireKeyCode, WireKeyEvent, WireModifiers};
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
@@ -866,10 +922,12 @@ mod tests {
         let mut client = Client {
             tx,
             welcomed: true,
+            kind: ClientKind::Terminal,
             needs_full: false,
             wants_snapshot: false,
             panes_subscribed: HashSet::new(),
             pane_needs_full: HashSet::new(),
+            pending_snapshot: false,
         };
         // Fill the writer's channel so the next send hits Full — exactly what
         // happens while the writer thread is blocked on a client that stopped
@@ -877,8 +935,8 @@ mod tests {
         let filler = client.tx.clone();
         filler.try_send(ServerMsg::Detach).unwrap();
         assert!(
-            !client.try_send_frame(ServerMsg::Detach),
-            "a lagging client must never be dropped"
+            matches!(client.send_msg(ServerMsg::Detach), SendOutcome::Lagging),
+            "a lagging client must be reported as lagging, never dropped"
         );
         assert!(
             client.needs_full,
@@ -889,7 +947,7 @@ mod tests {
         // broken), the client is dropped.
         drop(rx);
         assert!(
-            client.try_send_frame(ServerMsg::Detach),
+            matches!(client.send_msg(ServerMsg::Detach), SendOutcome::Disconnected),
             "a disconnected client must be dropped"
         );
     }
@@ -1332,8 +1390,46 @@ mod tests {
         assert!(pane_frame.rows > 0 && pane_frame.cols > 0, "pane frame must have a real size");
         assert_eq!(pane_frame.rows_dirty.len(), pane_frame.rows as usize, "a full frame includes every row");
 
+        // Split the pane (leader+b then 'v'): the session now has two panes
+        // with distinct geometry, and both pane streams flow.
+        send_key_mods(&mut stream, crossterm::event::KeyCode::Char('b'), crossterm::event::KeyModifiers::CONTROL);
+        send_key(&mut stream, WireKeyCode::Char('v'));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (pid2, split_session) = loop {
+            assert!(Instant::now() < deadline, "no two-pane snapshot after the split");
+            match protocol::read_framed::<ServerMsg>(&mut stream).unwrap() {
+                ServerMsg::Snapshot { sessions } => {
+                    let active = sessions
+                        .iter()
+                        .find(|s| s.active)
+                        .expect("an active session");
+                    if active.panes.len() >= 2 {
+                        break (active.panes[1].id, active.clone());
+                    }
+                }
+                ServerMsg::Frame { .. } | ServerMsg::PaneFrame { .. } => continue,
+                other => panic!("unexpected message while waiting for the split snapshot: {other:?}"),
+            }
+        };
+        assert_ne!(pid, pid2, "the new pane must have its own id");
+        protocol::write_framed(&mut stream, &ClientMsg::SubscribePane { pane_id: pid2 }).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "no PaneFrame for the split pane {pid2}");
+            match protocol::read_framed::<ServerMsg>(&mut stream).unwrap() {
+                ServerMsg::PaneFrame { frame } if frame.pane_id == pid2 => break,
+                // Other panes stay subscribed; ignore their frames.
+                ServerMsg::PaneFrame { .. } | ServerMsg::Frame { .. } | ServerMsg::Snapshot { .. } => continue,
+                other => panic!("unexpected message while waiting for the split PaneFrame: {other:?}"),
+            }
+        }
+        // The two panes must report different geometry (side-by-side split).
+        let (a, b) = (&split_session.panes[0], &split_session.panes[1]);
+        assert_ne!(a.rect, b.rect, "split panes must have distinct geometry");
+
         // Unsubscribe and kill.
         protocol::write_framed(&mut stream, &ClientMsg::UnsubscribePane { pane_id: pid }).unwrap();
+        protocol::write_framed(&mut stream, &ClientMsg::UnsubscribePane { pane_id: pid2 }).unwrap();
         protocol::write_framed(&mut stream, &ClientMsg::KillServer).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while sock.exists() {

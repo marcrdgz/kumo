@@ -593,15 +593,15 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
         let r = pane.rect;
         let x = bounds.left() + px(r.x as f32 * cell_w);
         let y = bounds.top() + px(r.y as f32 * cell_h);
-        let w = px(r.width as f32 * cell_w);
-        let h = px(r.height as f32 * cell_h);
+        let w = px((r.width as f32 * cell_w).max(1.0));
+        let h = px((r.height as f32 * cell_h).max(1.0));
         let card = Bounds::new(point(x, y), size(w, h));
         if pane.focused {
             window.paint_quad(fill(card, rgb(FOCUS_ACCENT)));
         }
         let inner = Bounds::new(
             point(x + px(1.5), y + px(1.5)),
-            size(w - px(3.0), h - px(3.0)),
+            size((w - px(3.0)).max(px(1.0)), (h - px(3.0)).max(px(1.0))),
         );
         window.paint_quad(fill(inner, rgb(CARD_BG)));
 
