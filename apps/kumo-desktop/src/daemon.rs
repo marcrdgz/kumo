@@ -114,11 +114,20 @@ fn runtime_dir() -> PathBuf {
 }
 
 /// Launch `kumo daemon` detached (own session, no stdio) so it survives this
-/// app closing. The `kumo` binary must be on `PATH`.
+/// app closing. Tries `kumo` on `PATH` first, then the sibling `kumo` binary
+/// next to this app (e.g. `target/debug/kumo` in a cargo workspace).
 fn spawn_daemon() -> io::Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
-    let mut cmd = std::process::Command::new("kumo");
+    let mut cmd = if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.parent().map(|p| p.join("kumo")).filter(|p| p.is_file());
+        match sibling {
+            Some(sib) => std::process::Command::new(sib),
+            None => std::process::Command::new("kumo"),
+        }
+    } else {
+        std::process::Command::new("kumo")
+    };
     cmd.arg("daemon").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe {
         cmd.pre_exec(|| {
