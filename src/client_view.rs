@@ -291,6 +291,23 @@ impl View {
         self.dirty
     }
 
+    /// Whether a transient overlay (pane numbers, toast, notice) is currently
+    /// up, so the loop keeps re-rendering until it expires — the client-side
+    /// equivalent of the daemon's forced frame.
+    pub fn has_transient(&self) -> bool {
+        let now = Instant::now();
+        if self.pane_numbers.is_some() {
+            return true;
+        }
+        if self.status_msg.as_ref().map(|(_, t)| now.duration_since(*t) < TOAST_TIMEOUT).unwrap_or(false) {
+            return true;
+        }
+        if self.notice.as_ref().map(|(_, t)| now.duration_since(*t) < TOAST_TIMEOUT).unwrap_or(false) {
+            return true;
+        }
+        false
+    }
+
     pub fn detach_requested(&self) -> bool {
         self.detach_requested
     }
@@ -1041,9 +1058,10 @@ impl View {
         self.menu.open = false;
         match action {
             "config" => {
-                // Opening the config file lives in the daemon; nothing streams
-                // the editor back, so it is surfaced as a notice.
-                self.notice = Some(("config: edit kumo's config.toml".to_string(), Instant::now()));
+                let session = self.active_session().map(|s| s.name.clone());
+                if let Some(session) = session {
+                    let _ = self.send(&Command::OpenConfig { session });
+                }
             }
             "reload" => {
                 let _ = self.send(&Command::ReloadConfig);

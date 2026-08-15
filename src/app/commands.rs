@@ -17,9 +17,25 @@ use kumo_protocol::{
 
 use super::App;
 use crate::layout;
+use crate::pane::Pane;
+use crate::pty::Pty;
 
 /// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
 const RESIZE_STEP: f32 = 0.05;
+
+/// The editor used by MENU `config`: `$VISUAL`, then `$EDITOR` (command
+/// strings may carry args, e.g. `code --wait`), then `vi`.
+fn config_editor() -> (String, Vec<String>) {
+    let raw = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "vi".to_string());
+    let mut it = raw.split_whitespace();
+    let program = it.next().unwrap_or("vi").to_string();
+    let args: Vec<String> = it.map(|s| s.to_string()).collect();
+    (program, args)
+}
 
 impl App {
     /// The focused pane of the active session.
@@ -476,6 +492,42 @@ impl App {
         self.theme = theme;
         self.theme_idx = idx;
         Ok(format!("theme: {}", theme.name))
+    }
+
+    /// MENU `config`: open the config file in an editor pane inside the named
+    /// session (vertical split). Uses `$VISUAL`, then `$EDITOR`, then `vi`.
+    pub(crate) fn open_config_in_session(&mut self, session: &str) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let (prog, mut args) = config_editor();
+        let path = crate::config::config_file_toml();
+        let path = if path.is_file() { path } else { crate::config::config_file() };
+        args.push(path.to_string_lossy().into_owned());
+        let focus = self.sessions[idx].tree.focus;
+        let sid = self.sessions[idx].id;
+        let pid = Pty::next_pane_id();
+        let (cols, rows) = self.pane_sizes.get(&focus).copied().unwrap_or(super::DEFAULT_PANE_DIMS);
+        let pane = Pane::spawn(
+            sid,
+            pid,
+            self.shell.clone(),
+            Some((prog, args)),
+            Some(self.sessions[idx].workspace.clone()),
+            cols,
+            rows,
+            false,
+            self.events_tx.clone(),
+            &self.theme,
+        )?;
+        self.panes.insert(pid, pane);
+        if !self.sessions[idx].tree.split(focus, pid, crate::layout::SplitDir::V) {
+            if let Some(mut p) = self.panes.remove(&pid) {
+                p.pty.kill();
+            }
+            return Ok(format!("no room to open the editor in {session:?}"));
+        }
+        Ok(format!("opened the config in {session:?}"))
     }
 
     /// Write raw bytes into a specific pane (mouse-reporting forwarding, where

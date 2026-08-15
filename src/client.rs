@@ -167,7 +167,7 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
                     _ => {}
                 }
             }
-            if view.dirty() {
+            if view.dirty() || view.has_transient() {
                 view.render_now(&mut terminal)?;
             }
         }

@@ -591,6 +591,11 @@ pub enum Command {
     SetTheme {
         idx: usize,
     },
+    /// Open the config file in a new editor pane of the named session (MENU
+    /// `config`): uses `$VISUAL`/`$EDITOR`/`vi` inside a vertical split.
+    OpenConfig {
+        session: String,
+    },
     /// Write raw bytes into a specific pane (mouse-reporting forwarding, where
     /// the client knows exactly which pane the pointer is over).
     PaneWrite {

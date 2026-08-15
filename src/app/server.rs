@@ -245,6 +245,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         let _ = client.tx.try_send(DaemonEvent::Theme { idx: app.theme_idx });
                     }
                 }
+                Command::OpenConfig { session } => {
+                    let reply = app.open_config_in_session(&session).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
                 Command::PaneWrite { pane_id, bytes } => {
                     app.pane_write(pane_id, &bytes);
                 }
