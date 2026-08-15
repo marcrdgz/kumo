@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn diff_frame_sends_only_changed_rows() {
-        let mut a = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let a = Buffer::empty(Rect::new(0, 0, 4, 3));
         let mut b = Buffer::empty(Rect::new(0, 0, 4, 3));
         b.cell_mut((1, 0)).unwrap().set_symbol("X");
         let frame = diff_frame(&b, &a, None, &palette());

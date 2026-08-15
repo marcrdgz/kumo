@@ -297,12 +297,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let mut diff_msg: Option<ServerMsg> = None;
             let mut dead = Vec::new();
 
-            // Snapshot push: rebuilt once per cycle and diffed against the last
-            // sent snapshot, so idle cycles send nothing.
-            let sessions = session_list(&app);
-            let snapshot_msg: Option<ServerMsg> = if last_snapshot.as_ref() != Some(&sessions) {
-                last_snapshot = Some(sessions.clone());
-                Some(ServerMsg::Snapshot { sessions })
+            // Snapshot push: rebuilt only when someone subscribed, and diffed
+            // against the last sent snapshot, so idle cycles send nothing.
+            let snapshot_msg: Option<ServerMsg> = if clients.values().any(|c| c.wants_snapshot) {
+                let sessions = session_list(&app);
+                if last_snapshot.as_ref() != Some(&sessions) {
+                    last_snapshot = Some(sessions.clone());
+                    Some(ServerMsg::Snapshot { sessions })
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -1186,6 +1190,94 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
+        protocol::write_framed(&mut stream, &ClientMsg::KillServer).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sock.exists() {
+            assert!(Instant::now() < deadline, "daemon socket not removed after kill");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&rt);
+    }
+
+    /// The v2 capability channels for non-terminal clients: a `Desktop` attach
+    /// gets the composed frames, a snapshot push with per-pane info, works with
+    /// `FocusSession`, and streams per-pane `PaneFrame`s.
+    #[test]
+    fn desktop_client_gets_snapshot_and_pane_frames() {
+        let cfg = scratch("desktop-cfg");
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\nnew-cwd = current\n").unwrap();
+        let _lock = crate::config::TEST_ENV_LOCK.lock().unwrap();
+        let prev_cfg = std::env::var("KUMO_CONFIG_DIR").ok();
+        let prev_update = std::env::var("KUMO_NO_UPDATE").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        std::env::set_var("KUMO_NO_UPDATE", "1");
+
+        let rt = scratch("desktop-rt");
+        let sock = rt.join("kumo").join("kumo.sock");
+        start_daemon(&sock);
+        let _ = wait_for_socket(&sock, Duration::from_secs(10));
+        match prev_cfg {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        match prev_update {
+            Some(v) => std::env::set_var("KUMO_NO_UPDATE", v),
+            None => std::env::remove_var("KUMO_NO_UPDATE"),
+        }
+        drop(_lock);
+
+        // A Desktop client handshakes with its kind and attaches.
+        let mut stream = wait_for_socket(&sock, Duration::from_secs(10));
+        stream.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
+        protocol::write_framed(
+            &mut stream,
+            &ClientMsg::Hello { protocol: protocol::PROTOCOL_VERSION, kind: ClientKind::Desktop, cols: 120, rows: 36 },
+        )
+        .unwrap();
+        let msg: ServerMsg = protocol::read_framed(&mut stream).unwrap();
+        assert!(matches!(msg, ServerMsg::Welcome { .. }), "expected Welcome, got {msg:?}");
+
+        // SubscribeSnapshot: the daemon answers immediately with the current
+        // state (per-pane titles/cwd/agent info).
+        protocol::write_framed(&mut stream, &ClientMsg::SubscribeSnapshot).unwrap();
+        let sessions = loop {
+            match protocol::read_framed::<ServerMsg>(&mut stream).unwrap() {
+                ServerMsg::Snapshot { sessions } => break sessions,
+                ServerMsg::Frame { .. } => continue,
+                other => panic!("expected a Snapshot, got {other:?}"),
+            }
+        };
+        assert_eq!(sessions.len(), 1, "one session should be reported");
+        let first = &sessions[0];
+        assert!(!first.panes.is_empty(), "session must report its panes");
+        assert!(!first.panes[0].title.is_empty(), "pane title must be reported");
+        assert!(!first.panes[0].cwd.as_os_str().is_empty(), "pane cwd must be reported");
+        let pid = first.panes[0].id;
+
+        // FocusSession by name: the daemon must not crash and the session stays.
+        protocol::write_framed(&mut stream, &ClientMsg::FocusSession { name: first.name.clone() }).unwrap();
+        // A bogus name is a no-op, not an error.
+        protocol::write_framed(&mut stream, &ClientMsg::FocusSession { name: "nope".into() }).unwrap();
+
+        // SubscribePane: the daemon streams this pane's own grid (full first).
+        protocol::write_framed(&mut stream, &ClientMsg::SubscribePane { pane_id: pid }).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pane_frame = loop {
+            assert!(Instant::now() < deadline, "no PaneFrame for pane {pid}");
+            match protocol::read_framed::<ServerMsg>(&mut stream).unwrap() {
+                ServerMsg::PaneFrame { frame } if frame.pane_id == pid => break frame,
+                ServerMsg::PaneFrame { frame } => panic!("unexpected PaneFrame for {}", frame.pane_id),
+                ServerMsg::Frame { .. } | ServerMsg::Snapshot { .. } => continue,
+                other => panic!("unexpected message while waiting for a PaneFrame: {other:?}"),
+            }
+        };
+        assert!(pane_frame.full, "the first PaneFrame must be a full frame");
+        assert!(pane_frame.rows > 0 && pane_frame.cols > 0, "pane frame must have a real size");
+        assert_eq!(pane_frame.rows_dirty.len(), pane_frame.rows as usize, "a full frame includes every row");
+
+        // Unsubscribe and kill.
+        protocol::write_framed(&mut stream, &ClientMsg::UnsubscribePane { pane_id: pid }).unwrap();
         protocol::write_framed(&mut stream, &ClientMsg::KillServer).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while sock.exists() {

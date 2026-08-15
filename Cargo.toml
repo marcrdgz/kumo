@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kumo-protocol"]
+members = ["crates/kumo-protocol", "apps/kumo-desktop"]
 
 [package]
 name = "kumo"
