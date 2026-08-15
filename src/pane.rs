@@ -229,11 +229,27 @@ impl Pane {
         theme: &Theme,
     ) -> Result<Pane> {
         let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
-        let pane =
+        let mut pane =
             Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)?;
         if mouse_tracking {
             pane.vt.mode_set(vt::MODE_MOUSE_NORMAL, true);
         }
+        // The fresh emulator is blank, and the live child process already runs
+        // inside a PTY that is `cols`x`rows`. If the resumed size happens to
+        // match the first layout (the common restart-in-place case), no later
+        // resize would ever change the size, so the kernel would never fire
+        // SIGWINCH and the process would never repaint into the new emulator —
+        // the pane would stay empty until a manual layout action (e.g. rotate)
+        // forced a genuine resize. Nudge it deterministically now: a brief
+        // size change makes the process redraw its prompt/screen, then restore
+        // the real size. Crucially, the kernel is left one column narrower than
+        // the emulator: the app's first render always resizes a pane exactly
+        // once (its `last_sizes` starts empty), so that render is a *genuine*
+        // size change. TUIs that skip a same-size redraw (opencode, full-screen
+        // apps) ignore a round-trip SIGWINCH but must repaint on a real change.
+        pane.resize(cols.saturating_sub(1).max(1), rows);
+        pane.resize(cols.max(1), rows.max(1));
+        let _ = pane.pty.resize(cols.saturating_sub(1).max(1), rows);
         Ok(pane)
     }
 
@@ -1675,6 +1691,157 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         )
         .unwrap();
         assert!(!resumed.has_mouse_reporting(), "mouse tracking must stay off");
+        resumed.pty.kill();
+    }
+
+    /// Poll `fd` and read/discard until no data arrives for `quiet`.
+    fn drain_until_quiet(fd: i32, quiet: Duration) {
+        let mut buf = [0u8; 4096];
+        let deadline = Instant::now() + quiet;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let rc = unsafe { libc::poll(&mut pfd, 1, remaining.as_millis() as i32) };
+            if rc <= 0 || pfd.revents & libc::POLLIN == 0 {
+                return;
+            }
+            let n =
+                unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn resumed_pane_nudges_process_to_repaint() {
+        // Restart-in-place resumes a pane at the same size the inherited PTY is
+        // already at, into a fresh (blank) emulator. Pre-fix, no later layout
+        // resize changed the size, so the kernel never fired SIGWINCH and the
+        // process never repainted: the pane stayed empty (only the session
+        // active at restart came back, by the accident of the daemon's initial
+        // small render forcing a real resize). The resume must nudge the
+        // process by briefly changing the size so it redraws into the fresh
+        // emulator.
+        use std::time::{Duration, Instant};
+
+        let spec = PtySpec {
+            shell: "/bin/sh".into(),
+            program: None,
+            cwd: Some(std::env::temp_dir()),
+            cols: 80,
+            rows: 24,
+        };
+        let mut pty = Pty::spawn(&spec).unwrap();
+        pty.write(b"PS1='KUMO_NUDGE> '\r\necho KUMO_RESUME_NUDGE\r\n").unwrap();
+
+        // Wait until the marker is echoed, then drain until the PTY is quiet,
+        // so any output after resume is a repaint from the nudge (not stale).
+        let fd = pty.raw_fd().expect("spawned pty exposes its master fd");
+        let mut all = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !all.windows(b"KUMO_RESUME_NUDGE".len()).any(|w| w == b"KUMO_RESUME_NUDGE") {
+            assert!(Instant::now() < deadline, "marker never echoed");
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut pfd, 1, 50) } <= 0 || pfd.revents & libc::POLLIN == 0 {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            all.extend_from_slice(&buf[..n as usize]);
+        }
+        assert!(
+            all.windows(b"KUMO_RESUME_NUDGE".len()).any(|w| w == b"KUMO_RESUME_NUDGE"),
+            "marker never echoed: {:?}",
+            String::from_utf8_lossy(&all)
+        );
+        drain_until_quiet(fd, Duration::from_millis(250));
+
+        // Simulate exec-inheritance: forget the handle so its fd survives.
+        let child_pid = pty.process_id();
+        std::mem::forget(pty);
+
+        let (tx, rx) = mpsc::channel();
+        let mut resumed = Pane::resume(
+            1,
+            2,
+            "/bin/sh".into(),
+            None,
+            std::env::temp_dir(),
+            80,
+            24,
+            false,
+            fd,
+            child_pid.map(|c| c as i32),
+            false,
+            tx,
+            test_theme(),
+        )
+        .unwrap();
+
+        // The nudge must make the shell repaint its prompt into the fresh
+        // emulator; a same-size resume emits nothing on its own.
+        let mut fed = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            while let Ok(ev) = rx.try_recv() {
+                if let PtyEvent::Output { data, .. } = ev {
+                    fed.extend_from_slice(&data);
+                    resumed.feed(&data);
+                }
+            }
+            if !fed.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!fed.is_empty(), "resume never nudged the shell to repaint");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        resumed.render_dirty(Rect::new(0, 0, 80, 24), true, &mut buf);
+        let text = pane_text(&buf);
+        assert!(
+            text.contains("KUMO_NUDGE>") || text.contains("KUMO_RESUME_NUDGE"),
+            "repainted prompt missing from the resumed pane: {text:?}"
+        );
+
+        // The kernel must be left one column narrower than the emulator, so the
+        // app's first layout render (which always resizes a pane once) is a
+        // genuine size change — TUIs that skip a same-size round-trip redraw
+        // must still repaint then.
+        assert_eq!(resumed.pty.cols, 79, "resume must leave the PTY narrower");
+        assert_eq!(resumed.pty.rows, 24);
+
+        // Drain the resume-time repaint, then resize back to the real size: the
+        // first layout resize must fire a fresh repaint of its own.
+        std::thread::sleep(Duration::from_millis(200));
+        while let Ok(ev) = rx.try_recv() {
+            if let PtyEvent::Output { data, .. } = ev {
+                fed.extend_from_slice(&data);
+            }
+        }
+        let settled = fed.len();
+        resumed.resize(80, 24);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            while let Ok(ev) = rx.try_recv() {
+                if let PtyEvent::Output { data, .. } = ev {
+                    fed.extend_from_slice(&data);
+                    resumed.feed(&data);
+                }
+            }
+            if fed.len() > settled {
+                break;
+            }
+            assert!(Instant::now() < deadline, "first layout resize never repainted");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         resumed.pty.kill();
     }
 }

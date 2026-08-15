@@ -530,9 +530,19 @@ mod tests {
     /// Read a frame (the daemon sends one every ~250ms even when idle).
     fn next_frame(stream: &mut UnixStream) -> protocol::FrameMsg {
         loop {
-            match protocol::read_framed::<ServerMsg>(stream).unwrap() {
-                ServerMsg::Frame { frame } => return frame,
-                _ => {}
+            match protocol::read_framed::<ServerMsg>(stream) {
+                Ok(ServerMsg::Frame { frame }) => return frame,
+                Ok(_) => {}
+                Err(e) => {
+                    let timed_out = e
+                        .downcast_ref::<std::io::Error>()
+                        .map(|e| matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+                        .unwrap_or(false);
+                    if timed_out {
+                        continue;
+                    }
+                    panic!("daemon connection failed: {e:#}");
+                }
             }
         }
     }
@@ -543,6 +553,69 @@ mod tests {
             &ClientMsg::Input { key: WireKeyEvent { code, modifiers: WireModifiers::default() } },
         )
         .unwrap();
+    }
+
+    /// Send a key with explicit modifiers (e.g. the Ctrl+B leader chord).
+    fn send_key_mods(stream: &mut UnixStream, code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) {
+        let key: WireKeyEvent = crossterm::event::KeyEvent::new(code, mods).into();
+        protocol::write_framed(stream, &ClientMsg::Input { key }).unwrap();
+    }
+
+    /// The `kumo` binary this test's package builds: the unit-test harness runs
+    /// from `target/debug/deps/kumo-<hash>`, the daemon executable sits one
+    /// level up in `target/debug/kumo`.
+    fn kumo_bin() -> PathBuf {
+        let exe = std::env::current_exe().expect("current exe");
+        exe.parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("kumo"))
+            .expect("kumo binary next to the test harness")
+    }
+
+    /// Accumulate every dirty row seen so far into `rows` (row index -> text).
+    /// Drains only the frames already buffered (the stream must have a read
+    /// timeout set), so it returns promptly instead of blocking on the daemon's
+    /// ~250ms idle frame stream.
+    fn collect_rows(stream: &mut UnixStream, rows: &mut std::collections::HashMap<u16, String>) {
+        loop {
+            match protocol::read_framed::<ServerMsg>(stream) {
+                Ok(ServerMsg::Frame { frame }) => {
+                    for patch in &frame.rows_dirty {
+                        let text: String = patch
+                            .cells
+                            .iter()
+                            .filter(|c| c.cell_width != 0)
+                            .map(|c| c.text.as_str())
+                            .collect();
+                        rows.insert(patch.row, text);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    if e.downcast_ref::<std::io::Error>()
+                        .map(|e| matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Read frames until some rendered row contains `needle` (or the deadline).
+    fn wait_for_text(stream: &mut UnixStream, needle: &str, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut rows = std::collections::HashMap::new();
+        loop {
+            collect_rows(stream, &mut rows);
+            if rows.values().any(|r| r.contains(needle)) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "never saw {what} ({needle:?}) in frames");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn start_daemon(sock: &PathBuf) {
@@ -794,5 +867,100 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    /// End-to-end `kumo server restart` against a real daemon subprocess: the
+    /// resume must repaint *every* session's panes, not just the one active at
+    /// the restart. Regression for the bug where the session that was inactive
+    /// during the restart came back blank until a layout action (leader+o)
+    /// forced a genuine PTY resize.
+    #[test]
+    fn daemon_restart_repaints_inactive_sessions() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use std::collections::HashMap;
+        use std::process::Stdio;
+
+        let cfg = scratch("restart-cfg");
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\nnew-cwd = current\n").unwrap();
+        let rt = scratch("restart-rt");
+        let sock = rt.join("kumo").join("kumo.sock");
+
+        // A real daemon subprocess with an isolated runtime dir, so the in-place
+        // restart exec rebinds the same socket / resume paths.
+        let mut daemon = std::process::Command::new(kumo_bin())
+            .arg("daemon")
+            .env("KUMO_CONFIG_DIR", &cfg)
+            .env("XDG_RUNTIME_DIR", &rt)
+            .env("KUMO_NO_UPDATE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn daemon");
+
+        // Attach, create a second session and give its shell a distinctive prompt.
+        let mut stream = handshake(&sock);
+        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        wait_for_prompt(&mut stream);
+        protocol::write_framed(&mut stream, &ClientMsg::NewSession { workspace: Some(cfg.clone()) }).unwrap();
+        wait_for_prompt(&mut stream);
+        for ch in "PS1='SESS2> '".chars() {
+            send_key(&mut stream, WireKeyCode::Char(ch));
+        }
+        send_key(&mut stream, WireKeyCode::Enter);
+        wait_for_text(&mut stream, "SESS2>", "the SESS2 prompt");
+
+        // Switch back to session 1 so the restart snapshots session 2 as inactive.
+        send_key_mods(&mut stream, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        send_key(&mut stream, WireKeyCode::Char('1'));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut rows = HashMap::new();
+            collect_rows(&mut stream, &mut rows);
+            let last = rows
+                .iter()
+                .filter(|(_, t)| !t.trim().is_empty())
+                .max_by_key(|(&r, _)| r)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default();
+            if last.contains("session-1") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "session 1 never became active");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Restart the daemon in place (exec + resume of the live PTYs).
+        protocol::write_framed(&mut stream, &ClientMsg::Restart).unwrap();
+        let _ = protocol::read_framed::<ServerMsg>(&mut stream);
+        drop(stream);
+
+        // The old daemon sleeps ~100ms before exec'ing; the new daemon (same
+        // pid) rebinds the socket once its resume finishes. A reconnect in the
+        // exec window is cut off, so just wait for the new daemon to settle.
+        std::thread::sleep(Duration::from_millis(2000));
+
+        // The new daemon re-binds the same socket; re-attach and re-handshake.
+        let mut stream = handshake(&sock);
+        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        // The resumed active session (session 1) must repaint its prompt.
+        wait_for_text(&mut stream, "session-1", "the resumed session-1 status bar");
+
+        // Now the crux: switching to the session that was INACTIVE during the
+        // restart must show its repainted prompt immediately, with no rotate.
+        send_key_mods(&mut stream, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        send_key(&mut stream, WireKeyCode::Char('2'));
+        wait_for_text(&mut stream, "SESS2>", "the repainted SESS2 prompt after restart");
+
+        protocol::write_framed(&mut stream, &ClientMsg::KillServer).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sock.exists() {
+            assert!(Instant::now() < deadline, "daemon socket not removed after kill");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = daemon.wait();
+
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&rt);
     }
 }
