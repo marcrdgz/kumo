@@ -114,12 +114,17 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
     )?;
 
-    // Daemon-event reader thread: forwards every frame the daemon pushes. When
-    // the daemon exits (or closes the connection on detach) the read returns
-    // EOF and the thread ends, which the main loop sees as a clean exit.
+    // Daemon-event reader thread: forwards every frame the daemon pushes. It
+    // wakes on a read timeout to check the stop flag, because the client's own
+    // socket clones keep the write end open — the reader would otherwise block
+    // forever on a clean detach (the daemon closes its end, but our clones
+    // keep the connection "alive" from the reader's perspective).
     let write_half = stream.try_clone()?;
+    write_half.set_read_timeout(Some(Duration::from_millis(200))).ok();
     let (ev_tx, ev_rx) = mpsc::channel::<DaemonEvent>();
-    let reader = std::thread::spawn(move || reader_loop(write_half, ev_tx));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let reader = std::thread::spawn(move || reader_loop(write_half, ev_tx, stop2));
 
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
@@ -173,6 +178,8 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
         }
     })();
 
+    // Release the reader thread before a reconnect spawns a new one.
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = reader.join();
 
     match result {
@@ -198,16 +205,23 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
 }
 
 /// Read daemon events off the socket and forward them over the channel. The
-/// reader blocks on the socket; when the daemon closes the connection (exit,
-/// detach, restart) the read returns EOF/Err and the thread ends, closing the
-/// channel.
-fn reader_loop(mut stream: UnixStream, tx: mpsc::Sender<DaemonEvent>) {
+/// reader wakes every `read_timeout` to check `stop` (the client's own socket
+/// clones keep the write end open, so a clean detach never yields EOF here).
+fn reader_loop(
+    mut stream: UnixStream,
+    tx: mpsc::Sender<DaemonEvent>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let mut reader = protocol::FrameReader::default();
     let mut buf = [0u8; 8192];
     loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         match stream.read(&mut buf) {
-            Ok(0) => break,
-            Err(_) => break,
+            Ok(0) => return,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
+            Err(_) => return,
             Ok(n) => {
                 let mut frames = Vec::new();
                 reader.push(&buf[..n], &mut frames);
@@ -215,7 +229,7 @@ fn reader_loop(mut stream: UnixStream, tx: mpsc::Sender<DaemonEvent>) {
                     let Ok((msg, _)) =
                         bincode::serde::decode_from_slice::<DaemonEvent, _>(&f, bincode::config::standard())
                     else {
-                        break;
+                        return;
                     };
                     if tx.send(msg).is_err() {
                         return;

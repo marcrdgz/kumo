@@ -137,6 +137,7 @@ struct WorktreePicker {
 }
 
 /// One pane's client-side grid, rebuilt from `PaneFrame`s.
+#[derive(Clone)]
 struct Grid {
     cols: usize,
     rows: usize,
@@ -238,8 +239,7 @@ pub struct View {
 
 impl View {
     pub fn new(out: UnixStream, cols: u16, rows: u16) -> Self {
-        let leader = match crate::config::leader() {
-            Some(raw) => match bindings::parse_chord(&raw) {
+        let leader = match crate::config::leader() {            Some(raw) => match bindings::parse_chord(&raw) {
                 Some(chord) => chord,
                 None => {
                     log::warn!("kumo: invalid leader key {:?}; falling back to ctrl+b", raw);
@@ -251,8 +251,8 @@ impl View {
         let keymap = bindings::build_keymap(&crate::config::keymap_bindings());
         let mut view = View {
             out,
-            cols,
-            rows,
+            cols: cols.max(2),
+            rows: rows.max(2),
             mode: Mode::Normal,
             leader,
             keymap,
@@ -2354,22 +2354,26 @@ impl View {
     fn render_tabs(&self, f: &mut Frame, area: Rect, w: u16) {
         let theme = &THEMES[self.theme_idx];
         let y = area.y + 2;
-        let half = (w / 2).max(4);
+        let half = (w / 2).max(1);
         let tabs = [("sessions", SidebarTab::Sessions), ("agents", SidebarTab::Agents)];
         for (i, (label, tab)) in tabs.iter().enumerate() {
             let x0 = area.x + i as u16 * half;
             let x1 = if i == 0 { x0 + half } else { area.x + w };
+            let width = x1.saturating_sub(x0);
+            if width == 0 {
+                continue;
+            }
             let active = *tab == self.sidebar_tab;
             let bg = if active { theme.panel_sep } else { RColor::Reset };
-            fill(f, Rect::new(x0, y, x1 - x0, 1), bg);
+            fill(f, Rect::new(x0, y, width, 1), bg);
             let style = if active {
                 Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(theme.panel_muted).bg(bg)
             };
             let label = label.to_uppercase();
-            let pad = (x1 - x0).saturating_sub(label.chars().count() as u16) / 2;
-            text(f, x0 + pad, y, &label, style, x1 - x0);
+            let pad = width.saturating_sub(label.chars().count() as u16) / 2;
+            text(f, x0 + pad, y, &label, style, width);
         }
         put(f, area.x + half, y, "│", Style::default().fg(theme.panel_sep).bg(RColor::Reset));
     }
@@ -3251,6 +3255,74 @@ mod tests {
         assert!(view.subscribed.contains(&1));
         let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
         assert_eq!(view.sent_sizes.get(&1), Some(&(inner.width, inner.height)));
+    }
+
+    /// Rendering must never panic at any (tiny → large) terminal size, with
+    /// every overlay open — the classic TUI's full frame was drawn every
+    /// cycle, so the client's draw path has to be total over all geometry.
+    #[test]
+    fn render_is_total_across_sizes_and_overlays() {
+        let layout = Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                focus: 1,
+                zoom: false,
+                branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
+                root: Some(Box::new(LayoutNode::Split {
+                    id: 1,
+                    dir: SplitDir::Vertical,
+                    ratio: 0.5,
+                    a: Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                        id: 1,
+                        title: " shell 1 ".into(),
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        is_ai: false,
+                        agent: None,
+                        mouse_reporting: false,
+                        alt_screen: false,
+                    })),
+                    b: Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                        id: 2,
+                        title: " AI CLI ".into(),
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        is_ai: true,
+                        agent: Some(kumo_protocol::AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked }),
+                        mouse_reporting: true,
+                        alt_screen: false,
+                    })),
+                })),
+            }],
+        };
+        let mut g = grid();
+        g.cells = vec![vec![cell("hi", 1), cell(" ", 1), cell("x", 1), cell("y", 1)]];
+        for (w, h) in [(2u16, 2u16), (5, 4), (20, 8), (40, 12), (80, 24), (120, 40)] {
+            let mut view = test_view();
+            view.cols = w;
+            view.rows = h;
+            view.layout = Some(layout.clone());
+            view.grids.insert(1, g.clone());
+            view.recompute_geometry();
+            // Open every overlay: it must still render without panicking.
+            view.menu.open = true;
+            view.ctx_menu.open = true;
+            view.popup.open = true;
+            view.popup.name = "worktree/name".into();
+            view.keybind_overlay.open = true;
+            view.settings.open = true;
+            view.worktree_picker.open = true;
+            view.worktree_picker.items = vec![
+                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false },
+            ];
+            view.pane_numbers = Some(Instant::now());
+            view.update_notice = Some(("key".into(), "nightly".into()));
+            view.sel = Some(Sel { pane_id: 1, start: (0, 0), end: (1, 0) });
+            view.link_mods = true;
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| view.draw(f)).unwrap();
+        }
     }
 
     #[test]
