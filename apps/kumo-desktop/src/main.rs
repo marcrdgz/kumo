@@ -51,7 +51,6 @@ struct KumoDesktop {
     subscribed: HashSet<u64>,
     rects: Vec<(u64, CellRect)>,
     grid_size: (u16, u16),
-    sent_sizes: HashMap<u64, (u16, u16)>,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -84,7 +83,6 @@ impl KumoDesktop {
             subscribed: HashSet::new(),
             rects: Vec::new(),
             grid_size: (80, 24),
-            sent_sizes: HashMap::new(),
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -161,7 +159,6 @@ impl KumoDesktop {
     /// request pane sizes, and keep pane subscriptions in sync.
     fn on_layout(&mut self, layout: &Layout) {
         self.layout = Some(layout.clone());
-        self.recompute_geometry();
         let mut want: HashSet<u64> = HashSet::new();
         if let Some(session) = layout.sessions.iter().find(|s| Some(&s.name) == layout.active.as_ref()) {
             let (gw, gh) = self.grid_size;
@@ -174,13 +171,8 @@ impl KumoDesktop {
                 Vec::new()
             };
             self.rects = rects;
-            for (pid, r) in self.rects.clone() {
+            for (pid, _r) in self.rects.clone() {
                 want.insert(pid);
-                let inner = (r.width.saturating_sub(2).max(1), r.height.saturating_sub(2).max(1));
-                if self.sent_sizes.get(&pid) != Some(&inner) {
-                    self.sent_sizes.insert(pid, inner);
-                    let _ = self.send(Command::PaneResize { pane_id: pid, cols: inner.0, rows: inner.1 });
-                }
                 if self.subscribed.insert(pid) {
                     let _ = self.send(Command::SubscribePane { pane_id: pid });
                 }
@@ -242,6 +234,8 @@ impl KumoDesktop {
         let gh = (avail_h / target_h).floor().max(10.0) as u16 + 1; // + status row
         if self.grid_size != (gw, gh) {
             self.grid_size = (gw, gh);
+            // The daemon sizes panes within this composed grid.
+            let _ = self.send(Command::Resize { cols: gw, rows: gh });
             if let Some(layout) = self.layout.clone() {
                 self.on_layout(&layout);
             }
@@ -254,11 +248,6 @@ impl KumoDesktop {
         let canvas_w = self.grid_size.0 as f32 * self.cell_w;
         self.canvas_origin = point(px(SIDEBAR_W + (avail_w - canvas_w).max(0.0) * 0.5), px(0.0));
         self.canvas_size = (canvas_w, avail_h);
-    }
-
-    fn recompute_geometry(&mut self) {
-        // Re-derive cell scaling from the window size.
-        // (update_geometry is called every frame with the window.)
     }
 
     fn cell_from_position(&self, pos: Point<Pixels>) -> Option<(u16, u16)> {

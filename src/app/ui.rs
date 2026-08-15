@@ -1,167 +1,166 @@
-//! Daemon-side content rendering and semantic layout export.
-//!
-//! The daemon is the "smart renderer" but it **never draws chrome**: no borders,
-//! box-drawing characters, sidebar, or status bar. `tick` refreshes metadata
-//! and renders each pane's terminal content into its retained cache; `layout`
-//! exports the semantic split tree (ratios, not pixels) for clients to draw.
-//!
-//! Clients are "dumb viewports": they compute geometry from the semantic tree,
-//! request pane sizes via `PaneResize`, and draw their own borders/chrome.
-
-use ratatui::buffer::Buffer;
+use anyhow::Result;
 use ratatui::Frame;
+use ratatui::backend::Backend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color as RColor, Style};
+use ratatui::style::{Color as RColor, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
-use kumo_protocol::{AgentInfo, Layout, LayoutNode, LayoutPane, SessionLayout, SplitDir};
-
-use super::App;
-use crate::layout;
-
-/// Legacy chrome-drawing helpers, kept so the (dead) sidebar/overlay renderers
-/// still compile; the daemon never calls them.
-#[allow(dead_code)]
-pub(super) fn fill(f: &mut Frame, area: Rect, color: RColor) {
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            if let Some(c) = f.buffer_mut().cell_mut((x, y)) {
-                c.reset();
-                c.set_bg(color);
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn put(f: &mut Frame, x: u16, y: u16, s: &str, style: Style) {
-    if let Some(c) = f.buffer_mut().cell_mut((x, y)) {
-        c.set_symbol(s);
-        c.set_style(style);
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn text(f: &mut Frame, x: u16, y: u16, s: &str, style: Style, max: u16) {
-    for (i, ch) in s.chars().take(max as usize).enumerate() {
-        put(f, x + i as u16, y, &ch.to_string(), style);
-    }
-}
-
-impl From<crate::agents::AgentStatus> for kumo_protocol::AgentStatus {
-    fn from(status: crate::agents::AgentStatus) -> Self {
-        match status {
-            crate::agents::AgentStatus::Working => kumo_protocol::AgentStatus::Working,
-            crate::agents::AgentStatus::Blocked => kumo_protocol::AgentStatus::Blocked,
-            crate::agents::AgentStatus::Idle => kumo_protocol::AgentStatus::Idle,
-        }
-    }
-}
-
-/// Default terminal size for a pane until a client resizes it via `PaneResize`.
-const DEFAULT_PANE_SIZE: (u16, u16) = (80, 24);
+use super::bindings::leader_hint;
+use super::overlays::MENU_BTN;
+use super::{App, Mode};
+use crate::layout::TreeGeom;
+use crate::agents::AgentStatus;
+use crate::vt;
 
 impl App {
-    /// Refresh metadata (git branches, cwd follow, AI detection) and render the
-    /// content of every dirty pane into its retained cache. Returns the ids of
-    /// panes whose content changed (candidates for a `PaneFrame`).
-    pub(super) fn tick(&mut self) -> Vec<u64> {
+    pub(super) fn frame<B: Backend>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()>
+    where
+        B::Error: Send + Sync + 'static,
+    {
         self.poll_exits();
+        if self.quit {
+            return Ok(());
+        }
+        let size = terminal.size()?;
+        self.term_size = (size.width, size.height);
         self.refresh_branches();
         self.refresh_workspace_follow();
         self.refresh_ai_cli();
         self.refresh_agent_statuses();
+        self.log_agent_statuses();
+        let area = Rect::new(0, 0, size.width, size.height);
+        let geom = self.active_geom();
 
-        let mut changed = Vec::new();
-        let ids: Vec<u64> = self.panes.keys().copied().collect();
-        for pid in ids {
-            let (cols, rows) = self.pane_size(pid);
-            let Some(pane) = self.panes.get_mut(&pid) else { continue };
-            if !pane.dirty && !pane.full_redraw {
-                continue;
-            }
-            let rect = Rect::new(0, 0, cols.max(1), rows.max(1));
-            let recreate = self.pane_cache.get(&pid).map(|c| c.area != rect).unwrap_or(true);
-            if recreate {
-                pane.resize(cols.max(1), rows.max(1));
-                pane.full_redraw = true;
-                self.pane_cache.insert(pid, Buffer::empty(rect));
-            }
-            if let Some(cached) = self.pane_cache.get_mut(&pid) {
-                // `focused = false`: the cursor is streamed via `PaneFrame`
-                // and drawn by the client, so it is never baked into the grid.
-                let _ = pane.render_dirty(rect, false, cached);
-                changed.push(pid);
+        for pg in &geom.panes {
+            if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
+                let inner = pg.inner();
+                let key = (inner.width, inner.height);
+                if self.last_sizes.get(&pg.pane_id) != Some(&key) {
+                    pane.resize(inner.width, inner.height);
+                    self.last_sizes.insert(pg.pane_id, key);
+                }
             }
         }
-        changed
+
+        let focused = self.sessions[self.active].tree.focus;
+        // When focus moves, re-render the old and new panes so the cursor
+        // highlight is drawn/cleared even if neither produced output.
+        if self.last_focused != Some(focused) {
+            if let Some(old) = self.last_focused {
+                if let Some(p) = self.panes.get_mut(&old) {
+                    p.dirty = true;
+                }
+            }
+            if let Some(p) = self.panes.get_mut(&focused) {
+                p.dirty = true;
+            }
+            self.last_focused = Some(focused);
+        }
+        let geom_ref = &geom;
+        terminal.draw(|f| self.render(f, area, geom_ref, focused))?;
+        self.place_cursor(terminal, &geom, focused)?;
+        Ok(())
     }
 
-    /// The requested terminal size for `pid` (set by clients via `PaneResize`).
-    pub(super) fn pane_size(&self, pid: u64) -> (u16, u16) {
-        self.pane_sizes.get(&pid).copied().unwrap_or(DEFAULT_PANE_SIZE)
+    fn render(&mut self, f: &mut Frame, size: Rect, geom: &TreeGeom, focused: u64) {
+        // Note: no global fill over the pane area, so unchanged (non-dirty)
+        // panes keep the cells ratatui retains from their last render.
+        for pg in &geom.panes {
+            let title = self.pane_title(pg.pane_id, pg.pane_id == focused);
+            let blocked = self
+                .panes
+                .get(&pg.pane_id)
+                .map(|p| p.is_ai_cli())
+                .unwrap_or(false)
+                && self.agent_status_cache.get(&pg.pane_id).copied() == Some(AgentStatus::Blocked);
+            let title = if blocked { format!("{title}· blocked ") } else { title };
+            self.render_pane_frame(f, pg.rect, pg.pane_id == focused, blocked, &title);
+        }
+        for pg in &geom.panes {
+            if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
+                let inner = pg.inner();
+                if inner.width > 0 && inner.height > 0 {
+                    // Whether a link modifier is held right now drives the
+                    // underline of links in the next render.
+                    pane.link_mods = self.link_mods;
+                    // Re-render dirty rows into the pane's retained cache;
+                    // unchanged rows are kept and blitted back (no FFI scan).
+                    if pane.dirty {
+                        // Keep the previous cache unless it was for a different
+                        // rect (moved/resized), so clean rows survive.
+                        let recreate = self
+                            .pane_cache
+                            .get(&pg.pane_id)
+                            .map(|c| c.area != inner)
+                            .unwrap_or(true);
+                        if recreate {
+                            pane.full_redraw = true;
+                            self.pane_cache.insert(pg.pane_id, Buffer::empty(inner));
+                        }
+                        if let Some(cached) = self.pane_cache.get_mut(&pg.pane_id) {
+                            let status = pane.render_dirty(inner, pg.pane_id == focused, cached);
+                            if let Some(status) = status {
+                                self.agent_status_cache.insert(pg.pane_id, status);
+                            }
+                        }
+                    }
+                    if let Some(cached) = self.pane_cache.get(&pg.pane_id) {
+                        let dst = f.buffer_mut();
+                        for (i, src) in cached.content.iter().enumerate() {
+                            let (x, y) = cached.pos_of(i);
+                            if let Some(dst_cell) = dst.cell_mut((x, y)) {
+                                *dst_cell = src.clone();
+                            }
+                        }
+                    }
+                    let sb = pane.scrollbar_data();
+                    self.render_scrollbar(f, &sb, inner);
+                }
+            }
+        }
+
+        self.render_pane_numbers(f);
+
+        if self.sidebar_open {
+            self.render_sidebar(f, size);
+        }
+
+        self.render_status(f, size);
+        self.render_menu(f);
+        self.render_ctx_menu(f);
+        self.render_name_popup(f);
+        self.render_update_notice(f);
+        self.render_keybind_overlay(f);
+        self.render_settings(f);
+        self.render_worktree_picker(f);
     }
 
-    /// Export the full semantic layout tree: sessions → splits (ratios) →
-    /// panes (title, cwd, agent status). Pushed to layout subscribers on any
-    /// change; clients derive geometry and draw all chrome.
-    pub(super) fn layout(&self) -> Layout {
-        let active = self.sessions.get(self.active).map(|s| s.name.clone());
-        let sessions = self
-            .sessions
-            .iter()
-            .map(|s| SessionLayout {
-                name: s.name.clone(),
-                workspace: s.workspace.clone(),
-                focus: s.tree.focus,
-                zoom: s.zoom,
-                root: s.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
-            })
-            .collect();
-        Layout { active, sessions }
-    }
-
-    fn layout_node(&self, node: &layout::Node) -> LayoutNode {
-        match node {
-            layout::Node::Pane { id } => LayoutNode::Pane(self.layout_pane(*id)),
-            layout::Node::Split { dir, ratio, a, b, .. } => LayoutNode::Split {
-                dir: match dir {
-                    layout::SplitDir::V => SplitDir::Vertical,
-                    layout::SplitDir::H => SplitDir::Horizontal,
-                },
-                ratio: *ratio,
-                a: Box::new(self.layout_node(a)),
-                b: Box::new(self.layout_node(b)),
-            },
+    /// Draw the `leader+q` pane-number overlay: a numbered badge on each pane.
+    /// Expires after `PANE_NUMBERS_TIMEOUT` even without a keypress.
+    fn render_pane_numbers(&mut self, f: &mut Frame) {
+        let Some(started) = self.pane_numbers else { return };
+        if started.elapsed() > super::PANE_NUMBERS_TIMEOUT {
+            self.pane_numbers = None;
+            return;
+        }
+        let ids = self.sessions[self.active].tree.pane_ids();
+        if ids.len() < 2 {
+            return;
+        }
+        let style = Style::default().fg(RColor::Black).bg(self.theme.accent).add_modifier(Modifier::BOLD);
+        let geom = self.active_geom();
+        for (i, pid) in ids.iter().enumerate() {
+            let Some(digit) = char::from_digit((i + 1) as u32, 10) else { continue };
+            let Some(pg) = geom.panes.iter().find(|p| p.pane_id == *pid) else { continue };
+            let inner = pg.inner();
+            put(f, inner.x + inner.width / 2, inner.y + inner.height / 2, &digit.to_string(), style);
         }
     }
 
-    fn layout_pane(&self, pid: u64) -> LayoutPane {
-        let pane = self.panes.get(&pid);
-        let is_ai = pane.map(|p| p.is_ai_cli()).unwrap_or(false);
-        let agent = if is_ai {
-            Some(AgentInfo {
-                name: self.agent_label(pid),
-                status: self
-                    .agent_status_cache
-                    .get(&pid)
-                    .copied()
-                    .unwrap_or(crate::agents::AgentStatus::Idle)
-                    .into(),
-            })
-        } else {
-            None
-        };
-        LayoutPane {
-            id: pid,
-            title: self.pane_label(pid),
-            cwd: pane.map(|p| p.cwd.clone()).unwrap_or_default(),
-            is_ai,
-            agent,
-        }
-    }
-
-    /// Display label of a pane (no focus/zoom suffix). A custom name wins;
-    /// otherwise the AI CLI marker or `shell N`.
+    /// Display label of a pane in the active session, without the focus/zoom
+    /// suffix. A custom name wins; otherwise the AI CLI marker or `shell N`.
     pub(super) fn pane_label(&self, pid: u64) -> String {
         let Some(pane) = self.panes.get(&pid) else {
             return " pane ".to_string();
@@ -185,6 +184,378 @@ impl App {
             format!(" shell {n} ")
         } else {
             " shell ".to_string()
+        }
+    }
+
+    fn pane_title(&self, pid: u64, focused: bool) -> String {
+        let base = self.pane_label(pid);
+        if focused && self.sessions[self.active].zoom {
+            format!("{base}(zoom) ")
+        } else {
+            base
+        }
+    }
+
+    fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, blocked: bool, title: &str) {
+        if rect.width < 3 || rect.height < 3 {
+            return;
+        }
+        let border = if blocked {
+            // A blocked AI pane glows orange even when it does not have focus.
+            self.theme.orange
+        } else if focused {
+            self.theme.accent
+        } else {
+            self.theme.border_idle
+        };
+        // Native background: the frame is just line glyphs over the host
+        // terminal's background, matching the pane content.
+        let border_style = Style::default().fg(border).bg(RColor::Reset);
+        let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
+        put(f, x0, y0, "┌", border_style);
+        put(f, x1, y0, "┐", border_style);
+        put(f, x0, y1, "└", border_style);
+        put(f, x1, y1, "┘", border_style);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border_style);
+            put(f, x, y1, "─", border_style);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border_style);
+            put(f, x1, y, "│", border_style);
+        }
+        // Title chip: filled accent when focused, orange when a blocked AI
+        // pane, plain otherwise.
+        let max = rect.width.saturating_sub(2) as usize;
+        let chip = if focused {
+            Style::default()
+                .fg(RColor::Black)
+                .bg(self.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if blocked {
+            Style::default()
+                .fg(RColor::Black)
+                .bg(self.theme.orange)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.theme.fg).bg(RColor::Reset)
+        };
+        for (i, ch) in title.chars().take(max).enumerate() {
+            put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
+        }
+    }
+
+    fn render_scrollbar(&self, f: &mut Frame, sb: &vt::TerminalScrollbar, inner: Rect) {
+        let total = sb.total as usize;
+        let screen = sb.len as usize;
+        if total <= screen || screen == 0 {
+            return;
+        }
+        let hist = total - screen;
+        let bar_h = inner.height as usize;
+        let thumb = ((screen * bar_h) / total).max(1).min(bar_h);
+        let off = sb.offset as usize;
+        let y_max = bar_h.saturating_sub(thumb);
+        let y_start = off.saturating_mul(y_max) / hist.max(1);
+        let x = inner.x + inner.width.saturating_sub(1);
+        for i in 0..bar_h {
+            let y = inner.y + i as u16;
+            if i >= y_start && i < y_start + thumb {
+                put(f, x, y, "▐", Style::default().fg(self.theme.secondary));
+            } else {
+                put(f, x, y, "░", Style::default().fg(self.theme.panel_sep));
+            }
+        }
+    }
+
+    fn render_status(&self, f: &mut Frame, size: Rect) {
+        let area = Rect::new(0, size.height.saturating_sub(1), size.width, 1);
+        fill(f, area, RColor::Reset);
+        let session = &self.sessions[self.active];
+        let n = session.tree.pane_count();
+        let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
+        let mode_style = if self.mode == Mode::Leader {
+            Style::default().fg(RColor::Black).bg(self.theme.secondary).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(RColor::Black).bg(self.theme.accent)
+        };
+
+        // Mode chip at the left edge.
+        let chip = format!(" {} ", mode);
+        let chip_w = chip.chars().count() as u16;
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(chip, mode_style)])),
+            Rect::new(0, area.y, chip_w, 1),
+        );
+
+        // MENU button right after the chip, then the remaining spans.
+        let btn_w = MENU_BTN.chars().count() as u16;
+        let btn_x = self.menu_btn_x();
+        let btn_style = if self.menu.open {
+            Style::default().fg(RColor::Black).bg(self.theme.secondary).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+        };
+        text(f, btn_x, area.y, MENU_BTN, btn_style, btn_w);
+
+        let mut spans: Vec<Span> = vec![
+            Span::raw(" "),
+            Span::styled(session.name.clone(), Style::default().fg(self.theme.fg).bg(RColor::Reset)),
+            Span::styled(format!(" · {n} panes"), Style::default().fg(self.theme.panel_muted).bg(RColor::Reset)),
+        ];
+        if session.zoom {
+            spans.push(Span::styled(
+                " · zoomed",
+                Style::default().fg(self.theme.secondary).bg(RColor::Reset),
+            ));
+        }
+        if !self.sidebar_open {
+            spans.push(Span::styled(
+                " · sidebar hidden",
+                Style::default().fg(self.theme.panel_muted).bg(RColor::Reset),
+            ));
+        }
+        if let Some((msg, t)) = &self.notice {
+            if t.elapsed() < std::time::Duration::from_secs(2) {
+                spans.push(Span::styled(
+                    format!(" ⚠ {msg} "),
+                    Style::default().fg(self.theme.secondary).bg(RColor::Reset),
+                ));
+            }
+        }
+
+        let start = btn_x + btn_w;
+        let left_w = spans
+            .iter()
+            .map(|s| s.content.chars().count() as u16)
+            .sum::<u16>()
+            .min(area.width.saturating_sub(start));
+        if left_w > 0 {
+            f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(start, area.y, left_w, 1));
+        }
+
+        if self.mode == Mode::Leader {
+            let hint = leader_hint(&self.keymap);
+            let avail = area.width.saturating_sub(start.saturating_add(left_w));
+            if avail > 0 {
+                // Clip the hint to the available width instead of hiding it: on
+                // narrow terminals the head ("?: help · …") still shows.
+                let hint: String = hint.chars().take(avail as usize).collect();
+                let hint_w = hint.chars().count() as u16;
+                let x = area.width.saturating_sub(hint_w);
+                let hint_style = Style::default()
+                    .fg(RColor::Black)
+                    .bg(self.theme.secondary)
+                    .add_modifier(Modifier::BOLD);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(hint, hint_style)])),
+                    Rect::new(x, area.y, hint_w, 1),
+                );
+            }
+        } else if let Some((msg, t)) = &self.status_msg {
+            // Right-aligned transient message (e.g. "copied to clipboard");
+            // the leader hint wins on its own row, so this only shows in
+            // NORMAL mode.
+            if t.elapsed() < std::time::Duration::from_secs(2) {
+                let avail = area.width.saturating_sub(start.saturating_add(left_w));
+                if avail > 0 {
+                    let msg: String = msg.chars().take(avail as usize).collect();
+                    let msg_w = msg.chars().count() as u16;
+                    let x = area.width.saturating_sub(msg_w);
+                    let msg_style = Style::default()
+                        .fg(RColor::White)
+                        .bg(self.theme.accent)
+                        .add_modifier(Modifier::BOLD);
+                    f.render_widget(
+                        Paragraph::new(Line::from(vec![Span::styled(msg, msg_style)])),
+                        Rect::new(x, area.y, msg_w, 1),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Draw the startup update banner (top-right, two lines) with a red ✕
+    /// close button.
+    fn render_update_notice(&self, f: &mut Frame) {
+        let Some(rect) = self.update_notice_rect() else { return };
+        let Some((line1, line2)) = self.update_notice_lines() else { return };
+        let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
+        let border = Style::default().fg(self.theme.panel_muted).bg(self.theme.panel_sep);
+        fill(f, rect, self.theme.panel_sep);
+        put(f, x0, y0, "┌", border);
+        put(f, x1, y0, "┐", border);
+        put(f, x0, y1, "└", border);
+        put(f, x1, y1, "┘", border);
+        for x in (x0 + 1)..x1 {
+            put(f, x, y0, "─", border);
+            put(f, x, y1, "─", border);
+        }
+        for y in (y0 + 1)..y1 {
+            put(f, x0, y, "│", border);
+            put(f, x1, y, "│", border);
+        }
+        put(
+            f,
+            x0 + 2,
+            y0 + 1,
+            "✕",
+            Style::default().fg(self.theme.red).bg(self.theme.panel_sep).add_modifier(Modifier::BOLD),
+        );
+        let inner_w = rect.width.saturating_sub(2);
+        text(
+            f,
+            x0 + 5,
+            y0 + 1,
+            &line1,
+            Style::default().fg(self.theme.fg).bg(self.theme.panel_sep),
+            inner_w.saturating_sub(6),
+        );
+        text(
+            f,
+            x0 + 5,
+            y0 + 2,
+            &line2,
+            Style::default().fg(self.theme.fg).bg(self.theme.panel_sep),
+            inner_w.saturating_sub(5),
+        );
+    }
+
+    fn place_cursor<B: Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+        geom: &TreeGeom,
+        focused: u64,
+    ) -> Result<()>
+    where
+        B::Error: Send + Sync + 'static,
+    {
+        if self.popup.open {
+            if let Some((x, y)) = self.name_popup_input_cursor() {
+                terminal.set_cursor_position((x, y))?;
+                terminal.show_cursor()?;
+                return Ok(());
+            }
+        }
+        if let Some(pg) = geom.panes.iter().find(|p| p.pane_id == focused) {
+            if let Some(pane) = self.panes.get(&pg.pane_id) {
+                let inner = pg.inner();
+                if let Some((cx, cy)) = pane.cursor_pos() {
+                    let x = inner.x + cx;
+                    let y = inner.y + cy;
+                    if x < inner.x + inner.width && y < inner.y + inner.height {
+                        terminal.set_cursor_position((x, y))?;
+                        terminal.show_cursor()?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        terminal.hide_cursor()?;
+        Ok(())
+    }
+}
+
+pub(super) fn put(f: &mut Frame, x: u16, y: u16, ch: &str, style: Style) {
+    let a = f.area();
+    if x >= a.width || y >= a.height {
+        return;
+    }
+    let c = f.buffer_mut().cell_mut((x, y)).unwrap();
+    c.set_symbol(ch).set_style(style);
+}
+
+pub(super) fn text(f: &mut Frame, x: u16, y: u16, s: &str, style: Style, max_width: u16) {
+    for (i, ch) in s.chars().take(max_width as usize).enumerate() {
+        put(f, x + i as u16, y, &ch.to_string(), style);
+    }
+}
+
+pub(super) fn fill(f: &mut Frame, area: Rect, color: RColor) {
+    for y in area.y..(area.y + area.height) {
+        for x in area.x..(area.x + area.width) {
+            let a = f.area();
+            if x >= a.width || y >= a.height {
+                continue;
+            }
+            let c = f.buffer_mut().cell_mut((x, y)).unwrap();
+            c.set_symbol(" ").set_style(Style::default().bg(color));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Semantic layout export (for desktop/mobile clients and the control CLI)
+// ---------------------------------------------------------------------------
+
+impl From<crate::agents::AgentStatus> for kumo_protocol::AgentStatus {
+    fn from(status: crate::agents::AgentStatus) -> Self {
+        match status {
+            crate::agents::AgentStatus::Working => kumo_protocol::AgentStatus::Working,
+            crate::agents::AgentStatus::Blocked => kumo_protocol::AgentStatus::Blocked,
+            crate::agents::AgentStatus::Idle => kumo_protocol::AgentStatus::Idle,
+        }
+    }
+}
+
+impl App {
+    /// Export the full semantic layout tree: sessions → splits (ratios) →
+    /// panes (title, cwd, agent status). Pushed to layout subscribers; clients
+    /// that draw their own chrome derive geometry from these proportions.
+    pub(super) fn layout(&self) -> kumo_protocol::Layout {
+        let active = self.sessions.get(self.active).map(|s| s.name.clone());
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|s| kumo_protocol::SessionLayout {
+                name: s.name.clone(),
+                workspace: s.workspace.clone(),
+                focus: s.tree.focus,
+                zoom: s.zoom,
+                root: s.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
+            })
+            .collect();
+        kumo_protocol::Layout { active, sessions }
+    }
+
+    fn layout_node(&self, node: &crate::layout::Node) -> kumo_protocol::LayoutNode {
+        use kumo_protocol::LayoutNode as LN;
+        match node {
+            crate::layout::Node::Pane { id } => LN::Pane(self.layout_pane(*id)),
+            crate::layout::Node::Split { dir, ratio, a, b, .. } => LN::Split {
+                dir: match dir {
+                    crate::layout::SplitDir::V => kumo_protocol::SplitDir::Vertical,
+                    crate::layout::SplitDir::H => kumo_protocol::SplitDir::Horizontal,
+                },
+                ratio: *ratio,
+                a: Box::new(self.layout_node(a)),
+                b: Box::new(self.layout_node(b)),
+            },
+        }
+    }
+
+    fn layout_pane(&self, pid: u64) -> kumo_protocol::LayoutPane {
+        let pane = self.panes.get(&pid);
+        let is_ai = pane.map(|p| p.is_ai_cli()).unwrap_or(false);
+        let agent = if is_ai {
+            Some(kumo_protocol::AgentInfo {
+                name: self.agent_label(pid),
+                status: self
+                    .agent_status_cache
+                    .get(&pid)
+                    .copied()
+                    .unwrap_or(crate::agents::AgentStatus::Idle)
+                    .into(),
+            })
+        } else {
+            None
+        };
+        kumo_protocol::LayoutPane {
+            id: pid,
+            title: self.pane_label(pid),
+            cwd: pane.map(|p| p.cwd.clone()).unwrap_or_default(),
+            is_ai,
+            agent,
         }
     }
 }

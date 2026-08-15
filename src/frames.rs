@@ -9,7 +9,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use kumo_protocol::{PaneFrame, RowPatch, WireCell};
+use kumo_protocol::{FrameMsg, PaneFrame, RowPatch, WireCell};
 
 use crate::vt::ColorRgb;
 
@@ -123,6 +123,37 @@ pub(crate) fn pane_frame(
             .collect()
     };
     PaneFrame { pane_id, cols, rows, full, rows_dirty, cursor }
+}
+
+/// A frame containing every row (`full = true`): for a client's first attach or
+/// after a resize.
+pub(crate) fn full_frame(
+    buf: &Buffer,
+    cursor: Option<(u16, u16)>,
+    palette: &[ColorRgb; 16],
+) -> FrameMsg {
+    let cols = buf.area.width;
+    let rows = buf.area.height;
+    let rows_dirty = (0..rows)
+        .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
+        .collect();
+    FrameMsg { cols, rows, full: true, rows_dirty, cursor }
+}
+
+/// A frame containing only the rows that changed since `last` (same size).
+pub(crate) fn diff_frame(
+    buf: &Buffer,
+    last: &Buffer,
+    cursor: Option<(u16, u16)>,
+    palette: &[ColorRgb; 16],
+) -> FrameMsg {
+    let cols = buf.area.width;
+    let rows = buf.area.height;
+    let rows_dirty = (0..rows)
+        .filter(|row| row_changed(buf, last, *row, cols))
+        .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
+        .collect();
+    FrameMsg { cols, rows, full: false, rows_dirty, cursor }
 }
 
 /// Convert a `Rect`-scoped buffer (a pane cache) into a standalone buffer

@@ -264,6 +264,19 @@ pub struct PaneFrame {
     pub cursor: Option<(u16, u16)>,
 }
 
+/// The daemon's whole composed UI (panes + borders + chrome), rendered
+/// daemon-side and streamed to full-attach TUI clients. `full` = every row
+/// (first frame / resize); otherwise only dirty rows.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct FrameMsg {
+    pub cols: u16,
+    pub rows: u16,
+    pub full: bool,
+    pub rows_dirty: Vec<RowPatch>,
+    /// Host-terminal cursor position, if the app wants one shown.
+    pub cursor: Option<(u16, u16)>,
+}
+
 // ---------------------------------------------------------------------------
 // Semantic layout tree
 // ---------------------------------------------------------------------------
@@ -476,6 +489,12 @@ pub enum Command {
         cols: u16,
         rows: u16,
     },
+    /// Set the daemon's composed grid size (full-attach TUI clients; the
+    /// daemon lays panes out within it and streams composed frames).
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
 
     // -- agents --------------------------------------------------------------
     /// Spawn an AI CLI in a new pane (default program = the configured AI cmd).
@@ -559,6 +578,11 @@ pub enum DaemonEvent {
     /// A subscribed pane's terminal grid.
     PaneFrame {
         frame: PaneFrame,
+    },
+    /// The daemon's composed UI (borders + chrome included), streamed to
+    /// full-attach TUI clients.
+    Composed {
+        frame: FrameMsg,
     },
 }
 

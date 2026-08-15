@@ -38,20 +38,6 @@ impl App {
         }
     }
 
-    /// Bracketed-paste text: write it to the focused pane with trailing
-    /// newlines stripped and interior newlines translated to `\r`.
-    pub(crate) fn paste(&mut self, text: &str) {
-        let text = text.trim_end_matches(['\n', '\r']);
-        if text.is_empty() {
-            return;
-        }
-        let bytes = text.replace('\n', "\r");
-        let focus = self.active_focus();
-        if let Some(pane) = self.panes.get_mut(&focus) {
-            pane.write(bytes.as_bytes());
-        }
-    }
-
     /// Mouse events from a dumb viewport are pane-relative: scroll wheels move
     /// the focused pane's viewport. Selection/drag is a client concern.
     pub(crate) fn on_pane_mouse(&mut self, m: MouseEvent) {
