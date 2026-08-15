@@ -583,6 +583,7 @@ mod tests {
             last_agent_sound: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
+            link_mods: false,
             quit: false,
             detach_requested: false,
             menu: super::super::Menu { open: false, selected: 0 },

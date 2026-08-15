@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, KeyCode, KeyEvent};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -44,6 +44,13 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 const RESIZE_STEP: f32 = 0.05;
 /// How long the `leader+q` pane-number overlay stays up without a keypress.
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Modifiers that reveal/activate links (`Cmd+click` like a normal terminal).
+/// SUPER is kept for hosts that forward it; CONTROL (Ctrl) and ALT (Option on
+/// macOS) are the ones the SGR mouse protocol can actually deliver.
+pub(super) fn link_modifiers() -> KeyModifiers {
+    KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT
+}
 
 struct Session {
     id: u64,
@@ -128,6 +135,9 @@ pub struct App {
     /// Rendered cells of each pane's viewport, blitted back when the pane is
     /// unchanged so the frame loop never re-iterates unchanged terminals.
     pane_cache: HashMap<u64, Buffer>,
+    /// Whether a link modifier (Cmd/Ctrl/Option) is held, per the last input
+    /// event. While set, links are underlined so they read as clickable.
+    link_mods: bool,
     quit: bool,
     /// True when the user asked to detach (`leader+d` / MENU `detach`): the
     /// loop exits and the state is persisted before returning.
@@ -257,6 +267,7 @@ impl App {
             last_agent_sound: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
+            link_mods: false,
             quit: false,
             detach_requested: false,
             menu: Menu { open: false, selected: 0 },
@@ -952,7 +963,22 @@ impl App {
         }
     }
 
+    /// Update the "link modifier held" state from an input event's modifiers.
+    /// On a change, force every pane to redraw so link underlines appear
+    /// (modifier pressed) or disappear (released).
+    fn set_link_mods(&mut self, held: bool) {
+        if self.link_mods == held {
+            return;
+        }
+        self.link_mods = held;
+        for pane in self.panes.values_mut() {
+            pane.dirty = true;
+            pane.full_redraw = true;
+        }
+    }
+
     fn on_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.set_link_mods(key.modifiers.intersects(link_modifiers()));
         if self.popup.open {
             self.on_popup_key(key);
             return Ok(());

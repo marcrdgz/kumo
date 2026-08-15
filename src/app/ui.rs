@@ -82,6 +82,9 @@ impl App {
             if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
                 let inner = pg.inner();
                 if inner.width > 0 && inner.height > 0 {
+                    // Whether a link modifier is held right now drives the
+                    // underline of links in the next render.
+                    pane.link_mods = self.link_mods;
                     // Re-render dirty rows into the pane's retained cache;
                     // unchanged rows are kept and blitted back (no FFI scan).
                     if pane.dirty {

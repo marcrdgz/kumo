@@ -379,10 +379,15 @@ pub const DIRTY_FULL: i32 = 2;
 
 pub const ROW_DATA_CELLS: i32 = 3;
 
+pub const ROW_CELLS_DATA_RAW: i32 = 1;
 pub const ROW_CELLS_DATA_STYLE: i32 = 2;
 pub const ROW_CELLS_DATA_BG_COLOR: i32 = 5;
 pub const ROW_CELLS_DATA_FG_COLOR: i32 = 6;
 pub const ROW_CELLS_DATA_GRAPHEMES_UTF8: i32 = 9;
+
+/// Cell data id for `ghostty_cell_get`: whether the cell is part of an
+/// OSC 8 hyperlink.
+pub const CELL_DATA_HAS_HYPERLINK: i32 = 7;
 
 // ---------------------------------------------------------------------------
 // C function declarations
@@ -459,6 +464,13 @@ unsafe extern "C" {
         buf: *mut u8,
         buf_len: usize,
         out_written: *mut usize,
+    ) -> Result;
+    fn ghostty_cell_get(cell: u64, data: i32, out: *mut c_void) -> Result;
+    fn ghostty_grid_ref_hyperlink_uri(
+        ref_: *const GridRef,
+        buf: *mut u8,
+        buf_len: usize,
+        out_len: *mut usize,
     ) -> Result;
 }
 
@@ -582,6 +594,66 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
+/// Find URL-like spans in `line`, returning `(start, end)` byte offsets and
+/// the matched text for each `scheme://` link. This is the plain-text fallback
+/// for Cmd+click: terminal output often prints URLs as bare text (e.g. `next
+/// dev`'s "Local: http://localhost:3000"), with no OSC 8 markup.
+///
+/// A match starts at a scheme (`http://`, `https://`, `ftp://`, …) and runs
+/// through the URL, stopping at whitespace/control bytes, an unbalanced `)`,
+/// or trailing punctuation (`, . ; : ! ?`) that is not part of the URL.
+pub fn find_urls(line: &str) -> Vec<(usize, usize, String)> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+        // Scheme: [A-Za-z][A-Za-z0-9+.-]* followed by "://".
+        let mut j = i + 1;
+        while j < bytes.len()
+            && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'+' | b'-' | b'.'))
+        {
+            j += 1;
+        }
+        if j + 2 < bytes.len() && bytes[j] == b':' && bytes[j + 1] == b'/' && bytes[j + 2] == b'/' {
+            let content = j + 3;
+            let mut end = content;
+            let mut parens = 0usize;
+            while end < bytes.len() {
+                let b = bytes[end];
+                if b.is_ascii_whitespace() || b.is_ascii_control() {
+                    break;
+                }
+                if b == b'(' {
+                    parens += 1;
+                } else if b == b')' {
+                    if parens == 0 {
+                        break;
+                    }
+                    parens -= 1;
+                }
+                end += 1;
+            }
+            // Trim trailing punctuation that is not part of the URL.
+            let mut t = end;
+            while t > content && matches!(bytes[t - 1], b'.' | b',' | b';' | b':' | b'!' | b'?') {
+                t -= 1;
+            }
+            if t > content {
+                let url = line[i..t].to_string();
+                out.push((i, t, url));
+                i = t;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// A viewport cell with resolved colors and a UTF-8 grapheme.
 #[derive(Clone, Debug)]
 pub struct RenderCell {
@@ -597,6 +669,8 @@ pub struct RenderCell {
     pub underline: bool,
     pub inverse: bool,
     pub faint: bool,
+    /// Whether the cell is part of an OSC 8 hyperlink.
+    pub hyperlink: bool,
 }
 
 /// A terminal emulator instance backed by libghostty-vt.
@@ -791,6 +865,66 @@ impl Terminal {
         }
     }
 
+    /// The OSC 8 hyperlink URI at viewport position (x, y), or `None` when the
+    /// cell has no hyperlink. The viewport point maps through the terminal's
+    /// coordinate system, so this resolves correctly even when scrolled into
+    /// scrollback.
+    pub fn hyperlink_at(&self, x: u16, y: u16) -> Option<String> {
+        let mut ref_ = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        unsafe {
+            if !ghostty_terminal_grid_ref(self.term, viewport_point(x, y as u32), &mut ref_).is_ok() {
+                return None;
+            }
+            let mut written = 0usize;
+            let res =
+                ghostty_grid_ref_hyperlink_uri(&ref_, ptr::null_mut(), 0, &mut written);
+            if res != Result::OutOfSpace || written == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; written];
+            let mut filled = 0usize;
+            if !ghostty_grid_ref_hyperlink_uri(&ref_, buf.as_mut_ptr(), buf.len(), &mut filled).is_ok() {
+                return None;
+            }
+            buf.truncate(filled.min(buf.len()));
+            Some(String::from_utf8_lossy(&buf).into_owned())
+        }
+    }
+
+    /// The plain text of viewport row `y` (unwrapped, untrimmed so cell columns
+    /// map 1:1 onto the string), used for plain-text URL detection.
+    pub fn row_text(&self, y: u16) -> String {
+        if y >= self.rows {
+            return String::new();
+        }
+        let last = self.cols.saturating_sub(1);
+        let Some(sel) = self.build_selection((0, y), (last, y)) else {
+            return String::new();
+        };
+        self.format_selection_opts(&sel, true, false)
+    }
+
+    /// The clickable link at viewport position (x, y): an OSC 8 hyperlink URI
+    /// first, else a plain-text `scheme://` URL detected on the row (matching
+    /// what a normal terminal does for e.g. `next dev` output).
+    pub fn link_at(&self, x: u16, y: u16) -> Option<String> {
+        if let Some(uri) = self.hyperlink_at(x, y) {
+            return Some(uri);
+        }
+        let line = self.row_text(y);
+        if line.is_empty() {
+            return None;
+        }
+        let target = x as usize;
+        // Cell column -> byte offset (URLs are ASCII so the mapping is exact;
+        // a wide char earlier on the row would skew it, an accepted edge case).
+        let byte_at = line.char_indices().nth(target).map(|(b, _)| b).unwrap_or(line.len());
+        find_urls(&line)
+            .iter()
+            .find(|(s, e, _)| *s <= byte_at && byte_at < *e)
+            .map(|(_, _, url)| url.clone())
+    }
+
     /// Extract the text between two viewport coordinates (inclusive) as plain
     /// text: soft-wrapped lines are unwrapped and trailing whitespace is
     /// trimmed, matching Ghostty's clipboard behavior. Builds a fresh
@@ -881,11 +1015,18 @@ impl Terminal {
     /// Format a selection as plain text (unwrap + trim), via the selection
     /// formatter.
     fn format_selection(&self, selection: &Selection) -> String {
+        self.format_selection_opts(selection, true, true)
+    }
+
+    /// Format a selection as plain text with explicit unwrap/trim behavior.
+    /// `trim = false` preserves leading/trailing whitespace so cell columns map
+    /// 1:1 onto the returned string (needed for plain-text URL detection).
+    fn format_selection_opts(&self, selection: &Selection, unwrap: bool, trim: bool) -> String {
         let options = SelectionFormatOptions {
             size: size_of::<SelectionFormatOptions>(),
             emit: FORMAT_PLAIN,
-            unwrap: true,
-            trim: true,
+            unwrap,
+            trim,
             selection,
         };
         unsafe {
@@ -1215,6 +1356,25 @@ impl Terminal {
                 String::new()
             };
 
+            // OSC 8 hyperlinks live on text cells; query the raw cell's
+            // hyperlink bit directly (the render state copies the page cell).
+            let mut hyperlink = false;
+            if has_text {
+                let mut raw: u64 = 0;
+                if ghostty_render_state_row_cells_get(
+                    cells,
+                    ROW_CELLS_DATA_RAW,
+                    &mut raw as *mut u64 as *mut c_void,
+                )
+                .is_ok()
+                {
+                    let mut hl: bool = false;
+                    if ghostty_cell_get(raw, CELL_DATA_HAS_HYPERLINK, &mut hl as *mut bool as *mut c_void).is_ok() {
+                        hyperlink = hl;
+                    }
+                }
+            }
+
             let mut style = Style::new();
             ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_STYLE, &mut style as *mut Style as *mut c_void);
             let has_fg = style.fg_color.tag != STYLE_COLOR_NONE;
@@ -1242,6 +1402,7 @@ impl Terminal {
                 underline: style.underline != 0,
                 inverse: style.inverse,
                 faint: style.faint,
+                hyperlink,
             })
         }
     }
@@ -1409,6 +1570,62 @@ mod tests {
             }
         });
         assert_eq!(after, 0);
+    }
+
+    #[test]
+    fn osc8_hyperlinks_expose_uri_and_cell_flag() {
+        let mut t = new_term(40, 4, 100);
+        t.write(b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07");
+        t.refresh();
+
+        // The link cells are flagged and the URI resolves on them.
+        let mut links = Vec::new();
+        t.for_each_cell(|r, c, rc, _sel, _dirty| {
+            if rc.hyperlink {
+                links.push((r, c, rc.text.clone()));
+            }
+        });
+        assert_eq!(
+            links,
+            vec![
+                (0, 0, "l".into()),
+                (0, 1, "i".into()),
+                (0, 2, "n".into()),
+                (0, 3, "k".into()),
+            ]
+        );
+        assert_eq!(t.hyperlink_at(0, 0).as_deref(), Some("https://example.com"));
+        assert_eq!(t.hyperlink_at(3, 0).as_deref(), Some("https://example.com"));
+
+        // No hyperlink outside the link (or on a later line).
+        assert_eq!(t.hyperlink_at(5, 0), None);
+        assert_eq!(t.hyperlink_at(0, 1), None);
+    }
+
+    #[test]
+    fn detects_plain_text_urls_on_row() {
+        let mut t = new_term(80, 4, 100);
+        t.write(b"  - Local:         http://localhost:3000\r\n  - Network:       http://192.168.1.134:3000");
+        t.refresh();
+
+        // row_text preserves leading whitespace so cell columns map onto chars.
+        let row = t.row_text(0);
+        let url_start = row.find("http://localhost:3000").expect("url in row text");
+        let col = row[..url_start].chars().count() as u16;
+        assert_eq!(t.link_at(col, 0).as_deref(), Some("http://localhost:3000"));
+        // One column before the URL (on the dashes) is not a link.
+        assert_eq!(t.link_at(col - 1, 0), None);
+        // The second row holds the network URL.
+        assert_eq!(t.link_at(19, 1).as_deref(), Some("http://192.168.1.134:3000"));
+    }
+
+    #[test]
+    fn find_urls_handles_bounds_and_punctuation() {
+        let urls = find_urls("See http://example.com/a(b). and (https://x.org). tail");
+        let got: Vec<String> = urls.iter().map(|(_, _, u)| u.clone()).collect();
+        assert_eq!(got, vec!["http://example.com/a(b)", "https://x.org"]);
+        // No scheme: not detected.
+        assert!(find_urls("localhost:3000 and time: 3:00").is_empty());
     }
 }
 

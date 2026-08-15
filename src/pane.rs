@@ -11,7 +11,7 @@ use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
 
-use crate::vt::{self, ColorRgb};
+use crate::vt::{self, find_urls, ColorRgb};
 use crate::xtgettcap::XtgettcapTracker;
 
 /// A live pane: PTY + a real terminal emulator (libghostty-vt) fed from it.
@@ -56,6 +56,9 @@ pub struct Pane {
     last_cursor: Option<(u16, u16)>,
     /// Answers terminal capability probes as a plain xterm (no mouse caps).
     xtgettcap: XtgettcapTracker,
+    /// Whether a link modifier (Cmd/Ctrl/Option) is currently held. Links are
+    /// underlined only while it is set, so holding Cmd shows what's clickable.
+    pub link_mods: bool,
 }
 
 /// How much stripped text to keep for blocked-marker scanning. Sized so the
@@ -296,6 +299,7 @@ impl Pane {
             full_redraw: true,
             last_cursor: None,
             xtgettcap: XtgettcapTracker::new(),
+            link_mods: false,
         };
 
         // Route query responses (DA, size reports, etc.) back to the PTY.
@@ -492,12 +496,21 @@ impl Pane {
             }
         }
 
+        // Plain-text row content for the written rows, rebuilt from the cells
+        // as they're drawn. While a link modifier is held, URLs detected in it
+        // are underlined so plain-text links (e.g. `next dev` output) read as
+        // clickable, the same way a normal terminal highlights them.
+        let mut row_texts: HashMap<usize, String> = HashMap::new();
+
         self.vt.for_each_cell(|row, col, rc, selected, row_dirty| {
             if !full && !row_dirty && !dirty.contains(&row) {
                 return;
             }
             if row >= ah as usize || col >= aw as usize {
                 return;
+            }
+            if self.link_mods {
+                row_texts.entry(row).or_default().push_str(&rc.text);
             }
             let bcell = cache.cell_mut((area_x + col as u16, area_y + row as u16)).unwrap();
             let mut mods = Modifier::empty();
@@ -508,6 +521,11 @@ impl Pane {
                 mods |= Modifier::ITALIC;
             }
             if rc.underline {
+                mods |= Modifier::UNDERLINED;
+            }
+            if self.link_mods && rc.hyperlink {
+                // OSC 8 hyperlinks are underlined while a link modifier is held
+                // so they read as clickable.
                 mods |= Modifier::UNDERLINED;
             }
             if rc.inverse {
@@ -565,6 +583,26 @@ impl Pane {
             }
         }
 
+        // Underline plain-text URLs on the rows written this frame while a link
+        // modifier is held (OSC 8 hyperlinks were underlined in the cell pass
+        // above). URLs are ASCII, so char offsets map 1:1 onto cell columns
+        // within the row.
+        if self.link_mods {
+            for (row, line) in row_texts {
+                for (s, e, _) in find_urls(&line) {
+                    let c0 = line[..s].chars().count() as u16;
+                    let c1 = line[..e].chars().count() as u16;
+                    for c in c0..c1 {
+                        let x = area_x + c;
+                        let y = area_y + row as u16;
+                        if let Some(bcell) = cache.cell_mut((x, y)) {
+                            bcell.modifier |= Modifier::UNDERLINED;
+                        }
+                    }
+                }
+            }
+        }
+
         self.vt.clear_dirty();
         self.dirty = false;
 
@@ -610,6 +648,13 @@ impl Pane {
     /// building a fresh selection at extraction time (unwrap + trim).
     pub fn selection_text(&mut self, start: (u16, u16), end: (u16, u16)) -> Option<String> {
         self.vt.selection_text(start, end)
+    }
+
+    /// The clickable link at a pane-relative viewport position: an OSC 8
+    /// hyperlink URI, else a plain-text `scheme://` URL on the row (matching a
+    /// normal terminal's detection of e.g. `next dev` output).
+    pub fn link_at(&self, col: u16, row: u16) -> Option<String> {
+        self.vt.link_at(col, row)
     }
 
     /// Viewport position of the terminal cursor, relative to the pane origin.
@@ -1843,5 +1888,70 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             std::thread::sleep(Duration::from_millis(20));
         }
         resumed.pty.kill();
+    }
+
+    #[test]
+    fn osc8_hyperlinks_render_underlined() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+
+        // Without a link modifier held, no underline is added.
+        p.feed(b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07");
+        p.render_dirty(area, true, &mut buf);
+        assert!(!buf.cell((0, 0)).unwrap().modifier.contains(Modifier::UNDERLINED));
+
+        // While a link modifier is held, every link cell is underlined.
+        p.link_mods = true;
+        p.render_dirty(area, true, &mut buf);
+        for x in 0..4 {
+            assert!(
+                buf.cell((x, 0)).unwrap().modifier.contains(Modifier::UNDERLINED),
+                "link cell {x} not underlined"
+            );
+        }
+        assert!(!buf.cell((5, 0)).unwrap().modifier.contains(Modifier::UNDERLINED));
+
+        // The URI resolves at pane-relative viewport coordinates (OSC 8).
+        assert_eq!(p.link_at(0, 0).as_deref(), Some("https://example.com"));
+        assert_eq!(p.link_at(5, 0), None);
+    }
+
+    #[test]
+    fn plain_text_urls_render_underlined_and_clickable() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+
+        // `next dev`-style output: the URL is plain text, not an OSC 8 link.
+        p.feed(b"- Local: http://localhost:3000\r\n");
+        p.link_mods = true;
+        p.render_dirty(area, true, &mut buf);
+
+        let row_text: String = (0..buf.area.width)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()).unwrap_or_default())
+            .collect();
+        let url_start = row_text.find("http://localhost:3000").unwrap();
+        // Every URL cell is underlined...
+        for i in 0.."http://localhost:3000".len() {
+            assert!(
+                buf.cell((url_start as u16 + i as u16, 0)).unwrap().modifier.contains(Modifier::UNDERLINED),
+                "url cell {i} not underlined"
+            );
+        }
+        // ...and the character right before the URL is not.
+        assert!(!buf.cell((url_start as u16 - 1, 0)).unwrap().modifier.contains(Modifier::UNDERLINED));
+
+        // Without a link modifier held, the URL is not underlined (the app
+        // forces a full redraw when the modifier toggles, as `set_link_mods`).
+        p.link_mods = false;
+        p.dirty = true;
+        p.full_redraw = true;
+        p.render_dirty(area, true, &mut buf);
+        assert!(!buf.cell((url_start as u16, 0)).unwrap().modifier.contains(Modifier::UNDERLINED));
+
+        // The click resolves at the pane-relative column.
+        assert_eq!(p.link_at(url_start as u16, 0).as_deref(), Some("http://localhost:3000"));
+        assert_eq!(p.link_at(url_start as u16 - 1, 0), None);
     }
 }

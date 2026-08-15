@@ -21,6 +21,25 @@ pub(super) fn copy_to_clipboard(text: &str) {
     }
 }
 
+/// Open `url` with the OS default handler, detached (spawn and forget): `open`
+/// on macOS, `xdg-open` on Linux, the default browser via `cmd /c start` on
+/// Windows.
+pub(super) fn open_url(url: &str) {
+    use std::process::Command;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    }
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();

@@ -3,7 +3,7 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 use super::overlays::{CtxTarget, PopupBtn};
-use super::util::copy_to_clipboard;
+use super::util::{copy_to_clipboard, open_url};
 use super::App;
 use crate::layout::SplitDir;
 use crate::pane::sgr_mouse;
@@ -32,6 +32,9 @@ pub(super) struct PendingClick {
 
 impl App {
     pub(super) fn on_mouse(&mut self, m: MouseEvent) -> Result<()> {
+        // Track whether a link modifier (Cmd/Ctrl/Option) is held, so link
+        // underlines appear/disappear as the user presses and releases it.
+        self.set_link_mods(m.modifiers.intersects(super::link_modifiers()));
         let x = m.column;
         let y = m.row;
         if m.kind == MouseEventKind::Down(MouseButton::Left) && self.update_notice_close_at(x, y) {
@@ -172,6 +175,26 @@ impl App {
                 if let Some(sg) = self.splitter_at(x, y) {
                     self.drag = Some(Drag::Splitter { split_id: sg.split_id });
                     return Ok(());
+                }
+                // Cmd+click (or Ctrl/Option+click) on a link opens it: an OSC 8
+                // hyperlink, or a plain-text `scheme://` URL detected on the
+                // row (like a normal terminal, e.g. `next dev` output).
+                // Mirroring Ghostty's `ctrl_or_super+click`, this runs before
+                // the selection/mouse-forwarding logic so it works even in
+                // panes that own the mouse (e.g. opencode).
+                if m.modifiers.intersects(super::link_modifiers()) {
+                    if let Some(pg) = self.pane_at(x, y) {
+                        let inner = pg.inner();
+                        let col = x.saturating_sub(inner.x);
+                        let row = y.saturating_sub(inner.y);
+                        if let Some(pane) = self.panes.get_mut(&pg.pane_id) {
+                            if let Some(url) = pane.link_at(col, row) {
+                                self.set_focus(pg.pane_id);
+                                open_url(&url);
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
                 if let Some(pg) = self.pane_at(x, y) {
                     self.set_focus(pg.pane_id);
