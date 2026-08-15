@@ -62,11 +62,41 @@ To ensure high-quality English technical output during development:
 
 ---
 
-## 5. Key Source Files
+## 5. Client/Server Delivery Channels (protocol v2)
+
+The daemon is the **single source of truth** for everything it has open
+(sessions, panes, PTYs, agents) and serves clients with different capabilities
+through the shared wire protocol (`crates/kumo-protocol`). The `Hello`
+handshake carries a `ClientKind` so the daemon routes the right channels:
+
+- **Full attach** (`Hello` + `Frame`): the daemon renders its whole UI
+  headlessly and streams dirty-row `WireCell` patches. Used by the TUI client
+  (`src/client.rs`) and the desktop app's main view.
+- **Snapshot** (`SubscribeSnapshot` + `Snapshot`): structured
+  `SessionInfo`/`PaneInfo`/`AgentInfo`, pushed on change. Drives native
+  sidebars, session lists, and (future) mobile overviews.
+- **Pane frames** (`SubscribePane` + `PaneFrame`): one pane rendered as its own
+  grid, built from the retained `pane_cache`. Intended for per-pane views
+  (mobile) and native pane layout (desktop) later.
+- **Control** (`FocusSession`, `NewSession`, `Resize`, input/paste/mouse): any
+  client can drive the same keymap/actions the TUI exposes.
+
+The desktop app (`apps/kumo-desktop`, GPUI) is another client: it attaches with
+`ClientKind::Desktop`, renders the composed frames in a native grid with full
+keyboard/mouse input, and subscribes to snapshots for a native
+sessions/agents sidebar. Several clients can be attached at once — terminal,
+app, or both.
+
+## 6. Key Source Files
 - **`src/main.rs`**: TUI entry point.
 - **`src/app.rs`**: sessions/panes, layout tree, input routing, mouse, rendering.
 - **`src/pane.rs`**: `Pane` = PTY + `libghostty-vt` terminal.
 - **`src/vt.rs`**: hand-written FFI bindings to `libghostty-vt` and the safe `Terminal` wrapper (write/resize/scroll/render/modes + query effects).
+- **`src/protocol.rs`**: re-exports the shared wire protocol.
+- **`src/frames.rs`**: daemon-side `ratatui` buffer → `FrameMsg`/`PaneFrame` serialization.
+- **`src/app/server.rs`**: headless daemon loop, per-client routing, snapshot/pane-frame push.
+- **`crates/kumo-protocol/`**: pure wire types + framing (no `ratatui`/`crossterm`; conversions gated behind the `crossterm` feature).
+- **`apps/kumo-desktop/`**: native macOS desktop client (GPUI) — full-attach grid viewer + sessions/agents sidebar.
 - **`build.rs`**: compiles the vendored `libghostty-vt` Zig library.
 - **`src/pty.rs`**: `portable-pty` wrapper (spawn, read loop, resize, kill).
 - **`src/config.rs`**: XDG directory resolution, Ghostty-style `~/.config/kumo/config` parser, shell/AI command resolution.
