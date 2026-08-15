@@ -62,42 +62,49 @@ To ensure high-quality English technical output during development:
 
 ---
 
-## 5. Client/Server Delivery Channels (protocol v2)
+## 5. Architecture: smart renderer / dumb viewport (protocol v4)
 
-The daemon is the **single source of truth** for everything it has open
-(sessions, panes, PTYs, agents) and serves clients with different capabilities
-through the shared wire protocol (`crates/kumo-protocol`). The `Hello`
-handshake carries a `ClientKind` so the daemon routes the right channels:
+The daemon is the **single source of truth** for everything it has open —
+sessions, the **semantic layout tree** (splits in ratios, never pixels), the
+PTYs, and per-pane terminal content — and it **never renders chrome**: no
+borders, box-drawing characters, sidebar, or status bar ever enter the wire.
+Clients are **dumb viewports**: they receive two things and draw everything
+themselves (through `crates/kumo-protocol`):
 
-- **Full attach** (`Hello` + `Frame`): the daemon renders its whole UI
-  headlessly and streams dirty-row `WireCell` patches. Used by the TUI client
-  (`src/client.rs`) and the desktop app's main view.
-- **Snapshot** (`SubscribeSnapshot` + `Snapshot`): structured
-  `SessionInfo`/`PaneInfo`/`AgentInfo`, pushed on change. Drives native
-  sidebars, session lists, and (future) mobile overviews.
-- **Pane frames** (`SubscribePane` + `PaneFrame`): one pane rendered as its own
-  grid, built from the retained `pane_cache`. Intended for per-pane views
-  (mobile) and native pane layout (desktop) later.
-- **Control** (`FocusSession`, `NewSession`, `Resize`, input/paste/mouse): any
-  client can drive the same keymap/actions the TUI exposes.
+- **Layout** (`DaemonEvent::Layout`): sessions → splits (with ratios) → panes
+  (title, cwd, agent status). Clients compute geometry, request pane sizes via
+  `PaneResize`, and draw their own borders/chrome.
+- **Pane content** (`DaemonEvent::PaneFrame`): each pane's terminal grid
+  (rendered by the daemon's Ghostty core), streamed on change.
 
-The desktop app (`apps/kumo-desktop`, GPUI) is another client: it attaches with
-`ClientKind::Desktop`, renders the composed frames in a native grid with full
-keyboard/mouse input, and subscribes to snapshots for a native
-sessions/agents sidebar. Several clients can be attached at once — terminal,
-app, or both.
+Everything else is a **command** (`Command`), tmux/zellij style — the whole
+multiplexer is drivable from the CLI, the TUI, the desktop app, or a script:
+
+- `kumo session [list|new|kill|attach]`
+- `kumo pane [split|close|focus|send-keys]`
+- `kumo agent [spawn|status|kill]`
+
+The daemon's keyboard layer is gone: the TUI client owns the leader keymap
+(`src/app/bindings.rs` is shared) and translates keys into commands
+(`src/client.rs`). Opening/closing a sidebar or resizing is a client concern
+that never mutates the daemon's state beyond a `PaneResize`/command.
 
 ## 6. Key Source Files
-- **`src/main.rs`**: TUI entry point.
-- **`src/app.rs`**: sessions/panes, layout tree, input routing, mouse, rendering.
+- **`src/app/server.rs`**: headless daemon loop — command dispatch, per-client
+  routing, layout + pane-frame streaming.
+- **`src/app/commands.rs`**: the daemon's command handlers (sessions/panes/agents).
+- **`src/app/ui.rs`**: per-pane content rendering (`tick`) and the semantic
+  `layout()` export; no chrome.
+- **`src/client.rs`**: the TUI client — a dumb viewport that lays out from the
+  semantic tree, draws borders, and maps the leader keymap to commands.
+- **`src/cli.rs`**: the `kumo session|pane|agent` control CLI.
+- **`crates/kumo-protocol/`**: `Command`/`DaemonEvent`, the semantic
+  `LayoutNode`/`Layout`, `PaneFrame`, and pure framing.
+- **`src/frames.rs`**: daemon-side per-pane `Buffer` → `PaneFrame` serialization.
+- **`src/app.rs`**: the engine — sessions, layout tree ops, PTYs, agents.
+- **`apps/kumo-desktop/`**: native macOS desktop client (GPUI) — computes its
+  own geometry from the semantic tree and paints native pane cards.
 - **`src/pane.rs`**: `Pane` = PTY + `libghostty-vt` terminal.
-- **`src/vt.rs`**: hand-written FFI bindings to `libghostty-vt` and the safe `Terminal` wrapper (write/resize/scroll/render/modes + query effects).
-- **`src/protocol.rs`**: re-exports the shared wire protocol.
-- **`src/frames.rs`**: daemon-side `ratatui` buffer → `FrameMsg`/`PaneFrame` serialization.
-- **`src/app/server.rs`**: headless daemon loop, per-client routing, snapshot/pane-frame push.
-- **`crates/kumo-protocol/`**: pure wire types + framing (no `ratatui`/`crossterm`; conversions gated behind the `crossterm` feature).
-- **`apps/kumo-desktop/`**: native macOS desktop client (GPUI) — full-attach grid viewer + sessions/agents sidebar.
 - **`build.rs`**: compiles the vendored `libghostty-vt` Zig library.
-- **`src/pty.rs`**: `portable-pty` wrapper (spawn, read loop, resize, kill).
-- **`src/config.rs`**: XDG directory resolution, Ghostty-style `~/.config/kumo/config` parser, shell/AI command resolution.
-- **`vendor/libghostty-vt/`**: vendored Ghostty terminal emulator (Zig source + C headers).
+- **`src/config.rs`**: XDG directory resolution, config parsing.
+- **`vendor/libghostty-vt/`**: vendored Ghostty terminal emulator (Zig + C).
