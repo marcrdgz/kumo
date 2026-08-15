@@ -1496,6 +1496,8 @@ impl View {
                             let c = x.saturating_sub(inner.x).min(inner.width.saturating_sub(1));
                             let r = y.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
                             self.sel = Some(Sel { pane_id: pid, start: sel.start, end: (c, r) });
+                            // Repaint live so the highlight follows the pointer.
+                            self.mark_dirty();
                         }
                     }
                     return Ok(());
@@ -1633,7 +1635,9 @@ impl View {
             let Some(cells) = grid.cells.get(row as usize) else { continue };
             let mut line = String::new();
             let start = if row == r0 { c0 } else { 0 };
-            let end = if row == r1 { c1 } else { cells.len() as u16 };
+            // Inclusive of the end column on the last row (both drag corners
+            // select the cell under the pointer), like a terminal's selection.
+            let end = if row == r1 { c1.saturating_add(1) } else { cells.len() as u16 };
             for (i, cell) in cells.iter().enumerate() {
                 let ci = i as u16;
                 if ci < start || ci >= end || cell.cell_width == 0 {
@@ -2147,9 +2151,11 @@ impl View {
                     continue;
                 }
                 let mut style = cell_style(cell);
-                // Selection highlight.
+                // Selection highlight: the (row, col) rectangle between the
+                // drag corners, matching what `selection_text` copies.
                 if let Some(sel) = selected {
-                    if (r as u16, c as u16) >= min_sel(&sel) && (r as u16, c as u16) <= max_sel(&sel) {
+                    let ((tr, tc), (br, bc)) = sel_corners(&sel);
+                    if (r as u16, c as u16) >= (tr, tc) && (r as u16, c as u16) <= (br, bc) {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
                 }
@@ -2888,19 +2894,16 @@ fn cell_style(cell: &WireCell) -> Style {
     style
 }
 
-fn min_sel(sel: &Sel) -> (u16, u16) {
-    if sel.end.1 < sel.start.1 || (sel.end.1 == sel.start.1 && sel.end.0 < sel.start.0) {
-        sel.end
+/// Normalize a selection into ((top_row, left_col), (bottom_row, right_col)) —
+/// both corners in `(row, col)` order so the render's tuple comparisons are
+/// consistent with `selection_text`'s row-major walk.
+fn sel_corners(sel: &Sel) -> ((u16, u16), (u16, u16)) {
+    let (c0, r0) = sel.start;
+    let (c1, r1) = sel.end;
+    if r1 < r0 || (r1 == r0 && c1 < c0) {
+        ((r1, c1), (r0, c0))
     } else {
-        sel.start
-    }
-}
-
-fn max_sel(sel: &Sel) -> (u16, u16) {
-    if sel.end.1 < sel.start.1 || (sel.end.1 == sel.start.1 && sel.end.0 < sel.start.0) {
-        sel.start
-    } else {
-        sel.end
+        ((r0, c0), (r1, c1))
     }
 }
 
@@ -3255,6 +3258,67 @@ mod tests {
         assert!(view.subscribed.contains(&1));
         let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
         assert_eq!(view.sent_sizes.get(&1), Some(&(inner.width, inner.height)));
+    }
+
+    /// The highlight rectangle must cover exactly the cells `selection_text`
+    /// copies — a horizontal drag over a table like `top` must not light up a
+    /// vertical band (the classic transposed-corner bug).
+    #[test]
+    fn selection_highlight_matches_copied_text() {
+        let mut g = grid();
+        g.cells = vec![
+            vec![cell("a", 1), cell("b", 1), cell("c", 1), cell("d", 1), cell("e", 1)],
+            vec![cell("f", 1), cell("g", 1), cell("h", 1), cell("i", 1), cell("j", 1)],
+            vec![cell("k", 1), cell("l", 1), cell("m", 1), cell("n", 1), cell("o", 1)],
+        ];
+        let layout = Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        };
+        let mut view = test_view();
+        view.layout = Some(layout);
+        view.grids.insert(1, g);
+        view.recompute_geometry();
+        // Horizontal drag across row 1, cols 1..=3.
+        view.sel = Some(Sel { pane_id: 1, start: (1, 1), end: (3, 1) });
+        assert_eq!(view.selection_text(&view.sel.unwrap()), "ghi", "copy of a row drag");
+
+        // Render and check exactly cols 1..=3 of row 1 are reversed.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        let rev = |c: u16, r: u16| {
+            buf.cell((inner.x + c, inner.y + r)).unwrap().modifier.contains(Modifier::REVERSED)
+        };
+        assert!(!rev(0, 1) && rev(1, 1) && rev(2, 1) && rev(3, 1) && !rev(4, 1),
+            "row 1 highlights only cols 1..=3");
+        assert!(!rev(1, 0) && !rev(1, 2), "adjacent rows stay clear");
+    }
+
+    /// A drag drawn up-left (end before start) still highlights the same cells
+    /// the copy extracts.
+    #[test]
+    fn selection_reversed_drag_normalizes_corners() {
+        let sel = Sel { pane_id: 1, start: (3, 1), end: (1, 1) };
+        let ((tr, tc), (br, bc)) = sel_corners(&sel);
+        assert_eq!(((tr, tc), (br, bc)), ((1, 1), (1, 3)));
     }
 
     /// Rendering must never panic at any (tiny → large) terminal size, with
