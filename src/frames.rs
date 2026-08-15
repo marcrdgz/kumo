@@ -3,13 +3,15 @@
 //!
 //! The daemon renders ONLY per-pane terminal content (never chrome/borders);
 //! this module owns cell serialization (colors resolved against the active
-//! theme palette, wide-char continuation cells, row diffs). Kept here — not in
-//! `kumo_protocol` — because it depends on `ratatui` and `crate::vt::ColorRgb`.
+//! theme palette, wide-char continuation cells, row diffs) plus the per-row
+//! link ranges and the scrollback state clients need to draw scrollbars and
+//! underline links. Kept here — not in `kumo_protocol` — because it depends on
+//! `ratatui` and `crate::vt::ColorRgb`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use kumo_protocol::{FrameMsg, PaneFrame, RowPatch, WireCell};
+use kumo_protocol::{PaneFrame, RowPatch, ScrollState, WireCell};
 
 use crate::vt::ColorRgb;
 
@@ -100,60 +102,41 @@ fn cell_from_ratatui(cell: &ratatui::buffer::Cell, palette: &[ColorRgb; 16]) -> 
 
 /// Build a per-pane frame from the pane's retained render buffer, with either a
 /// full frame (first subscribe / resize) or a diff against the previously sent
-/// buffer.
+/// buffer. `pane` supplies the per-row link ranges (OSC 8 + plain-text URLs)
+/// for the rows actually shipped; `scroll` is the pane's scrollback state.
 pub(crate) fn pane_frame(
     pane_id: u64,
     buf: &Buffer,
     last: Option<&Buffer>,
     cursor: Option<(u16, u16)>,
     palette: &[ColorRgb; 16],
+    pane: Option<&crate::pane::Pane>,
+    scroll: Option<ScrollState>,
 ) -> PaneFrame {
     let cols = buf.area.width;
     let rows = buf.area.height;
+    let links = |row: u16| pane.map(|p| p.link_ranges(row)).unwrap_or_default();
     let full = last.map(|l| l.area != buf.area).unwrap_or(true);
     let rows_dirty = if full {
         (0..rows)
-            .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
+            .map(|row| RowPatch {
+                row,
+                cells: row_cells(buf, row, cols, palette),
+                links: links(row),
+            })
             .collect()
     } else {
         let last = last.expect("diff needs a previous buffer");
         (0..rows)
             .filter(|row| row_changed(buf, last, *row, cols))
-            .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
+            .map(|row| RowPatch {
+                row,
+                cells: row_cells(buf, row, cols, palette),
+                links: links(row),
+            })
             .collect()
     };
-    PaneFrame { pane_id, cols, rows, full, rows_dirty, cursor }
-}
-
-/// A frame containing every row (`full = true`): for a client's first attach or
-/// after a resize.
-pub(crate) fn full_frame(
-    buf: &Buffer,
-    cursor: Option<(u16, u16)>,
-    palette: &[ColorRgb; 16],
-) -> FrameMsg {
-    let cols = buf.area.width;
-    let rows = buf.area.height;
-    let rows_dirty = (0..rows)
-        .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
-        .collect();
-    FrameMsg { cols, rows, full: true, rows_dirty, cursor }
-}
-
-/// A frame containing only the rows that changed since `last` (same size).
-pub(crate) fn diff_frame(
-    buf: &Buffer,
-    last: &Buffer,
-    cursor: Option<(u16, u16)>,
-    palette: &[ColorRgb; 16],
-) -> FrameMsg {
-    let cols = buf.area.width;
-    let rows = buf.area.height;
-    let rows_dirty = (0..rows)
-        .filter(|row| row_changed(buf, last, *row, cols))
-        .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
-        .collect();
-    FrameMsg { cols, rows, full: false, rows_dirty, cursor }
+    PaneFrame { pane_id, cols, rows, full, rows_dirty, cursor, scroll }
 }
 
 /// Convert a `Rect`-scoped buffer (a pane cache) into a standalone buffer
@@ -183,10 +166,11 @@ mod tests {
     #[test]
     fn full_pane_frame_includes_every_row() {
         let buf = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let frame = pane_frame(1, &buf, None, None, &palette());
+        let frame = pane_frame(1, &buf, None, None, &palette(), None, None);
         assert!(frame.full);
         assert_eq!(frame.pane_id, 1);
         assert_eq!(frame.rows_dirty.len(), 3);
+        assert!(frame.rows_dirty.iter().all(|p| p.links.is_empty()));
     }
 
     #[test]
@@ -194,11 +178,21 @@ mod tests {
         let a = Buffer::empty(Rect::new(0, 0, 4, 3));
         let mut b = Buffer::empty(Rect::new(0, 0, 4, 3));
         b.cell_mut((1, 0)).unwrap().set_symbol("X");
-        let frame = pane_frame(1, &b, Some(&a), None, &palette());
+        let frame = pane_frame(1, &b, Some(&a), None, &palette(), None, None);
         assert!(!frame.full);
         assert_eq!(frame.rows_dirty.len(), 1);
         assert_eq!(frame.rows_dirty[0].row, 0);
         assert_eq!(frame.rows_dirty[0].cells[1].text, "X");
+    }
+
+    #[test]
+    fn pane_frame_carries_links_and_scroll() {
+        let buf = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let scroll = ScrollState { offset: 2, total: 10, screen: 3 };
+        let frame = pane_frame(1, &buf, None, Some((1, 1)), &palette(), None, Some(scroll));
+        assert!(frame.rows_dirty.iter().all(|p| p.links.is_empty()));
+        assert_eq!(frame.scroll, Some(scroll));
+        assert_eq!(frame.cursor, Some((1, 1)));
     }
 
     #[test]

@@ -128,11 +128,6 @@ impl App {
                     self.last_agent_sound.insert(pid, now);
                 }
             }
-            // A pane entering Blocked lands at the top of the sorted AGENTS
-            // section; scroll there so the blocked agent is actually visible.
-            if old.is_some() && old != Some(status) && status == AgentStatus::Blocked {
-                self.sidebar_scroll.agents = 0;
-            }
             self.last_agent_status.insert(pid, status);
         }
     }

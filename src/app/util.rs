@@ -1,6 +1,6 @@
 /// Copy `text` to the clipboard: OSC 52 to the outer terminal, plus `pbcopy`
 /// on macOS as a fallback.
-pub(super) fn copy_to_clipboard(text: &str) {
+pub(crate) fn copy_to_clipboard(text: &str) {
     let b64 = base64_encode(text.as_bytes());
     use std::io::Write;
     let mut stdout = std::io::stdout();
@@ -24,7 +24,7 @@ pub(super) fn copy_to_clipboard(text: &str) {
 /// Open `url` with the OS default handler, detached (spawn and forget): `open`
 /// on macOS, `xdg-open` on Linux, the default browser via `cmd /c start` on
 /// Windows.
-pub(super) fn open_url(url: &str) {
+pub(crate) fn open_url(url: &str) {
     use std::process::Command;
     #[cfg(target_os = "macos")]
     {

@@ -4,7 +4,8 @@
 //! metadata) and serves every client over the unix socket. It never renders
 //! chrome: clients receive the semantic [`Layout`] (splits in ratios) and
 //! per-pane [`PaneFrame`]s, and drive everything else through [`Command`]s —
-//! sessions, panes, agents, input, resizes.
+//! sessions, panes, agents, input, resizes, and chrome actions (rename,
+//! worktrees, theme). Every client draws its own chrome.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
@@ -12,13 +13,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 use super::{App, Launch};
 use crate::frames;
@@ -33,9 +31,6 @@ struct Client {
     tx: mpsc::SyncSender<DaemonEvent>,
     welcomed: bool,
     kind: ClientKind,
-    /// True until this client has received one full composed frame (its first
-    /// attach); it needs a full repaint even if the daemon's frame is a diff.
-    needs_full: bool,
     /// `SubscribeLayout`: push `DaemonEvent::Layout` whenever it changes.
     wants_layout: bool,
     /// A layout push was dropped (writer queue full) and must be re-sent.
@@ -64,7 +59,6 @@ impl Client {
             tx,
             welcomed: false,
             kind: ClientKind::Terminal,
-            needs_full: true,
             wants_layout: false,
             pending_layout: false,
             panes_subscribed: HashSet::new(),
@@ -75,10 +69,7 @@ impl Client {
     fn send_msg(&mut self, msg: DaemonEvent) -> SendOutcome {
         match self.tx.try_send(msg) {
             Ok(()) => SendOutcome::Ok,
-            Err(mpsc::TrySendError::Full(_)) => {
-                self.needs_full = true;
-                SendOutcome::Lagging
-            }
+            Err(mpsc::TrySendError::Full(_)) => SendOutcome::Lagging,
             Err(mpsc::TrySendError::Disconnected(_)) => SendOutcome::Disconnected,
         }
     }
@@ -95,7 +86,6 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     // socket appears only once that's done, so callers (and tests) know the
     // daemon is fully up when they can connect.
     let mut app = App::new(launch)?;
-    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
 
     prepare_socket(&path)?;
     let listener = UnixListener::bind(&path)?;
@@ -107,10 +97,6 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let mut next_id = 0usize;
     let mut last_layout: Option<Layout> = None;
     let mut last_pane_bufs: HashMap<u64, Buffer> = HashMap::new();
-    // Composed-grid state for full-attach TUI clients.
-    let mut last_buffer: Option<Buffer> = None;
-    let mut render_dirty = true;
-    let mut last_forced = Instant::now();
     let mut kill = false;
 
     loop {
@@ -137,7 +123,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // Commands from clients.
         while let Ok((id, cmd)) = input_rx.try_recv() {
             match cmd {
-                Command::Attach { protocol, kind, cols, rows } => {
+                Command::Attach { protocol, kind, .. } => {
                     if protocol != PROTOCOL_VERSION {
                         let _ = send_to(&mut clients, id, &DaemonEvent::Shutdown);
                         clients.remove(&id);
@@ -152,10 +138,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         c.welcomed = true;
                         c.kind = kind;
                     }
-                    // A full-attach client sizes the composed grid immediately
-                    // (before its first `Resize` on terminal change), so the
-                    // TUI does not start at the 80x24 default.
-                    resize_terminal(&mut terminal, cols, rows);
+                    // Push the active theme so the client can draw its chrome
+                    // before the first layout arrives.
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Theme { idx: app.theme_idx });
+                    let notice = app.update_status();
+                    let _ = send_to(&mut clients, id, &DaemonEvent::UpdateNotice { notice });
                 }
                 Command::Detach => {
                     clients.remove(&id);
@@ -210,42 +197,70 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
                 Command::Input { key } => {
-                    let key = key.to_crossterm();
-                    // Terminal clients send raw keys: the daemon interprets the
-                    // leader keymap, popups, and menus (the classic TUI). Other
-                    // clients forward keys straight to the focused pane.
-                    let is_terminal = clients.get(&id).map(|c| c.kind == ClientKind::Terminal).unwrap_or(false);
-                    let result = if is_terminal {
-                        app.on_key(key)
-                    } else {
-                        app.write_key(key);
-                        Ok(())
-                    };
-                    if let Err(e) = result {
-                        log::warn!("daemon: input error: {e:#}");
-                    }
+                    // Passthrough for every client: the client owns the keymap
+                    // and sends leader actions as explicit commands.
+                    app.write_key(key.to_crossterm());
                 }
                 Command::Paste { text } => {
-                    app.on_paste(&text);
+                    app.paste(&text);
                 }
                 Command::Mouse { event } => {
-                    let event = event.to_crossterm();
-                    let is_terminal = clients.get(&id).map(|c| c.kind == ClientKind::Terminal).unwrap_or(false);
-                    let result = if is_terminal {
-                        app.on_mouse(event)
-                    } else {
-                        app.on_pane_mouse(event);
-                        Ok(())
-                    };
-                    if let Err(e) = result {
-                        log::warn!("daemon: mouse error: {e:#}");
-                    }
-                }
-                Command::Resize { cols, rows } => {
-                    resize_terminal(&mut terminal, cols, rows);
+                    app.on_pane_mouse(event.to_crossterm());
                 }
                 Command::PaneResize { pane_id, cols, rows } => {
                     app.resize_pane(pane_id, cols, rows);
+                }
+                Command::PaneRename { session, pane_id, name } => {
+                    let reply = app.rename_pane_in_session(&session, pane_id, &name).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::SessionRename { session, new_name } => {
+                    let reply = app.rename_session(&session, &new_name).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::WorktreeList { session } => {
+                    match app.worktree_list(&session) {
+                        Ok(items) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items: Vec::new() });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
+                        }
+                    }
+                }
+                Command::WorktreeCreate { session, branch } => {
+                    let reply = app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::WorktreeOpen { session, path } => {
+                    let reply = app.worktree_open(&session, &path).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::SetTheme { idx } => {
+                    let reply = app.set_theme(idx).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                    // Broadcast the new chrome colors so every client re-colors.
+                    for client in clients.values_mut() {
+                        let _ = client.tx.try_send(DaemonEvent::Theme { idx: app.theme_idx });
+                    }
+                }
+                Command::PaneWrite { pane_id, bytes } => {
+                    app.pane_write(pane_id, &bytes);
+                }
+                Command::PaneScroll { pane_id, up } => {
+                    app.scroll_pane(pane_id, up);
+                }
+                Command::UpdateStatus => {
+                    let notice = app.update_status();
+                    let _ = send_to(&mut clients, id, &DaemonEvent::UpdateNotice { notice });
+                }
+                Command::UpdateDismiss { key } => {
+                    app.dismiss_update(&key);
+                    // Tell every client the banner is gone.
+                    for client in clients.values_mut() {
+                        let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: None });
+                    }
                 }
                 Command::SessionList => {
                     let sessions = app.session_info_list();
@@ -277,6 +292,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let reply = app.resize_split_in_session(&session, dir).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
+                Command::PaneResizeTo { session, split_id, ratio } => {
+                    // Fire-and-forget: drags stream these and the Reply would
+                    // otherwise flash the client's status bar on every move.
+                    let _ = app.set_split_ratio_in_session(&session, split_id, ratio);
+                }
                 Command::PaneSwap { session } => {
                     let reply = app.swap_focused(&session).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
@@ -306,155 +326,102 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
             }
-            // Any command may have mutated state; re-render next cycle.
-            render_dirty = true;
         }
 
         // PTY output and background results.
         while let Ok(ev) = app.events_rx.try_recv() {
             app.on_pty_event(ev);
-            render_dirty = true;
         }
         while let Ok(notice) = app.update_rx.try_recv() {
             app.update_notice = notice;
-            render_dirty = true;
-        }
-        if last_forced.elapsed() >= Duration::from_millis(250) {
-            // Periodic frame so the composed TUI stays fresh even without input.
-            last_forced = Instant::now();
-            render_dirty = true;
-        }
-
-        // Render the composed UI (this also fills each pane's content cache).
-        if render_dirty {
-            render_dirty = false;
-            // Which panes were dirty *before* rendering (frame() clears the
-            // flags); used to decide which pane frames changed.
-            let dirty_before: HashSet<u64> = app
-                .panes
-                .iter()
-                .filter(|(_, p)| p.dirty || p.full_redraw)
-                .map(|(id, _)| *id)
-                .collect();
-            app.frame(&mut terminal)?;
-            let (cx, cy) = {
-                let pos = terminal.get_cursor_position()?;
-                (pos.x, pos.y)
-            };
-            let new_buf = terminal.backend().buffer().clone();
-            let cursor = Some((cx, cy));
-            let area_changed = last_buffer.as_ref().map(|l| l.area != new_buf.area).unwrap_or(true);
-
-            // Composed frames for full-attach TUI clients, and the semantic
-            // layout + per-pane content for clients that draw their own chrome.
-            let mut full_msg: Option<DaemonEvent> = None;
-            let mut diff_msg: Option<DaemonEvent> = None;
-
-            let layout_needed = clients.values().any(|c| c.wants_layout);
-            let layout: Option<Layout> = if layout_needed { Some(app.layout()) } else { None };
-            let layout_changed = layout_needed && last_layout.as_ref() != layout.as_ref();
-            if layout_changed {
-                last_layout = layout.clone();
+            let notice = app.update_status();
+            for client in clients.values_mut() {
+                let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: notice.clone() });
             }
+        }
 
-            let mut dead = Vec::new();
-            for (id, client) in clients.iter_mut() {
-                if !client.welcomed {
-                    continue;
-                }
-                if client.kind == ClientKind::Terminal {
-                    // Full-attach TUI: stream the composed grid.
-                    let send_full = client.needs_full || area_changed;
-                    let msg = if send_full {
-                        client.needs_full = false;
-                        full_msg.get_or_insert_with(|| {
-                            DaemonEvent::Composed {
-                                frame: frames::full_frame(&new_buf, cursor, &app.theme.palette),
-                            }
-                        })
-                    } else {
-                        let Some(last) = &last_buffer else { continue };
-                        diff_msg.get_or_insert_with(|| {
-                            DaemonEvent::Composed {
-                                frame: frames::diff_frame(&new_buf, last, cursor, &app.theme.palette),
-                            }
-                        })
-                    };
-                    if matches!(client.send_msg(msg.clone()), SendOutcome::Disconnected) {
-                        dead.push(*id);
-                    }
-                    continue;
-                }
+        // Render dirty pane content into the caches, then stream what changed.
+        let changed: HashSet<u64> = app.tick().into_iter().collect();
 
-                // Semantic layout for desktop/mobile/CLI subscribers.
-                if let Some(layout) = &layout {
-                    if client.wants_layout && (layout_changed || client.pending_layout) {
-                        match client.send_msg(DaemonEvent::Layout { layout: layout.clone() }) {
-                            SendOutcome::Ok => client.pending_layout = false,
-                            SendOutcome::Lagging => client.pending_layout = true,
-                            SendOutcome::Disconnected => {
-                                dead.push(*id);
-                                continue;
-                            }
-                        }
-                    }
-                }
-                // Per-pane content for pane subscribers.
-                let pane_ids: Vec<u64> = client.panes_subscribed.iter().copied().collect();
-                for pid in pane_ids {
-                    let was_pending = client.pane_needs_full.remove(&pid);
-                    let Some(cached) = app.pane_cache.get(&pid) else { continue };
-                    let resized = last_pane_bufs
-                        .get(&pid)
-                        .map(|l| l.area != cached.area)
-                        .unwrap_or(true);
-                    if !was_pending && !resized && !dirty_before.contains(&pid) {
-                        continue;
-                    }
-                    let buf = frames::detach_buffer(cached);
-                    let pane_cursor = app.panes.get(&pid).and_then(|p| {
-                        if p.vt.cursor_visible() {
-                            p.vt.cursor_pos()
-                        } else {
-                            None
-                        }
-                    });
-                    let palette = &app.theme.palette;
-                    let frame = if was_pending || resized {
-                        frames::pane_frame(pid, &buf, None, pane_cursor, palette)
-                    } else {
-                        frames::pane_frame(pid, &buf, last_pane_bufs.get(&pid), pane_cursor, palette)
-                    };
-                    last_pane_bufs.insert(pid, buf);
-                    if !frame.full && frame.rows_dirty.is_empty() {
-                        continue;
-                    }
-                    match client.send_msg(DaemonEvent::PaneFrame { frame }) {
-                        SendOutcome::Ok => {}
-                        SendOutcome::Lagging => {
-                            client.pane_needs_full.insert(pid);
-                        }
+        let layout_needed = clients.values().any(|c| c.wants_layout);
+        let layout: Option<Layout> = if layout_needed { Some(app.layout()) } else { None };
+        let layout_changed = layout_needed && last_layout.as_ref() != layout.as_ref();
+        if layout_changed {
+            last_layout = layout.clone();
+        }
+
+        let mut dead = Vec::new();
+        for (id, client) in clients.iter_mut() {
+            if !client.welcomed {
+                continue;
+            }
+            // Semantic layout for all subscribers.
+            if let Some(layout) = &layout {
+                if client.wants_layout && (layout_changed || client.pending_layout) {
+                    match client.send_msg(DaemonEvent::Layout { layout: layout.clone() }) {
+                        SendOutcome::Ok => client.pending_layout = false,
+                        SendOutcome::Lagging => client.pending_layout = true,
                         SendOutcome::Disconnected => {
                             dead.push(*id);
-                            break;
+                            continue;
                         }
                     }
                 }
             }
-            for id in dead {
-                clients.remove(&id);
+            // Per-pane content for pane subscribers.
+            let pane_ids: Vec<u64> = client.panes_subscribed.iter().copied().collect();
+            for pid in pane_ids {
+                let was_pending = client.pane_needs_full.remove(&pid);
+                let Some(cached) = app.pane_cache.get(&pid) else { continue };
+                let resized = last_pane_bufs
+                    .get(&pid)
+                    .map(|l| l.area != cached.area)
+                    .unwrap_or(true);
+                if !was_pending && !resized && !changed.contains(&pid) {
+                    continue;
+                }
+                let buf = frames::detach_buffer(cached);
+                let pane = app.panes.get(&pid);
+                let pane_cursor = pane.and_then(|p| {
+                    if p.vt.cursor_visible() {
+                        p.vt.cursor_pos()
+                    } else {
+                        None
+                    }
+                });
+                let scroll = pane.map(|p| super::ui::scroll_state(p.scrollbar_data()));
+                let palette = &app.theme.palette;
+                let frame = if was_pending || resized {
+                    frames::pane_frame(pid, &buf, None, pane_cursor, palette, pane, scroll)
+                } else {
+                    frames::pane_frame(
+                        pid,
+                        &buf,
+                        last_pane_bufs.get(&pid),
+                        pane_cursor,
+                        palette,
+                        pane,
+                        scroll,
+                    )
+                };
+                last_pane_bufs.insert(pid, buf);
+                if !frame.full && frame.rows_dirty.is_empty() {
+                    continue;
+                }
+                match client.send_msg(DaemonEvent::PaneFrame { frame }) {
+                    SendOutcome::Ok => {}
+                    SendOutcome::Lagging => {
+                        client.pane_needs_full.insert(pid);
+                    }
+                    SendOutcome::Disconnected => {
+                        dead.push(*id);
+                        break;
+                    }
+                }
             }
-            last_buffer = Some(new_buf);
         }
-
-        // `leader+d` / MENU detach: tell every client to disconnect and keep
-        // the daemon (and the panes) alive.
-        if app.detach_requested {
-            app.detach_requested = false;
-            app.quit = false;
-            for client in clients.values_mut() {
-                let _ = client.tx.try_send(DaemonEvent::Detach);
-            }
+        for id in dead {
+            clients.remove(&id);
         }
 
         // Every session closed (explicit `kill`, or auto-stop when the last
@@ -473,19 +440,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     Ok(())
 }
 
-/// Resize both the `TestBackend` buffer (which `Terminal::size()` reports) and
-/// the `Terminal`'s own buffers + viewport. `Terminal::resize` alone only does
-/// the latter, leaving the frame stuck at the initial size.
-fn resize_terminal(terminal: &mut Terminal<TestBackend>, cols: u16, rows: u16) {
-    let w = cols.max(1);
-    let h = rows.max(1);
-    terminal.backend_mut().resize(w, h);
-    let _ = terminal.resize(Rect::new(0, 0, w, h));
-}
-
 /// Prepare an in-place daemon restart for `kumo update`: snapshot the live
 /// sessions into the resume file (each pane's PTY master descriptor + child
-/// pid) and clear `FD_CLOEXEC` on those descriptors so they survive the exec./// `portable-pty` sets the flag at openpty; without clearing it, the masters
+/// pid) and clear `FD_CLOEXEC` on those descriptors so they survive the exec.
+/// `portable-pty` sets the flag at openpty; without clearing it, the masters
 /// would close at exec and the panes (and their processes) would die.
 fn restart_daemon(app: &App) -> Result<()> {
     let Some(state) = app.to_resume_state() else {
@@ -688,6 +646,16 @@ mod tests {
         }
     }
 
+    /// Whether any pane in the tree carries `needle` in its title.
+    fn pane_title_contains(node: &LayoutNode, needle: &str) -> bool {
+        match node {
+            LayoutNode::Pane(p) => p.title.contains(needle),
+            LayoutNode::Split { a, b, .. } => {
+                pane_title_contains(a, needle) || pane_title_contains(b, needle)
+            }
+        }
+    }
+
     /// End-to-end: the daemon is driven purely by commands over the socket and
     /// streams the semantic layout + per-pane content (never a composed grid).
     #[test]
@@ -720,7 +688,7 @@ mod tests {
         let mut stream = wait_for_socket(&sock, Duration::from_secs(10));
         stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
 
-        // Attach as a desktop viewer: Welcome, then the initial layout.
+        // Attach as a viewer: Welcome + the initial Theme, then the layout.
         protocol::write_framed(&mut stream, &Command::Attach {
             protocol: PROTOCOL_VERSION,
             kind: ClientKind::Desktop,
@@ -738,6 +706,14 @@ mod tests {
                 _ => continue,
             }
         }
+        let theme = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "Theme") {
+                DaemonEvent::Theme { idx } => break idx,
+                _ => continue,
+            }
+        };
+        assert_eq!(theme, crate::theme::DEFAULT_THEME_IDX, "attach pushes the active theme");
+
         let layout = loop {
             match next_event(&mut stream, Duration::from_secs(10), "initial Layout") {
                 DaemonEvent::Layout { layout } => break layout,
@@ -795,7 +771,7 @@ mod tests {
         let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
         let root = two.root.as_deref().unwrap();
         match root {
-            LayoutNode::Split { dir, ratio, a, b } => {
+            LayoutNode::Split { dir, ratio, a, b, .. } => {
                 assert_eq!(*dir, SplitDir::Vertical);
                 assert!((0.0..=1.0).contains(ratio));
                 assert!(matches!(a.as_ref(), LayoutNode::Pane(_)));
@@ -804,10 +780,9 @@ mod tests {
             _ => panic!("expected a vertical split, got {root:?}"),
         }
 
-        // Subscribe a pane and resize the composed grid; the pane's PaneFrame
-        // streams at its composed inner size.
+        // Subscribe a pane and resize it; the PaneFrame streams at that size.
         protocol::write_framed(&mut stream, &Command::SubscribePane { pane_id: two_pane }).unwrap();
-        protocol::write_framed(&mut stream, &Command::Resize { cols: 60, rows: 20 }).unwrap();
+        protocol::write_framed(&mut stream, &Command::PaneResize { pane_id: two_pane, cols: 60, rows: 20 }).unwrap();
         let frame = loop {
             match next_event(&mut stream, Duration::from_secs(10), "PaneFrame") {
                 DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane => break frame,
@@ -815,14 +790,7 @@ mod tests {
                 other => panic!("unexpected event while waiting for a PaneFrame: {other:?}"),
             }
         };
-        // 60x20 grid: the pane streams at its composed inner size (the daemon's
-        // chrome — sidebar/status — shrinks the pane area, as in the TUI).
-        assert!(
-            frame.cols > 0 && frame.rows > 0,
-            "the pane must stream at a real composed size, got {}x{}",
-            frame.cols,
-            frame.rows
-        );
+        assert_eq!((frame.cols, frame.rows), (60, 20), "the pane streams at its requested size");
 
         // `kumo session list` returns metadata (no geometry/rects).
         protocol::write_framed(&mut stream, &Command::SessionList).unwrap();
@@ -836,28 +804,34 @@ mod tests {
         let two_info = sessions.iter().find(|s| s.name == "two").unwrap();
         assert_eq!(two_info.pane_count, 2, "the split added a pane");
 
-        // A full-attach TUI client gets the composed grid — with box-drawing
-        // borders in it, exactly like the classic TUI.
-        let mut tstream = wait_for_socket(&sock, Duration::from_secs(10));
-        tstream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-        protocol::write_framed(&mut tstream, &Command::Attach {
-            protocol: PROTOCOL_VERSION,
-            kind: ClientKind::Terminal,
-            cols: 80,
-            rows: 24,
+        // Chrome actions over the wire: rename the pane, then confirm the
+        // Layout title changed.
+        protocol::write_framed(&mut stream, &Command::PaneRename {
+            session: "two".into(),
+            pane_id: two_pane,
+            name: "editor".into(),
         })
         .unwrap();
-        let composed = loop {
-            match next_event(&mut tstream, Duration::from_secs(10), "Composed") {
-                DaemonEvent::Composed { frame } if frame.full => break frame,
+        let layout = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "renamed Layout") {
+                DaemonEvent::Layout { layout } => {
+                    let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
+                    if let Some(root) = &two.root {
+                        if pane_title_contains(root, "editor") {
+                            break layout;
+                        }
+                    }
+                    continue;
+                }
                 _ => continue,
             }
         };
-        assert!(!composed.rows_dirty.is_empty(), "a full composed frame has rows");
-        let has_box_chars = composed.rows_dirty.iter().flat_map(|p| p.cells.iter()).any(|c| {
-            c.text.chars().any(|ch| matches!(ch, '│' | '─' | '┌' | '┐' | '└' | '┘'))
-        });
-        assert!(has_box_chars, "the composed grid must include the pane borders the daemon draws for the TUI");
+        let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
+        let root = two.root.as_deref().unwrap();
+        assert!(
+            pane_title_contains(root, "editor"),
+            "the pane title must carry the custom name"
+        );
 
         // `kumo session kill two`: back to one session.
         protocol::write_framed(&mut stream, &Command::SessionKill { name: "two".into() }).unwrap();

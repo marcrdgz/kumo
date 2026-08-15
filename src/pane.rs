@@ -631,6 +631,7 @@ impl Pane {
     }
 
     /// Install the terminal's active selection from two viewport coordinates.
+    #[allow(dead_code)]
     pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
         let ok = self.vt.set_selection(start, end);
         if ok {
@@ -641,6 +642,7 @@ impl Pane {
     }
 
     /// Clear the terminal's active selection.
+    #[allow(dead_code)]
     pub fn clear_selection(&mut self) {
         self.vt.clear_selection();
         self.dirty = true;
@@ -649,6 +651,7 @@ impl Pane {
 
     /// Extract the text between two viewport coordinates as plain text,
     /// building a fresh selection at extraction time (unwrap + trim).
+    #[allow(dead_code)]
     pub fn selection_text(&mut self, start: (u16, u16), end: (u16, u16)) -> Option<String> {
         self.vt.selection_text(start, end)
     }
@@ -656,8 +659,51 @@ impl Pane {
     /// The clickable link at a pane-relative viewport position: an OSC 8
     /// hyperlink URI, else a plain-text `scheme://` URL on the row (matching a
     /// normal terminal's detection of e.g. `next dev` output).
+    #[allow(dead_code)]
     pub fn link_at(&self, col: u16, row: u16) -> Option<String> {
         self.vt.link_at(col, row)
+    }
+
+    /// Every clickable link covering viewport row `row`, as column ranges:
+    /// OSC 8 hyperlink runs first, then plain-text `scheme://` URLs. Streamed
+    /// in `PaneFrame` rows so the client can underline links while a link
+    /// modifier is held and open them on click.
+    pub fn link_ranges(&self, row: u16) -> Vec<kumo_protocol::LinkRange> {
+        let cols = self.vt.cols();
+        let mut out: Vec<kumo_protocol::LinkRange> = Vec::new();
+        // OSC 8 hyperlinks: contiguous columns sharing one URI form a run.
+        let mut run: Option<(u16, String)> = None;
+        for col in 0..cols {
+            let uri = self.vt.hyperlink_at(col, row);
+            match (run.take(), uri) {
+                (None, Some(u)) => run = Some((col, u)),
+                (Some((s, ru)), Some(u)) if ru == u => run = Some((s, u)),
+                (Some((s, ru)), Some(u)) => {
+                    out.push(kumo_protocol::LinkRange { start: s, end: col, url: ru });
+                    run = Some((col, u));
+                }
+                (Some((s, ru)), None) => {
+                    out.push(kumo_protocol::LinkRange { start: s, end: col, url: ru });
+                    run = None;
+                }
+                (None, None) => {}
+            }
+        }
+        if let Some((s, ru)) = run {
+            out.push(kumo_protocol::LinkRange { start: s, end: cols, url: ru });
+        }
+        // Plain-text URLs on the row, unless an OSC 8 run already covers them.
+        let line = self.vt.row_text(row);
+        if !line.is_empty() {
+            for (s, e, url) in crate::vt::find_urls(&line) {
+                let c0 = line[..s].chars().count() as u16;
+                let c1 = line[..e].chars().count() as u16;
+                if !out.iter().any(|r| c0 < r.end && c1 > r.start) {
+                    out.push(kumo_protocol::LinkRange { start: c0, end: c1, url });
+                }
+            }
+        }
+        out
     }
 
     /// Viewport position of the terminal cursor, relative to the pane origin.

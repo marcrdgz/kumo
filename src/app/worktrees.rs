@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 /// One worktree of a repository: its working-tree path and the branch checked
 /// out there. `branch` is `None` when the HEAD is detached.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct WorktreeInfo {
+pub(crate) struct WorktreeInfo {
     pub(super) path: PathBuf,
     pub(super) branch: Option<String>,
 }
@@ -35,7 +35,7 @@ fn git(ws: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 
 /// The top-level working tree of the repository containing `ws`, if `ws` is
 /// inside one. Works from the main checkout or a linked worktree alike.
-pub(super) fn repo_root(ws: &Path) -> Option<PathBuf> {
+pub(crate) fn repo_root(ws: &Path) -> Option<PathBuf> {
     let out = git(ws, &["rev-parse", "--show-toplevel"]).ok()?;
     let root = String::from_utf8_lossy(&out).trim().to_string();
     if root.is_empty() {
@@ -47,7 +47,7 @@ pub(super) fn repo_root(ws: &Path) -> Option<PathBuf> {
 
 /// Git's default sibling location for a new worktree: `<parent>/<basename>-<branch>`
 /// (e.g. `~/dev/kumo` + `feat/foo` → `~/dev/kumo-feat/foo`).
-pub(super) fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
+pub(crate) fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
     let base = repo_root
         .file_name()
         .map(|b| b.to_string_lossy().into_owned())
@@ -59,14 +59,14 @@ pub(super) fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
 /// Create a new worktree checking out a fresh branch from the current HEAD:
 /// `git worktree add -b <branch> <path>`. On failure the git error (stderr) is
 /// returned for display.
-pub(super) fn add_worktree(repo_root: &Path, path: &Path, branch: &str) -> Result<(), String> {
+pub(crate) fn add_worktree(repo_root: &Path, path: &Path, branch: &str) -> Result<(), String> {
     git(repo_root, &["worktree", "add", "-b", branch, path.to_str().unwrap_or_default()])?;
     Ok(())
 }
 
 /// All worktrees of the repository containing `ws`, main first then linked,
 /// parsed from `git worktree list --porcelain`. Includes the main worktree.
-pub(super) fn list_worktrees(ws: &Path) -> Result<Vec<WorktreeInfo>, String> {
+pub(crate) fn list_worktrees(ws: &Path) -> Result<Vec<WorktreeInfo>, String> {
     let out = git(ws, &["worktree", "list", "--porcelain"])?;
     Ok(parse_worktrees(&out))
 }

@@ -11,10 +11,15 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 
-use kumo_protocol::{AgentInfo, AgentStatusLine, SessionInfo, SplitDir, WireKeyEvent};
+use kumo_protocol::{
+    AgentInfo, AgentStatusLine, SessionInfo, SplitDir, WireKeyEvent, WireNotice, WireWorktree,
+};
 
 use super::App;
 use crate::layout;
+
+/// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
+const RESIZE_STEP: f32 = 0.05;
 
 impl App {
     /// The focused pane of the active session.
@@ -48,6 +53,20 @@ impl App {
                 MouseEventKind::ScrollDown => pane.scroll(-1),
                 _ => {}
             }
+        }
+    }
+
+    /// Bracketed-paste text: write it to the focused pane with trailing
+    /// newlines stripped and interior newlines translated to `\r`.
+    pub(crate) fn paste(&mut self, text: &str) {
+        let text = text.trim_end_matches(['\n', '\r']);
+        if text.is_empty() {
+            return;
+        }
+        let bytes = text.replace('\n', "\r");
+        let focus = self.active_focus();
+        if let Some(pane) = self.panes.get_mut(&focus) {
+            pane.write(bytes.as_bytes());
         }
     }
 
@@ -130,11 +149,27 @@ impl App {
             kumo_protocol::ResizeDir::Up => crate::layout::ResizeDir::Up,
             kumo_protocol::ResizeDir::Right => crate::layout::ResizeDir::Right,
         };
-        let prev = self.active;
-        self.active = idx;
-        self.resize_focused(dir);
-        self.active = prev;
+        let focus = self.sessions[idx].tree.focus;
+        if !self.sessions[idx].tree.resize_pane(focus, dir, RESIZE_STEP) {
+            return Ok(format!("nothing to resize in that direction in {session:?}"));
+        }
         Ok(format!("resized split in {session:?}"))
+    }
+
+    /// Set the ratio of a specific split (identified by the id shipped in the
+    /// semantic layout) to an absolute value — the daemon-side half of a
+    /// desktop drag on the divider.
+    pub(crate) fn set_split_ratio_in_session(
+        &mut self,
+        session: &str,
+        split_id: u64,
+        ratio: f32,
+    ) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        self.sessions[idx].tree.set_ratio(split_id, ratio);
+        Ok(format!("set split {split_id} ratio in {session:?}"))
     }
 
     /// Swap the focused pane with its sibling in the named session.
@@ -316,5 +351,159 @@ impl App {
             }
         }
         out
+    }
+
+    // ------------------------------------------------------------------
+    // Chrome actions (clients draw all chrome; these mutate daemon state)
+    // ------------------------------------------------------------------
+
+    /// Rename a pane in the named session (the name popup's commit).
+    pub(crate) fn rename_pane_in_session(
+        &mut self,
+        session: &str,
+        pane_id: u64,
+        name: &str,
+    ) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        if !self.sessions[idx].tree.contains(pane_id) {
+            return Ok(format!("no pane {pane_id} in {session:?}"));
+        }
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Ok("name cannot be empty".to_string());
+        }
+        let taken = self
+            .sessions[idx]
+            .tree
+            .pane_ids()
+            .into_iter()
+            .filter(|id| *id != pane_id)
+            .map(|id| self.pane_label(id))
+            .any(|l| l.trim() == name);
+        if taken {
+            return Ok(format!("a pane named '{name}' already exists"));
+        }
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.custom_name = Some(name.clone());
+        }
+        Ok(format!("renamed pane {pane_id} to {name:?}"))
+    }
+
+    /// Rename a session.
+    pub(crate) fn rename_session(&mut self, session: &str, new_name: &str) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let name = new_name.trim().to_string();
+        if name.is_empty() {
+            return Ok("name cannot be empty".to_string());
+        }
+        let taken = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .any(|(_, s)| s.name == name);
+        if taken {
+            return Ok(format!("a session named '{name}' already exists"));
+        }
+        self.sessions[idx].name = name.clone();
+        Ok(format!("renamed session to {name:?}"))
+    }
+
+    /// List the git worktrees of a session's repository (main + linked), with
+    /// the kumo-side flags the picker renders (main tree, already-open).
+    pub(crate) fn worktree_list(&self, session: &str) -> Result<Vec<WireWorktree>> {
+        let Some(ws) = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone()) else {
+            return Ok(Vec::new());
+        };
+        let items = super::worktrees::list_worktrees(&ws)
+            .map_err(|e| anyhow!("{e}"))?;
+        let root = super::worktrees::repo_root(&ws);
+        let rows = items
+            .into_iter()
+            .map(|info| {
+                let canon = std::fs::canonicalize(&info.path).ok();
+                let is_main = match (&root, &canon) {
+                    (Some(r), Some(c)) => *r == *c,
+                    _ => false,
+                };
+                let open = self.session_for_workspace(&info.path).is_some();
+                WireWorktree { path: info.path, branch: info.branch, is_main, open }
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    /// Create a git worktree (new branch from the repo HEAD) and open a fresh
+    /// session inside it, named after the branch.
+    pub(crate) fn worktree_create(&mut self, session: &str, branch: &str) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let branch = branch.trim().to_string();
+        if branch.is_empty() {
+            return Ok("branch name cannot be empty".to_string());
+        }
+        match self.new_worktree_session(idx, &branch) {
+            Ok(()) => Ok(format!("created worktree {branch:?}")),
+            Err(e) => Ok(format!("error: {e}")),
+        }
+    }
+
+    /// Open the session already working in `path`, or create a new one there
+    /// (the worktree picker's confirm).
+    pub(crate) fn worktree_open(&mut self, session: &str, path: &std::path::Path) -> Result<String> {
+        if !self.sessions.iter().any(|s| s.name == session) {
+            return Ok(format!("no session {session:?}"));
+        }
+        self.open_session_in_worktree(path, None)?;
+        Ok(format!("opened {path:?}"))
+    }
+
+    /// Apply theme `idx` daemon-side: re-color every pane's terminal emulator
+    /// with the new ANSI palette and record it as the active theme.
+    pub(crate) fn set_theme(&mut self, idx: usize) -> Result<String> {
+        if idx >= crate::theme::THEMES.len() {
+            return Ok(format!("no such theme #{idx}"));
+        }
+        let theme = crate::theme::THEMES[idx];
+        for pane in self.panes.values_mut() {
+            pane.apply_theme(&theme);
+        }
+        self.theme = theme;
+        self.theme_idx = idx;
+        Ok(format!("theme: {}", theme.name))
+    }
+
+    /// Write raw bytes into a specific pane (mouse-reporting forwarding, where
+    /// the client knows exactly which pane the pointer is over).
+    pub(crate) fn pane_write(&mut self, pane_id: u64, bytes: &[u8]) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.write(bytes);
+        }
+    }
+
+    /// Scroll a specific pane's viewport by one wheel step.
+    pub(crate) fn scroll_pane(&mut self, pane_id: u64, up: bool) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.scroll(if up { -3 } else { 3 });
+        }
+    }
+
+    /// The active startup update notice, if any.
+    pub(crate) fn update_status(&self) -> Option<WireNotice> {
+        self.update_notice.as_ref().map(|n| WireNotice {
+            key: n.key.clone(),
+            display: n.display.clone(),
+        })
+    }
+
+    /// Dismiss the startup update banner (persisted so it stays gone).
+    pub(crate) fn dismiss_update(&mut self, key: &str) {
+        crate::update::dismiss(key);
+        self.update_notice = None;
     }
 }

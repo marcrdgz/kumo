@@ -8,25 +8,27 @@
 //! on `ratatui`, `crossterm`, or the terminal emulator, so any client can speak
 //! the protocol without dragging in the whole kumo stack. Conversions to and
 //! from host types (`crossterm` events, `ratatui` buffers) live in the kumo
-//! crate (`src/wireconv.rs`, `src/frames.rs`).
+//! crate (`src/frames.rs`).
 //!
 //! # Architecture: smart renderer / dumb viewport
 //!
 //! The daemon is the **single source of truth** for everything it has open —
 //! sessions, the semantic layout tree (splits in ratios, not pixels), the PTYs,
-//! and per-pane terminal content. It does **not** render chrome: no borders,
-//! box-drawing characters, sidebar, or status bar ever enter the wire. Clients
-//! receive two things and draw everything themselves:
+//! and per-pane terminal content. It never renders chrome. Clients receive two
+//! streams and draw all their own chrome (borders, sidebar, status bar, menus,
+//! popups):
 //!
 //! - **Layout** ([`DaemonEvent::Layout`]): the semantic tree of sessions →
-//!   splits (with ratios) → panes (title, cwd, agent status). Clients compute
-//!   actual geometry and draw their own chrome.
+//!   splits (with ratios) → panes (title, cwd, agent status, terminal flags).
+//!   Clients compute actual geometry and draw their own chrome.
 //! - **Pane content** ([`DaemonEvent::PaneFrame`]): each pane's terminal grid
-//!   (rendered by the daemon's Ghostty core), streamed on change.
+//!   (rendered by the daemon's Ghostty core) with per-row link ranges and the
+//!   scrollback state, streamed on change.
 //!
 //! Everything else is a **command** ([`Command`]) — sessions, panes, agents,
-//! input, subscriptions — so the whole multiplexer can be driven from the CLI,
-//! the TUI, the desktop app, or a script.
+//! input, subscriptions, chrome actions (rename, worktrees, theme) — so the
+//! whole multiplexer can be driven from the CLI, the TUI, the desktop app, or a
+//! script.
 
 use std::io::{self, Read};
 
@@ -37,10 +39,11 @@ use serde::{Deserialize, Serialize};
 mod crossterm;
 
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
-/// with a mismatched version. v4 switches from rendered frames to the
-/// semantic-layout + per-pane-content model, and from `ClientMsg`/`ServerMsg`
-/// to the tmux-style `Command`/`DaemonEvent` protocol.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// with a mismatched version. v5 removes the composed-grid channel entirely:
+/// every client draws its own chrome from the semantic layout + per-pane
+/// content, and the chrome actions (rename, worktrees, theme) travel as
+/// commands.
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -244,11 +247,38 @@ pub struct WireCell {
 }
 
 /// One dirty row: its index plus every cell, so the client can repaint it fully
-/// (handles wide chars, styles, and cells that were cleared).
+/// (handles wide chars, styles, and cells that were cleared). `links` spans the
+/// hyperlinks / plain-text URLs covering this row, so clients can underline
+/// them while a link modifier is held and open them on click.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct RowPatch {
     pub row: u16,
     pub cells: Vec<WireCell>,
+    /// Links covering this row (empty when none). Columns are row-relative.
+    pub links: Vec<LinkRange>,
+}
+
+/// One clickable link spanning a row: an OSC 8 hyperlink URI or a plain-text
+/// `scheme://` URL detected on the row.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct LinkRange {
+    /// First column of the link.
+    pub start: u16,
+    /// One past the last column of the link.
+    pub end: u16,
+    /// The URL.
+    pub url: String,
+}
+
+/// Scrollback state of a pane's terminal, for client-drawn scrollbars.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScrollState {
+    /// Rows scrolled above the viewport.
+    pub offset: u16,
+    /// Total rows in the scrollback buffer (viewport included).
+    pub total: u16,
+    /// Rows visible in the viewport.
+    pub screen: u16,
 }
 
 /// One pane's terminal grid, streamed on change. `full` = every row included
@@ -262,19 +292,8 @@ pub struct PaneFrame {
     pub rows_dirty: Vec<RowPatch>,
     /// Terminal cursor position, if the pane shows one.
     pub cursor: Option<(u16, u16)>,
-}
-
-/// The daemon's whole composed UI (panes + borders + chrome), rendered
-/// daemon-side and streamed to full-attach TUI clients. `full` = every row
-/// (first frame / resize); otherwise only dirty rows.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct FrameMsg {
-    pub cols: u16,
-    pub rows: u16,
-    pub full: bool,
-    pub rows_dirty: Vec<RowPatch>,
-    /// Host-terminal cursor position, if the app wants one shown.
-    pub cursor: Option<(u16, u16)>,
+    /// Scrollback state of the pane's terminal, when it has scrollback.
+    pub scroll: Option<ScrollState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +328,11 @@ pub struct LayoutPane {
     pub is_ai: bool,
     /// The running AI CLI, when this pane hosts one.
     pub agent: Option<AgentInfo>,
+    /// Whether the pane's child has enabled mouse reporting (SGR mouse): the
+    /// client forwards the whole mouse gesture to it instead of selecting text.
+    pub mouse_reporting: bool,
+    /// Whether the pane is on the terminal's alternate screen.
+    pub alt_screen: bool,
 }
 
 /// A node in the semantic layout tree: a split of two subtrees with a ratio
@@ -318,6 +342,9 @@ pub struct LayoutPane {
 pub enum LayoutNode {
     Pane(LayoutPane),
     Split {
+        /// Stable split id (matches the daemon's layout tree), so clients can
+        /// target a specific split for absolute ratio drags.
+        id: u64,
         dir: SplitDir,
         ratio: f32,
         a: Box<LayoutNode>,
@@ -335,6 +362,40 @@ pub struct SessionLayout {
     /// When zoomed, only the focused pane is shown full-size.
     pub zoom: bool,
     pub root: Option<Box<LayoutNode>>,
+    /// Git branch of the session's workspace (name + ahead/behind), for the
+    /// client's sidebar.
+    pub branch: Option<WireBranch>,
+}
+
+/// Git branch state of a session's workspace, as shown in the sidebar.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WireBranch {
+    pub name: String,
+    /// Commits ahead of the upstream (shown as `↑N`).
+    pub ahead: u32,
+    /// Commits behind the upstream (shown as `~N`).
+    pub behind: u32,
+}
+
+/// One row of the worktree picker: a git worktree plus kumo-side flags.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WireWorktree {
+    pub path: std::path::PathBuf,
+    /// Checked-out branch; `None` for a detached HEAD.
+    pub branch: Option<String>,
+    /// True when this is the repository's main worktree.
+    pub is_main: bool,
+    /// True when a kumo session is already open in this worktree.
+    pub open: bool,
+}
+
+/// A startup update notice, keyed so the client can dismiss it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WireNotice {
+    /// Stable key used for dismissal (`UpdateDismiss`).
+    pub key: String,
+    /// Human display string, e.g. `nightly (Aug 16)`.
+    pub display: String,
 }
 
 /// The full layout snapshot pushed on change.
@@ -464,6 +525,13 @@ pub enum Command {
         session: String,
         dir: ResizeDir,
     },
+    /// Set the ratio of a specific split to an absolute value (0..1). Used by
+    /// desktop drags where the client knows exactly where the divider lands.
+    PaneResizeTo {
+        session: String,
+        split_id: u64,
+        ratio: f32,
+    },
     /// Swap the focused pane with its sibling.
     PaneSwap {
         session: String,
@@ -489,11 +557,56 @@ pub enum Command {
         cols: u16,
         rows: u16,
     },
-    /// Set the daemon's composed grid size (full-attach TUI clients; the
-    /// daemon lays panes out within it and streams composed frames).
-    Resize {
-        cols: u16,
-        rows: u16,
+
+    // -- chrome actions (clients draw all chrome) ----------------------------
+    /// Rename a pane (custom title; the name popup's commit).
+    PaneRename {
+        session: String,
+        pane_id: u64,
+        name: String,
+    },
+    /// Rename a session.
+    SessionRename {
+        session: String,
+        new_name: String,
+    },
+    /// List the git worktrees of a session's repository (reply: `Worktrees`).
+    WorktreeList {
+        session: String,
+    },
+    /// Create a git worktree (new branch from the repo HEAD) and open a fresh
+    /// session inside it.
+    WorktreeCreate {
+        session: String,
+        branch: String,
+    },
+    /// Open the session already working in `path` (or create one) — the
+    /// worktree picker's confirm.
+    WorktreeOpen {
+        session: String,
+        path: std::path::PathBuf,
+    },
+    /// Apply theme `idx` daemon-side (the ANSI palette re-colors every pane)
+    /// and push the new `Theme` event to clients.
+    SetTheme {
+        idx: usize,
+    },
+    /// Write raw bytes into a specific pane (mouse-reporting forwarding, where
+    /// the client knows exactly which pane the pointer is over).
+    PaneWrite {
+        pane_id: u64,
+        bytes: Vec<u8>,
+    },
+    /// Scroll a specific pane's viewport by one wheel step.
+    PaneScroll {
+        pane_id: u64,
+        up: bool,
+    },
+    /// Query the startup update notice (reply: `UpdateNotice`).
+    UpdateStatus,
+    /// Dismiss the startup update banner (persisted daemon-side).
+    UpdateDismiss {
+        key: String,
     },
 
     // -- agents --------------------------------------------------------------
@@ -579,10 +692,18 @@ pub enum DaemonEvent {
     PaneFrame {
         frame: PaneFrame,
     },
-    /// The daemon's composed UI (borders + chrome included), streamed to
-    /// full-attach TUI clients.
-    Composed {
-        frame: FrameMsg,
+    /// The active theme index (chrome colors the client renders with). Pushed
+    /// on attach and whenever `SetTheme` applies a new theme.
+    Theme {
+        idx: usize,
+    },
+    /// Reply to `WorktreeList`.
+    Worktrees {
+        items: Vec<WireWorktree>,
+    },
+    /// Reply to `UpdateStatus`: the startup update notice, if one is active.
+    UpdateNotice {
+        notice: Option<WireNotice>,
     },
 }
 
@@ -698,7 +819,9 @@ mod tests {
                 workspace: std::path::PathBuf::from("/tmp"),
                 focus: 11,
                 zoom: false,
+                branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
                 root: Some(Box::new(LayoutNode::Split {
+                    id: 7,
                     dir: SplitDir::Vertical,
                     ratio: 0.7,
                     a: Box::new(LayoutNode::Pane(LayoutPane {
@@ -707,6 +830,8 @@ mod tests {
                         cwd: std::path::PathBuf::from("/tmp"),
                         is_ai: false,
                         agent: None,
+                        mouse_reporting: false,
+                        alt_screen: false,
                     })),
                     b: Box::new(LayoutNode::Pane(LayoutPane {
                         id: 12,
@@ -714,6 +839,8 @@ mod tests {
                         cwd: std::path::PathBuf::from("/tmp"),
                         is_ai: true,
                         agent: Some(AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked }),
+                        mouse_reporting: true,
+                        alt_screen: true,
                     })),
                 })),
             }],

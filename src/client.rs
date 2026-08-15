@@ -1,29 +1,32 @@
-//! Thin terminal client: connects to the daemon socket, renders the composed
-//! frames the daemon streams, and forwards input. It has no terminal emulator —
-//! the daemon renders the whole UI (panes, borders, chrome, menus) and ships
-//! rendered cells, exactly like a dumb viewport.
+//! Smart terminal client: a "dumb viewport with chrome" for the kumo daemon.
+//!
+//! Connects to the daemon socket, subscribes to the semantic layout + per-pane
+//! content, computes its own geometry, and draws ALL chrome (borders, sidebar,
+//! status bar, menus, popups) with ratatui — exactly like the desktop app, but
+//! in a host terminal. The daemon never renders chrome.
 
-use std::io::{self, Write};
+use std::io;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::cursor::{Hide, Show};
+use crossterm::cursor::Hide;
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
-use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
-};
 
 use crate::app::Launch;
-use crate::protocol::{self, ClientKind, Command, DaemonEvent, FrameMsg};
+use crate::client_view::View;
+use crate::protocol::{self, ClientKind, Command, DaemonEvent};
 
 pub fn run(launch: Launch) -> Result<()> {
     let path = crate::config::ipc_socket_path();
@@ -111,53 +114,66 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
     )?;
 
-    // Input thread: reads crossterm events and writes them straight to the
-    // daemon over its own socket clone. Stopped via the flag so a restart can
-    // hand the event reader back to the next connection.
+    // Daemon-event reader thread: forwards every frame the daemon pushes. When
+    // the daemon exits (or closes the connection on detach) the read returns
+    // EOF and the thread ends, which the main loop sees as a clean exit.
     let write_half = stream.try_clone()?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let input = std::thread::spawn(move || input_loop(write_half, stop2));
+    let (ev_tx, ev_rx) = mpsc::channel::<DaemonEvent>();
+    let reader = std::thread::spawn(move || reader_loop(write_half, ev_tx));
 
-    // The daemon pushes a frame every ~250ms even when idle, so a read timeout
-    // (2s of silence) always means the connection is stuck: the daemon flagged
-    // this client as lagging (tab backgrounded, machine asleep) and stopped
-    // serving it. Reconnecting instead of blocking on the last frame forever.
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
+    terminal.clear()?;
+
+    let mut view = View::new(stream.try_clone()?, cols, rows);
+    view.render_now(&mut terminal)?;
 
     let result: Result<Exit> = (|| {
-        let mut saw_frame = false;
         loop {
-            match protocol::read_framed::<DaemonEvent>(stream) {
-                Ok(DaemonEvent::Welcome { .. }) => {}
-                Ok(DaemonEvent::Composed { frame }) => {
-                    saw_frame = true;
-                    blit(&mut stdout, &frame)?;
-                }
-                Ok(DaemonEvent::Detach) => return Ok(Exit::Clean),
-                Ok(DaemonEvent::Restarting) => return Ok(Exit::Restarting),
-                Ok(DaemonEvent::Shutdown) => {
-                    // A shutdown before any frame means the daemon rejected the
-                    // handshake (protocol mismatch with an old lingering daemon)
-                    // rather than a clean auto-stop.
-                    if !saw_frame {
-                        anyhow::bail!(
-                            "the running kumo daemon is from an older, incompatible kumo.\n\
-                             Restart it with:  pkill -f 'kumo daemon'\nthen run `kumo` again"
-                        );
+            // Daemon events (16ms timeout so local input stays responsive).
+            match ev_rx.recv_timeout(Duration::from_millis(16)) {
+                Ok(ev) => {
+                    let exit = match ev {
+                        DaemonEvent::Detach => Some(Exit::Clean),
+                        DaemonEvent::Restarting => Some(Exit::Restarting),
+                        DaemonEvent::Shutdown => Some(Exit::Clean),
+                        other => {
+                            view.on_event(other);
+                            None
+                        }
+                    };
+                    if let Some(exit) = exit {
+                        return Ok(exit);
                     }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // The daemon closed the socket without a Shutdown frame
+                    // (abrupt exit): nothing left to render.
                     return Ok(Exit::Clean);
                 }
-                Ok(_) => {}
-                Err(e) if is_read_timeout(&e) => return Ok(Exit::Restarting),
-                Err(e) => return Err(e),
+            }
+            if view.detach_requested() {
+                return Ok(Exit::Clean);
+            }
+            if crossterm::event::poll(Duration::from_millis(0))? {
+                match crossterm::event::read()? {
+                    crossterm::event::Event::Key(k) => view.on_key(k)?,
+                    crossterm::event::Event::Paste(text) => view.on_paste(&text),
+                    crossterm::event::Event::Mouse(m) => view.on_mouse(m)?,
+                    crossterm::event::Event::Resize(w, h) => {
+                        view.on_resize(w, h)?;
+                        terminal.resize(ratatui::layout::Rect::new(0, 0, w.max(2), h.max(2)))?;
+                    }
+                    _ => {}
+                }
+            }
+            if view.dirty() {
+                view.render_now(&mut terminal)?;
             }
         }
     })();
 
-    // Release the crossterm event reader before a reconnect spawns a new one.
-    stop.store(true, Ordering::Relaxed);
-    let _ = input.join();
+    let _ = reader.join();
 
     match result {
         Ok(Exit::Restarting) => {
@@ -166,7 +182,14 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
             Ok(Exit::Restarting)
         }
         other => {
-            let _ = execute!(stdout, Show, crossterm::event::DisableMouseCapture, DisableBracketedPaste, PopKeyboardEnhancementFlags, LeaveAlternateScreen);
+            let _ = execute!(
+                stdout,
+                crossterm::cursor::Show,
+                crossterm::event::DisableMouseCapture,
+                DisableBracketedPaste,
+                PopKeyboardEnhancementFlags,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             let _ = stdout.flush();
             other
@@ -174,39 +197,31 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
     }
 }
 
-/// Whether an error is a socket read timeout: no data arrived within the
-/// client's read-timeout window. The daemon sends a frame every ~250ms even
-/// when idle, so prolonged silence always means a lost/stalled connection.
-fn is_read_timeout(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<io::Error>()
-        .map(|ioe| matches!(ioe.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
-        .unwrap_or(false)
-}
-
-/// Read crossterm events and forward them to the daemon. Exits when `stop` is
-/// set (restart/reconnect) or once the socket becomes unwritable (daemon gone).
-fn input_loop(mut stream: UnixStream, stop: Arc<AtomicBool>) {
-    while !stop.load(Ordering::Relaxed) {
-        if !crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            continue;
-        }
-        let ok = match crossterm::event::read() {
-            Ok(crossterm::event::Event::Key(k)) => {
-                protocol::write_framed(&mut stream, &Command::Input { key: k.into() })
+/// Read daemon events off the socket and forward them over the channel. The
+/// reader blocks on the socket; when the daemon closes the connection (exit,
+/// detach, restart) the read returns EOF/Err and the thread ends, closing the
+/// channel.
+fn reader_loop(mut stream: UnixStream, tx: mpsc::Sender<DaemonEvent>) {
+    let mut reader = protocol::FrameReader::default();
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Err(_) => break,
+            Ok(n) => {
+                let mut frames = Vec::new();
+                reader.push(&buf[..n], &mut frames);
+                for f in frames {
+                    let Ok((msg, _)) =
+                        bincode::serde::decode_from_slice::<DaemonEvent, _>(&f, bincode::config::standard())
+                    else {
+                        break;
+                    };
+                    if tx.send(msg).is_err() {
+                        return;
+                    }
+                }
             }
-            Ok(crossterm::event::Event::Paste(text)) => {
-                protocol::write_framed(&mut stream, &Command::Paste { text })
-            }
-            Ok(crossterm::event::Event::Mouse(m)) => {
-                protocol::write_framed(&mut stream, &Command::Mouse { event: m.into() })
-            }
-            Ok(crossterm::event::Event::Resize(w, h)) => {
-                protocol::write_framed(&mut stream, &Command::Resize { cols: w, rows: h })
-            }
-            _ => continue,
-        };
-        if ok.is_err() {
-            return;
         }
     }
 }
@@ -224,113 +239,6 @@ fn reconnect() -> Result<UnixStream> {
             anyhow::bail!("kumo daemon did not come back after the update restart");
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// The subset of a cell's styling that decides whether to re-emit SGR codes.
-type StyleKey = (Option<u32>, Option<u32>, bool, bool, bool, bool, bool);
-
-/// Blit a frame: repaint only the dirty rows (`full` frames clear first), so
-/// unchanged parts of the terminal never flicker.
-fn blit(out: &mut io::Stdout, f: &FrameMsg) -> io::Result<()> {
-    let mut buf = String::with_capacity(4096);
-    if f.full {
-        buf.push_str("\x1b[2J\x1b[H");
-    }
-    for patch in &f.rows_dirty {
-        write_row(&mut buf, patch.row, &patch.cells);
-    }
-    match f.cursor {
-        Some((x, y)) => {
-            buf.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
-            buf.push_str("\x1b[?25h");
-        }
-        None => buf.push_str("\x1b[?25l"),
-    }
-    out.write_all(buf.as_bytes())?;
-    out.flush()
-}
-
-/// Rewrite one row (column-major cells), then erase the tail to the end of the
-/// line so stale cells beyond the row's content are cleared. Continuation cells
-/// after a wide grapheme (`cell_width == 0`) are skipped so wide characters
-/// are not overwritten.
-fn write_row(buf: &mut String, row: u16, cells: &[protocol::WireCell]) {
-    let last = cells
-        .iter()
-        .rposition(|c| !c.text.trim().is_empty())
-        .unwrap_or(usize::MAX);
-    let mut prev_style: Option<StyleKey> = None;
-    let mut cursor_col: u16 = 0;
-    let mut wrote_any = false;
-    for (col, cell) in cells.iter().enumerate() {
-        if col > last {
-            break;
-        }
-        if cell.cell_width == 0 {
-            continue;
-        }
-        let style = (
-            cell.fg,
-            cell.bg,
-            cell.bold,
-            cell.italic,
-            cell.underline,
-            cell.inverse,
-            cell.faint,
-        );
-        if prev_style != Some(style) {
-            buf.push_str("\x1b[0m");
-            push_sgr(buf, &style);
-            prev_style = Some(style);
-        }
-        buf.push_str(&format!("\x1b[{};{}H", row + 1, col + 1));
-        buf.push_str(if cell.text.trim().is_empty() { " " } else { &cell.text });
-        cursor_col = col as u16 + cell.cell_width;
-        wrote_any = true;
-    }
-    // Erase the stale tail only when the content does not already reach the
-    // row's end: `\x1b[K` clears from the cursor to the end of the line
-    // *inclusive*, so emitting it while the cursor is on the last column (the
-    // pane's right border) would erase that border cell.
-    if wrote_any && cursor_col < cells.len() as u16 {
-        buf.push_str(&format!("\x1b[{};{}H", row + 1, cursor_col + 1));
-        buf.push_str("\x1b[K");
-    }
-}
-
-fn push_sgr(
-    buf: &mut String,
-    &(fg, bg, bold, italic, underline, inverse, faint): &(
-        Option<u32>,
-        Option<u32>,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-    ),
-) {
-    if bold {
-        buf.push_str("\x1b[1m");
-    }
-    if faint {
-        buf.push_str("\x1b[2m");
-    }
-    if italic {
-        buf.push_str("\x1b[3m");
-    }
-    if underline {
-        buf.push_str("\x1b[4m");
-    }
-    if inverse {
-        buf.push_str("\x1b[7m");
-    }
-    if let Some(c) = fg {
-        buf.push_str(&format!("\x1b[38;2;{};{};{}m", (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff));
-    }
-    if let Some(c) = bg {
-        buf.push_str(&format!("\x1b[48;2;{};{};{}m", (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff));
     }
 }
 
@@ -366,97 +274,4 @@ fn wait_for_daemon(path: &std::path::Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(25));
     }
     anyhow::bail!("kumo daemon did not start in time")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cell(text: &str, width: u16) -> protocol::WireCell {
-        protocol::WireCell {
-            text: text.to_string(),
-            fg: None,
-            bg: None,
-            bold: false,
-            italic: false,
-            underline: false,
-            inverse: false,
-            faint: false,
-            cell_width: width,
-        }
-    }
-
-    #[test]
-    fn read_timeout_signals_a_stalled_connection() {
-        use std::os::unix::net::UnixStream;
-        let (mut a, _b) = UnixStream::pair().unwrap();
-        a.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-        let err = protocol::read_framed::<DaemonEvent>(&mut a).unwrap_err();
-        assert!(
-            is_read_timeout(&err),
-            "a silent socket must be a stalled connection, got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn non_timeout_errors_are_not_reconnects() {
-        let err = anyhow::anyhow!("connection reset by peer");
-        assert!(!is_read_timeout(&err), "a plain error must not trigger a reconnect");
-    }
-
-    #[test]
-    fn write_row_emits_full_emoji_grapheme() {
-        let row = vec![
-            cell("\u{1f1ea}\u{1f1f8}", 2),
-            cell(" ", 0),
-            cell("hi", 1),
-        ];
-        let mut out = String::new();
-        write_row(&mut out, 0, &row);
-        assert!(
-            out.contains("\u{1f1ea}\u{1f1f8}"),
-            "emoji missing from client bytes: {out:?}"
-        );
-        assert!(
-            !out.contains("\x1b[1;2H"),
-            "continuation cell emitted a position: {out:?}"
-        );
-    }
-
-    #[test]
-    fn write_row_skips_continuation_after_wide_char() {
-        let row = vec![
-            cell("\u{1f600}", 2),
-            cell(" ", 0),
-            cell("x", 1),
-        ];
-        let mut out = String::new();
-        write_row(&mut out, 3, &row);
-        assert!(out.contains("\x1b[4;1H\u{1f600}"), "wide cell wrong: {out:?}");
-        assert!(out.contains("\x1b[4;3Hx"), "text after emoji mispositioned: {out:?}");
-    }
-
-    #[test]
-    fn write_row_does_not_erase_last_column_border() {
-        let mut row = Vec::new();
-        for _ in 0..79 {
-            row.push(cell(" ", 1));
-        }
-        row.push(cell("\u{2502}", 1));
-        let mut out = String::new();
-        write_row(&mut out, 2, &row);
-        assert!(out.contains("\x1b[3;80H\u{2502}"), "border not written: {out:?}");
-        assert!(
-            !out.contains("\x1b[K"),
-            "trailing erase must be skipped when content fills the row: {out:?}"
-        );
-    }
-
-    #[test]
-    fn write_row_erases_tail_after_short_content() {
-        let row = vec![cell("a", 1), cell("b", 1), cell("c", 1), cell(" ", 1)];
-        let mut out = String::new();
-        write_row(&mut out, 0, &row);
-        assert!(out.contains("\x1b[1;4H\x1b[K"), "tail not erased after content: {out:?}");
-    }
 }
