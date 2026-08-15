@@ -137,7 +137,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // Commands from clients.
         while let Ok((id, cmd)) = input_rx.try_recv() {
             match cmd {
-                Command::Attach { protocol, kind, .. } => {
+                Command::Attach { protocol, kind, cols, rows } => {
                     if protocol != PROTOCOL_VERSION {
                         let _ = send_to(&mut clients, id, &DaemonEvent::Shutdown);
                         clients.remove(&id);
@@ -152,6 +152,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         c.welcomed = true;
                         c.kind = kind;
                     }
+                    // A full-attach client sizes the composed grid immediately
+                    // (before its first `Resize` on terminal change), so the
+                    // TUI does not start at the 80x24 default.
+                    resize_terminal(&mut terminal, cols, rows);
                 }
                 Command::Detach => {
                     clients.remove(&id);
