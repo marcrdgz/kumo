@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
+use std::time::Instant;
 
 use super::overlays::{CtxTarget, PopupBtn};
 use super::util::{copy_to_clipboard, open_url};
@@ -217,6 +218,13 @@ impl App {
                             pane.write(&sgr_mouse(b, col + 1, row + 1, false));
                         }
                     } else {
+                        // A new drag replaces the previous (still-highlighted)
+                        // selection: clear it on its pane before starting fresh.
+                        if let Some(old) = self.sel {
+                            if let Some(pane) = self.panes.get_mut(&old.pane_id) {
+                                pane.clear_selection();
+                            }
+                        }
                         self.sel = Some(Sel {
                             pane_id: pg.pane_id,
                             start: (col, row),
@@ -323,13 +331,18 @@ impl App {
                     if let Some(pane) = self.panes.get_mut(&pc.pane_id) {
                         pane.write(&sgr_mouse(b, up.0, up.1, true));
                     }
-                } else if let Some(sel) = self.sel.take() {
+                } else if let Some(sel) = self.sel {
                     // A plain click without drag copies nothing, like a normal
-                    // terminal; only an actual drag copies.
+                    // terminal; only an actual drag copies. The copied selection
+                    // stays highlighted (kept in `self.sel`) until the next drag
+                    // replaces it or a plain click clears it.
                     if sel.start != sel.end {
                         self.copy_selection(&sel);
-                    } else if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
-                        pane.clear_selection();
+                    } else {
+                        self.sel = None;
+                        if let Some(pane) = self.panes.get_mut(&sel.pane_id) {
+                            pane.clear_selection();
+                        }
                     }
                 }
             }
@@ -400,9 +413,11 @@ impl App {
             if let Some(text) = pane.selection_text(sel.start, sel.end) {
                 if !text.is_empty() {
                     copy_to_clipboard(&text);
+                    self.toast = Some(("copied to clipboard".to_string(), Instant::now()));
                 }
             }
-            pane.clear_selection();
+            // Keep the pane's active selection so it stays highlighted after
+            // the copy; a new drag replaces it, a plain click clears it.
         }
     }
 }
