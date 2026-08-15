@@ -163,8 +163,8 @@ pub struct App {
     theme_idx: usize,
     /// Transient status-bar notice, e.g. "config: coming soon".
     notice: Option<(String, Instant)>,
-    /// Transient center-screen toast popup, e.g. "copied to clipboard".
-    toast: Option<(String, Instant)>,
+    /// Transient right-aligned status-bar message, e.g. "copied to clipboard".
+    status_msg: Option<(String, Instant)>,
     /// Startup update banner (top-right), when a newer release exists.
     update_notice: Option<crate::update::UpdateNotice>,
     /// Receives the background update check result.
@@ -285,7 +285,7 @@ impl App {
             theme: THEMES[crate::theme::DEFAULT_THEME_IDX],
             theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
-            toast: None,
+            status_msg: None,
             update_notice: None,
             update_rx,
         };

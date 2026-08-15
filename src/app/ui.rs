@@ -135,7 +135,6 @@ impl App {
         self.render_keybind_overlay(f);
         self.render_settings(f);
         self.render_worktree_picker(f);
-        self.render_toast(f);
     }
 
     /// Draw the `leader+q` pane-number overlay: a numbered badge on each pane.
@@ -353,6 +352,26 @@ impl App {
                     Rect::new(x, area.y, hint_w, 1),
                 );
             }
+        } else if let Some((msg, t)) = &self.status_msg {
+            // Right-aligned transient message (e.g. "copied to clipboard");
+            // the leader hint wins on its own row, so this only shows in
+            // NORMAL mode.
+            if t.elapsed() < std::time::Duration::from_secs(2) {
+                let avail = area.width.saturating_sub(start.saturating_add(left_w));
+                if avail > 0 {
+                    let msg: String = msg.chars().take(avail as usize).collect();
+                    let msg_w = msg.chars().count() as u16;
+                    let x = area.width.saturating_sub(msg_w);
+                    let msg_style = Style::default()
+                        .fg(RColor::White)
+                        .bg(self.theme.accent)
+                        .add_modifier(Modifier::BOLD);
+                    f.render_widget(
+                        Paragraph::new(Line::from(vec![Span::styled(msg, msg_style)])),
+                        Rect::new(x, area.y, msg_w, 1),
+                    );
+                }
+            }
         }
     }
 
@@ -400,41 +419,6 @@ impl App {
             Style::default().fg(self.theme.fg).bg(self.theme.panel_sep),
             inner_w.saturating_sub(5),
         );
-    }
-
-    /// Draw the transient toast (e.g. "copied to clipboard") as a small
-    /// bordered popup centered horizontally near the top, that fades out after
-    /// a short time. Non-interactive.
-    fn render_toast(&self, f: &mut Frame) {
-        let Some((msg, t)) = &self.toast else { return };
-        if t.elapsed() > std::time::Duration::from_millis(1600) {
-            return;
-        }
-        let area = f.area();
-        let w = (msg.chars().count() as u16 + 4).min(area.width.saturating_sub(2));
-        if w < 4 || area.height < 3 {
-            return;
-        }
-        let x0 = area.width.saturating_sub(w) / 2;
-        let y0 = 1;
-        let x1 = x0 + w - 1;
-        let border = Style::default().fg(self.theme.secondary).bg(self.theme.panel_sep);
-        fill(f, Rect::new(x0, y0, w, 3), self.theme.panel_sep);
-        put(f, x0, y0, "┌", border);
-        put(f, x1, y0, "┐", border);
-        put(f, x0, y0 + 2, "└", border);
-        put(f, x1, y0 + 2, "┘", border);
-        for x in (x0 + 1)..x1 {
-            put(f, x, y0, "─", border);
-            put(f, x, y0 + 2, "─", border);
-        }
-        put(f, x0, y0 + 1, "│", border);
-        put(f, x1, y0 + 1, "│", border);
-        let st = Style::default()
-            .fg(self.theme.fg)
-            .bg(self.theme.panel_sep)
-            .add_modifier(Modifier::BOLD);
-        text(f, x0 + 2, y0 + 1, msg, st, w - 2);
     }
 
     fn place_cursor<B: Backend>(

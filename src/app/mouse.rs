@@ -413,7 +413,7 @@ impl App {
             if let Some(text) = pane.selection_text(sel.start, sel.end) {
                 if !text.is_empty() {
                     copy_to_clipboard(&text);
-                    self.toast = Some(("copied to clipboard".to_string(), Instant::now()));
+                    self.status_msg = Some(("copied to clipboard".to_string(), Instant::now()));
                 }
             }
             // Keep the pane's active selection so it stays highlighted after

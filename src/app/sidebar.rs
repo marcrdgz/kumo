@@ -608,7 +608,7 @@ mod tests {
             theme: crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX],
             theme_idx: crate::theme::DEFAULT_THEME_IDX,
             notice: None,
-            toast: None,
+            status_msg: None,
             update_notice: None,
             update_rx,
         }
