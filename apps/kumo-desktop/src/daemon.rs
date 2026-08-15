@@ -1,10 +1,9 @@
 //! Background connection to the kumo daemon.
 //!
-//! The daemon owns everything (PTYs, terminal emulators, sessions, agents) and
-//! streams frames/snapshots over a unix socket. This thread is the app's window
-//! into that: it spawns the daemon when none is running, handshakes (declaring
-//! itself a `Desktop` client), and pumps messages both ways over two channels —
-//! `ServerMsg`s to the view, `ClientMsg`s from the view. On a daemon restart
+//! The daemon owns everything and never renders chrome. This thread is the
+//! app's window into it: it spawns the daemon when none is running, attaches
+//! as a `Desktop` client, subscribes to the semantic layout, and pumps
+//! `Command`s/`DaemonEvent`s over two channels. On a daemon restart
 //! (`kumo update`) it reconnects transparently.
 
 use std::io;
@@ -13,14 +12,14 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use kumo_protocol::{self as protocol, ClientKind, ClientMsg, ServerMsg, PROTOCOL_VERSION};
+use kumo_protocol::{self as protocol, ClientKind, Command, DaemonEvent, PROTOCOL_VERSION};
 
 /// Channels the view uses to talk to the background connection thread.
 pub struct Connection {
-    /// The view polls this for `ServerMsg`s.
-    pub to_view: mpsc::Receiver<ServerMsg>,
-    /// The view sends `ClientMsg`s (input, resize, subscribe, focus) here.
-    pub from_view: mpsc::Sender<ClientMsg>,
+    /// The view polls this for `DaemonEvent`s.
+    pub to_view: mpsc::Receiver<DaemonEvent>,
+    /// The view sends `Command`s (input, pane resizes, focus, subscribe) here.
+    pub from_view: mpsc::Sender<Command>,
 }
 
 /// Start the background connection thread.
@@ -40,7 +39,7 @@ enum ServeOutcome {
     Retry,
 }
 
-fn run(to_view: mpsc::Sender<ServerMsg>, from_view: mpsc::Receiver<ClientMsg>) {
+fn run(to_view: mpsc::Sender<DaemonEvent>, from_view: mpsc::Receiver<Command>) {
     let mut spawned = false;
     loop {
         match serve(&to_view, &from_view, &mut spawned) {
@@ -51,7 +50,7 @@ fn run(to_view: mpsc::Sender<ServerMsg>, from_view: mpsc::Receiver<ClientMsg>) {
     }
 }
 
-fn serve(to_view: &mpsc::Sender<ServerMsg>, from_view: &mpsc::Receiver<ClientMsg>, spawned: &mut bool) -> ServeOutcome {
+fn serve(to_view: &mpsc::Sender<DaemonEvent>, from_view: &mpsc::Receiver<Command>, spawned: &mut bool) -> ServeOutcome {
     let path = ipc_socket_path();
     if UnixStream::connect(&path).is_err() {
         if !*spawned {
@@ -69,15 +68,13 @@ fn serve(to_view: &mpsc::Sender<ServerMsg>, from_view: &mpsc::Receiver<ClientMsg
 
     // Handshake: announce ourselves as a desktop client. The daemon rejects a
     // mismatched protocol version with `Shutdown`.
-    let hello = ClientMsg::Hello { protocol: PROTOCOL_VERSION, kind: ClientKind::Desktop, cols: 80, rows: 24 };
-    if protocol::write_framed(&mut stream, &hello).is_err() {
+    let attach = Command::Attach { protocol: PROTOCOL_VERSION, kind: ClientKind::Desktop, cols: 80, rows: 24 };
+    if protocol::write_framed(&mut stream, &attach).is_err() {
         return ServeOutcome::Restart;
     }
-    // This app paints its own chrome, so keep the daemon's sidebar closed so
-    // panes get the full width.
-    let _ = protocol::write_framed(&mut stream, &ClientMsg::SetSidebar { open: false });
-    // The daemon pushes a frame every ~250ms even when idle, so a short read
-    // timeout lets us poll the outbox (resize/input) without a second thread.
+    let _ = protocol::write_framed(&mut stream, &Command::SubscribeLayout);
+    // A short read timeout lets us poll the outbox (resize/input) without a
+    // second thread.
     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
 
     loop {
@@ -86,9 +83,9 @@ fn serve(to_view: &mpsc::Sender<ServerMsg>, from_view: &mpsc::Receiver<ClientMsg
                 return ServeOutcome::Restart;
             }
         }
-        match protocol::read_framed::<ServerMsg>(&mut stream) {
-            Ok(ServerMsg::Restarting) => return ServeOutcome::Restart,
-            Ok(ServerMsg::Shutdown) => return ServeOutcome::Exited,
+        match protocol::read_framed::<DaemonEvent>(&mut stream) {
+            Ok(DaemonEvent::Restarting) => return ServeOutcome::Restart,
+            Ok(DaemonEvent::Shutdown) => return ServeOutcome::Exited,
             Ok(msg) => {
                 if to_view.send(msg).is_err() {
                     return ServeOutcome::Exited;

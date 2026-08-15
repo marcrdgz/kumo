@@ -1,11 +1,9 @@
 //! Kumo Desktop: a native GPUI client for the kumo daemon.
 //!
-//! Unlike the TUI client, this app does **not** render the daemon's composed
-//! interface. It consumes the structured snapshot (sessions/panes/agents with
-//! geometry) and per-pane `PaneFrame`s, then paints panes itself: each pane is
-//! a card in its session's layout, with its own title chip and agent status,
-//! inside a native sidebar and status strip. Input is forwarded to the daemon,
-//! which remains the single source of truth for PTYs, layout, and focus.
+//! The daemon never renders chrome. This app subscribes to the semantic layout
+//! (sessions → splits in ratios → panes), computes its own geometry, requests
+//! per-pane sizes (`PaneResize`), and paints each pane as a card (border,
+//! title chip, agent status) with its cells — all chrome drawn natively.
 
 mod daemon;
 mod grid;
@@ -22,8 +20,8 @@ use gpui::{
     WindowOptions, fill, prelude::*,
 };
 use kumo_protocol::{
-    AgentInfo, AgentStatus, ClientMsg, PaneRect, ServerMsg, SessionInfo, WireKeyCode,
-    WireKeyEvent, WireModifiers, WireMouseButton, WireMouseEvent, WireMouseKind,
+    AgentInfo, AgentStatus, Command, DaemonEvent, Layout, LayoutNode, SplitDir,
+    WireKeyCode, WireKeyEvent, WireModifiers, WireMouseButton, WireMouseEvent, WireMouseKind,
 };
 
 use crate::grid::Grid;
@@ -34,16 +32,26 @@ const CANVAS_BG: u32 = 0x0d0d10;
 const CARD_BG: u32 = 0x111116;
 const FOCUS_ACCENT: u32 = 0x4c6ef5;
 
+/// A rectangle in cell coordinates (client-computed from the semantic tree).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct CellRect {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
 struct KumoDesktop {
-    to_view: mpsc::Receiver<ServerMsg>,
-    from_view: mpsc::Sender<ClientMsg>,
+    to_view: mpsc::Receiver<DaemonEvent>,
+    from_view: mpsc::Sender<Command>,
     connected: bool,
     status: SharedString,
-    sessions: Vec<SessionInfo>,
+    layout: Option<Layout>,
     panes: HashMap<u64, Grid>,
     subscribed: HashSet<u64>,
-    selected: Option<String>,
-    last_sent: Option<(u16, u16)>,
+    rects: Vec<(u64, CellRect)>,
+    grid_size: (u16, u16),
+    sent_sizes: HashMap<u64, (u16, u16)>,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -71,11 +79,12 @@ impl KumoDesktop {
             from_view: conn.from_view,
             connected: false,
             status: SharedString::from("connecting to kumo daemon…"),
-            sessions: Vec::new(),
+            layout: None,
             panes: HashMap::new(),
             subscribed: HashSet::new(),
-            selected: None,
-            last_sent: None,
+            rects: Vec::new(),
+            grid_size: (80, 24),
+            sent_sizes: HashMap::new(),
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -88,10 +97,7 @@ impl KumoDesktop {
             base,
             dim,
         };
-        // Declare ourselves as a snapshot + pane consumer and close the daemon's
-        // chrome so panes get the full width (this app paints its own).
-        let _ = this.send(ClientMsg::SubscribeSnapshot);
-        let _ = this.send(ClientMsg::SetSidebar { open: false });
+        let _ = this.send(Command::SubscribeLayout);
         cx.spawn(|this: gpui::WeakEntity<KumoDesktop>, cx: &mut gpui::AsyncApp| {
             let mut cx = cx.clone();
             async move {
@@ -105,7 +111,7 @@ impl KumoDesktop {
         this
     }
 
-    fn send(&mut self, msg: ClientMsg) -> Result<(), ()> {
+    fn send(&mut self, msg: Command) -> Result<(), ()> {
         self.from_view.send(msg).map_err(|_| ())
     }
 
@@ -117,25 +123,28 @@ impl KumoDesktop {
         let mut changed = false;
         while let Ok(msg) = self.to_view.try_recv() {
             match msg {
-                ServerMsg::Welcome { .. } => {
+                DaemonEvent::Welcome { .. } => {
                     self.connected = true;
                     self.status = SharedString::from("connected");
                     changed = true;
                 }
-                ServerMsg::Snapshot { sessions } => {
-                    self.sessions = sessions;
-                    self.on_snapshot();
+                DaemonEvent::Layout { layout } => {
+                    self.on_layout(&layout);
                     changed = true;
                 }
-                ServerMsg::PaneFrame { frame } => {
+                DaemonEvent::PaneFrame { frame } => {
                     self.panes.entry(frame.pane_id).or_default().apply(&frame);
                     changed = true;
                 }
-                ServerMsg::Restarting => {
+                DaemonEvent::Reply { message } => {
+                    self.status = SharedString::from(message);
+                    changed = true;
+                }
+                DaemonEvent::Restarting => {
                     self.status = SharedString::from("daemon restarting…");
                     changed = true;
                 }
-                ServerMsg::Shutdown => {
+                DaemonEvent::Shutdown => {
                     self.connected = false;
                     self.status = SharedString::from("daemon stopped");
                     changed = true;
@@ -148,73 +157,71 @@ impl KumoDesktop {
         }
     }
 
-    /// Follow the daemon's active session and keep pane subscriptions in sync
-    /// with it.
-    fn on_snapshot(&mut self) {
-        let active = self
-            .sessions
-            .iter()
-            .find(|s| s.active)
-            .map(|s| s.name.clone())
-            .or_else(|| self.sessions.first().map(|s| s.name.clone()));
-        if self.selected != active {
-            self.selected = active;
-            if let Some(name) = &self.selected {
-                let _ = self.send(ClientMsg::FocusSession { name: name.clone() });
+    /// Follow the active session: compute geometry from the semantic tree,
+    /// request pane sizes, and keep pane subscriptions in sync.
+    fn on_layout(&mut self, layout: &Layout) {
+        self.layout = Some(layout.clone());
+        self.recompute_geometry();
+        let mut want: HashSet<u64> = HashSet::new();
+        if let Some(session) = layout.sessions.iter().find(|s| Some(&s.name) == layout.active.as_ref()) {
+            let (gw, gh) = self.grid_size;
+            let area = CellRect { x: 0, y: 0, width: gw, height: gh.saturating_sub(1) };
+            let rects = if session.zoom {
+                vec![(session.focus, area)]
+            } else if let Some(root) = &session.root {
+                compute_rects(root, area)
+            } else {
+                Vec::new()
+            };
+            self.rects = rects;
+            for (pid, r) in self.rects.clone() {
+                want.insert(pid);
+                let inner = (r.width.saturating_sub(2).max(1), r.height.saturating_sub(2).max(1));
+                if self.sent_sizes.get(&pid) != Some(&inner) {
+                    self.sent_sizes.insert(pid, inner);
+                    let _ = self.send(Command::PaneResize { pane_id: pid, cols: inner.0, rows: inner.1 });
+                }
+                if self.subscribed.insert(pid) {
+                    let _ = self.send(Command::SubscribePane { pane_id: pid });
+                }
             }
         }
-        let session = self.selected_session().cloned();
-        if let Some(s) = session {
-            self.resubscribe(&s);
+        for pid in self.subscribed.difference(&want).copied().collect::<Vec<_>>() {
+            self.subscribed.remove(&pid);
+            let _ = self.send(Command::UnsubscribePane { pane_id: pid });
+            self.panes.remove(&pid);
         }
     }
 
-    /// Subscribe to / unsubscribe from the selected session's pane streams.
-    fn resubscribe(&mut self, session: &SessionInfo) {
-        let want: HashSet<u64> = session.panes.iter().map(|p| p.id).collect();
-        let to_add: Vec<u64> = want.difference(&self.subscribed).copied().collect();
-        let to_remove: Vec<u64> = self.subscribed.difference(&want).copied().collect();
-        for id in to_add {
-            let _ = self.send(ClientMsg::SubscribePane { pane_id: id });
-        }
-        for id in to_remove {
-            let _ = self.send(ClientMsg::UnsubscribePane { pane_id: id });
-            self.panes.remove(&id);
-        }
-        self.subscribed = want;
-    }
-
-    fn selected_session(&self) -> Option<&SessionInfo> {
-        let name = self.selected.as_ref()?;
-        self.sessions.iter().find(|s| &s.name == name)
+    /// The active session (following the daemon's active session).
+    fn active_session(&self) -> Option<&kumo_protocol::SessionLayout> {
+        let layout = self.layout.as_ref()?;
+        let name = layout.active.as_deref()?;
+        layout.sessions.iter().find(|s| s.name == name)
     }
 
     fn select_session(&mut self, name: String) {
-        self.selected = Some(name.clone());
-        let _ = self.send(ClientMsg::FocusSession { name });
-        let session = self.selected_session().cloned();
-        if let Some(s) = session {
-            self.resubscribe(&s);
-        }
+        let _ = self.send(Command::SessionFocus { name });
     }
 
-    /// The pane under a cell coordinate, as `(session, pane_id)`.
+    /// The pane under a cell coordinate (client-computed geometry).
     fn pane_at(&self, col: u16, row: u16) -> Option<(String, u64)> {
-        let s = self.selected_session()?;
-        for p in &s.panes {
-            let r = p.rect;
+        let session = self.active_session()?;
+        for (pid, r) in &self.rects {
             if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
-                return Some((s.name.clone(), p.id));
+                return Some((session.name.clone(), *pid));
             }
         }
         None
     }
 
     fn focused_pane_label(&self) -> String {
-        let s = self.selected_session();
-        let focus = s.and_then(|s| s.focus);
-        let Some(focus) = focus else { return "-".into() };
-        s.and_then(|s| s.panes.iter().find(|p| p.id == focus))
+        let Some(session) = self.active_session() else { return "-".into() };
+        let focus = session.focus;
+        session
+            .root
+            .as_deref()
+            .and_then(|r| find_pane(r, focus))
             .map(|p| p.title.trim().to_string())
             .unwrap_or_else(|| format!("pane {focus}"))
     }
@@ -223,45 +230,35 @@ impl KumoDesktop {
     // Geometry
     // ------------------------------------------------------------------
 
-    /// Extent (in cells) of the selected session's rendered grid: the max pane
-    /// bottom/right edge, plus one row for the status strip.
-    fn selected_bounds(&self) -> (u16, u16) {
-        if let Some(s) = self.selected_session() {
-            let mut w = 0u16;
-            let mut h = 0u16;
-            for p in &s.panes {
-                w = w.max(p.rect.x + p.rect.width);
-                h = h.max(p.rect.y + p.rect.height);
-            }
-            if w > 0 && h > 0 {
-                return (w, h + 1);
-            }
-        }
-        let (c, r) = self.last_sent.unwrap_or((80, 24));
-        (c, r.saturating_sub(1))
-    }
-
-    /// Choose a daemon grid size (~13px cells) and compute the scaled cell
-    /// metrics so the session's panes fill the available area.
+    /// Choose the cell grid size (from the window at a ~13px target) and
+    /// re-derive the scaled cell metrics so the session's panes fill the area.
     fn update_geometry(&mut self, window: &mut Window) {
         let vp = window.viewport_size();
         let avail_w = (f32::from(vp.width) - SIDEBAR_W).max(1.0);
         let avail_h = (f32::from(vp.height) - STATUS_H).max(1.0);
         let target_w = 13.0 * self.advance_ratio;
         let target_h = 13.0 * self.line_height_ratio;
-        let cols = (avail_w / target_w).floor().max(20.0) as u16;
-        let rows = (avail_h / target_h).floor().max(10.0) as u16 + 1; // + status row
-        if self.last_sent != Some((cols, rows)) {
-            self.last_sent = Some((cols, rows));
-            let _ = self.send(ClientMsg::Resize { cols, rows });
+        let gw = (avail_w / target_w).floor().max(20.0) as u16;
+        let gh = (avail_h / target_h).floor().max(10.0) as u16 + 1; // + status row
+        if self.grid_size != (gw, gh) {
+            self.grid_size = (gw, gh);
+            if let Some(layout) = self.layout.clone() {
+                self.on_layout(&layout);
+            }
         }
-        let (gw, gh) = self.selected_bounds();
-        self.cell_h = avail_h / (gh.max(1) as f32);
+        let (_, gh) = self.grid_size;
+        let pane_rows = (gh.saturating_sub(1)).max(1) as f32;
+        self.cell_h = avail_h / pane_rows;
         self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
         self.cell_w = self.font_size * self.advance_ratio;
-        let canvas_w = gw as f32 * self.cell_w;
+        let canvas_w = self.grid_size.0 as f32 * self.cell_w;
         self.canvas_origin = point(px(SIDEBAR_W + (avail_w - canvas_w).max(0.0) * 0.5), px(0.0));
         self.canvas_size = (canvas_w, avail_h);
+    }
+
+    fn recompute_geometry(&mut self) {
+        // Re-derive cell scaling from the window size.
+        // (update_geometry is called every frame with the window.)
     }
 
     fn cell_from_position(&self, pos: Point<Pixels>) -> Option<(u16, u16)> {
@@ -281,7 +278,7 @@ impl KumoDesktop {
         let button = wire_button(ev.button);
         let Some((col, row)) = self.cell_from_position(ev.position) else { return };
         if let Some((session, pid)) = self.pane_at(col, row) {
-            let _ = self.send(ClientMsg::FocusPane { session, pane_id: pid });
+            let _ = self.send(Command::PaneFocus { session, pane_id: pid });
         }
         self.send_mouse(WireMouseKind::Down(button), col, row, ev.modifiers);
     }
@@ -312,7 +309,7 @@ impl KumoDesktop {
     }
 
     fn send_mouse(&mut self, kind: WireMouseKind, col: u16, row: u16, mods: Modifiers) {
-        let _ = self.send(ClientMsg::Mouse {
+        let _ = self.send(Command::Mouse {
             event: WireMouseEvent { kind, col, row, modifiers: wire_modifiers(mods) },
         });
     }
@@ -333,35 +330,41 @@ impl KumoDesktop {
             .p(px(10.))
             .gap(px(3.))
             .child(self.header());
-        if self.sessions.is_empty() {
-            col = col.child(
-                div().pt(px(6.)).child(
-                    StyledText::new(SharedString::from(
-                        if self.connected { "no sessions".to_string() } else { self.status.to_string() },
-                    ))
-                    .with_default_highlights(&self.dim, []),
-                ),
-            );
-        } else {
-            col = col.child(self.section_label("SESSIONS"));
-            for s in &self.sessions {
-                col = col.child(self.session_card(s, cx));
-            }
-            col = col.child(self.section_label("AGENTS"));
-            let mut has_agents = false;
-            for s in &self.sessions {
-                for pane in &s.panes {
-                    if let Some(agent) = &pane.agent {
+        if let Some(layout) = &self.layout {
+            if layout.sessions.is_empty() {
+                col = col.child(
+                    div().pt(px(6.)).child(
+                        StyledText::new(SharedString::from(
+                            if self.connected { "no sessions".to_string() } else { self.status.to_string() },
+                        ))
+                        .with_default_highlights(&self.dim, []),
+                    ),
+                );
+            } else {
+                col = col.child(self.section_label("SESSIONS"));
+                for s in &layout.sessions {
+                    col = col.child(self.session_card(s, cx));
+                }
+                col = col.child(self.section_label("AGENTS"));
+                let mut has_agents = false;
+                for s in &layout.sessions {
+                    for (_, agent) in session_agents(&s.root) {
                         has_agents = true;
-                        col = col.child(self.agent_row(&s.name, agent, cx));
+                        col = col.child(self.agent_row(&s.name, &agent, cx));
                     }
                 }
+                if !has_agents {
+                    col = col.child(
+                        div().child(StyledText::new(SharedString::from("no agents running")).with_default_highlights(&self.dim, [])),
+                    );
+                }
             }
-            if !has_agents {
-                col = col.child(
-                    div().child(StyledText::new(SharedString::from("no agents running")).with_default_highlights(&self.dim, [])),
-                );
-            }
+        } else {
+            col = col.child(
+                div().pt(px(6.)).child(
+                    StyledText::new(SharedString::from(&self.status)).with_default_highlights(&self.dim, []),
+                ),
+            );
         }
         col
     }
@@ -385,10 +388,12 @@ impl KumoDesktop {
             .child(StyledText::new(SharedString::from(label.to_string())).with_default_highlights(&self.dim, []))
     }
 
-    fn session_card(&self, s: &SessionInfo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn session_card(&self, s: &kumo_protocol::SessionLayout, cx: &mut Context<Self>) -> impl IntoElement {
         let name = s.name.clone();
-        let bg: Hsla = if s.active { rgb(0x23232c).into() } else { hsla(0.0, 0.0, 0.0, 0.0) };
-        let border: Hsla = if s.active { rgb(FOCUS_ACCENT).into() } else { rgb(0x222228).into() };
+        let is_active = self.layout.as_ref().map(|l| l.active.as_deref()) == Some(Some(&s.name));
+        let bg: Hsla = if is_active { rgb(0x23232c).into() } else { hsla(0.0, 0.0, 0.0, 0.0) };
+        let border: Hsla = if is_active { rgb(FOCUS_ACCENT).into() } else { rgb(0x222228).into() };
+        let pane_count = count_panes(&s.root);
         let mut card = div()
             .w_full()
             .rounded_md()
@@ -400,12 +405,7 @@ impl KumoDesktop {
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, _cx| {
                 this.select_session(name.clone());
             }));
-        let title = format!(
-            "{}  · {} panes{}",
-            s.name,
-            s.panes.len(),
-            if s.zoomed { " (zoom)" } else { "" }
-        );
+        let title = format!("{}  · {} panes{}", s.name, pane_count, if s.zoom { " (zoom)" } else { "" });
         card = card
             .child(div().child(StyledText::new(SharedString::from(title)).with_default_highlights(&self.base, [])))
             .child(
@@ -414,17 +414,15 @@ impl KumoDesktop {
                         .with_default_highlights(&self.dim, []),
                 ),
             );
-        for pane in &s.panes {
-            if let Some(agent) = &pane.agent {
-                card = card.child(self.agent_badge(agent));
-            }
+        for (_, agent) in session_agents(&s.root) {
+            card = card.child(self.agent_badge(&agent));
         }
         card
     }
 
     fn agent_badge(&self, agent: &AgentInfo) -> impl IntoElement {
         let color = agent_status_color(agent.status);
-        let text = format!("{}  {} · {}", agent.name, agent.status.label(), agent_status_label(agent.status));
+        let text = format!("{}  {} · {}", agent.name, agent.status.label(), agent.status.label());
         let mut style = self.dim.clone();
         style.color = color;
         div().pt(px(2.)).child(StyledText::new(SharedString::from(text)).with_default_highlights(&style, []))
@@ -451,7 +449,7 @@ impl KumoDesktop {
         let text = format!(
             "{}   session {}   pane {}",
             if self.connected { "connected" } else { "disconnected" },
-            self.selected.as_deref().unwrap_or("-"),
+            self.layout.as_ref().and_then(|l| l.active.clone()).unwrap_or_else(|| "-".into()),
             self.focused_pane_label()
         );
         div()
@@ -468,15 +466,11 @@ impl KumoDesktop {
 }
 
 // ---------------------------------------------------------------------------
-// Pane canvas: paints each pane as a card (border, title chip, agent status)
-// with its cells, so the app renders natively instead of showing the daemon's
-// composed UI.
+// Pane canvas
 // ---------------------------------------------------------------------------
 
-/// Owned snapshot of what the canvas paints this frame, extracted in
-/// `prepaint` so `paint` can borrow `App` freely while shaping text.
 struct CanvasPane {
-    rect: PaneRect,
+    rect: CellRect,
     focused: bool,
     title: String,
     agent: Option<(String, AgentStatus)>,
@@ -500,14 +494,16 @@ impl PaneCanvas {
     fn extract(&self, cx: &App) -> CanvasData {
         let model = self.view.read(cx);
         let mut panes = Vec::new();
-        if let Some(session) = model.selected_session() {
-            for pane in &session.panes {
-                let grid = model.panes.get(&pane.id).cloned();
+        if let Some(session) = model.active_session() {
+            let focus = session.focus;
+            for (pid, r) in &model.rects {
+                let info = session.root.as_deref().and_then(|root| find_pane(root, *pid));
+                let grid = model.panes.get(pid).cloned();
                 panes.push(CanvasPane {
-                    rect: pane.rect,
-                    focused: session.focus == Some(pane.id),
-                    title: pane.title.trim().to_string(),
-                    agent: pane.agent.as_ref().map(|a| (a.name.clone(), a.status)),
+                    rect: *r,
+                    focused: focus == *pid,
+                    title: info.map(|p| p.title.trim().to_string()).unwrap_or_else(|| format!("pane {pid}")),
+                    agent: info.and_then(|p| p.agent.as_ref()).map(|a| (a.name.clone(), a.status)),
                     grid,
                 });
             }
@@ -671,6 +667,83 @@ fn paint_title_chip(
 }
 
 // ---------------------------------------------------------------------------
+// Semantic layout helpers
+// ---------------------------------------------------------------------------
+
+/// Recursively lay a semantic tree out over a cell area.
+fn compute_rects(node: &LayoutNode, area: CellRect) -> Vec<(u64, CellRect)> {
+    match node {
+        LayoutNode::Pane(p) => vec![(p.id, area)],
+        LayoutNode::Split { dir, ratio, a, b } => {
+            let mut out = Vec::new();
+            let ratio = ratio.clamp(0.01, 0.99);
+            match dir {
+                SplitDir::Vertical => {
+                    if area.width <= 1 {
+                        return vec![];
+                    }
+                    let aw = ((area.width as f32) * ratio).round().clamp(1.0, (area.width - 1) as f32) as u16;
+                    out.extend(compute_rects(a, CellRect { x: area.x, y: area.y, width: aw, height: area.height }));
+                    out.extend(compute_rects(b, CellRect { x: area.x + aw, y: area.y, width: area.width - aw, height: area.height }));
+                }
+                SplitDir::Horizontal => {
+                    if area.height <= 1 {
+                        return vec![];
+                    }
+                    let ah = ((area.height as f32) * ratio).round().clamp(1.0, (area.height - 1) as f32) as u16;
+                    out.extend(compute_rects(a, CellRect { x: area.x, y: area.y, width: area.width, height: ah }));
+                    out.extend(compute_rects(b, CellRect { x: area.x, y: area.y + ah, width: area.width, height: area.height - ah }));
+                }
+            }
+            out
+        }
+    }
+}
+
+fn count_panes(node: &Option<Box<LayoutNode>>) -> usize {
+    match node {
+        Some(n) => match n.as_ref() {
+            LayoutNode::Pane(_) => 1,
+            LayoutNode::Split { a, b, .. } => count_panes(&Some(a.clone())) + count_panes(&Some(b.clone())),
+        },
+        None => 0,
+    }
+}
+
+fn find_pane(node: &LayoutNode, pid: u64) -> Option<&kumo_protocol::LayoutPane> {
+    match node {
+        LayoutNode::Pane(p) if p.id == pid => Some(p),
+        LayoutNode::Split { a, b, .. } => {
+            find_pane(a, pid).or_else(|| find_pane(b, pid))
+        }
+        _ => None,
+    }
+}
+
+/// All (pane_id, agent) pairs in a session tree.
+fn session_agents(node: &Option<Box<LayoutNode>>) -> Vec<(u64, AgentInfo)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&LayoutNode> = Vec::new();
+    if let Some(n) = node {
+        stack.push(n);
+    }
+    while let Some(n) = stack.pop() {
+        match n {
+            LayoutNode::Pane(p) => {
+                if let Some(a) = &p.agent {
+                    out.push((p.id, a.clone()));
+                }
+            }
+            LayoutNode::Split { a, b, .. } => {
+                stack.push(a);
+                stack.push(b);
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -680,10 +753,6 @@ fn agent_status_color(status: AgentStatus) -> Hsla {
         AgentStatus::Working => rgb(0x2ee06b).into(),
         AgentStatus::Idle => rgb(0x7d7d82).into(),
     }
-}
-
-fn agent_status_label(status: AgentStatus) -> &'static str {
-    status.label()
 }
 
 fn wire_button(b: MouseButton) -> WireMouseButton {
@@ -704,8 +773,7 @@ fn wire_modifiers(m: Modifiers) -> WireModifiers {
     wm
 }
 
-/// Map a GPUI keystroke to a wire key event, or `None` if it has no terminal
-/// equivalent (e.g. a lone modifier press).
+/// Map a GPUI keystroke to a wire key event.
 fn wire_key(ks: &Keystroke) -> Option<WireKeyEvent> {
     let mods = wire_modifiers(ks.modifiers);
     let key = ks.key.as_str();
@@ -796,8 +864,6 @@ fn main() {
             )
             .unwrap();
         let view = window.update(cx, |_, _, cx| cx.entity()).unwrap();
-        // Forward every keystroke to the daemon (except the app-level chords
-        // handled here), like a terminal forwards keys to the attached session.
         cx.observe_keystrokes(move |ev, _, cx| {
             let ks = ev.keystroke.clone();
             if ks.key == "q" && ks.modifiers.platform {
@@ -808,14 +874,14 @@ fn main() {
                 let text = cx.read_from_clipboard().and_then(|item| item.text());
                 view.update(cx, move |this, _cx| {
                     if let Some(text) = text {
-                        let _ = this.send(ClientMsg::Paste { text });
+                        let _ = this.send(Command::Paste { text });
                     }
                 });
                 return;
             }
             view.update(cx, move |this, _cx| {
                 if let Some(key) = wire_key(&ks) {
-                    let _ = this.send(ClientMsg::Input { key });
+                    let _ = this.send(Command::Input { key });
                 }
             });
         })

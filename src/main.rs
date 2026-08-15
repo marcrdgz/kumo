@@ -1,6 +1,7 @@
 mod agents;
 mod alert;
 mod app;
+mod cli;
 #[cfg(unix)]
 mod client;
 mod config;
@@ -20,16 +21,6 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::app::Launch;
-
-#[cfg(not(unix))]
-use {
-    crossterm::event::{DisableMouseCapture, EnableMouseCapture},
-    crossterm::execute,
-    crossterm::terminal::{enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ratatui::backend::CrosstermBackend,
-    ratatui::Terminal,
-    std::io::stdout,
-};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -85,59 +76,26 @@ fn main() -> Result<()> {
         }
     }
 
+    // Control CLI: `kumo session|pane|agent ...` (and the legacy aliases
+    // `ls`/`kill`/`reload`/`server restart`).
     match args.first().map(|s| s.as_str()) {
-        Some("ls") => {
+        Some("session") | Some("pane") | Some("agent") | Some("ls") | Some("list")
+        | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
-                return client::list_sessions();
+                return cli::run(&args);
             }
             #[cfg(not(unix))]
             {
-                anyhow::bail!("`kumo ls` needs the unix daemon");
-            }
-        }
-        Some("kill") => {
-            #[cfg(unix)]
-            {
-                return client::kill_server();
-            }
-            #[cfg(not(unix))]
-            {
-                anyhow::bail!("`kumo kill` needs the unix daemon");
-            }
-        }
-        Some("reload") => {
-            #[cfg(unix)]
-            {
-                return client::reload();
-            }
-            #[cfg(not(unix))]
-            {
-                anyhow::bail!("`kumo reload` needs the unix daemon");
-            }
-        }
-        Some("server") => {
-            #[cfg(unix)]
-            {
-                match args.get(1).map(|s| s.as_str()) {
-                    Some("restart") => return client::server_restart(),
-                    Some(other) => anyhow::bail!(
-                        "unknown kumo server subcommand {other:?} (try `kumo server restart`)"
-                    ),
-                    None => anyhow::bail!("missing kumo server subcommand (try `kumo server restart`)"),
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                anyhow::bail!("`kumo server restart` needs the unix daemon");
+                anyhow::bail!("kumo commands need the unix daemon");
             }
         }
         _ => {}
     }
 
     // tmux-style launch: `kumo` attaches to the daemon if present (else starts
-    // one), `kumo attach` requires a running daemon, `kumo new [dir]` and the
-    // back-compat `kumo [dir]` start fresh.
+    // one), `kumo attach` requires a running daemon, `kumo new [dir]` starts a
+    // fresh session.
     let launch = match args.first().map(|s| s.as_str()) {
         Some("attach") => Launch::Attach,
         Some("new") => Launch::New(args.get(1).map(PathBuf::from)),
@@ -151,28 +109,8 @@ fn main() -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        run_foreground(launch)
+        anyhow::bail!("kumo needs a unix daemon (the TUI client is unix-only)")
     }
-}
-
-/// Foreground TUI (non-unix fallback until daemon parity lands).
-#[cfg(not(unix))]
-fn run_foreground(launch: Launch) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, crossterm::event::EnableBracketedPaste)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let result = app::run(&mut terminal, launch);
-
-    // Restore the terminal regardless of how the app exits.
-    let _ = crossterm::terminal::disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, crossterm::event::DisableBracketedPaste);
-    let _ = terminal.show_cursor();
-    let _ = terminal.flush();
-
-    result
 }
 
 fn print_help() {
@@ -183,30 +121,27 @@ fn print_help() {
     println!("    kumo attach                attach to the running daemon");
     println!("    kumo new [WORKSPACE]       start a fresh session");
     println!("    kumo [WORKSPACE]           start fresh inside this directory");
-    println!("    kumo ls                    list the daemon's sessions");
-    println!("    kumo kill                  stop the daemon (and its panes)");
-    println!("    kumo reload                re-read the config and apply it live");
-    println!("    kumo server restart        restart the daemon in place (panes survive)");
-    println!("    kumo update [--nightly] [--check]");
     println!();
-    println!("ARGS:");
-    println!("    [WORKSPACE]    Start kumo inside this directory");
+    println!("SESSIONS:");
+    println!("    kumo session list");
+    println!("    kumo session new [DIR] [--name NAME]");
+    println!("    kumo session kill NAME");
+    println!("    kumo session attach NAME");
     println!();
-    println!("OPTIONS:");
-    println!("    -h, --help     Print help information");
-    println!("    -v, --version  Print version and channel (stable / nightly / dev)");
+    println!("PANES:");
+    println!("    kumo pane split [-s SESSION] [--horizontal] [--ai]");
+    println!("    kumo pane close [-s SESSION] [-p PANE_ID]");
+    println!("    kumo pane focus -p PANE_ID [-s SESSION]");
+    println!("    kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...");
     println!();
-    println!("COMMANDS:");
-    println!("    attach         Attach a terminal to the daemon (no daemon = error)");
-    println!("    new            Start a fresh session in the daemon");
-    println!("    ls             List the daemon's sessions");
-    println!("    kill           Stop the daemon (kills its panes)");
-    println!("    reload         Re-read the config and apply it live");
-    println!("    server restart Restart the daemon in place (execs the current binary, panes survive)");
-    println!("    update         Update to the latest release (needs gh)");
-    println!("                   --nightly  update to the latest nightly build");
-    println!("                   --check    report availability (exit 0 = up to date, 1 = update)");
+    println!("AGENTS:");
+    println!("    kumo agent spawn [-s SESSION] [PROGRAM]");
+    println!("    kumo agent status");
+    println!("    kumo agent kill -p PANE_ID [-s SESSION]");
     println!();
-    println!("The daemon runs in the background and owns your panes; `leader+d`");
-    println!("detaches this terminal, leaving everything running. Re-attach with `kumo`.");
+    println!("OTHER:");
+    println!("    kumo ls / kill / reload / server restart / update");
+    println!();
+    println!("The daemon runs in the background and owns your panes; the TUI is a");
+    println!("client to it, so several terminals and the desktop app can attach at once.");
 }

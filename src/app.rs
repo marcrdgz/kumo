@@ -1,15 +1,12 @@
 use std::collections::HashMap;
-use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::CrosstermBackend;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::Terminal;
 
 use crate::layout::{self, LayoutTree, ResizeDir, SplitDir};
 use crate::agents::AgentStatus;
@@ -24,25 +21,30 @@ use self::overlays::{CtxMenu, CtxTarget, KeybindOverlay, Menu, NamePopup, Settin
 use self::sidebar::{SidebarScroll, SidebarTab};
 use self::tasks::BranchInfo;
 
-mod bindings;
+pub(crate) mod bindings;
+mod commands;
+#[allow(dead_code)]
 mod mouse;
+#[allow(dead_code)]
 mod overlays;
 #[cfg(unix)]
 pub(super) mod server;
+#[allow(dead_code)]
 mod sidebar;
 mod tasks;
 mod ui;
 mod util;
+#[allow(dead_code)]
 mod worktrees;
 
-/// Foreground TUI terminal backend, used only by the non-unix fallback path
-/// (`App::run`); the daemon renders to a `TestBackend` instead.
-#[cfg_attr(unix, allow(dead_code))]
-type Term = Terminal<CrosstermBackend<Stdout>>;
+// The daemon is the only engine: it owns PTYs, the semantic layout tree, and
+// per-pane terminal content, and is driven entirely by commands. There is no
+// foreground TUI path anymore — `kumo` is a thin client to the daemon.
 
 /// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
 const RESIZE_STEP: f32 = 0.05;
 /// How long the `leader+q` pane-number overlay stays up without a keypress.
+#[allow(dead_code)]
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Modifiers that reveal/activate links (`Cmd+click` like a normal terminal).
@@ -67,7 +69,7 @@ enum Mode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Dir {
+pub(crate) enum Dir {
     Left,
     Right,
     Up,
@@ -87,6 +89,7 @@ pub enum Launch {
     Resume(PathBuf),
 }
 
+#[allow(dead_code)]
 pub struct App {
     sessions: Vec<Session>,
     active: usize,
@@ -135,6 +138,9 @@ pub struct App {
     /// Rendered cells of each pane's viewport, blitted back when the pane is
     /// unchanged so the frame loop never re-iterates unchanged terminals.
     pane_cache: HashMap<u64, Buffer>,
+    /// Client-requested terminal size per pane (`PaneResize`); the daemon
+    /// resizes each pane's PTY + emulator to this. Default 80x24.
+    pane_sizes: HashMap<u64, (u16, u16)>,
     /// Whether a link modifier (Cmd/Ctrl/Option) is held, per the last input
     /// event. While set, links are underlined so they read as clickable.
     link_mods: bool,
@@ -174,40 +180,6 @@ pub struct App {
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
 /// lands); on unix the daemon drives `App` directly and the thin client renders.
 #[cfg_attr(unix, allow(dead_code))]
-pub fn run(terminal: &mut Term, launch: Launch) -> Result<()> {
-    let mut app = App::new(launch)?;
-    while !app.quit {
-        while let Ok(ev) = app.events_rx.try_recv() {
-            app.on_pty_event(ev);
-        }
-        while let Ok(notice) = app.update_rx.try_recv() {
-            app.update_notice = notice;
-        }
-        if event::poll(Duration::from_millis(16))? {
-            // Drain the whole input burst before rendering: a fast trackpad
-            // scroll can enqueue many events, and processing one per frame
-            // would trickle them into the pane and feel extremely laggy.
-            loop {
-                match event::read()? {
-                    crossterm::event::Event::Key(k) => app.on_key(k)?,
-                    crossterm::event::Event::Paste(text) => app.on_paste(&text),
-                    crossterm::event::Event::Mouse(m) => app.on_mouse(m)?,
-                    crossterm::event::Event::Resize(w, h) => {
-                        app.term_size = (w, h);
-                    }
-                    _ => {}
-                }
-                if !event::poll(Duration::ZERO)? {
-                    break;
-                }
-            }
-        }
-        app.frame(terminal)?;
-    }
-    app.on_exit();
-    Ok(())
-}
-
 impl App {
     fn new(launch: Launch) -> Result<App> {
         let shell = crate::config::default_shell();
@@ -269,6 +241,7 @@ impl App {
             last_agent_sound: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
+            pane_sizes: HashMap::new(),
             link_mods: false,
             quit: false,
             detach_requested: false,
@@ -870,6 +843,7 @@ impl App {
         }
         self.last_sizes.remove(&pid);
         self.pane_cache.remove(&pid);
+        self.pane_sizes.remove(&pid);
         self.agent_status_cache.remove(&pid);
         self.last_agent_status.remove(&pid);
         self.last_agent_sound.remove(&pid);
@@ -896,6 +870,7 @@ impl App {
             }
             self.last_sizes.remove(&pid);
             self.pane_cache.remove(&pid);
+            self.pane_sizes.remove(&pid);
             self.agent_status_cache.remove(&pid);
             self.last_agent_status.remove(&pid);
             self.last_agent_sound.remove(&pid);

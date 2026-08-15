@@ -1,22 +1,22 @@
-//! Daemon-side conversion of a rendered `ratatui` buffer into wire `FrameMsg`s
-//! (`kumo_protocol`). The daemon renders the whole UI into a `TestBackend`
-//! buffer each frame and ships dirty rows; this module owns the cell
-//! serialization (colors resolved against the active theme palette, wide-char
-//! continuation cells, row diffs). Kept here — not in `kumo_protocol` — because
-//! it depends on `ratatui` and `crate::vt::ColorRgb`.
+//! Daemon-side serialization of a rendered pane grid into wire `PaneFrame`s
+//! (`kumo_protocol`).
+//!
+//! The daemon renders ONLY per-pane terminal content (never chrome/borders);
+//! this module owns cell serialization (colors resolved against the active
+//! theme palette, wide-char continuation cells, row diffs). Kept here — not in
+//! `kumo_protocol` — because it depends on `ratatui` and `crate::vt::ColorRgb`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use kumo_protocol::{FrameMsg, RowPatch, WireCell};
+use kumo_protocol::{PaneFrame, RowPatch, WireCell};
 
 use crate::vt::ColorRgb;
 
 /// Pack a ratatui `Color` into the wire's 0xRRGGBB form. Named ANSI colors map
-/// to the active theme's palette (the ANSI 0-15 entries), so chrome cells
-/// that style text with `Color::Black` (mode chips, menu items, input fields)
-/// keep a real foreground on the client instead of falling back to the
-/// terminal's default. `Reset` (and anything unnamed) stays `None`.
+/// to the active theme's palette (the ANSI 0-15 entries), so cells styled with
+/// named colors keep a real value on the client. `Reset` (and anything unnamed)
+/// stays `None`.
 fn color_to_wire(color: ratatui::style::Color, palette: &[ColorRgb; 16]) -> Option<u32> {
     use ratatui::style::Color;
     let (r, g, b) = match color {
@@ -47,11 +47,6 @@ fn color_to_wire(color: ratatui::style::Color, palette: &[ColorRgb; 16]) -> Opti
 /// (a CJK char or emoji occupying two columns) is a continuation cell; it is
 /// forced to `cell_width = 0` so the client skips it instead of overwriting
 /// the wide char's right half.
-///
-/// This cannot rely on ratatui's `CellDiffOption::Skip`: by the time the
-/// daemon serializes `terminal.backend().buffer()`, `Terminal::draw` has
-/// already diffed and normalized those cells to plain blanks, losing the flag.
-/// The row's own cell widths are the only reliable signal.
 pub(crate) fn row_cells(buf: &Buffer, row: u16, cols: u16, palette: &[ColorRgb; 16]) -> Vec<WireCell> {
     let s = row as usize * cols as usize;
     let e = s + cols as usize;
@@ -85,10 +80,6 @@ fn cell_from_ratatui(cell: &ratatui::buffer::Cell, palette: &[ColorRgb; 16]) -> 
     let fg = color_to_wire(cell.fg, palette);
     let bg = color_to_wire(cell.bg, palette);
     let m = cell.modifier;
-    // A `Skip` cell is a continuation after a wide grapheme (the pane marks
-    // it when the emoji/CJK char occupies two columns). `Cell::cell_width()`
-    // would report the width of its blank symbol (1), so map it to 0 here to
-    // let the client skip it instead of overwriting the wide char's right half.
     let cell_width = if cell.diff_option == ratatui::buffer::CellDiffOption::Skip {
         0
     } else {
@@ -107,47 +98,16 @@ fn cell_from_ratatui(cell: &ratatui::buffer::Cell, palette: &[ColorRgb; 16]) -> 
     }
 }
 
-/// A frame containing every row (`full = true`): for a client's first attach or
-/// after a resize.
-pub(crate) fn full_frame(
-    buf: &Buffer,
-    cursor: Option<(u16, u16)>,
-    palette: &[ColorRgb; 16],
-) -> FrameMsg {
-    let cols = buf.area.width;
-    let rows = buf.area.height;
-    let rows_dirty = (0..rows)
-        .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
-        .collect();
-    FrameMsg { cols, rows, full: true, rows_dirty, cursor }
-}
-
-/// A frame containing only the rows that changed since `last` (same size).
-pub(crate) fn diff_frame(
-    buf: &Buffer,
-    last: &Buffer,
-    cursor: Option<(u16, u16)>,
-    palette: &[ColorRgb; 16],
-) -> FrameMsg {
-    let cols = buf.area.width;
-    let rows = buf.area.height;
-    let rows_dirty = (0..rows)
-        .filter(|row| row_changed(buf, last, *row, cols))
-        .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
-        .collect();
-    FrameMsg { cols, rows, full: false, rows_dirty, cursor }
-}
-
-/// Build a per-pane frame from the pane's retained render buffer (`pane_cache`),
-/// with either a full frame (first subscribe / resize) or a diff against the
-/// previously sent buffer.
+/// Build a per-pane frame from the pane's retained render buffer, with either a
+/// full frame (first subscribe / resize) or a diff against the previously sent
+/// buffer.
 pub(crate) fn pane_frame(
     pane_id: u64,
     buf: &Buffer,
     last: Option<&Buffer>,
     cursor: Option<(u16, u16)>,
     palette: &[ColorRgb; 16],
-) -> kumo_protocol::PaneFrame {
+) -> PaneFrame {
     let cols = buf.area.width;
     let rows = buf.area.height;
     let full = last.map(|l| l.area != buf.area).unwrap_or(true);
@@ -162,12 +122,11 @@ pub(crate) fn pane_frame(
             .map(|row| RowPatch { row, cells: row_cells(buf, row, cols, palette) })
             .collect()
     };
-    kumo_protocol::PaneFrame { pane_id, cols, rows, full, rows_dirty, cursor }
+    PaneFrame { pane_id, cols, rows, full, rows_dirty, cursor }
 }
 
-/// Convert a `Rect`-scoped buffer (a pane cache at its inner rect) into a
-/// standalone buffer starting at (0,0). Used so a pane frame is always shipped
-/// as its own grid regardless of where the pane sits in the composed UI.
+/// Convert a `Rect`-scoped buffer (a pane cache) into a standalone buffer
+/// starting at (0,0), so a pane frame is always shipped as its own grid.
 pub(crate) fn detach_buffer(src: &Buffer) -> Buffer {
     let w = src.area.width;
     let h = src.area.height;
@@ -191,77 +150,24 @@ mod tests {
     }
 
     #[test]
-    fn diff_frame_sends_only_changed_rows() {
-        let a = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let mut b = Buffer::empty(Rect::new(0, 0, 4, 3));
-        b.cell_mut((1, 0)).unwrap().set_symbol("X");
-        let frame = diff_frame(&b, &a, None, &palette());
-        assert!(!frame.full);
-        assert_eq!(frame.rows_dirty.len(), 1, "only the touched row should be dirty");
-        assert_eq!(frame.rows_dirty[0].row, 0);
-        assert_eq!(frame.rows_dirty[0].cells.len(), 4);
-        assert_eq!(frame.rows_dirty[0].cells[1].text, "X");
-    }
-
-    #[test]
-    fn diff_frame_all_rows_equal_is_empty() {
-        let a = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let b = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let frame = diff_frame(&b, &a, None, &palette());
-        assert!(!frame.full);
-        assert!(frame.rows_dirty.is_empty());
-    }
-
-    #[test]
-    fn full_frame_includes_every_row() {
+    fn full_pane_frame_includes_every_row() {
         let buf = Buffer::empty(Rect::new(0, 0, 4, 3));
-        let frame = full_frame(&buf, None, &palette());
+        let frame = pane_frame(1, &buf, None, None, &palette());
         assert!(frame.full);
+        assert_eq!(frame.pane_id, 1);
         assert_eq!(frame.rows_dirty.len(), 3);
     }
 
     #[test]
-    fn skip_continuation_cell_serializes_width_zero() {
-        // A wide emoji followed by a `Skip` continuation cell: the client must
-        // see cell_width 0 on the continuation so it does not overwrite the
-        // emoji's right half.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
-        buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f1ea}\u{1f1f8}"); // 🇪🇸
-        buf.cell_mut((1, 0))
-            .unwrap()
-            .set_symbol(" ")
-            .set_diff_option(ratatui::buffer::CellDiffOption::Skip);
-        let frame = full_frame(&buf, None, &palette());
-        let cells = &frame.rows_dirty[0].cells;
-        assert_eq!(cells[0].text, "\u{1f1ea}\u{1f1f8}", "wide grapheme must be sent whole");
-        assert_eq!(cells[1].cell_width, 0, "continuation cell must be skipped by the client");
-    }
-
-    #[test]
-    fn continuation_after_wide_char_serializes_width_zero_post_draw() {
-        // After `Terminal::draw` normalizes the buffer, the continuation cell
-        // is a plain blank with no `Skip` flag — only the preceding wide cell's
-        // width reveals it. The row must still mark it as cell_width 0.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
-        buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
-        buf.cell_mut((1, 0)).unwrap().set_symbol(" ");
-        buf.cell_mut((2, 0)).unwrap().set_symbol("x");
-        let frame = full_frame(&buf, None, &palette());
-        let cells = &frame.rows_dirty[0].cells;
-        assert_eq!(cells[0].text, "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
-        assert_eq!(cells[0].cell_width, 2);
-        assert_eq!(cells[1].cell_width, 0, "continuation cell must stay width 0");
-        assert_eq!(cells[2].cell_width, 1);
-    }
-
-    #[test]
-    fn wide_char_at_row_end_needs_no_continuation() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
-        buf.cell_mut((0, 0)).unwrap().set_symbol("\u{1f600}");
-        let frame = full_frame(&buf, None, &palette());
-        let cells = &frame.rows_dirty[0].cells;
-        assert_eq!(cells[0].cell_width, 2);
-        assert_eq!(cells[1].cell_width, 0, "trailing empty cell is a blank, not content");
+    fn pane_frame_diff_sends_only_changed_rows() {
+        let a = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let mut b = Buffer::empty(Rect::new(0, 0, 4, 3));
+        b.cell_mut((1, 0)).unwrap().set_symbol("X");
+        let frame = pane_frame(1, &b, Some(&a), None, &palette());
+        assert!(!frame.full);
+        assert_eq!(frame.rows_dirty.len(), 1);
+        assert_eq!(frame.rows_dirty[0].row, 0);
+        assert_eq!(frame.rows_dirty[0].cells[1].text, "X");
     }
 
     #[test]

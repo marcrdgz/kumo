@@ -583,6 +583,7 @@ mod tests {
             last_agent_sound: HashMap::new(),
             last_focused: None,
             pane_cache: HashMap::new(),
+            pane_sizes: HashMap::new(),
             link_mods: false,
             quit: false,
             detach_requested: false,

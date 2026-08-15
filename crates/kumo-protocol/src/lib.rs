@@ -1,5 +1,5 @@
-//! Wire protocol between the kumo daemon and its clients (the TUI client, the
-//! GPUI desktop app, and future mobile clients).
+//! Wire protocol between the kumo daemon and its clients (TUI client, GPUI
+//! desktop app, mobile, and the control CLI).
 //!
 //! Framing: `[u32 LE length][bincode payload]`. Messages are bincode-serialized;
 //! the payload is never longer than `MAX_FRAME_LEN`.
@@ -10,22 +10,23 @@
 //! from host types (`crossterm` events, `ratatui` buffers) live in the kumo
 //! crate (`src/wireconv.rs`, `src/frames.rs`).
 //!
-//! The daemon is the single source of truth for everything it has open
-//! (sessions, panes, agents); this protocol is how it hands that context to
-//! clients with different capabilities:
+//! # Architecture: smart renderer / dumb viewport
 //!
-//! - **Full attach** (`ClientMsg::Hello` + `ServerMsg::Frame`): the daemon
-//!   renders its whole UI headlessly and streams dirty-row cell patches. Used
-//!   by the TUI client and the desktop app's main view.
-//! - **Snapshot** (`ClientMsg::SubscribeSnapshot` + `ServerMsg::Snapshot`):
-//!   structured sessions/panes/agents, pushed on change. Drives native
-//!   sidebars, session lists, and mobile overviews.
-//! - **Pane frames** (`ClientMsg::SubscribePane` + `ServerMsg::PaneFrame`):
-//!   a single pane rendered as its own grid, for per-pane views (mobile) and
-//!   native pane layout (desktop) later.
+//! The daemon is the **single source of truth** for everything it has open —
+//! sessions, the semantic layout tree (splits in ratios, not pixels), the PTYs,
+//! and per-pane terminal content. It does **not** render chrome: no borders,
+//! box-drawing characters, sidebar, or status bar ever enter the wire. Clients
+//! receive two things and draw everything themselves:
 //!
-//! Clients declare what they want in [`ClientMsg::Hello`] (`kind`), so the
-//! daemon can route the right channels per client.
+//! - **Layout** ([`DaemonEvent::Layout`]): the semantic tree of sessions →
+//!   splits (with ratios) → panes (title, cwd, agent status). Clients compute
+//!   actual geometry and draw their own chrome.
+//! - **Pane content** ([`DaemonEvent::PaneFrame`]): each pane's terminal grid
+//!   (rendered by the daemon's Ghostty core), streamed on change.
+//!
+//! Everything else is a **command** ([`Command`]) — sessions, panes, agents,
+//! input, subscriptions — so the whole multiplexer can be driven from the CLI,
+//! the TUI, the desktop app, or a script.
 
 use std::io::{self, Read};
 
@@ -36,23 +37,25 @@ use serde::{Deserialize, Serialize};
 mod crossterm;
 
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
-/// with a mismatched version. v3 adds per-pane geometry (`PaneRect`), the
-/// session's focused pane, and the `FocusPane` / `SetSidebar` control messages
-/// for native clients that paint panes themselves.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// with a mismatched version. v4 switches from rendered frames to the
+/// semantic-layout + per-pane-content model, and from `ClientMsg`/`ServerMsg`
+/// to the tmux-style `Command`/`DaemonEvent` protocol.
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
-/// What kind of client is attaching. The daemon routes delivery channels
-/// (full frames vs. snapshots vs. pane frames) based on it.
+/// What kind of client is attaching. The daemon routes delivery channels based
+/// on it (e.g. interactive viewers vs. one-shot CLI commands).
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClientKind {
-    /// The `kumo` TUI client in a host terminal: full-attach render loop.
+    /// The `kumo` TUI client in a host terminal.
     Terminal,
-    /// A native desktop app: full-attach render loop + snapshot sidebar.
+    /// A native desktop app.
     Desktop,
-    /// A small-screen / read-only client (mobile): snapshot + pane frames.
+    /// A small-screen / read-only client (mobile).
     Mobile,
+    /// The control CLI (`kumo session ...`): sends one command, reads replies.
+    Cli,
 }
 
 // ---------------------------------------------------------------------------
@@ -217,10 +220,10 @@ pub struct WireMouseEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Render frame
+// Render frame (per-pane content)
 // ---------------------------------------------------------------------------
 
-/// A serialized rendered cell (the grid the daemon draws).
+/// A serialized rendered cell (the grid the daemon draws for ONE pane).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct WireCell {
     /// Grapheme to draw; empty for cells with no content.
@@ -248,108 +251,44 @@ pub struct RowPatch {
     pub cells: Vec<WireCell>,
 }
 
-/// A render frame. Rows are sent as patches; `full` means every row is included
-/// and the client should clear the screen first (first frame, or a resize).
+/// One pane's terminal grid, streamed on change. `full` = every row included
+/// (first frame or after a resize); otherwise only dirty rows.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct FrameMsg {
+pub struct PaneFrame {
+    pub pane_id: u64,
     pub cols: u16,
     pub rows: u16,
     pub full: bool,
     pub rows_dirty: Vec<RowPatch>,
-    /// Host-terminal cursor position, if the app wants one shown.
+    /// Terminal cursor position, if the pane shows one.
     pub cursor: Option<(u16, u16)>,
 }
 
 // ---------------------------------------------------------------------------
-// Messages
+// Semantic layout tree
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub enum ClientMsg {
-    Hello {
-        protocol: u32,
-        /// What kind of client is attaching (drives delivery routing).
-        kind: ClientKind,
-        cols: u16,
-        rows: u16,
-    },
-    Input {
-        key: WireKeyEvent,
-    },
-    /// Text pasted into the client (bracketed paste), e.g. from the OS
-    /// clipboard. Carried as raw text so the daemon can strip trailing
-    /// newlines and route it to the focused pane.
-    Paste {
-        text: String,
-    },
-    Mouse {
-        event: WireMouseEvent,
-    },
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
-    /// The client is detaching; the daemon keeps running.
-    Detach,
-    /// `kumo ls`: request the session list (non-TUI client).
-    ListSessions,
-    /// `kumo kill`: stop the daemon (killing its panes).
-    KillServer,
-    /// `kumo new [WORKSPACE]` against a running daemon: create a fresh session
-    /// and focus it. `workspace` is the client-resolved dir (its cwd when no
-    /// explicit arg was given; the daemon falls back to its own if unusable).
-    NewSession {
-        workspace: Option<std::path::PathBuf>,
-    },
-    /// `kumo update` after swapping the binary: ask the daemon to restart
-    /// itself (exec the new binary) inheriting the live PTY masters, so the
-    /// running panes and agents survive the update.
-    Restart,
-    /// `kumo reload`: re-read the config and apply it live (shell, leader,
-    /// keymap bindings); new panes and future actions pick it up.
-    ReloadConfig,
-    /// Start pushing [`ServerMsg::Snapshot`] on every change (sidebar / mobile
-    /// overviews). The daemon also responds with one snapshot immediately.
-    SubscribeSnapshot,
-    /// Focus the session with the given name (desktop sidebar click).
-    FocusSession {
-        name: String,
-    },
-    /// Focus a specific pane inside a session (desktop pane click). The daemon
-    /// switches to the session and routes subsequent `Input` to the pane.
-    FocusPane {
-        session: String,
-        pane_id: u64,
-    },
-    /// Open/close the daemon's own sidebar. Native clients paint their own
-    /// chrome, so they close the daemon's to give panes the full width.
-    SetSidebar {
-        open: bool,
-    },
-    /// Start streaming [`ServerMsg::PaneFrame`] for one pane (per-pane views).
-    SubscribePane {
-        pane_id: u64,
-    },
-    /// Stop streaming [`ServerMsg::PaneFrame`] for one pane.
-    UnsubscribePane {
-        pane_id: u64,
-    },
-}
-
-/// A pane's rectangle within its session's grid (cell coordinates).
+/// Split orientation. `V` = side-by-side columns, `H` = stacked rows.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PaneRect {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
+pub enum SplitDir {
+    Vertical,
+    Horizontal,
 }
 
-/// One pane, as reported inside a [`SessionInfo`].
+/// Direction of a keyboard pane-resize / focus move.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResizeDir {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
+/// One pane as it appears in the semantic tree.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct PaneInfo {
+pub struct LayoutPane {
     pub id: u64,
-    /// Display title (custom name or the default `shell N` / `AI CLI` label).
+    /// Display title (custom name or a default `shell N` / `AI CLI` label).
     pub title: String,
     /// Working directory the pane is currently in (follow-workspace).
     pub cwd: std::path::PathBuf,
@@ -357,24 +296,43 @@ pub struct PaneInfo {
     pub is_ai: bool,
     /// The running AI CLI, when this pane hosts one.
     pub agent: Option<AgentInfo>,
-    /// Where the pane sits in its session's grid. Lets native clients paint
-    /// panes themselves instead of showing the daemon's composed UI.
-    pub rect: PaneRect,
 }
 
-/// One session, as reported to `kumo ls` and pushed in snapshots.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct SessionInfo {
+/// A node in the semantic layout tree: a split of two subtrees with a ratio
+/// (0..1, the share of `a`), or a single pane. Clients compute pixel/cell
+/// geometry from these proportions; the daemon never ships coordinates.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum LayoutNode {
+    Pane(LayoutPane),
+    Split {
+        dir: SplitDir,
+        ratio: f32,
+        a: Box<LayoutNode>,
+        b: Box<LayoutNode>,
+    },
+}
+
+/// One session's semantic tree, as pushed to layout subscribers.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct SessionLayout {
     pub name: String,
     pub workspace: std::path::PathBuf,
-    pub panes: Vec<PaneInfo>,
-    pub zoomed: bool,
-    pub active: bool,
-    /// The pane currently focused in this session (`None` when empty).
-    pub focus: Option<u64>,
+    /// The focused pane in this session.
+    pub focus: u64,
+    /// When zoomed, only the focused pane is shown full-size.
+    pub zoom: bool,
+    pub root: Option<Box<LayoutNode>>,
 }
 
-/// One AI CLI running inside a session.
+/// The full layout snapshot pushed on change.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Layout {
+    /// Name of the active session, if any.
+    pub active: Option<String>,
+    pub sessions: Vec<SessionLayout>,
+}
+
+/// One AI CLI running inside a pane.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AgentInfo {
     /// Short AI CLI name, e.g. "opencode".
@@ -405,47 +363,200 @@ impl AgentStatus {
     }
 }
 
-/// One pane rendered as its own grid (per-pane channel).
+/// One session, as reported to `kumo session list` (metadata only; the full
+/// semantic tree travels via [`DaemonEvent::Layout`]).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct PaneFrame {
-    pub pane_id: u64,
-    pub cols: u16,
-    pub rows: u16,
-    /// `true` = every row included; clear the view first.
-    pub full: bool,
-    pub rows_dirty: Vec<RowPatch>,
-    pub cursor: Option<(u16, u16)>,
+pub struct SessionInfo {
+    pub name: String,
+    pub workspace: std::path::PathBuf,
+    pub pane_count: usize,
+    pub zoomed: bool,
+    pub active: bool,
+    pub focus: Option<u64>,
+    /// AI CLIs running inside this session.
+    pub agents: Vec<AgentInfo>,
 }
 
+/// One agent status line, as reported to `kumo agent status`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub enum ServerMsg {
+pub struct AgentStatusLine {
+    pub session: String,
+    pub pane_id: u64,
+    pub name: String,
+    pub status: AgentStatus,
+}
+
+// ---------------------------------------------------------------------------
+// Commands (client -> daemon)
+// ---------------------------------------------------------------------------
+
+/// A tmux-style command sent by any client (CLI, TUI, desktop app, script).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum Command {
+    // -- attach / lifecycle ------------------------------------------------
+    /// Attach as an interactive viewer of the given size. The daemon responds
+    /// with `Welcome`, then pushes `Layout` and `PaneFrame` streams.
+    Attach {
+        protocol: u32,
+        kind: ClientKind,
+        cols: u16,
+        rows: u16,
+    },
+    /// Detach (a viewer leaves; the daemon keeps running).
+    Detach,
+    /// Stop the daemon (killing its panes).
+    KillServer,
+    /// `kumo update`: restart the daemon in place, inheriting live PTYs.
+    Restart,
+    /// Re-read the config and apply it live.
+    ReloadConfig,
+
+    // -- sessions -----------------------------------------------------------
+    /// `kumo session list`: reply with `SessionList`.
+    SessionList,
+    /// `kumo session new [DIR] [--name NAME]`: create and focus a session.
+    SessionNew {
+        name: Option<String>,
+        workspace: Option<std::path::PathBuf>,
+    },
+    /// `kumo session kill NAME`: close a session (and its panes).
+    SessionKill {
+        name: String,
+    },
+    /// Focus the named session (interactive switch).
+    SessionFocus {
+        name: String,
+    },
+
+    // -- panes ---------------------------------------------------------------
+    /// Split a pane (default: the focused one in `session`).
+    PaneSplit {
+        session: String,
+        dir: SplitDir,
+        is_ai: bool,
+    },
+    /// Close a pane (default: the focused one in `session`).
+    PaneClose {
+        session: String,
+        pane_id: Option<u64>,
+    },
+    /// Focus a specific pane in a session.
+    PaneFocus {
+        session: String,
+        pane_id: u64,
+    },
+    /// Nudge the ratio of the split separating the focused pane from its
+    /// neighbor in `dir`.
+    PaneResizeRatio {
+        session: String,
+        dir: ResizeDir,
+    },
+    /// Swap the focused pane with its sibling.
+    PaneSwap {
+        session: String,
+    },
+    /// Mirror the layout (rotate the split tree).
+    LayoutRotate {
+        session: String,
+    },
+    /// Toggle a session's zoom (only the focused pane shown full-size).
+    SessionZoom {
+        session: String,
+    },
+    /// Send key events to a pane (default: the focused one in `session`).
+    PaneSendKeys {
+        session: String,
+        pane_id: Option<u64>,
+        keys: Vec<WireKeyEvent>,
+    },
+    /// Resize a pane's terminal to `cols` x `rows` (clients drive geometry
+    /// from the semantic tree).
+    PaneResize {
+        pane_id: u64,
+        cols: u16,
+        rows: u16,
+    },
+
+    // -- agents --------------------------------------------------------------
+    /// Spawn an AI CLI in a new pane (default program = the configured AI cmd).
+    AgentSpawn {
+        session: String,
+        program: Option<String>,
+    },
+    /// `kumo agent status`: reply with every running agent.
+    AgentStatus,
+    /// Kill the AI CLI running in a pane (closes the pane).
+    AgentKill {
+        session: String,
+        pane_id: u64,
+    },
+
+    // -- interactive input (attached viewers) -------------------------------
+    /// A key pressed in the focused pane's terminal.
+    Input {
+        key: WireKeyEvent,
+    },
+    /// Text pasted (bracketed paste) into the focused pane.
+    Paste {
+        text: String,
+    },
+    /// A mouse event in the focused pane's terminal.
+    Mouse {
+        event: WireMouseEvent,
+    },
+
+    // -- subscriptions --------------------------------------------------------
+    /// Start receiving `DaemonEvent::Layout` pushes (viewers).
+    SubscribeLayout,
+    /// Start receiving `DaemonEvent::PaneFrame` for one pane.
+    SubscribePane {
+        pane_id: u64,
+    },
+    /// Stop receiving `DaemonEvent::PaneFrame` for one pane.
+    UnsubscribePane {
+        pane_id: u64,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Daemon events (daemon -> client)
+// ---------------------------------------------------------------------------
+
+/// Everything the daemon pushes to a client: command replies and streams.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum DaemonEvent {
+    /// Reply to `Command::Attach`.
     Welcome {
         protocol: u32,
     },
-    Frame {
-        frame: FrameMsg,
-    },
-    /// `leader+d`: the daemon asks this client to disconnect.
+    /// `leader+d` / detach: this viewer should disconnect; the daemon lives on.
     Detach,
-    /// The daemon is stopping (last session closed / `kumo kill`).
+    /// The daemon is stopping (last session closed / `kill`).
     Shutdown,
-    /// The daemon is restarting itself for `kumo update`: drop the socket and
-    /// reconnect (with retries) instead of erroring out.
+    /// The daemon is restarting itself (`kumo update`); reconnect with retries.
     Restarting,
-    /// Response to `ListSessions`.
-    SessionList {
-        sessions: Vec<SessionInfo>,
-    },
-    /// Response to `ReloadConfig`: the outcome, as a status-bar/CLI notice.
+    /// Reply to `ReloadConfig`.
     ConfigReloaded {
         notice: String,
     },
-    /// Pushed to `SubscribeSnapshot` subscribers whenever sessions/panes/
-    /// agents change.
-    Snapshot {
+    /// Generic reply to a one-shot command (CLI): human-readable outcome.
+    Reply {
+        message: String,
+    },
+    /// Reply to `SessionList`.
+    SessionList {
         sessions: Vec<SessionInfo>,
     },
-    /// A subscribed pane's rendered grid.
+    /// Reply to `AgentStatus`.
+    AgentStatus {
+        agents: Vec<AgentStatusLine>,
+    },
+    /// Pushed to `SubscribeLayout` subscribers whenever sessions/panes/agents
+    /// change: the full semantic tree.
+    Layout {
+        layout: Layout,
+    },
+    /// A subscribed pane's terminal grid.
     PaneFrame {
         frame: PaneFrame,
     },
@@ -521,7 +632,7 @@ mod tests {
 
     #[test]
     fn frame_reader_reassembles_frames() {
-        let msg = ServerMsg::Welcome { protocol: PROTOCOL_VERSION };
+        let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION };
         let bytes = encode(&msg).unwrap();
         let mut reader = FrameReader::default();
         let mut out = Vec::new();
@@ -530,7 +641,7 @@ mod tests {
             reader.push(chunk, &mut out);
         }
         assert_eq!(out.len(), 1);
-        let decoded: ServerMsg = bincode::serde::decode_from_slice(&out[0], bincode::config::standard())
+        let decoded: DaemonEvent = bincode::serde::decode_from_slice(&out[0], bincode::config::standard())
             .unwrap()
             .0;
         assert_eq!(decoded, msg);
@@ -538,26 +649,11 @@ mod tests {
 
     #[test]
     fn read_write_framed_roundtrip() {
-        let msg = ServerMsg::Shutdown;
+        let msg = DaemonEvent::Shutdown;
         let mut buf = Vec::new();
         write_framed(&mut buf, &msg).unwrap();
-        let decoded: ServerMsg = read_framed(&mut &buf[..]).unwrap();
+        let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();
         assert_eq!(decoded, msg);
-    }
-
-    #[test]
-    fn reload_messages_roundtrip() {
-        let req = ClientMsg::ReloadConfig;
-        let mut buf = Vec::new();
-        write_framed(&mut buf, &req).unwrap();
-        let decoded: ClientMsg = read_framed(&mut &buf[..]).unwrap();
-        assert_eq!(decoded, req);
-
-        let resp = ServerMsg::ConfigReloaded { notice: "config reloaded".into() };
-        let mut buf = Vec::new();
-        write_framed(&mut buf, &resp).unwrap();
-        let decoded: ServerMsg = read_framed(&mut &buf[..]).unwrap();
-        assert_eq!(decoded, resp);
     }
 
     #[test]
@@ -570,50 +666,59 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_messages_roundtrip() {
-        let req = ClientMsg::SubscribeSnapshot;
-        let mut buf = Vec::new();
-        write_framed(&mut buf, &req).unwrap();
-        let decoded: ClientMsg = read_framed(&mut &buf[..]).unwrap();
-        assert_eq!(decoded, req);
-
-        let resp = ServerMsg::Snapshot {
-            sessions: vec![SessionInfo {
+    fn layout_tree_roundtrip() {
+        let layout = Layout {
+            active: Some("session-1".into()),
+            sessions: vec![SessionLayout {
                 name: "session-1".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
-                panes: vec![PaneInfo {
-                    id: 11,
-                    title: " opencode ".into(),
-                    cwd: std::path::PathBuf::from("/tmp"),
-                    is_ai: true,
-                    agent: Some(AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked }),
-                    rect: PaneRect { x: 0, y: 0, width: 80, height: 24 },
-                }],
-                zoomed: false,
-                active: true,
-                focus: Some(11),
+                focus: 11,
+                zoom: false,
+                root: Some(Box::new(LayoutNode::Split {
+                    dir: SplitDir::Vertical,
+                    ratio: 0.7,
+                    a: Box::new(LayoutNode::Pane(LayoutPane {
+                        id: 11,
+                        title: " shell ".into(),
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        is_ai: false,
+                        agent: None,
+                    })),
+                    b: Box::new(LayoutNode::Pane(LayoutPane {
+                        id: 12,
+                        title: " opencode ".into(),
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        is_ai: true,
+                        agent: Some(AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked }),
+                    })),
+                })),
             }],
         };
         let mut buf = Vec::new();
-        write_framed(&mut buf, &resp).unwrap();
-        let decoded: ServerMsg = read_framed(&mut &buf[..]).unwrap();
-        assert_eq!(decoded, resp);
+        write_framed(&mut buf, &DaemonEvent::Layout { layout: layout.clone() }).unwrap();
+        let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, DaemonEvent::Layout { layout });
     }
 
     #[test]
-    fn focus_session_and_pane_subscription_roundtrip() {
-        let msgs = vec![
-            ClientMsg::FocusSession { name: "session-2".into() },
-            ClientMsg::FocusPane { session: "session-2".into(), pane_id: 12 },
-            ClientMsg::SetSidebar { open: false },
-            ClientMsg::SubscribePane { pane_id: 12 },
-            ClientMsg::UnsubscribePane { pane_id: 12 },
+    fn commands_roundtrip() {
+        let cmds = vec![
+            Command::SessionList,
+            Command::SessionNew { name: Some("session-2".into()), workspace: None },
+            Command::PaneSplit { session: "session-1".into(), dir: SplitDir::Vertical, is_ai: false },
+            Command::PaneSendKeys {
+                session: "session-1".into(),
+                pane_id: None,
+                keys: vec![WireKeyEvent::new(WireKeyCode::Char('a'), WireModifiers::none())],
+            },
+            Command::AgentSpawn { session: "session-1".into(), program: Some("opencode".into()) },
+            Command::AgentStatus,
         ];
-        for req in msgs {
+        for cmd in cmds {
             let mut buf = Vec::new();
-            write_framed(&mut buf, &req).unwrap();
-            let decoded: ClientMsg = read_framed(&mut &buf[..]).unwrap();
-            assert_eq!(decoded, req);
+            write_framed(&mut buf, &cmd).unwrap();
+            let decoded: Command = read_framed(&mut &buf[..]).unwrap();
+            assert_eq!(decoded, cmd);
         }
     }
 

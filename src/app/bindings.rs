@@ -18,28 +18,28 @@ use super::Dir;
 ///
 /// Overridable via the `leader` config key; `App::new` parses it with
 /// [`parse_chord`] and falls back to this default.
-pub(super) const LEADER: Chord = Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+pub(crate) const LEADER: Chord = Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
 
 /// The keys a user presses: a [`KeyCode`] plus its modifiers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct Chord {
-    pub(super) code: KeyCode,
-    pub(super) modifiers: KeyModifiers,
+pub(crate) struct Chord {
+    pub(crate) code: KeyCode,
+    pub(crate) modifiers: KeyModifiers,
 }
 
 impl Chord {
-    pub(super) const fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
+    pub(crate) const fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
         Chord { code, modifiers }
     }
 
     /// True when `event` is exactly this chord.
-    pub(super) fn matches(self, event: KeyEvent) -> bool {
+    pub(crate) fn matches(self, event: KeyEvent) -> bool {
         self.code == event.code && self.modifiers == event.modifiers
     }
 
     /// True when `event` is the leader chord: Ctrl+Space in any of its three
     /// crossterm spellings (space-with-ctrl, NUL, literal null).
-    pub(super) fn is_leader(self, event: KeyEvent) -> bool {
+    pub(crate) fn is_leader(self, event: KeyEvent) -> bool {
         let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
         self.matches(event) || (ctrl && matches!(event.code, KeyCode::Char('\0') | KeyCode::Null))
     }
@@ -47,7 +47,7 @@ impl Chord {
 
 /// A leader-mode command, the second half of a binding's `chord + action` pair.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Action {
+pub(crate) enum Action {
     SplitVertical,
     SplitHorizontal,
     SplitAi,
@@ -71,7 +71,7 @@ pub(super) enum Action {
 
 /// Logical group a binding belongs to, used to organize the showcase.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Group {
+pub(crate) enum Group {
     Layout,
     Panes,
     Sessions,
@@ -80,10 +80,10 @@ pub(super) enum Group {
 }
 
 impl Group {
-    pub(super) const ALL: [Group; 5] =
+    pub(crate) const ALL: [Group; 5] =
         [Group::Layout, Group::Panes, Group::Sessions, Group::Chrome, Group::General];
 
-    pub(super) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Group::Layout => "layout",
             Group::Panes => "panes",
@@ -99,15 +99,15 @@ impl Group {
 /// bindings may share one (e.g. `h/j/k/l`, `1-9`) so the showcase shows a
 /// single grouped row for them.
 #[derive(Clone)]
-pub(super) struct Binding {
+pub(crate) struct Binding {
     /// Key pressed after the leader to run `action`.
-    pub(super) key: Chord,
+    pub(crate) key: Chord,
     /// Compact showcase keys, e.g. "h/j/k/l" or "1-9".
-    pub(super) keys: String,
+    pub(crate) keys: String,
     /// Longer description for the showcase.
-    pub(super) desc: String,
-    pub(super) group: Group,
-    pub(super) action: Action,
+    pub(crate) desc: String,
+    pub(crate) group: Group,
+    pub(crate) action: Action,
 }
 
 /// Static stock-binding spec: same fields as [`Binding`] but `&'static str`,
@@ -188,7 +188,7 @@ fn stock_bindings() -> Vec<Binding> {
 /// Build the effective keymap: the stock bindings with `[keymap.bindings]`
 /// overrides applied. An override rebinds an existing chord or adds a new one;
 /// chords that fail to parse and unknown action ids are ignored with a warning.
-pub(super) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> {
+pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> {
     let mut out = stock_bindings();
     for (key_str, action_str) in overrides {
         let Some(chord) = parse_chord(key_str) else {
@@ -214,7 +214,7 @@ pub(super) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> 
 /// Parse a key or chord string from the config, e.g. `v`, `tab`, `f12`,
 /// `ctrl+b`, `ctrl+space`, `ctrl+shift+tab`. An uppercase letter implies
 /// Shift (so `H` parses to the same chord a terminal reports for Shift+h).
-pub(super) fn parse_chord(raw: &str) -> Option<Chord> {
+pub(crate) fn parse_chord(raw: &str) -> Option<Chord> {
     let mut modifiers = KeyModifiers::NONE;
     let mut parts: Vec<&str> = raw.split('+').map(|s| s.trim()).collect();
     let key_raw = parts.pop()?;
@@ -263,7 +263,7 @@ pub(super) fn parse_chord(raw: &str) -> Option<Chord> {
 
 /// Canonical `[keymap.bindings]` id for an action, e.g. `split-vertical`.
 #[allow(dead_code)]
-pub(super) fn action_id(action: Action) -> &'static str {
+pub(crate) fn action_id(action: Action) -> &'static str {
     match action {
         Action::SplitVertical => "split-vertical",
         Action::SplitHorizontal => "split-horizontal",
@@ -305,7 +305,7 @@ pub(super) fn action_id(action: Action) -> &'static str {
 }
 
 /// Reverse of [`action_id`]. `None` for unknown ids.
-pub(super) fn action_from_id(id: &str) -> Option<Action> {
+pub(crate) fn action_from_id(id: &str) -> Option<Action> {
     Some(match id {
         "split-vertical" => Action::SplitVertical,
         "split-horizontal" => Action::SplitHorizontal,
@@ -345,7 +345,7 @@ pub(super) fn action_from_id(id: &str) -> Option<Action> {
 }
 
 /// Showcase description for an action (used for config-added bindings).
-pub(super) fn action_desc(action: Action) -> &'static str {
+pub(crate) fn action_desc(action: Action) -> &'static str {
     match action {
         Action::SplitVertical => "split the focused pane vertically",
         Action::SplitHorizontal => "split the focused pane horizontally",
@@ -369,7 +369,7 @@ pub(super) fn action_desc(action: Action) -> &'static str {
 }
 
 /// Showcase group for an action (used for config-added bindings).
-pub(super) fn action_group(action: Action) -> Group {
+pub(crate) fn action_group(action: Action) -> Group {
     match action {
         Action::SplitVertical
         | Action::SplitHorizontal
@@ -387,7 +387,7 @@ pub(super) fn action_group(action: Action) -> Group {
 
 /// Human-readable form of a chord, e.g. `v`, `ctrl+b`, `H`. Used for the
 /// showcase row of config-added bindings.
-pub(super) fn chord_display(c: Chord) -> String {
+pub(crate) fn chord_display(c: Chord) -> String {
     let implicit_shift = matches!(c.code, KeyCode::Char(ch) if ch.is_ascii_uppercase());
     let mut s = String::new();
     if c.modifiers.contains(KeyModifiers::CONTROL) {
@@ -430,14 +430,15 @@ fn key_name(code: KeyCode) -> String {
 /// validate config remaps ("is this action remappable?") and to show an
 /// action's default key.
 #[allow(dead_code)]
-pub(super) fn key_for(action: Action) -> Option<Chord> {
+pub(crate) fn key_for(action: Action) -> Option<Chord> {
     stock_bindings().iter().find(|b| b.action == action).map(|b| b.key)
 }
 
 /// The leader-mode status-bar hint: just the `?` pointer to the keybind
 /// showcase. Everything else lives in the showcase, so the strip stays tiny and
 /// never drifts from the table.
-pub(super) fn leader_hint(keymap: &[Binding]) -> String {
+#[allow(dead_code)]
+pub(crate) fn leader_hint(keymap: &[Binding]) -> String {
     let help = keymap.iter().find(|b| b.keys == "?").expect("help binding present");
     format!(" {}: {} ", help.keys, help.desc)
 }

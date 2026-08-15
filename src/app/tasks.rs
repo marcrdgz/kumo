@@ -141,6 +141,7 @@ impl App {
     /// `/tmp/kumo_agent.log` (throttled to 1/s, capped at 512 KiB). Gated
     /// behind `DEBUG_AGENT=1` so it is inert in production but stays in the
     /// codebase for diagnostics.
+    #[allow(dead_code)]
     pub(super) fn log_agent_statuses(&mut self) {
         if std::env::var("DEBUG_AGENT").is_err() {
             return;

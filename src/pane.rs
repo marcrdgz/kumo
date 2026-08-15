@@ -389,11 +389,13 @@ impl Pane {
     }
 
     /// Milliseconds since the pane last produced output. Debug/diagnostics.
+    #[allow(dead_code)]
     pub fn last_output_age(&self) -> Duration {
         self.last_output.elapsed()
     }
 
     /// Last `max_chars` of stripped output text. Debug/diagnostics.
+    #[allow(dead_code)]
     pub fn recent_text_tail(&self, max_chars: usize) -> String {
         let start = self.recent_text.len().saturating_sub(max_chars);
         String::from_utf8_lossy(&self.recent_text[start..]).into_owned()
@@ -429,6 +431,7 @@ impl Pane {
     }
 
     /// Scrollbar state (total/offset/len rows), refreshed during `render`.
+    #[allow(dead_code)]
     pub fn scrollbar_data(&self) -> vt::TerminalScrollbar {
         self.vt.scrollbar()
     }
@@ -659,6 +662,7 @@ impl Pane {
 
     /// Viewport position of the terminal cursor, relative to the pane origin.
     /// Requires a prior `render` (which refreshes the render state).
+    #[allow(dead_code)]
     pub fn cursor_pos(&self) -> Option<(u16, u16)> {
         if self.vt.mode_get(vt::MODE_CURSOR_VISIBLE) {
             self.vt.cursor_pos()

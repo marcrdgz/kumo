@@ -424,9 +424,8 @@ fn restart_running_daemon() -> bool {
         use std::os::unix::net::UnixStream;
         let path = crate::config::ipc_socket_path();
         let Ok(mut stream) = UnixStream::connect(&path) else { return false };
-        // No `Hello`: the daemon handles `Restart` regardless, and handshaking
-        // would resize its render terminal to the client's (1x1) size first.
-        crate::protocol::write_framed(&mut stream, &crate::protocol::ClientMsg::Restart).is_ok()
+        // No handshake: the daemon handles `Restart` regardless.
+        crate::protocol::write_framed(&mut stream, &crate::protocol::Command::Restart).is_ok()
     }
     #[cfg(not(unix))]
     {

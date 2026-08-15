@@ -10,6 +10,7 @@ use crate::vt::ColorRgb;
 
 /// A complete color scheme: ANSI palette + terminal defaults + chrome colors.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub struct Theme {
     pub name: &'static str,
     /// ANSI 16-color palette fed to the terminal emulator.
