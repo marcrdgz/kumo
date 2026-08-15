@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = []
+members = ["crates/kumo-protocol"]
 
 [package]
 name = "kumo"
@@ -27,6 +27,7 @@ allow-branch = ["main"]
 publish = false
 
 [dependencies]
+kumo-protocol = { path = "crates/kumo-protocol", features = ["crossterm"] }
 ratatui = "0.30"
 crossterm = "0.29"
 portable-pty = "0.9"

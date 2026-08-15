@@ -4,6 +4,7 @@ mod app;
 #[cfg(unix)]
 mod client;
 mod config;
+mod frames;
 mod keys;
 mod layout;
 mod pane;

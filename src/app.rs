@@ -1260,6 +1260,17 @@ impl App {
         }
     }
 
+    /// Focus the session with the given name (desktop sidebar click, mobile).
+    /// Returns whether a session with that name exists.
+    pub(crate) fn focus_session_named(&mut self, name: &str) -> bool {
+        if let Some(i) = self.sessions.iter().position(|s| s.name == name) {
+            self.active = i;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from
     /// the cached process scan. Falls back to "AI CLI".
     fn agent_label(&self, pid: u64) -> String {

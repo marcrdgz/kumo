@@ -3,7 +3,7 @@
 //! attached terminal clients over the unix socket. Detach only closes the
 //! client connection; the daemon keeps running until the last session closes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -18,7 +18,8 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use super::{App, Launch};
-use crate::protocol::{self, ClientMsg, ServerMsg};
+use crate::frames;
+use crate::protocol::{self, AgentInfo, ClientMsg, PaneInfo, ServerMsg};
 
 impl From<crate::agents::AgentStatus> for protocol::AgentStatus {
     fn from(status: crate::agents::AgentStatus) -> Self {
@@ -30,11 +31,11 @@ impl From<crate::agents::AgentStatus> for protocol::AgentStatus {
     }
 }
 
-/// One connected terminal client. The read half lives in a per-client reader
-/// thread; outgoing messages go through a per-client writer thread with a
-/// bounded queue, so a slow (or unread) client never blocks the daemon loop —
-/// a lagging client is paused (and later caught up with a full frame) instead
-/// of stalling everyone. A client is only dropped when its connection is
+/// One connected client. The read half lives in a per-client reader thread;
+/// outgoing messages go through a per-client writer thread with a bounded
+/// queue, so a slow (or unread) client never blocks the daemon loop — a
+/// lagging client is paused (and later caught up with a full frame) instead of
+/// stalling everyone. A client is only dropped when its connection is
 /// genuinely gone (writer dead or the reader thread saw EOF).
 struct Client {
     tx: mpsc::SyncSender<ServerMsg>,
@@ -42,6 +43,13 @@ struct Client {
     /// True until this client has received one full frame (its first attach);
     /// it needs a full repaint even if the daemon's own frame is a diff.
     needs_full: bool,
+    /// `SubscribeSnapshot`: push `ServerMsg::Snapshot` whenever it changes.
+    wants_snapshot: bool,
+    /// Panes this client subscribed to via `SubscribePane`.
+    panes_subscribed: HashSet<u64>,
+    /// Panes for which the client has not yet received a full `PaneFrame`
+    /// (first subscribe or after a resize).
+    pane_needs_full: HashSet<u64>,
 }
 
 impl Client {
@@ -89,6 +97,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
     let mut last_buffer: Option<Buffer> = None;
+    // Last snapshot sent to subscribers (diffed against to avoid spam).
+    let mut last_snapshot: Option<Vec<protocol::SessionInfo>> = None;
+    // Last per-pane buffer serialized to subscribers (pane-frame diff baseline).
+    let mut last_pane_bufs: HashMap<u64, Buffer> = HashMap::new();
     let mut kill = false;
 
     let mut render_dirty = true;
@@ -112,14 +124,24 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let id = next_id;
             next_id += 1;
             std::thread::spawn(move || client_read_loop(read_half, tx, id));
-            clients.insert(id, Client { tx: writer_tx, welcomed: false, needs_full: true });
+            clients.insert(
+                id,
+                Client {
+                    tx: writer_tx,
+                    welcomed: false,
+                    needs_full: true,
+                    wants_snapshot: false,
+                    panes_subscribed: HashSet::new(),
+                    pane_needs_full: HashSet::new(),
+                },
+            );
             render_dirty = true;
         }
 
         // Input from clients.
         while let Ok((id, msg)) = input_rx.try_recv() {
             match msg {
-                ClientMsg::Hello { protocol, cols, rows } => {
+                ClientMsg::Hello { protocol, cols, rows, .. } => {
                     if protocol != protocol::PROTOCOL_VERSION {
                         let _ = send_to(&mut clients, id, &ServerMsg::Shutdown);
                         clients.remove(&id);
@@ -160,37 +182,36 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     clients.remove(&id);
                 }
                 ClientMsg::ListSessions => {
-                    let sessions = app
-                        .sessions
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| protocol::SessionInfo {
-                            name: s.name.clone(),
-                            workspace: s.workspace.clone(),
-                            panes: s.tree.pane_count(),
-                            zoomed: s.zoom,
-                            active: i == app.active,
-                            agents: app
-                                .sessions[i]
-                                .tree
-                                .pane_ids()
-                                .into_iter()
-                                .filter(|pid| {
-                                    app.panes.get(pid).map(|p| p.is_ai_cli()).unwrap_or(false)
-                                })
-                                .map(|pid| protocol::AgentInfo {
-                                    name: app.agent_label(pid),
-                                    status: app
-                                        .agent_status_cache
-                                        .get(&pid)
-                                        .copied()
-                                        .unwrap_or(crate::agents::AgentStatus::Idle)
-                                        .into(),
-                                })
-                                .collect(),
-                        })
-                        .collect();
+                    let sessions = session_list(&app);
                     let _ = send_to(&mut clients, id, &ServerMsg::SessionList { sessions });
+                }
+                ClientMsg::SubscribeSnapshot => {
+                    if let Some(c) = clients.get_mut(&id) {
+                        c.wants_snapshot = true;
+                    }
+                    // Respond immediately with the current state.
+                    let sessions = session_list(&app);
+                    let _ = send_to(&mut clients, id, &ServerMsg::Snapshot { sessions });
+                    render_dirty = true;
+                }
+                ClientMsg::SubscribePane { pane_id } => {
+                    if let Some(c) = clients.get_mut(&id) {
+                        if c.panes_subscribed.insert(pane_id) {
+                            c.pane_needs_full.insert(pane_id);
+                        }
+                    }
+                    render_dirty = true;
+                }
+                ClientMsg::UnsubscribePane { pane_id } => {
+                    if let Some(c) = clients.get_mut(&id) {
+                        c.panes_subscribed.remove(&pane_id);
+                        c.pane_needs_full.remove(&pane_id);
+                    }
+                }
+                ClientMsg::FocusSession { name } => {
+                    if app.focus_session_named(&name) {
+                        render_dirty = true;
+                    }
                 }
                 ClientMsg::KillServer => {
                     kill = true;
@@ -275,6 +296,49 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let mut full_msg: Option<ServerMsg> = None;
             let mut diff_msg: Option<ServerMsg> = None;
             let mut dead = Vec::new();
+
+            // Snapshot push: rebuilt once per cycle and diffed against the last
+            // sent snapshot, so idle cycles send nothing.
+            let sessions = session_list(&app);
+            let snapshot_msg: Option<ServerMsg> = if last_snapshot.as_ref() != Some(&sessions) {
+                last_snapshot = Some(sessions.clone());
+                Some(ServerMsg::Snapshot { sessions })
+            } else {
+                None
+            };
+
+            // Pane-frame delivery: detach each subscribed pane's retained cache
+            // to its own origin grid and precompute the full + diff variants.
+            let mut pane_msgs: HashMap<u64, (ServerMsg, ServerMsg)> = HashMap::new();
+            let mut subscribed: Vec<u64> = clients
+                .values()
+                .flat_map(|c| c.panes_subscribed.iter().copied())
+                .collect();
+            subscribed.sort_unstable();
+            subscribed.dedup();
+            for pid in subscribed {
+                let Some(cached) = app.pane_cache.get(&pid) else { continue };
+                let buf = frames::detach_buffer(cached);
+                let cursor = app.panes.get(&pid).and_then(|p| {
+                    if p.vt.cursor_visible() {
+                        p.vt.cursor_pos()
+                    } else {
+                        None
+                    }
+                });
+                let palette = &app.theme.palette;
+                let full = frames::pane_frame(pid, &buf, None, cursor, palette);
+                let diff = frames::pane_frame(pid, &buf, last_pane_bufs.get(&pid), cursor, palette);
+                pane_msgs.insert(
+                    pid,
+                    (
+                        ServerMsg::PaneFrame { frame: full },
+                        ServerMsg::PaneFrame { frame: diff },
+                    ),
+                );
+                last_pane_bufs.insert(pid, buf);
+            }
+
             for (id, client) in clients.iter_mut() {
                 if !client.welcomed {
                     continue;
@@ -284,14 +348,14 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     client.needs_full = false;
                     full_msg.get_or_insert_with(|| {
                         ServerMsg::Frame {
-                            frame: protocol::FrameMsg::full_frame(&new_buf, cursor, &app.theme.palette),
+                            frame: frames::full_frame(&new_buf, cursor, &app.theme.palette),
                         }
                     })
                 } else {
                     let Some(last) = &last_buffer else { continue };
                     diff_msg.get_or_insert_with(|| {
                         ServerMsg::Frame {
-                            frame: protocol::FrameMsg::diff_frame(&new_buf, last, cursor, &app.theme.palette),
+                            frame: frames::diff_frame(&new_buf, last, cursor, &app.theme.palette),
                         }
                     })
                 };
@@ -300,6 +364,31 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 // frame. Only a disconnected writer drops the client.
                 if client.try_send_frame(msg.clone()) {
                     dead.push(*id);
+                    continue;
+                }
+                if client.wants_snapshot {
+                    if let Some(snap) = &snapshot_msg {
+                        if client.try_send_frame(snap.clone()) {
+                            dead.push(*id);
+                            continue;
+                        }
+                    }
+                }
+                let pane_ids: Vec<u64> = client.panes_subscribed.iter().copied().collect();
+                for pid in pane_ids {
+                    let Some((full, diff)) = pane_msgs.get(&pid) else { continue };
+                    let (needs_full, msg) = if client.pane_needs_full.remove(&pid) {
+                        (true, full)
+                    } else {
+                        (false, diff)
+                    };
+                    if client.try_send_frame(msg.clone()) {
+                        if needs_full {
+                            client.pane_needs_full.insert(pid);
+                        }
+                        dead.push(*id);
+                        break;
+                    }
                 }
             }
             for id in dead {
@@ -379,6 +468,51 @@ fn resize_terminal(terminal: &mut Terminal<TestBackend>, cols: u16, rows: u16) {
     let h = rows.max(1);
     terminal.backend_mut().resize(w, h);
     let _ = terminal.resize(Rect::new(0, 0, w, h));
+}
+
+/// Build the structured session list (used by `kumo ls`, `ListSessions`, and
+/// snapshot pushes). Every field is data the daemon already keeps: session
+/// name/workspace, per-pane title/cwd/AI marker, and the agent lifecycle cache.
+fn session_list(app: &App) -> Vec<protocol::SessionInfo> {
+    app.sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| protocol::SessionInfo {
+            name: s.name.clone(),
+            workspace: s.workspace.clone(),
+            panes: s
+                .tree
+                .pane_ids()
+                .into_iter()
+                .filter_map(|pid| {
+                    let pane = app.panes.get(&pid)?;
+                    let is_ai = pane.is_ai_cli();
+                    let agent = if is_ai {
+                        Some(AgentInfo {
+                            name: app.agent_label(pid),
+                            status: app
+                                .agent_status_cache
+                                .get(&pid)
+                                .copied()
+                                .unwrap_or(crate::agents::AgentStatus::Idle)
+                                .into(),
+                        })
+                    } else {
+                        None
+                    };
+                    Some(PaneInfo {
+                        id: pid,
+                        title: app.pane_label(pid),
+                        cwd: pane.cwd.clone(),
+                        is_ai,
+                        agent,
+                    })
+                })
+                .collect(),
+            zoomed: s.zoom,
+            active: i == app.active,
+        })
+        .collect()
 }
 
 /// Queue a message to one client (non-blocking).
@@ -506,7 +640,7 @@ fn peer_owned_by_same_user(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{WireKeyCode, WireKeyEvent, WireModifiers};
+    use crate::protocol::{ClientKind, WireKeyCode, WireKeyEvent, WireModifiers};
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
@@ -629,7 +763,12 @@ mod tests {
         let mut stream = wait_for_socket(sock, Duration::from_secs(10));
         protocol::write_framed(
             &mut stream,
-            &ClientMsg::Hello { protocol: protocol::PROTOCOL_VERSION, cols: 180, rows: 45 },
+            &ClientMsg::Hello {
+                protocol: protocol::PROTOCOL_VERSION,
+                kind: ClientKind::Terminal,
+                cols: 180,
+                rows: 45,
+            },
         )
         .unwrap();
         let msg: ServerMsg = protocol::read_framed(&mut stream).unwrap();
@@ -685,7 +824,14 @@ mod tests {
     #[test]
     fn full_queue_marks_full_redraw_instead_of_dropping() {
         let (tx, rx) = mpsc::sync_channel::<ServerMsg>(1);
-        let mut client = Client { tx, welcomed: true, needs_full: false };
+        let mut client = Client {
+            tx,
+            welcomed: true,
+            needs_full: false,
+            wants_snapshot: false,
+            panes_subscribed: HashSet::new(),
+            pane_needs_full: HashSet::new(),
+        };
         // Fill the writer's channel so the next send hits Full — exactly what
         // happens while the writer thread is blocked on a client that stopped
         // reading (backgrounded tab, asleep machine).
@@ -801,10 +947,12 @@ mod tests {
         assert_eq!(sessions.len(), 1, "one session should be listed");
         assert_eq!(sessions[0].name, "session-1");
         assert!(sessions[0].active);
-        assert!(sessions[0].panes >= 1);
+        assert!(!sessions[0].panes.is_empty(), "session should list its panes");
+        let first = &sessions[0].panes[0];
+        assert!(!first.title.is_empty(), "pane title must be reported");
         assert!(
-            sessions[0].agents.is_empty(),
-            "a plain shell session has no AI agents to report"
+            first.agent.is_none(),
+            "a plain shell pane has no AI agent to report"
         );
 
         // `kumo reload`: the daemon re-reads its config and confirms live.

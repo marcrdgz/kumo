@@ -22,7 +22,7 @@ use crossterm::event::{
 };
 
 use crate::app::Launch;
-use crate::protocol::{self, ClientMsg, FrameMsg, ServerMsg};
+use crate::protocol::{self, ClientKind, ClientMsg, FrameMsg, ServerMsg};
 
 pub fn run(launch: Launch) -> Result<()> {
     let path = crate::config::ipc_socket_path();
@@ -77,21 +77,25 @@ pub fn list_sessions() -> Result<()> {
         ServerMsg::SessionList { sessions } => {
             for s in &sessions {
                 let mark = if s.active { "* " } else { "  " };
-                let pane_word = if s.panes == 1 { "pane" } else { "panes" };
+                let pane_word = if s.panes.len() == 1 { "pane" } else { "panes" };
                 println!(
                     "{mark}{}: {} {} · {}{}",
                     s.name,
-                    s.panes,
+                    s.panes.len(),
                     pane_word,
                     s.workspace.display(),
                     if s.zoomed { " (zoomed)" } else { "" }
                 );
-                // One indented line per running AI CLI, so a blocked agent is
-                // noticeable from outside the TUI. Status word colored only on
-                // a real terminal (amber blocked, green working).
+                // One indented line per pane (title + cwd), with the AI CLI's
+                // status highlighted, so a blocked agent is noticeable from
+                // outside the TUI.
                 let color = io::stdout().is_terminal();
-                for agent in &s.agents {
-                    println!("{}", agent_line(&agent.name, agent.status, color));
+                for pane in &s.panes {
+                    let mut line = format!("    {} ({})", pane.title.trim(), pane.cwd.display());
+                    if let Some(agent) = &pane.agent {
+                        line.push_str(&format!(" — {}", agent_line(&agent.name, agent.status, color)));
+                    }
+                    println!("{line}");
                 }
             }
             if sessions.is_empty() {
@@ -205,7 +209,12 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
     let (cols, rows) = crossterm::terminal::size()?;
     protocol::write_framed(
         stream,
-        &ClientMsg::Hello { protocol: protocol::PROTOCOL_VERSION, cols, rows },
+        &ClientMsg::Hello {
+            protocol: protocol::PROTOCOL_VERSION,
+            kind: ClientKind::Terminal,
+            cols,
+            rows,
+        },
     )?;
     // Messages to send right after the handshake (e.g. the `kumo new` session
     // request), before entering the render loop.
@@ -255,6 +264,8 @@ fn client_once(stream: &mut UnixStream, pre: &[ClientMsg]) -> Result<Exit> {
                 }
                 Ok(ServerMsg::SessionList { .. }) => {}
                 Ok(ServerMsg::ConfigReloaded { .. }) => {}
+                Ok(ServerMsg::Snapshot { .. }) => {}
+                Ok(ServerMsg::PaneFrame { .. }) => {}
                 Ok(ServerMsg::Detach) => return Ok(Exit::Clean),
                 Ok(ServerMsg::Restarting) => return Ok(Exit::Restarting),
                 Ok(ServerMsg::Shutdown) => {
