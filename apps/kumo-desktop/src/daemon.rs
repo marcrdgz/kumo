@@ -73,6 +73,9 @@ fn serve(to_view: &mpsc::Sender<ServerMsg>, from_view: &mpsc::Receiver<ClientMsg
     if protocol::write_framed(&mut stream, &hello).is_err() {
         return ServeOutcome::Restart;
     }
+    // This app paints its own chrome, so keep the daemon's sidebar closed so
+    // panes get the full width.
+    let _ = protocol::write_framed(&mut stream, &ClientMsg::SetSidebar { open: false });
     // The daemon pushes a frame every ~250ms even when idle, so a short read
     // timeout lets us poll the outbox (resize/input) without a second thread.
     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));

@@ -1,66 +1,97 @@
 //! Kumo Desktop: a native GPUI client for the kumo daemon.
 //!
-//! The daemon is the single source of truth (sessions, panes, PTYs, agents)
-//! and streams everything over a unix socket. This app attaches like the TUI
-//! client — rendering the daemon's composed `WireCell` frames in a native grid
-//! view with full keyboard/mouse input — and additionally subscribes to the
-//! structured snapshot to drive a native sessions/agents sidebar. Because it is
-//! just another client, you can use the terminal, this app, or both at once.
+//! Unlike the TUI client, this app does **not** render the daemon's composed
+//! interface. It consumes the structured snapshot (sessions/panes/agents with
+//! geometry) and per-pane `PaneFrame`s, then paints panes itself: each pane is
+//! a card in its session's layout, with its own title chip and agent status,
+//! inside a native sidebar and status strip. Input is forwarded to the daemon,
+//! which remains the single source of truth for PTYs, layout, and focus.
 
 mod daemon;
 mod grid;
 
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use gpui::{
-    div, hsla, px, rgb, App, Application, Bounds, Context, ElementId, Keystroke, Modifiers,
+    div, hsla, point, px, rgb, size, App, Application, Bounds, Context, Element, ElementId, Font,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, Keystroke, LayoutId, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, StyledText, TextStyle, Window, WindowBounds, WindowOptions,
-    prelude::*,
+    ScrollWheelEvent, SharedString, Style, StyledText, TextStyle, Window, WindowBounds,
+    WindowOptions, fill, prelude::*,
 };
 use kumo_protocol::{
-    ClientMsg, ServerMsg, SessionInfo, WireKeyCode, WireKeyEvent, WireModifiers, WireMouseButton,
-    WireMouseEvent, WireMouseKind,
+    AgentInfo, AgentStatus, ClientMsg, PaneRect, ServerMsg, SessionInfo, WireKeyCode,
+    WireKeyEvent, WireModifiers, WireMouseButton, WireMouseEvent, WireMouseKind,
 };
 
 use crate::grid::Grid;
 
-const SIDEBAR_W: f32 = 230.0;
+const SIDEBAR_W: f32 = 244.0;
+const STATUS_H: f32 = 28.0;
+const CANVAS_BG: u32 = 0x0d0d10;
+const CARD_BG: u32 = 0x111116;
+const FOCUS_ACCENT: u32 = 0x4c6ef5;
 
 struct KumoDesktop {
     to_view: mpsc::Receiver<ServerMsg>,
     from_view: mpsc::Sender<ClientMsg>,
     connected: bool,
     status: SharedString,
-    grid: Grid,
-    snapshot: Vec<SessionInfo>,
+    sessions: Vec<SessionInfo>,
+    panes: HashMap<u64, Grid>,
+    subscribed: HashSet<u64>,
+    selected: Option<String>,
+    last_sent: Option<(u16, u16)>,
+    // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
+    font_size: f32,
+    line_height_ratio: f32,
+    advance_ratio: f32,
+    font: Font,
+    default_fg: Hsla,
+    canvas_origin: Point<Pixels>,
+    canvas_size: (f32, f32),
     base: TextStyle,
     dim: TextStyle,
-    last_sent: Option<(u16, u16)>,
 }
 
 impl KumoDesktop {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let conn = daemon::spawn();
-        let base = grid::base_text_style(window);
-        let dim = grid::dim_text_style(window);
-        let (cell_w, cell_h) = grid::cell_size(window, &base);
-        let this = KumoDesktop {
+        let base = crate::grid::base_text_style(window);
+        let dim = crate::grid::dim_text_style(window);
+        let (line_height_ratio, advance_ratio) = crate::grid::font_ratios(window, &base);
+        let font = base.font();
+        let default_fg = base.color;
+        let mut this = KumoDesktop {
             to_view: conn.to_view,
             from_view: conn.from_view,
             connected: false,
             status: SharedString::from("connecting to kumo daemon…"),
-            grid: Grid::default(),
-            snapshot: Vec::new(),
-            cell_w,
-            cell_h,
+            sessions: Vec::new(),
+            panes: HashMap::new(),
+            subscribed: HashSet::new(),
+            selected: None,
+            last_sent: None,
+            cell_w: 7.8,
+            cell_h: 17.0,
+            font_size: 13.0,
+            line_height_ratio,
+            advance_ratio,
+            font,
+            default_fg,
+            canvas_origin: point(px(SIDEBAR_W), px(0.0)),
+            canvas_size: (800.0, 600.0),
             base,
             dim,
-            last_sent: None,
         };
+        // Declare ourselves as a snapshot + pane consumer and close the daemon's
+        // chrome so panes get the full width (this app paints its own).
+        let _ = this.send(ClientMsg::SubscribeSnapshot);
+        let _ = this.send(ClientMsg::SetSidebar { open: false });
         cx.spawn(|this: gpui::WeakEntity<KumoDesktop>, cx: &mut gpui::AsyncApp| {
             let mut cx = cx.clone();
             async move {
@@ -74,11 +105,14 @@ impl KumoDesktop {
         this
     }
 
-    fn send(&mut self, msg: ClientMsg) {
-        let _ = self.from_view.send(msg);
+    fn send(&mut self, msg: ClientMsg) -> Result<(), ()> {
+        self.from_view.send(msg).map_err(|_| ())
     }
 
-    /// Drain messages from the daemon and notify GPUI when the view changed.
+    // ------------------------------------------------------------------
+    // State
+    // ------------------------------------------------------------------
+
     fn pump(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         while let Ok(msg) = self.to_view.try_recv() {
@@ -88,12 +122,13 @@ impl KumoDesktop {
                     self.status = SharedString::from("connected");
                     changed = true;
                 }
-                ServerMsg::Frame { frame } => {
-                    self.grid.apply(&frame);
+                ServerMsg::Snapshot { sessions } => {
+                    self.sessions = sessions;
+                    self.on_snapshot();
                     changed = true;
                 }
-                ServerMsg::Snapshot { sessions } => {
-                    self.snapshot = sessions;
+                ServerMsg::PaneFrame { frame } => {
+                    self.panes.entry(frame.pane_id).or_default().apply(&frame);
                     changed = true;
                 }
                 ServerMsg::Restarting => {
@@ -113,30 +148,148 @@ impl KumoDesktop {
         }
     }
 
-    /// Recompute the terminal size from the window and send `Resize` when it
-    /// changes (the daemon renders the whole UI at the client's size).
-    fn update_geometry(&mut self, window: &mut Window) {
-        let size = window.viewport_size();
-        let avail_w = (f32::from(size.width) - SIDEBAR_W).max(1.0);
-        let cols = (avail_w / self.cell_w).floor().max(1.0) as u16;
-        let rows = (f32::from(size.height) / self.cell_h).floor().max(1.0) as u16;
-        if self.last_sent != Some((cols, rows)) {
-            self.last_sent = Some((cols, rows));
-            self.send(ClientMsg::Resize { cols, rows });
+    /// Follow the daemon's active session and keep pane subscriptions in sync
+    /// with it.
+    fn on_snapshot(&mut self) {
+        let active = self
+            .sessions
+            .iter()
+            .find(|s| s.active)
+            .map(|s| s.name.clone())
+            .or_else(|| self.sessions.first().map(|s| s.name.clone()));
+        if self.selected != active {
+            self.selected = active;
+            if let Some(name) = &self.selected {
+                let _ = self.send(ClientMsg::FocusSession { name: name.clone() });
+            }
+        }
+        let session = self.selected_session().cloned();
+        if let Some(s) = session {
+            self.resubscribe(&s);
         }
     }
 
+    /// Subscribe to / unsubscribe from the selected session's pane streams.
+    fn resubscribe(&mut self, session: &SessionInfo) {
+        let want: HashSet<u64> = session.panes.iter().map(|p| p.id).collect();
+        let to_add: Vec<u64> = want.difference(&self.subscribed).copied().collect();
+        let to_remove: Vec<u64> = self.subscribed.difference(&want).copied().collect();
+        for id in to_add {
+            let _ = self.send(ClientMsg::SubscribePane { pane_id: id });
+        }
+        for id in to_remove {
+            let _ = self.send(ClientMsg::UnsubscribePane { pane_id: id });
+            self.panes.remove(&id);
+        }
+        self.subscribed = want;
+    }
+
+    fn selected_session(&self) -> Option<&SessionInfo> {
+        let name = self.selected.as_ref()?;
+        self.sessions.iter().find(|s| &s.name == name)
+    }
+
+    fn select_session(&mut self, name: String) {
+        self.selected = Some(name.clone());
+        let _ = self.send(ClientMsg::FocusSession { name });
+        let session = self.selected_session().cloned();
+        if let Some(s) = session {
+            self.resubscribe(&s);
+        }
+    }
+
+    /// The pane under a cell coordinate, as `(session, pane_id)`.
+    fn pane_at(&self, col: u16, row: u16) -> Option<(String, u64)> {
+        let s = self.selected_session()?;
+        for p in &s.panes {
+            let r = p.rect;
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                return Some((s.name.clone(), p.id));
+            }
+        }
+        None
+    }
+
+    fn focused_pane_label(&self) -> String {
+        let s = self.selected_session();
+        let focus = s.and_then(|s| s.focus);
+        let Some(focus) = focus else { return "-".into() };
+        s.and_then(|s| s.panes.iter().find(|p| p.id == focus))
+            .map(|p| p.title.trim().to_string())
+            .unwrap_or_else(|| format!("pane {focus}"))
+    }
+
     // ------------------------------------------------------------------
-    // Mouse
+    // Geometry
+    // ------------------------------------------------------------------
+
+    /// Extent (in cells) of the selected session's rendered grid: the max pane
+    /// bottom/right edge, plus one row for the status strip.
+    fn selected_bounds(&self) -> (u16, u16) {
+        if let Some(s) = self.selected_session() {
+            let mut w = 0u16;
+            let mut h = 0u16;
+            for p in &s.panes {
+                w = w.max(p.rect.x + p.rect.width);
+                h = h.max(p.rect.y + p.rect.height);
+            }
+            if w > 0 && h > 0 {
+                return (w, h + 1);
+            }
+        }
+        let (c, r) = self.last_sent.unwrap_or((80, 24));
+        (c, r.saturating_sub(1))
+    }
+
+    /// Choose a daemon grid size (~13px cells) and compute the scaled cell
+    /// metrics so the session's panes fill the available area.
+    fn update_geometry(&mut self, window: &mut Window) {
+        let vp = window.viewport_size();
+        let avail_w = (f32::from(vp.width) - SIDEBAR_W).max(1.0);
+        let avail_h = (f32::from(vp.height) - STATUS_H).max(1.0);
+        let target_w = 13.0 * self.advance_ratio;
+        let target_h = 13.0 * self.line_height_ratio;
+        let cols = (avail_w / target_w).floor().max(20.0) as u16;
+        let rows = (avail_h / target_h).floor().max(10.0) as u16 + 1; // + status row
+        if self.last_sent != Some((cols, rows)) {
+            self.last_sent = Some((cols, rows));
+            let _ = self.send(ClientMsg::Resize { cols, rows });
+        }
+        let (gw, gh) = self.selected_bounds();
+        self.cell_h = avail_h / (gh.max(1) as f32);
+        self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
+        self.cell_w = self.font_size * self.advance_ratio;
+        let canvas_w = gw as f32 * self.cell_w;
+        self.canvas_origin = point(px(SIDEBAR_W + (avail_w - canvas_w).max(0.0) * 0.5), px(0.0));
+        self.canvas_size = (canvas_w, avail_h);
+    }
+
+    fn cell_from_position(&self, pos: Point<Pixels>) -> Option<(u16, u16)> {
+        let gx = f32::from(pos.x) - f32::from(self.canvas_origin.x);
+        let gy = f32::from(pos.y) - f32::from(self.canvas_origin.y);
+        if gx < 0.0 || gy < 0.0 {
+            return None;
+        }
+        Some(((gx / self.cell_w).min(u16::MAX as f32) as u16, (gy / self.cell_h).min(u16::MAX as f32) as u16))
+    }
+
+    // ------------------------------------------------------------------
+    // Input
     // ------------------------------------------------------------------
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
         let button = wire_button(ev.button);
-        self.mouse_at(ev.position, WireMouseKind::Down(button), ev.modifiers);
+        let Some((col, row)) = self.cell_from_position(ev.position) else { return };
+        if let Some((session, pid)) = self.pane_at(col, row) {
+            let _ = self.send(ClientMsg::FocusPane { session, pane_id: pid });
+        }
+        self.send_mouse(WireMouseKind::Down(button), col, row, ev.modifiers);
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.mouse_at(ev.position, WireMouseKind::Up(wire_button(ev.button)), ev.modifiers);
+        let button = wire_button(ev.button);
+        let Some((col, row)) = self.cell_from_position(ev.position) else { return };
+        self.send_mouse(WireMouseKind::Up(button), col, row, ev.modifiers);
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -144,7 +297,8 @@ impl KumoDesktop {
             Some(b) => WireMouseKind::Drag(wire_button(b)),
             None => WireMouseKind::Moved,
         };
-        self.mouse_at(ev.position, kind, ev.modifiers);
+        let Some((col, row)) = self.cell_from_position(ev.position) else { return };
+        self.send_mouse(kind, col, row, ev.modifiers);
     }
 
     fn on_scroll_wheel(&mut self, ev: &ScrollWheelEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -153,22 +307,18 @@ impl KumoDesktop {
             ScrollDelta::Lines(p) => p.y * 8.0,
         };
         let kind = if dy > 0.0 { WireMouseKind::ScrollUp } else { WireMouseKind::ScrollDown };
-        self.mouse_at(ev.position, kind, ev.modifiers);
+        let Some((col, row)) = self.cell_from_position(ev.position) else { return };
+        self.send_mouse(kind, col, row, ev.modifiers);
     }
 
-    fn mouse_at(&mut self, pos: Point<Pixels>, kind: WireMouseKind, mods: Modifiers) {
-        let gx = f32::from(pos.x) - SIDEBAR_W;
-        let gy = f32::from(pos.y);
-        if gx < 0.0 || gy < 0.0 {
-            return;
-        }
-        let col = (gx / self.cell_w).min(u16::MAX as f32) as u16;
-        let row = (gy / self.cell_h).min(u16::MAX as f32) as u16;
-        self.send(ClientMsg::Mouse { event: WireMouseEvent { kind, col, row, modifiers: wire_modifiers(mods) } });
+    fn send_mouse(&mut self, kind: WireMouseKind, col: u16, row: u16, mods: Modifiers) {
+        let _ = self.send(ClientMsg::Mouse {
+            event: WireMouseEvent { kind, col, row, modifiers: wire_modifiers(mods) },
+        });
     }
 
     // ------------------------------------------------------------------
-    // Sidebar
+    // Sidebar / status
     // ------------------------------------------------------------------
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -177,19 +327,15 @@ impl KumoDesktop {
             .flex_col()
             .w(px(SIDEBAR_W))
             .h_full()
-            .bg(rgb(0x1c1c1e))
+            .bg(rgb(0x131318))
             .border_r_1()
-            .border_color(rgb(0x2a2a2c))
-            .p(px(8.))
-            .gap(px(2.))
-            .child(
-                div().pb(px(4.)).child(
-                    StyledText::new(SharedString::from("KUMO")).with_default_highlights(&self.base, []),
-                ),
-            );
-        if self.snapshot.is_empty() {
+            .border_color(rgb(0x1e1e24))
+            .p(px(10.))
+            .gap(px(3.))
+            .child(self.header());
+        if self.sessions.is_empty() {
             col = col.child(
-                div().child(
+                div().pt(px(6.)).child(
                     StyledText::new(SharedString::from(
                         if self.connected { "no sessions".to_string() } else { self.status.to_string() },
                     ))
@@ -197,85 +343,347 @@ impl KumoDesktop {
                 ),
             );
         } else {
-            for s in &self.snapshot {
-                col = col.child(self.session_row(s, cx));
+            col = col.child(self.section_label("SESSIONS"));
+            for s in &self.sessions {
+                col = col.child(self.session_card(s, cx));
+            }
+            col = col.child(self.section_label("AGENTS"));
+            let mut has_agents = false;
+            for s in &self.sessions {
+                for pane in &s.panes {
+                    if let Some(agent) = &pane.agent {
+                        has_agents = true;
+                        col = col.child(self.agent_row(&s.name, agent, cx));
+                    }
+                }
+            }
+            if !has_agents {
+                col = col.child(
+                    div().child(StyledText::new(SharedString::from("no agents running")).with_default_highlights(&self.dim, [])),
+                );
             }
         }
         col
     }
 
-    fn session_row(&self, s: &SessionInfo, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = s.name.clone();
-        let marker = if s.active { "● " } else { "○ " };
-        let mut row = div()
+    fn header(&self) -> impl IntoElement {
+        let dot: Hsla = if self.connected { rgb(0x2ee06b).into() } else { rgb(0x7d7d82).into() };
+        div()
             .flex()
-            .flex_col()
-            .w_full()
-            .px(px(6.))
-            .py(px(3.))
-            .rounded_md()
-            .bg(if s.active { rgb(0x2c2c34).into() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, _cx| {
-                this.send(ClientMsg::FocusSession { name: name.clone() });
-            }))
-            .child(
-                StyledText::new(SharedString::from(format!("{marker}{}", s.name)))
-                    .with_default_highlights(&self.base, []),
-            )
-            .child(
-                StyledText::new(SharedString::from(s.workspace.display().to_string()))
-                    .with_default_highlights(&self.dim, []),
-            );
-        for agent in s.panes.iter().filter_map(|p| p.agent.as_ref()) {
-            let dot = match agent.status {
-                kumo_protocol::AgentStatus::Blocked => "● ",
-                kumo_protocol::AgentStatus::Working => "● ",
-                kumo_protocol::AgentStatus::Idle => "○ ",
-            };
-            let dot_color = match agent.status {
-                kumo_protocol::AgentStatus::Blocked => rgb(0xffb84d).into(),
-                kumo_protocol::AgentStatus::Working => rgb(0x2ee06b).into(),
-                kumo_protocol::AgentStatus::Idle => rgb(0x66666a).into(),
-            };
-            let mut style = self.dim.clone();
-            style.color = dot_color;
-            row = row.child(
-                div().child(
-                    StyledText::new(SharedString::from(format!("{dot}{} · {}", agent.name, agent.status.label())))
-                        .with_default_highlights(&style, []),
-                ),
-            );
-        }
-        row
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .pb(px(6.))
+            .child(div().size_2().rounded_full().bg(dot))
+            .child(StyledText::new(SharedString::from("KUMO")).with_default_highlights(&self.base, []))
     }
 
-    fn grid_view(&self) -> impl IntoElement {
-        let rows: usize = self.grid.rows() as usize;
-        let mut container = div().flex().flex_col().flex_grow().overflow_hidden();
-        if rows == 0 {
-            container = container.child(
-                div().p(px(12.)).child(
-                    StyledText::new(SharedString::from(&self.status))
+    fn section_label(&self, label: &str) -> impl IntoElement {
+        div()
+            .pt(px(6.))
+            .pb(px(2.))
+            .child(StyledText::new(SharedString::from(label.to_string())).with_default_highlights(&self.dim, []))
+    }
+
+    fn session_card(&self, s: &SessionInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = s.name.clone();
+        let bg: Hsla = if s.active { rgb(0x23232c).into() } else { hsla(0.0, 0.0, 0.0, 0.0) };
+        let border: Hsla = if s.active { rgb(FOCUS_ACCENT).into() } else { rgb(0x222228).into() };
+        let mut card = div()
+            .w_full()
+            .rounded_md()
+            .px(px(8.))
+            .py(px(5.))
+            .bg(bg)
+            .border_1()
+            .border_color(border)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, _cx| {
+                this.select_session(name.clone());
+            }));
+        let title = format!(
+            "{}  · {} panes{}",
+            s.name,
+            s.panes.len(),
+            if s.zoomed { " (zoom)" } else { "" }
+        );
+        card = card
+            .child(div().child(StyledText::new(SharedString::from(title)).with_default_highlights(&self.base, [])))
+            .child(
+                div().child(
+                    StyledText::new(SharedString::from(s.workspace.display().to_string()))
                         .with_default_highlights(&self.dim, []),
                 ),
             );
-        } else {
-            for y in 0..rows {
-                let styled = match self.grid.row(y as u16) {
-                    Some(cells) => grid::row_styled_text(cells, &self.base),
-                    None => StyledText::new(SharedString::from(" ")).with_default_highlights(&self.base, []),
-                };
-                container = container.child(
-                    div()
-                        .id(ElementId::named_usize("grid-row", y))
-                        .h(px(self.cell_h))
-                        .w_full()
-                        .child(styled),
-                );
+        for pane in &s.panes {
+            if let Some(agent) = &pane.agent {
+                card = card.child(self.agent_badge(agent));
             }
         }
-        container
+        card
     }
+
+    fn agent_badge(&self, agent: &AgentInfo) -> impl IntoElement {
+        let color = agent_status_color(agent.status);
+        let text = format!("{}  {} · {}", agent.name, agent.status.label(), agent_status_label(agent.status));
+        let mut style = self.dim.clone();
+        style.color = color;
+        div().pt(px(2.)).child(StyledText::new(SharedString::from(text)).with_default_highlights(&style, []))
+    }
+
+    fn agent_row(&self, session: &str, agent: &AgentInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let session = session.to_string();
+        let text = format!("{} · {} · {}", session, agent.name, agent.status.label());
+        let color = agent_status_color(agent.status);
+        let mut style = self.dim.clone();
+        style.color = color;
+        div()
+            .w_full()
+            .px(px(8.))
+            .py(px(2.))
+            .rounded_md()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, _cx| {
+                this.select_session(session.clone());
+            }))
+            .child(StyledText::new(SharedString::from(text)).with_default_highlights(&style, []))
+    }
+
+    fn status_strip(&self) -> impl IntoElement {
+        let text = format!(
+            "{}   session {}   pane {}",
+            if self.connected { "connected" } else { "disconnected" },
+            self.selected.as_deref().unwrap_or("-"),
+            self.focused_pane_label()
+        );
+        div()
+            .w_full()
+            .h(px(STATUS_H))
+            .flex()
+            .items_center()
+            .px(px(10.))
+            .border_t_1()
+            .border_color(rgb(0x1e1e24))
+            .bg(rgb(0x101014))
+            .child(StyledText::new(SharedString::from(text)).with_default_highlights(&self.dim, []))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pane canvas: paints each pane as a card (border, title chip, agent status)
+// with its cells, so the app renders natively instead of showing the daemon's
+// composed UI.
+// ---------------------------------------------------------------------------
+
+/// Owned snapshot of what the canvas paints this frame, extracted in
+/// `prepaint` so `paint` can borrow `App` freely while shaping text.
+struct CanvasPane {
+    rect: PaneRect,
+    focused: bool,
+    title: String,
+    agent: Option<(String, AgentStatus)>,
+    grid: Option<Grid>,
+}
+
+struct CanvasData {
+    cell_w: f32,
+    cell_h: f32,
+    font_size: f32,
+    font: Font,
+    default_fg: Hsla,
+    panes: Vec<CanvasPane>,
+}
+
+struct PaneCanvas {
+    view: gpui::Entity<KumoDesktop>,
+}
+
+impl PaneCanvas {
+    fn extract(&self, cx: &App) -> CanvasData {
+        let model = self.view.read(cx);
+        let mut panes = Vec::new();
+        if let Some(session) = model.selected_session() {
+            for pane in &session.panes {
+                let grid = model.panes.get(&pane.id).cloned();
+                panes.push(CanvasPane {
+                    rect: pane.rect,
+                    focused: session.focus == Some(pane.id),
+                    title: pane.title.trim().to_string(),
+                    agent: pane.agent.as_ref().map(|a| (a.name.clone(), a.status)),
+                    grid,
+                });
+            }
+        }
+        CanvasData {
+            cell_w: model.cell_w,
+            cell_h: model.cell_h,
+            font_size: model.font_size,
+            font: model.font.clone(),
+            default_fg: model.default_fg,
+            panes,
+        }
+    }
+}
+
+impl IntoElement for PaneCanvas {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for PaneCanvas {
+    type RequestLayoutState = ();
+    type PrepaintState = CanvasData;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name("pane-canvas".into()))
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let (w, h) = self.view.read(cx).canvas_size;
+        let mut style = Style::default();
+        style.size.width = px(w).into();
+        style.size.height = px(h).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.extract(cx)
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        paint_canvas(prepaint, bounds, window, cx);
+    }
+}
+
+fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    window.paint_quad(fill(bounds, rgb(CANVAS_BG)));
+    let cell_w = data.cell_w;
+    let cell_h = data.cell_h;
+    let font_size = px(data.font_size);
+    let line_h = px(cell_h);
+    for pane in &data.panes {
+        let r = pane.rect;
+        let x = bounds.left() + px(r.x as f32 * cell_w);
+        let y = bounds.top() + px(r.y as f32 * cell_h);
+        let w = px(r.width as f32 * cell_w);
+        let h = px(r.height as f32 * cell_h);
+        let card = Bounds::new(point(x, y), size(w, h));
+        if pane.focused {
+            window.paint_quad(fill(card, rgb(FOCUS_ACCENT)));
+        }
+        let inner = Bounds::new(
+            point(x + px(1.5), y + px(1.5)),
+            size(w - px(3.0), h - px(3.0)),
+        );
+        window.paint_quad(fill(inner, rgb(CARD_BG)));
+
+        // Cells.
+        if let Some(grid) = &pane.grid {
+            for row in 0..grid.rows() {
+                let cells = grid.row(row).unwrap_or_default();
+                let (text, runs) =
+                    crate::grid::row_runs(cells, &data.font, data.default_fg, rgb(CARD_BG).into());
+                let line = window
+                    .text_system()
+                    .shape_line(SharedString::from(text), font_size, &runs, None);
+                let origin = point(x, y + px(row as f32 * cell_h));
+                let _ = line.paint_background(origin, line_h, window, cx);
+                let _ = line.paint(origin, line_h, window, cx);
+            }
+            // Native cursor: an underline under the terminal cursor cell.
+            if let Some((ccx, ccy)) = grid.cursor() {
+                let cw = px(cell_w);
+                let ch = px(cell_h);
+                let cursor_y = y + px(ccy as f32 * cell_h) + ch - px(1.5);
+                window.paint_quad(fill(
+                    Bounds::new(point(x + px(ccx as f32 * cell_w), cursor_y), size(cw, px(1.5))),
+                    rgb(0x8aa7ff),
+                ));
+            }
+        }
+
+        paint_title_chip(data, pane, x, y, window, cx);
+    }
+}
+
+fn paint_title_chip(
+    data: &CanvasData,
+    pane: &CanvasPane,
+    x: Pixels,
+    y: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let chip_bg: Hsla = if pane.focused { rgb(FOCUS_ACCENT).into() } else { rgb(0x26262e).into() };
+    let mut text = format!(" {}", pane.title);
+    let mut runs = vec![gpui::TextRun {
+        len: text.len(),
+        font: data.font.clone(),
+        color: rgb(0xf2f2f4).into(),
+        background_color: Some(chip_bg),
+        underline: None,
+        strikethrough: None,
+    }];
+    if let Some((name, status)) = &pane.agent {
+        let label = format!("  {name}  {}", status.label());
+        text.push_str(&label);
+        runs.push(gpui::TextRun {
+            len: label.len(),
+            font: data.font.clone(),
+            color: agent_status_color(*status),
+            background_color: Some(chip_bg),
+            underline: None,
+            strikethrough: None,
+        });
+    }
+    let line = window.text_system().shape_line(SharedString::from(text), px(11.0), &runs, None);
+    let origin = point(x + px(3.0), y + px(3.0));
+    let _ = line.paint_background(origin, px(15.0), window, cx);
+    let _ = line.paint(origin, px(15.0), window, cx);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn agent_status_color(status: AgentStatus) -> Hsla {
+    match status {
+        AgentStatus::Blocked => rgb(0xffb84d).into(),
+        AgentStatus::Working => rgb(0x2ee06b).into(),
+        AgentStatus::Idle => rgb(0x7d7d82).into(),
+    }
+}
+
+fn agent_status_label(status: AgentStatus) -> &'static str {
+    status.label()
 }
 
 fn wire_button(b: MouseButton) -> WireMouseButton {
@@ -338,12 +746,6 @@ fn wire_key(ks: &Keystroke) -> Option<WireKeyEvent> {
     Some(WireKeyEvent::new(code, mods))
 }
 
-fn on_keystroke(ks: &Keystroke, this: &mut KumoDesktop) {
-    if let Some(key) = wire_key(ks) {
-        this.send(ClientMsg::Input { key });
-    }
-}
-
 impl Render for KumoDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_geometry(window);
@@ -351,7 +753,7 @@ impl Render for KumoDesktop {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(0x121214))
+            .bg(rgb(CANVAS_BG))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -361,13 +763,29 @@ impl Render for KumoDesktop {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(self.sidebar(cx))
-            .child(self.grid_view())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .size_full()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_grow()
+                            .w_full()
+                            .child(PaneCanvas { view: cx.entity() }),
+                    )
+                    .child(self.status_strip()),
+            )
     }
 }
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, gpui::size(px(1100.), px(720.)), cx);
+        let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
@@ -390,12 +808,16 @@ fn main() {
                 let text = cx.read_from_clipboard().and_then(|item| item.text());
                 view.update(cx, move |this, _cx| {
                     if let Some(text) = text {
-                        this.send(ClientMsg::Paste { text });
+                        let _ = this.send(ClientMsg::Paste { text });
                     }
                 });
                 return;
             }
-            view.update(cx, move |this, _cx| on_keystroke(&ks, this));
+            view.update(cx, move |this, _cx| {
+                if let Some(key) = wire_key(&ks) {
+                    let _ = this.send(ClientMsg::Input { key });
+                }
+            });
         })
         .detach();
         cx.activate(true);

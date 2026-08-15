@@ -36,9 +36,10 @@ use serde::{Deserialize, Serialize};
 mod crossterm;
 
 /// Protocol version. Bump on breaking wire changes; the daemon rejects clients
-/// with a mismatched version. v2 adds client-kind capability negotiation,
-/// per-pane `SessionInfo`, and the snapshot / pane-frame channels.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// with a mismatched version. v3 adds per-pane geometry (`PaneRect`), the
+/// session's focused pane, and the `FocusPane` / `SetSidebar` control messages
+/// for native clients that paint panes themselves.
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -314,6 +315,17 @@ pub enum ClientMsg {
     FocusSession {
         name: String,
     },
+    /// Focus a specific pane inside a session (desktop pane click). The daemon
+    /// switches to the session and routes subsequent `Input` to the pane.
+    FocusPane {
+        session: String,
+        pane_id: u64,
+    },
+    /// Open/close the daemon's own sidebar. Native clients paint their own
+    /// chrome, so they close the daemon's to give panes the full width.
+    SetSidebar {
+        open: bool,
+    },
     /// Start streaming [`ServerMsg::PaneFrame`] for one pane (per-pane views).
     SubscribePane {
         pane_id: u64,
@@ -322,6 +334,15 @@ pub enum ClientMsg {
     UnsubscribePane {
         pane_id: u64,
     },
+}
+
+/// A pane's rectangle within its session's grid (cell coordinates).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PaneRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 /// One pane, as reported inside a [`SessionInfo`].
@@ -336,6 +357,9 @@ pub struct PaneInfo {
     pub is_ai: bool,
     /// The running AI CLI, when this pane hosts one.
     pub agent: Option<AgentInfo>,
+    /// Where the pane sits in its session's grid. Lets native clients paint
+    /// panes themselves instead of showing the daemon's composed UI.
+    pub rect: PaneRect,
 }
 
 /// One session, as reported to `kumo ls` and pushed in snapshots.
@@ -346,6 +370,8 @@ pub struct SessionInfo {
     pub panes: Vec<PaneInfo>,
     pub zoomed: bool,
     pub active: bool,
+    /// The pane currently focused in this session (`None` when empty).
+    pub focus: Option<u64>,
 }
 
 /// One AI CLI running inside a session.
@@ -561,9 +587,11 @@ mod tests {
                     cwd: std::path::PathBuf::from("/tmp"),
                     is_ai: true,
                     agent: Some(AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked }),
+                    rect: PaneRect { x: 0, y: 0, width: 80, height: 24 },
                 }],
                 zoomed: false,
                 active: true,
+                focus: Some(11),
             }],
         };
         let mut buf = Vec::new();
@@ -576,6 +604,8 @@ mod tests {
     fn focus_session_and_pane_subscription_roundtrip() {
         let msgs = vec![
             ClientMsg::FocusSession { name: "session-2".into() },
+            ClientMsg::FocusPane { session: "session-2".into(), pane_id: 12 },
+            ClientMsg::SetSidebar { open: false },
             ClientMsg::SubscribePane { pane_id: 12 },
             ClientMsg::UnsubscribePane { pane_id: 12 },
         ];

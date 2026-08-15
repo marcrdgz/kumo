@@ -1271,6 +1271,21 @@ impl App {
         }
     }
 
+    /// Focus a specific pane inside a named session (desktop pane click). Also
+    /// activates the session. Returns whether the pane exists in it.
+    pub(crate) fn focus_pane_in_session(&mut self, name: &str, pane_id: u64) -> bool {
+        let Some(i) = self.sessions.iter().position(|s| s.name == name) else {
+            return false;
+        };
+        if self.sessions[i].tree.pane_ids().contains(&pane_id) {
+            self.active = i;
+            self.sessions[i].tree.focus = pane_id;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from
     /// the cached process scan. Falls back to "AI CLI".
     fn agent_label(&self, pid: u64) -> String {

@@ -1,19 +1,21 @@
-//! Rendering helpers: assemble the daemon's `WireCell` grid and turn each row
-//! into a GPUI `StyledText` with per-cell colors/styles.
+//! Rendering helpers for the native desktop client.
+//!
+//! The daemon streams per-pane grids (`PaneFrame`s); each is assembled into a
+//! retained [`Grid`] and then painted by a custom GPUI element. `row_runs`
+//! turns one row of `WireCell`s into shaped text runs with per-cell colors.
 
-use std::ops::Range;
+use gpui::{Font, Hsla, TextRun, TextStyle, UnderlineStyle, px};
 
-use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla, SharedString, StyledText, TextStyle, UnderlineStyle, px};
+use kumo_protocol::{PaneFrame, WireCell};
 
-use kumo_protocol::{FrameMsg, WireCell};
-
-/// A retained cell grid assembled from `FrameMsg` row patches (the daemon sends
-/// full frames on attach/resize, then only dirty rows).
-#[derive(Default)]
+/// A retained cell grid assembled from `PaneFrame` row patches (the daemon sends
+/// full frames on subscribe/resize, then only dirty rows).
+#[derive(Default, Clone)]
 pub struct Grid {
     cols: usize,
     rows: usize,
     cells: Vec<Vec<WireCell>>,
+    cursor: Option<(u16, u16)>,
 }
 
 impl Grid {
@@ -25,7 +27,11 @@ impl Grid {
         self.cells.get(row as usize).map(|r| r.as_slice())
     }
 
-    pub fn apply(&mut self, frame: &FrameMsg) {
+    pub fn cursor(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
+
+    pub fn apply(&mut self, frame: &PaneFrame) {
         if frame.full {
             self.cols = frame.cols as usize;
             self.rows = frame.rows as usize;
@@ -41,6 +47,7 @@ impl Grid {
                 }
             }
         }
+        self.cursor = frame.cursor;
     }
 }
 
@@ -63,30 +70,20 @@ fn color(hex: u32) -> Hsla {
     gpui::rgba((hex << 8) | 0xff).into()
 }
 
-/// Build the `StyledText` for one row. Blank cells become spaces so the row
-/// keeps its full width; continuation cells after a wide grapheme are skipped.
-pub fn row_styled_text(cells: &[WireCell], base: &TextStyle) -> StyledText {
+/// Shape one row of cells into `(text, runs)`. Every visible cell gets a run
+/// (blank cells become spaces with the default foreground), so the runs tile
+/// the text exactly. Continuation cells after a wide grapheme are skipped.
+pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: Hsla) -> (String, Vec<TextRun>) {
     let mut text = String::with_capacity(cells.len());
-    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
     for cell in cells {
         if cell.cell_width == 0 {
             continue;
         }
-        let start = text.len();
         let symbol = if cell.text.is_empty() { " " } else { cell.text.as_str() };
         text.push_str(symbol);
-        let end = text.len();
-        if end == start {
-            continue;
-        }
-        let styled = cell.bold
-            || cell.italic
-            || cell.underline
-            || cell.inverse
-            || cell.faint
-            || cell.fg.is_some()
-            || cell.bg.is_some();
-        if !styled {
+        let len = symbol.len();
+        if len == 0 {
             continue;
         }
         let mut fg = cell.fg.map(color);
@@ -94,47 +91,45 @@ pub fn row_styled_text(cells: &[WireCell], base: &TextStyle) -> StyledText {
         if cell.inverse {
             std::mem::swap(&mut fg, &mut bg);
             if bg.is_none() {
-                bg = Some(base.color);
+                bg = Some(default_fg);
+            }
+            if fg.is_none() {
+                fg = Some(default_bg);
             }
         }
-        let mut style = HighlightStyle {
-            color: fg,
-            font_weight: None,
-            font_style: None,
-            background_color: bg,
-            underline: None,
-            strikethrough: None,
-            fade_out: None,
-        };
-        if cell.bold {
-            style.font_weight = Some(FontWeight::BOLD);
-        }
-        if cell.italic {
-            style.font_style = Some(FontStyle::Italic);
-        }
-        if cell.underline {
-            style.underline = Some(UnderlineStyle { thickness: px(1.0), color: None, wavy: false });
-        }
+        let mut fg = fg.unwrap_or(default_fg);
         if cell.faint {
-            style.fade_out = Some(0.55);
+            fg.fade_out(0.5);
         }
-        highlights.push((start..end, style));
+        let underline = if cell.underline {
+            Some(UnderlineStyle { thickness: px(1.0), color: None, wavy: false })
+        } else {
+            None
+        };
+        runs.push(TextRun {
+            len,
+            font: font.clone(),
+            color: fg,
+            background_color: bg,
+            underline,
+            strikethrough: None,
+        });
     }
-    StyledText::new(text).with_default_highlights(base, highlights)
+    (text, runs)
 }
 
-/// The app-wide base text style: monospace, used for every grid row.
+/// The app-wide base text style: monospace.
 pub fn base_text_style(window: &mut gpui::Window) -> TextStyle {
     let mut style = window.text_style();
-    style.font_family = SharedString::from("Menlo");
+    style.font_family = gpui::SharedString::from("Menlo");
     style.color = hsla_from_hex(0xdddddd);
     style
 }
 
-/// A dimmer variant of the base style for sidebar/secondary text.
+/// A dimmer variant for sidebar/secondary text.
 pub fn dim_text_style(window: &mut gpui::Window) -> TextStyle {
     let mut style = base_text_style(window);
-    style.color = hsla_from_hex(0x888888);
+    style.color = hsla_from_hex(0x7d7d82);
     style
 }
 
@@ -142,17 +137,26 @@ fn hsla_from_hex(hex: u32) -> Hsla {
     gpui::rgba((hex << 8) | 0xff).into()
 }
 
-pub fn cell_size(window: &mut gpui::Window, style: &TextStyle) -> (f32, f32) {
-    let font = style.font();
+/// Cell geometry ratios for the monospace font: `line_height_ratio` =
+/// line-height / font-size and `advance_ratio` = "X" advance / font-size.
+/// These let the app scale cells to any size without re-measuring.
+pub fn font_ratios(window: &mut gpui::Window, style: &TextStyle) -> (f32, f32) {
     let rem = window.rem_size();
     let font_size = style.font_size.to_pixels(rem);
+    let line_height = style.line_height_in_pixels(rem);
     let probe = window.text_system().shape_line(
-        SharedString::from("X"),
+        gpui::SharedString::from("X"),
         font_size,
-        &[gpui::TextRun { len: 1, font, color: style.color, background_color: None, underline: None, strikethrough: None }],
+        &[TextRun {
+            len: 1,
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
         None,
     );
-    let w = f32::from(probe.width).max(1.0);
-    let h = f32::from(style.line_height_in_pixels(rem)).max(1.0);
-    (w, h)
+    let advance = f32::from(probe.width);
+    (f32::from(line_height) / f32::from(font_size), advance / f32::from(font_size))
 }

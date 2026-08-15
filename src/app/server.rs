@@ -213,6 +213,15 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         render_dirty = true;
                     }
                 }
+                ClientMsg::FocusPane { session, pane_id } => {
+                    if app.focus_pane_in_session(&session, pane_id) {
+                        render_dirty = true;
+                    }
+                }
+                ClientMsg::SetSidebar { open } => {
+                    app.sidebar_open = open;
+                    render_dirty = true;
+                }
                 ClientMsg::KillServer => {
                     kill = true;
                 }
@@ -476,45 +485,71 @@ fn resize_terminal(terminal: &mut Terminal<TestBackend>, cols: u16, rows: u16) {
 
 /// Build the structured session list (used by `kumo ls`, `ListSessions`, and
 /// snapshot pushes). Every field is data the daemon already keeps: session
-/// name/workspace, per-pane title/cwd/AI marker, and the agent lifecycle cache.
+/// name/workspace, per-pane title/cwd/AI marker, the agent lifecycle cache, and
+/// each pane's geometry within its session's grid (so native clients can paint
+/// panes themselves instead of showing the daemon's composed UI).
 fn session_list(app: &App) -> Vec<protocol::SessionInfo> {
+    // The pane area the daemon lays out within — the same rect the TUI chrome
+    // uses, so the reported rects match the rendered pane caches exactly.
+    let area = app.panes_area();
     app.sessions
         .iter()
         .enumerate()
-        .map(|(i, s)| protocol::SessionInfo {
-            name: s.name.clone(),
-            workspace: s.workspace.clone(),
-            panes: s
-                .tree
-                .pane_ids()
-                .into_iter()
-                .filter_map(|pid| {
-                    let pane = app.panes.get(&pid)?;
-                    let is_ai = pane.is_ai_cli();
-                    let agent = if is_ai {
-                        Some(AgentInfo {
-                            name: app.agent_label(pid),
-                            status: app
-                                .agent_status_cache
-                                .get(&pid)
-                                .copied()
-                                .unwrap_or(crate::agents::AgentStatus::Idle)
-                                .into(),
+        .map(|(i, s)| {
+            // Geometry for this session's tree over the pane area. A zoomed
+            // session shows only its focused pane full-size.
+            let mut geom = crate::layout::TreeGeom::default();
+            if let Some(root) = &s.tree.root {
+                if s.zoom {
+                    geom.panes.push(crate::layout::PaneGeom { pane_id: s.tree.focus, rect: area });
+                } else {
+                    crate::layout::compute_geometry(root, area, &mut geom);
+                }
+            }
+            let rect_of = |pid: u64| {
+                geom.panes
+                    .iter()
+                    .find(|p| p.pane_id == pid)
+                    .map(|p| p.inner())
+                    .map(|r| protocol::PaneRect { x: r.x, y: r.y, width: r.width, height: r.height })
+            };
+            protocol::SessionInfo {
+                name: s.name.clone(),
+                workspace: s.workspace.clone(),
+                panes: s
+                    .tree
+                    .pane_ids()
+                    .into_iter()
+                    .filter_map(|pid| {
+                        let pane = app.panes.get(&pid)?;
+                        let is_ai = pane.is_ai_cli();
+                        let agent = if is_ai {
+                            Some(AgentInfo {
+                                name: app.agent_label(pid),
+                                status: app
+                                    .agent_status_cache
+                                    .get(&pid)
+                                    .copied()
+                                    .unwrap_or(crate::agents::AgentStatus::Idle)
+                                    .into(),
+                            })
+                        } else {
+                            None
+                        };
+                        Some(PaneInfo {
+                            id: pid,
+                            title: app.pane_label(pid),
+                            cwd: pane.cwd.clone(),
+                            is_ai,
+                            agent,
+                            rect: rect_of(pid)?,
                         })
-                    } else {
-                        None
-                    };
-                    Some(PaneInfo {
-                        id: pid,
-                        title: app.pane_label(pid),
-                        cwd: pane.cwd.clone(),
-                        is_ai,
-                        agent,
                     })
-                })
-                .collect(),
-            zoomed: s.zoom,
-            active: i == app.active,
+                    .collect(),
+                zoomed: s.zoom,
+                active: i == app.active,
+                focus: s.tree.pane_ids().contains(&s.tree.focus).then_some(s.tree.focus),
+            }
         })
         .collect()
 }
@@ -1253,12 +1288,33 @@ mod tests {
         assert!(!first.panes.is_empty(), "session must report its panes");
         assert!(!first.panes[0].title.is_empty(), "pane title must be reported");
         assert!(!first.panes[0].cwd.as_os_str().is_empty(), "pane cwd must be reported");
+        assert!(
+            first.panes[0].rect.width > 0 && first.panes[0].rect.height > 0,
+            "pane geometry must be reported"
+        );
+        assert_eq!(first.focus, Some(first.panes[0].id), "session must report its focused pane");
         let pid = first.panes[0].id;
 
         // FocusSession by name: the daemon must not crash and the session stays.
         protocol::write_framed(&mut stream, &ClientMsg::FocusSession { name: first.name.clone() }).unwrap();
         // A bogus name is a no-op, not an error.
         protocol::write_framed(&mut stream, &ClientMsg::FocusSession { name: "nope".into() }).unwrap();
+
+        // FocusPane focuses a specific pane in the session (desktop click).
+        protocol::write_framed(
+            &mut stream,
+            &ClientMsg::FocusPane { session: first.name.clone(), pane_id: pid },
+        )
+        .unwrap();
+        // A bogus pane id is a no-op.
+        protocol::write_framed(
+            &mut stream,
+            &ClientMsg::FocusPane { session: first.name.clone(), pane_id: 999_999 },
+        )
+        .unwrap();
+
+        // SetSidebar closes the daemon's chrome so native clients get the full width.
+        protocol::write_framed(&mut stream, &ClientMsg::SetSidebar { open: false }).unwrap();
 
         // SubscribePane: the daemon streams this pane's own grid (full first).
         protocol::write_framed(&mut stream, &ClientMsg::SubscribePane { pane_id: pid }).unwrap();
