@@ -1327,7 +1327,10 @@ impl View {
                 }
                 MouseEventKind::Moved => {
                     if let Some(i) = self.worktree_picker_item_at(x, y) {
-                        self.worktree_picker.selected = i;
+                        if self.worktree_picker.selected != i {
+                            self.worktree_picker.selected = i;
+                            self.mark_dirty();
+                        }
                     }
                 }
                 MouseEventKind::ScrollDown => self.worktree_picker_move(1),
@@ -1355,7 +1358,10 @@ impl View {
                 }
                 MouseEventKind::Moved => {
                     if let Some(i) = self.settings_item_at(x, y) {
-                        self.settings.selected = i;
+                        if self.settings.selected != i {
+                            self.settings.selected = i;
+                            self.mark_dirty();
+                        }
                     }
                 }
                 _ => {}
@@ -1570,18 +1576,30 @@ impl View {
             }
             MouseEventKind::Moved => {
                 if self.popup.open {
-                    self.popup.hover = self.name_popup_button_at(x, y);
+                    // Hover highlights a popup button (repaint on change).
+                    let hover = self.name_popup_button_at(x, y);
+                    if self.popup.hover != hover {
+                        self.popup.hover = hover;
+                        self.mark_dirty();
+                    }
                     return Ok(());
                 }
                 if self.menu.open {
+                    // Modal menu: hovering moves the selection like j/k.
                     if let Some(i) = self.menu_item_at(x, y) {
-                        self.menu.selected = i;
+                        if self.menu.selected != i {
+                            self.menu.selected = i;
+                            self.mark_dirty();
+                        }
                     }
                     return Ok(());
                 }
                 if self.ctx_menu.open {
                     if let Some(i) = self.ctx_menu_item_at(x, y) {
-                        self.ctx_menu.selected = i;
+                        if self.ctx_menu.selected != i {
+                            self.ctx_menu.selected = i;
+                            self.mark_dirty();
+                        }
                     }
                     return Ok(());
                 }
@@ -3142,6 +3160,48 @@ mod tests {
             dirty: false,
             detach_requested: false,
         }
+    }
+
+    fn mouse_moved(x: u16, y: u16) -> crossterm::event::MouseEvent {
+        use crossterm::event::MouseEventKind;
+        MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE }
+    }
+
+    /// Hovering the MENU dropdown or the context menu must move the selection
+    /// AND mark the view dirty, so the primary-accent highlight repaints live.
+    #[test]
+    fn hovering_menu_repaints_selection() {
+        let mut view = test_view();
+        view.menu.open = true;
+        view.menu.selected = 0;
+        // The dropdown sits above the MENU button; item i lives at row 17+i
+        // (cols 80, rows 24, mode NORMAL -> MENU at x 9).
+        view.on_mouse(mouse_moved(4, 18)).unwrap();
+        assert_eq!(view.menu.selected, 1, "hover item 2 selects it");
+        assert!(view.dirty(), "hover must trigger a repaint");
+        view.dirty = false;
+        // Hovering the same item again is a no-op (no repaint churn).
+        view.on_mouse(mouse_moved(4, 18)).unwrap();
+        assert!(!view.dirty(), "unchanged hover must not repaint");
+        // Hovering item 4 updates selection + repaints.
+        view.on_mouse(mouse_moved(4, 20)).unwrap();
+        assert_eq!(view.menu.selected, 3);
+        assert!(view.dirty());
+    }
+
+    #[test]
+    fn hovering_ctx_menu_repaints_selection() {
+        let mut view = test_view();
+        view.ctx_menu.open = true;
+        view.ctx_menu.x = 30;
+        view.ctx_menu.y = 5;
+        view.ctx_menu.target = CtxTarget::Pane(1);
+        view.ctx_menu.selected = 0;
+        // The context menu opens down-right of (30,5): box at (31,6,18,7),
+        // item i at row 7+i. Hover item 2.
+        view.on_mouse(mouse_moved(32, 8)).unwrap();
+        assert_eq!(view.ctx_menu.selected, 1);
+        assert!(view.dirty(), "ctx-menu hover must repaint");
     }
 
     #[test]
