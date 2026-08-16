@@ -618,10 +618,11 @@ impl KumoWindow {
         }
         let (_, gh) = self.grid_size;
         let pane_rows = (gh.saturating_sub(1)).max(1) as f32;
-        // One inset on every side — the gap next to the sidebar, above and
-        // below the pane area all match.
-        let pad_y = 6.0;
-        let pad_x = 6.0;
+        // Vertical breathing room above/below the pane area; the horizontal
+        // inset is minimal so panes hug the sidebar panel (any extra margin
+        // next to the text is the terminal program's own padding).
+        let pad_y = 12.0;
+        let pad_x = 2.0;
         let cells_h = (avail_h - 2.0 * pad_y).max(1.0);
         self.cell_h = cells_h / pane_rows;
         self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
