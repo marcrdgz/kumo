@@ -219,11 +219,22 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
         if let Some(grid) = &pane.grid {
             for row in 0..grid.rows() {
                 let cells = grid.row(row).unwrap_or_default();
-                let (text, runs) = crate::grid::row_runs(cells, &data.font, data.default_fg, chrome.card());
+                let art = crate::grid::row_art(cells, &data.font, data.default_fg, chrome.card());
+                let row_y = m.content_y + px(row as f32 * m.cell_h);
+                // Cell backgrounds first (merged spans), then the glyphs on top.
+                for span in &art.bg {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(m.content_x + px(span.x * m.cell_w), row_y),
+                            size(px(span.w * m.cell_w), px(m.cell_h)),
+                        ),
+                        span.color,
+                    ));
+                }
                 let line = window
                     .text_system()
-                    .shape_line(SharedString::from(text), font_size, &runs, None);
-                let origin = point(m.content_x, m.content_y + px(row as f32 * m.cell_h));
+                    .shape_line(SharedString::from(art.text), font_size, &art.runs, None);
+                let origin = point(m.content_x, row_y);
                 let _ = line.paint(origin, line_h, window, cx);
             }
 

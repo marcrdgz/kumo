@@ -65,23 +65,60 @@ fn blank_cell() -> WireCell {
     }
 }
 
+/// A horizontal background span over one row, in cell units (`x` and `w` are
+/// column offsets/widths so the caller scales them by the cell width).
+#[derive(Clone, Copy, Debug)]
+pub struct BgSpan {
+    pub x: f32,
+    pub w: f32,
+    pub color: Hsla,
+}
+
+/// Everything needed to paint one row: text + runs, plus merged background
+/// spans (painted as quads by the caller, before the text).
+pub struct RowArt {
+    pub text: String,
+    pub runs: Vec<TextRun>,
+    pub bg: Vec<BgSpan>,
+}
+
 /// 0xRRGGBB -> opaque `Hsla`.
 fn color(hex: u32) -> Hsla {
     gpui::rgba((hex << 8) | 0xff).into()
 }
 
-/// Shape one row of cells into `(text, runs)`. Every visible cell gets a run
+/// 0xRRGGBB -> `Hsla` at [`BG_ALPHA`].
+fn color_a(hex: u32) -> Hsla {
+    gpui::rgba((hex << 8) | ((BG_ALPHA * 255.0).round() as u32)).into()
+}
+
+/// Alpha for painted cell backgrounds: opaque enough for `ls` coloring and
+/// selections to read clearly, translucent enough to keep the glass look.
+const BG_ALPHA: f32 = 0.92;
+
+fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
+    c.a = a;
+    c
+}
+
+/// Turn one row of cells into paintable art. Every visible cell gets a run
 /// (blank cells become spaces with the default foreground), so the runs tile
-/// the text exactly. Continuation cells after a wide grapheme are skipped.
+/// the text exactly. Continuation cells after a wide grapheme are skipped for
+/// text but still contribute to background coverage.
 ///
-/// Background colors are intentionally NOT painted — the translucent card
-/// background shows through, giving a uniform frosted-glass look instead of
-/// opaque black cells from the terminal's default background.
-pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, _default_bg: Hsla) -> (String, Vec<TextRun>) {
+/// Backgrounds are only painted where the program set one (or inverse video
+/// implies one); cells with a default background stay transparent so the
+/// frosted-glass chrome shows through.
+pub fn row_art(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: Hsla) -> RowArt {
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
-    for cell in cells {
+    let mut bg: Vec<BgSpan> = Vec::new();
+    for (x, cell) in cells.iter().enumerate() {
         if cell.cell_width == 0 {
+            // Continuation cell: no glyph, but cover it with the wide cell's bg.
+            if let Some(hex) = cell.bg {
+                push_bg(&mut bg, x as f32, 1.0, color_a(hex));
+            }
             continue;
         }
         let symbol = if cell.text.is_empty() { " " } else { cell.text.as_str() };
@@ -91,15 +128,21 @@ pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, _default_bg: 
             continue;
         }
         let mut fg = cell.fg.map(color);
+        let mut bgc = cell.bg.map(color_a);
         if cell.inverse {
-            // Inverse: swap fg/bg, but since we don't paint bg, just brighten fg
-            if fg.is_none() {
-                fg = Some(default_fg);
-            }
+            // True inverse: swap fg and bg, filling either side with the defaults.
+            std::mem::swap(&mut fg, &mut bgc);
+            let ifg = fg.take().unwrap_or(default_bg);
+            let ibg = bgc.take().unwrap_or_else(|| with_alpha(default_fg, BG_ALPHA));
+            fg = Some(ifg);
+            bgc = Some(ibg);
         }
         let mut fg = fg.unwrap_or(default_fg);
         if cell.faint {
             fg.fade_out(0.5);
+        }
+        if let Some(bgc) = bgc {
+            push_bg(&mut bg, x as f32, cell.cell_width.max(1) as f32, bgc);
         }
         let underline = if cell.underline {
             Some(UnderlineStyle { thickness: px(1.0), color: None, wavy: false })
@@ -110,12 +153,27 @@ pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, _default_bg: 
             len,
             font: font.clone(),
             color: fg,
-            background_color: None, // no background — let the card's translucent fill show through
+            background_color: None,
             underline,
             strikethrough: None,
         });
     }
-    (text, runs)
+    RowArt { text, runs, bg }
+}
+
+/// Append a background span, merging with the previous one when contiguous and
+/// of the same color.
+fn push_bg(bg: &mut Vec<BgSpan>, x: f32, w: f32, color: Hsla) {
+    if w <= 0.0 {
+        return;
+    }
+    if let Some(last) = bg.last_mut() {
+        if (last.x + last.w - x).abs() < f32::EPSILON && last.color == color {
+            last.w += w;
+            return;
+        }
+    }
+    bg.push(BgSpan { x, w, color });
 }
 
 /// The app-wide base text style: monospace.
