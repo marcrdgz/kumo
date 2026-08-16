@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.1
+
+### 🐛 Bug Fixes
+
+- *(release)* Regenerate the root changelog from the workspace root
+- Input lag
+
+### 💼 Other
+
+- *(release)* Scope cargo-release to the kumo package
+
+### ⚙️ Miscellaneous Tasks
+
+- Ignore the zcode agent session directory
 ## v0.5.0
 
 ### 🚀 Features
