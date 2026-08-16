@@ -43,6 +43,7 @@ impl Render for Sidebar {
         div()
             .w(px(SIDEBAR_W))
             .h_full()
+            .bg(chrome.surface_glass())
             .border_r_1()
             .border_color(theme::hairline())
             .flex()
@@ -332,14 +333,20 @@ impl Sidebar {
         let mut rail = div()
             .w(px(RAIL_W))
             .h_full()
-            .border_r_1()
-            .border_color(theme::hairline())
-            .flex()
-            .flex_col()
-            .items_center()
-            .pt(px(8.0))
-            .gap(px(10.0))
-            .child(self.collapse_button(cx, true, chrome));
+            .bg(chrome.surface_glass())
+            .child(
+                div()
+                    .w_full()
+                    .h_full()
+                    .border_r_1()
+                    .border_color(theme::hairline())
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .pt(px(8.0))
+                    .gap(px(10.0))
+                    .child(self.collapse_button(cx, true, chrome))
+            );
 
         if let Some(layout) = layout {
             let mut dots: Vec<AnyElement> = Vec::new();

@@ -353,16 +353,10 @@ impl KumoWindow {
         }
         let (_, gh) = self.grid_size;
         let pane_rows = (gh.saturating_sub(1)).max(1) as f32;
-        // The panes sit clearly below the KUMO titlebar: a larger top margin
-        // than the side/bottom gaps, so the cards never crowd the bar.
-        let top_pad = 16.0;
-        let bottom_pad = panes::PANE_GAP;
-        let cells_h = (avail_h - top_pad - bottom_pad).max(1.0);
+        let pad_y = 12.0;
+        let cells_h = (avail_h - 2.0 * pad_y).max(1.0);
         self.cell_h = cells_h / pane_rows;
         self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
-        // Clamp the cell width so the whole grid plus its edge margins always
-        // fits the available width: on tall windows the height-driven font
-        // would otherwise push the right-hand panes past the window edge.
         let gw = self.grid_size.0 as f32;
         let max_cell_w = ((avail_w - 2.0 * panes::PANE_GAP).max(1.0)) / gw;
         let nominal_cell_w = self.font_size * self.advance_ratio;
@@ -372,8 +366,15 @@ impl KumoWindow {
         }
         self.cell_w = cell_w;
         let canvas_w = gw * self.cell_w;
-        let margin = ((avail_w - canvas_w) * 0.5).max(panes::PANE_GAP);
-        self.canvas_origin = point(px(self.sidebar_width() + margin), px(16.0));
+        let sidebar_gap = if self.sidebar_collapsed {
+            ((avail_w - canvas_w) * 0.5).clamp(panes::PANE_GAP, 24.0)
+        } else {
+            0.0 // sin gap cuando el sidebar está abierto, los panes pegados al sidebar
+        };
+        let total_pane_h = pane_rows * self.cell_h;
+        let y_offset = ((avail_h - total_pane_h) * 0.5).max(pad_y);
+        // canvas_origin es la posición absoluta del canvas en la ventana
+        self.canvas_origin = point(px(self.sidebar_width() + sidebar_gap), px(TITLEBAR_H + y_offset));
         self.canvas_size = (canvas_w, avail_h);
     }
 
@@ -482,7 +483,6 @@ impl KumoWindow {
             self.layout.as_ref().and_then(|l| l.active.clone()).unwrap_or_else(|| "-".into()),
             self.focused_pane_label()
         );
-        // Transparent glass strip over the frost, hairline on top.
         div()
             .w_full()
             .h(px(STATUS_H))
@@ -498,14 +498,13 @@ impl KumoWindow {
 impl Render for KumoWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_geometry(window);
-        let chrome = self.chrome();
         div()
             .flex()
             .flex_col()
             .size_full()
-            // Frost: the whole window is one translucent scrim over the blurred
-            // desktop; transparent chrome lets the glass read everywhere.
-            .bg(chrome.glass())
+            // No glass fill here — the window's `Blurred` background already
+            // composites the frosted desktop. A translucent fill on top would
+            // bury the blur under every element.
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -537,18 +536,12 @@ impl Render for KumoWindow {
 }
 
 impl KumoWindow {
-    /// Custom drag-to-move titlebar (the native bar is hidden): a full-width
-    /// glass bar — the KUMO wordmark right of the traffic lights, a hairline
-    /// bottom edge that runs to the window's right border — that the panes sit
-    /// below.
     fn titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let chrome = self.chrome();
         let mut wordmark = self.base.clone();
         wordmark.color = chrome.accent();
         wordmark.font_size = px(11.5).into();
         wordmark.font_weight = gpui::FontWeight::BOLD;
-        // A faint fill so the bar reads across the full width (glass still
-        // shows through), with the bottom hairline running to the right edge.
         div()
             .w_full()
             .h(px(TITLEBAR_H))
@@ -556,17 +549,12 @@ impl KumoWindow {
             .items_center()
             .pl(px(78.0))
             .pr(px(12.0))
-            .bg(theme::wash(0x05))
             .border_b_1()
             .border_color(theme::hairline())
-            // The whole strip is a native window-drag region.
             .window_control_area(gpui::WindowControlArea::Drag)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, _cx| {
-                    // Armed here; the next mouse-move hands the drag to AppKit
-                    // (`performWindowDragWithEvent`), so a plain click never
-                    // moves the window.
                     this.titlebar_drag_armed = true;
                 }),
             )
@@ -660,7 +648,7 @@ pub(crate) fn pane_metrics(model: &KumoWindow, r: &CellRect) -> PaneMetrics {
     let w = px((r.width as f32 * model.cell_w).max(1.0));
     let h = px((r.height as f32 * model.cell_h).max(1.0));
     let content_w = (f32::from(w) - 2.0 * panes::PANE_GAP).max(1.0);
-    let content_h = (f32::from(h) - 2.0 * panes::PANE_GAP - panes::TITLE_H).max(1.0);
+    let content_h = (f32::from(h) - 2.0 * panes::PANE_GAP).max(1.0);
     let cw = content_w / r.width.max(1) as f32;
     let ch = content_h / r.height.max(1) as f32;
     PaneMetrics {
@@ -672,7 +660,7 @@ pub(crate) fn pane_metrics(model: &KumoWindow, r: &CellRect) -> PaneMetrics {
         cell_h: ch,
         font_size: (ch / model.line_height_ratio).clamp(6.0, 34.0),
         content_x: x + px(panes::PANE_GAP),
-        content_y: y + px(panes::PANE_GAP + panes::TITLE_H),
+        content_y: y + px(panes::PANE_GAP),
     }
 }
 
