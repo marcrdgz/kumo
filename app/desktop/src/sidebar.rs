@@ -44,7 +44,7 @@ impl Render for Sidebar {
             .h_full()
             .bg(chrome.surface_glass())
             .border_r_1()
-            .border_color(theme::hairline())
+            .border_color(theme::wash(0x20))
             .flex()
             .flex_col()
             .pt(px(8.0))
