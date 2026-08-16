@@ -689,8 +689,13 @@ impl KumoWindow {
         let canvas_w = gw * self.cell_w;
         let total_pane_h = pane_rows * self.cell_h;
         let y_offset = ((avail_h - total_pane_h) * 0.5).max(pad_y);
+        // With the sidebar open, panes hug its divider line. Collapsed to the
+        // rail, the leftover grid slack would all pile up on the right, so
+        // the canvas is centered instead — equal margins on both sides.
+        let slack = (avail_w - canvas_w - pad_x).max(0.0);
+        let x_inset = if self.sidebar_collapsed { pad_x + slack * 0.5 } else { pad_x };
         // canvas_origin es la posición absoluta del canvas en la ventana
-        self.canvas_origin = point(px(self.sidebar_width() + pad_x), px(TITLEBAR_H + y_offset));
+        self.canvas_origin = point(px(self.sidebar_width() + x_inset), px(TITLEBAR_H + y_offset));
         self.canvas_size = (canvas_w, avail_h);
     }
 
