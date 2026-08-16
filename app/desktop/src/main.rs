@@ -16,6 +16,7 @@ mod actions;
 mod daemon;
 mod grid;
 mod panes;
+mod popup;
 mod sidebar;
 mod theme;
 mod window;
@@ -108,6 +109,8 @@ pub(crate) struct KumoWindow {
     leader_active: bool,
     /// Pane-number overlay (`leader+q`), cleared 1.5 s after it appears.
     pane_numbers: Option<std::time::Instant>,
+    /// The open name popup (new session / worktree / rename), if any.
+    popup: Option<popup::NamePopup>,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -176,6 +179,7 @@ impl KumoWindow {
             leader: actions::leader_chord(),
             leader_active: false,
             pane_numbers: None,
+            popup: None,
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -686,9 +690,42 @@ impl KumoWindow {
     // ------------------------------------------------------------------
 
     /// Handle a keystroke against the leader keymap. Returns `true` when the
-    /// key was consumed (leader chord or leader-mode dispatch) and must not be
-    /// typed into the pane.
+    /// key was consumed (popup, leader chord, or leader-mode dispatch) and
+    /// must not be typed into the pane.
     fn on_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> bool {
+        // The open popup owns the keyboard entirely.
+        if self.popup.is_some() {
+            match ks.key.as_str() {
+                "escape" => self.popup = None,
+                "enter" => self.commit_popup(cx),
+                "backspace" => {
+                    if let Some(p) = self.popup.as_mut() {
+                        p.backspace(false, false);
+                    }
+                }
+                _ => {
+                    // ctrl+w / ctrl+u arrive as their letter keys with ctrl.
+                    if ks.modifiers.control && matches!(ks.key.as_str(), "w" | "u") {
+                        if let Some(p) = self.popup.as_mut() {
+                            p.backspace(ks.key == "w", ks.key == "u");
+                        }
+                    } else if let Some(ch) = ks
+                        .key_char
+                        .as_deref()
+                        .and_then(|s| s.chars().next())
+                        .filter(|_| !ks.modifiers.control)
+                    {
+                        if let Some(p) = self.popup.as_mut() {
+                            p.insert(ch);
+                        }
+                    }
+                }
+            }
+            self.cursor_on = true;
+            self.last_blink = std::time::Instant::now();
+            cx.notify();
+            return true;
+        }
         // While the pane-number overlay is up, any digit 1-9 jumps there.
         if self.pane_numbers.is_some() && ks.key.len() == 1 && ks.key.parse::<u8>().is_ok() {
             let n = ks.key.parse::<usize>().unwrap_or(0);
@@ -786,15 +823,8 @@ impl KumoWindow {
                 self.pane_numbers = Some(std::time::Instant::now());
                 cx.notify();
             }
-            Action::NewSession => {
-                // Named-session popup lands with the popups commit; create an
-                // auto-named session directly for now.
-                let _ = self.send(Command::SessionNew { name: None, workspace: None });
-            }
-            Action::NewWorktree => {
-                self.status = SharedString::from("worktree picker: coming with the popups update");
-                cx.notify();
-            }
+            Action::NewSession => self.open_session_popup(cx),
+            Action::NewWorktree => self.open_worktree_popup(cx),
             Action::NextSession => {
                 if let Some(name) = self.cycle_session(1) {
                     let _ = self.send(Command::SessionFocus { name });
@@ -1059,6 +1089,7 @@ impl Render for KumoWindow {
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             // No glass fill here — the window's `Blurred` background already
             // composites the frosted desktop. A translucent fill on top would
             // bury the blur under every element.
@@ -1090,6 +1121,7 @@ impl Render for KumoWindow {
                             .child(self.status_strip()),
                     ),
             )
+            .children(self.popup_layer())
     }
 }
 
