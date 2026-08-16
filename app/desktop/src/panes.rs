@@ -1,20 +1,20 @@
 //! Terminal viewports: `TerminalPane` + the raw-GPU `PaneCanvas`.
 //!
-//! Each pane card renders the `PaneFrame` grid Ghostty produces (painted
-//! directly with `window.paint_*`, not ANSI chrome), framed by native GPUI
-//! chrome: rounded cards with soft shadows, a hairline border that lights up in
-//! the neon accent for the focused pane, and hover-glow drag separators.
+//! Each pane renders the `PaneFrame` grid Ghostty produces (painted directly
+//! with `window.paint_*`, cell backgrounds included), sitting on the frosted
+//! window glass. A neon accent ring marks the focused pane, and the drag
+//! separators glow on hover with a short fade-in.
 
 use gpui::{
-    div, point, px, size, App, Bounds, Element, ElementId, Font,
+    div, point, px, quad, size, App, Bounds, Element, ElementId, Font,
     GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Point, Render,
     SharedString, Style, TextRun, WeakEntity, Window, fill, prelude::*,
 };
 
 use kumo_protocol::SplitDir;
 
-use crate::theme::Chrome;
-use crate::{KumoWindow, pane_metrics, theme};
+use crate::theme::{self, corners, Chrome};
+use crate::{KumoWindow, pane_metrics};
 
 /// Pixel gap kept around every pane card (and between adjacent panes).
 pub(crate) const PANE_GAP: f32 = 8.0;
@@ -126,6 +126,8 @@ pub(crate) struct CanvasData {
     sel: Option<Sel>,
     cursor_on: bool,
     focused_pid: Option<u64>,
+    /// Splitter hover glow intensity (0..1, faded in over ~140 ms).
+    splitter_glow: f32,
 }
 
 pub(crate) struct PaneCanvas {
@@ -164,6 +166,13 @@ impl PaneCanvas {
             sel: model.sel,
             cursor_on: model.cursor_on,
             focused_pid: model.active_session().map(|s| s.focus),
+            splitter_glow: model
+                .hover_since
+                .map(|t| {
+                    let ms = t.elapsed().as_millis() as f32;
+                    (ms / 140.0).clamp(0.0, 1.0)
+                })
+                .unwrap_or(0.0),
         }
     }
 }
@@ -326,8 +335,26 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
         }
     }
 
+    paint_focus_ring(data, window);
     paint_splitter_highlights(data, window);
     paint_pane_numbers(data, window, cx);
+}
+
+/// A neon hairline around the focused pane's card — the accent tone of the
+/// active theme, rounded to match the chrome.
+fn paint_focus_ring(data: &CanvasData, window: &mut Window) {
+    let Some(focus) = data.focused_pid else { return };
+    let Some(pane) = data.panes.iter().find(|p| p.pid == focus) else { return };
+    let m = pane.m;
+    let bounds = Bounds::new(point(m.x - px(2.0), m.y - px(2.0)), size(m.w + px(4.0), m.h + px(4.0)));
+    window.paint_quad(quad(
+        bounds,
+        corners(10.0),
+        gpui::transparent_black(),
+        px(1.5),
+        data.chrome.accent().with_a(0.85),
+        gpui::BorderStyle::Solid,
+    ));
 }
 
 /// While the pane-number overlay is up, badge every pane with its 1-based
@@ -398,7 +425,14 @@ fn paint_splitter_highlights(data: &CanvasData, window: &mut Window) {
         let strip = &split.strip;
         let origin_x = data.canvas_origin.x + px(strip.x as f32 * data.cell_w);
         let origin_y = data.canvas_origin.y + px(strip.y as f32 * data.cell_h);
-        let glow_color = chrome.accent().with_a(0.18);
+        // The glow fades in on hover and snaps to full while dragging.
+        let intensity = if data.drag_splitter == Some(active_id) {
+            1.0
+        } else {
+            data.splitter_glow
+        };
+        let glow_color = chrome.accent().with_a(0.18 * intensity);
+        let line_color = chrome.accent().with_a(0.55 + 0.45 * intensity);
 
         let (glow_bounds, line_bounds) = match split.dir {
             SplitDir::Vertical => {
@@ -418,7 +452,7 @@ fn paint_splitter_highlights(data: &CanvasData, window: &mut Window) {
         };
 
         window.paint_quad(fill(glow_bounds, glow_color));
-        window.paint_quad(fill(line_bounds, chrome.accent()));
+        window.paint_quad(fill(line_bounds, line_color));
     }
 }
 

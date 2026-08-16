@@ -77,6 +77,7 @@ impl KumoWindow {
             .rounded(px(12.0))
             .border_1()
             .border_color(theme::hairline())
+            .shadow(theme::card_shadow())
             .bg(gpui::rgba(0x121218f2))
             .px(px(18.0))
             .py(px(16.0))

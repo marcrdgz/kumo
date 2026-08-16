@@ -10,9 +10,7 @@ use gpui::{
 use kumo_protocol::{AgentInfo, AgentStatus, Layout, LayoutNode, SessionLayout};
 
 use crate::theme::{self, Chrome};
-use crate::{KumoWindow, SIDEBAR_W, SIDEBAR_W_COLLAPSED};
-
-const RAIL_W: f32 = SIDEBAR_W_COLLAPSED;
+use crate::KumoWindow;
 
 pub struct Sidebar {
     parent: WeakEntity<KumoWindow>,
@@ -35,13 +33,14 @@ impl Render for Sidebar {
         let connected = data.connected;
         let collapsed = data.sidebar_collapsed;
         let layout = data.layout.clone();
+        let width = data.sidebar_w;
 
         if collapsed {
-            return self.collapsed_rail(cx, &layout, &chrome);
+            return self.collapsed_rail(cx, &layout, &chrome, width);
         }
 
         div()
-            .w(px(SIDEBAR_W))
+            .w(px(width))
             .h_full()
             .bg(chrome.surface_glass())
             .border_r_1()
@@ -416,9 +415,15 @@ impl Sidebar {
     // Collapsed Rail
     // ------------------------------------------------------------------
 
-    fn collapsed_rail(&self, cx: &mut Context<Self>, layout: &Option<Layout>, chrome: &Chrome) -> gpui::Div {
+    fn collapsed_rail(
+        &self,
+        cx: &mut Context<Self>,
+        layout: &Option<Layout>,
+        chrome: &Chrome,
+        width: f32,
+    ) -> gpui::Div {
         let mut rail = div()
-            .w(px(RAIL_W))
+            .w(px(width))
             .h_full()
             .bg(chrome.surface_glass())
             .child(

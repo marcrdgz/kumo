@@ -2,10 +2,11 @@
 //!
 //! The daemon never renders chrome. This app subscribes to the semantic layout
 //! (sessions → splits in ratios → panes), computes its own geometry, requests
-//! per-pane sizes (`PaneResize`), and paints each pane as a rounded card with
-//! native GPUI chrome — a floating "Spider Web" sidebar for sessions + AI
-//! agents, drag-to-resize separators with a neon hover glow, and a neon focus
-//! ring around the active pane.
+//! per-pane sizes (`PaneResize`), and paints each pane's grid directly on the
+//! frosted window glass with native GPUI chrome on top: a collapsible
+//! "Spider Web" sidebar for sessions + AI agents, drag-to-resize separators
+//! with a neon hover glow, a neon focus ring around the active pane, the
+//! leader-key command system, popups/pickers, and a settings panel.
 //!
 //! Component structure:
 //! - [`KumoWindow`] — root view: daemon connection, geometry, input routing.
@@ -98,6 +99,8 @@ const STATUS_H: f32 = 30.0;
 const CURSOR_BLINK: Duration = Duration::from_millis(530);
 /// How long the pane-number overlay stays up after `leader+q`.
 const PANE_NUMBERS_TTL: Duration = Duration::from_millis(1500);
+/// Splitter hover glow fade-in duration.
+const SPLIT_GLOW_IN: Duration = Duration::from_millis(140);
 
 pub(crate) struct KumoWindow {
     to_view: mpsc::Receiver<DaemonEvent>,
@@ -152,6 +155,10 @@ pub(crate) struct KumoWindow {
     theme_idx: usize,
     /// The keybind overlay (`leader+?`).
     keybinds_open: bool,
+    /// Animated current sidebar width (eases between expanded and rail).
+    sidebar_w: f32,
+    /// When the current splitter hover started (fades the glow in).
+    hover_since: Option<std::time::Instant>,
     /// The settings panel (gear in the titlebar).
     settings_open: bool,
     settings_about: bool,
@@ -230,6 +237,8 @@ impl KumoWindow {
             keybinds_open: false,
             settings_open: false,
             settings_about: false,
+            sidebar_w: SIDEBAR_W,
+            hover_since: None,
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -266,14 +275,11 @@ impl KumoWindow {
         theme::chrome(self.theme_idx)
     }
 
-    /// The width the sidebar currently occupies (its collapsed rail or the
-    /// expanded pill), which the geometry calc subtracts from the viewport.
+    /// The width the sidebar currently occupies — eased toward the collapsed
+    /// rail or the expanded pill, which the geometry calc subtracts from the
+    /// viewport so the panes glide along with it.
     fn sidebar_width(&self) -> f32 {
-        if self.sidebar_collapsed {
-            SIDEBAR_W_COLLAPSED
-        } else {
-            SIDEBAR_W
-        }
+        self.sidebar_w
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -334,6 +340,21 @@ impl KumoWindow {
         if let Some(shown_at) = self.pane_numbers {
             if shown_at.elapsed() >= PANE_NUMBERS_TTL {
                 self.pane_numbers = None;
+                changed = true;
+            }
+        }
+        // Ease the sidebar toward its target width (rail ↔ expanded pill).
+        let sidebar_target = if self.sidebar_collapsed { SIDEBAR_W_COLLAPSED } else { SIDEBAR_W };
+        if (self.sidebar_w - sidebar_target).abs() > 0.5 {
+            self.sidebar_w += (sidebar_target - self.sidebar_w) * 0.28;
+            changed = true;
+        } else if self.sidebar_w != sidebar_target {
+            self.sidebar_w = sidebar_target;
+            changed = true;
+        }
+        // Keep repainting while the splitter hover glow fades in.
+        if let Some(t) = self.hover_since {
+            if t.elapsed() < SPLIT_GLOW_IN {
                 changed = true;
             }
         }
@@ -763,6 +784,7 @@ impl KumoWindow {
         let hovered = self.splitter_at_pixel(ev.position).map(|s| s.split_id);
         if hovered != self.hover_splitter {
             self.hover_splitter = hovered;
+            self.hover_since = hovered.map(|_| std::time::Instant::now());
             cx.notify();
         }
         let kind = match ev.pressed_button {
@@ -1386,6 +1408,7 @@ impl KumoWindow {
                         .rounded(px(12.0))
                         .border_1()
                         .border_color(theme::hairline())
+                        .shadow(theme::card_shadow())
                         .bg(gpui::rgba(0x121218f2))
                         .px(px(18.0))
                         .py(px(16.0))
@@ -1422,6 +1445,7 @@ impl KumoWindow {
             .rounded(px(12.0))
             .border_1()
             .border_color(theme::hairline())
+            .shadow(theme::card_shadow())
             .bg(gpui::rgba(0x121218f2))
             .px(px(18.0))
             .py(px(16.0))
@@ -1602,6 +1626,7 @@ impl KumoWindow {
                         .rounded(px(12.0))
                         .border_1()
                         .border_color(theme::hairline())
+                        .shadow(theme::card_shadow())
                         .bg(gpui::rgba(0x121218f2))
                         .px(px(18.0))
                         .py(px(16.0))
