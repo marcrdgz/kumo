@@ -14,7 +14,7 @@ use gpui::{
 use kumo_protocol::SplitDir;
 
 use crate::theme::Chrome;
-use crate::{KumoWindow, pane_metrics};
+use crate::{KumoWindow, pane_metrics, theme};
 
 /// Pixel gap kept around every pane card (and between adjacent panes).
 pub(crate) const PANE_GAP: f32 = 8.0;
@@ -292,6 +292,27 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
                     ),
                     chrome.accent(),
                 ));
+            }
+
+            // Scrollback scrollbar: a hairline track with an accent thumb,
+            // only when there is scrollback beyond the viewport.
+            if let Some(scroll) = grid.scroll() {
+                if scroll.total > scroll.screen && scroll.screen > 0 {
+                    let track_h = f32::from(m.h) - 2.0 * PANE_GAP;
+                    let thumb_h = ((scroll.screen as f32 / scroll.total as f32) * track_h).clamp(12.0, track_h);
+                    let max_offset = (scroll.total - scroll.screen).max(1);
+                    let travel = (track_h - thumb_h).max(0.0);
+                    let thumb_y = m.content_y + px((scroll.offset as f32 / max_offset as f32) * travel);
+                    let x = m.x + m.w - px(4.0);
+                    window.paint_quad(fill(
+                        Bounds::new(point(x, m.content_y), size(px(2.0), px(track_h))),
+                        theme::hairline(),
+                    ));
+                    window.paint_quad(fill(
+                        Bounds::new(point(x, thumb_y), size(px(2.0), px(thumb_h))),
+                        chrome.accent().with_a(0.55),
+                    ));
+                }
             }
         }
     }

@@ -6,7 +6,7 @@
 
 use gpui::{Font, Hsla, TextRun, TextStyle, UnderlineStyle, px};
 
-use kumo_protocol::{PaneFrame, WireCell};
+use kumo_protocol::{PaneFrame, ScrollState, WireCell};
 
 /// A retained cell grid assembled from `PaneFrame` row patches (the daemon sends
 /// full frames on subscribe/resize, then only dirty rows).
@@ -16,6 +16,8 @@ pub struct Grid {
     rows: usize,
     cells: Vec<Vec<WireCell>>,
     cursor: Option<(u16, u16)>,
+    /// Scrollback state of the pane's terminal, for the client scrollbar.
+    scroll: Option<ScrollState>,
     /// Cached paintable art per row; `None` = stale, rebuilt lazily on paint.
     art: Vec<Option<RowArt>>,
 }
@@ -31,6 +33,11 @@ impl Grid {
 
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
+    }
+
+    /// The scrollback state (`None` = no scrollback, e.g. alt-screen apps).
+    pub fn scroll(&self) -> Option<&ScrollState> {
+        self.scroll.as_ref()
     }
 
     /// The selected text between two cell corners (inclusive), joined with
@@ -102,6 +109,7 @@ impl Grid {
             }
         }
         self.cursor = frame.cursor;
+        self.scroll = frame.scroll;
     }
 }
 

@@ -594,16 +594,36 @@ impl KumoWindow {
         }
     }
 
+    /// Whether a pane's program switched to the alternate screen (vim, htop).
+    fn pane_alt_screen(&self, pid: u64) -> bool {
+        self.active_session()
+            .and_then(|s| s.root.as_deref())
+            .and_then(|r| find_pane(r, pid))
+            .map(|p| p.alt_screen)
+            .unwrap_or(false)
+    }
+
     fn on_scroll_wheel(&mut self, ev: &ScrollWheelEvent, _: &mut Window, _: &mut Context<Self>) {
         let dy = match ev.delta {
             ScrollDelta::Pixels(p) => f32::from(p.y),
             ScrollDelta::Lines(p) => p.y * 8.0,
         };
-        let kind = if dy > 0.0 { WireMouseKind::ScrollUp } else { WireMouseKind::ScrollDown };
-        if let Some((_session, _pid, col, row)) = self.pane_at_pixel(ev.position) {
-            self.send_mouse(kind, col, row, ev.modifiers);
-        } else if let Some((col, row)) = self.cell_from_position(ev.position) {
-            self.send_mouse(kind, col, row, ev.modifiers);
+        let up = dy > 0.0;
+        if let Some((session, pid, col, row)) = self.pane_at_pixel(ev.position) {
+            let _ = self.send(Command::PaneFocus { session, pane_id: pid });
+            // Same routing as the TUI: mouse-reporting apps get SGR wheel
+            // bytes, alt-screen apps get arrow keys, and plain panes scroll
+            // their scrollback viewport.
+            if self.pane_reports_mouse(pid) {
+                let b = if up { 64 } else { 65 };
+                let bytes = sgr_mouse(b, col + 1, row + 1, false);
+                let _ = self.send(Command::PaneWrite { pane_id: pid, bytes });
+            } else if self.pane_alt_screen(pid) {
+                let bytes: Vec<u8> = if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() };
+                let _ = self.send(Command::PaneWrite { pane_id: pid, bytes });
+            } else {
+                let _ = self.send(Command::PaneScroll { pane_id: pid, up });
+            }
         }
     }
 
@@ -1006,6 +1026,13 @@ fn wire_button(b: MouseButton) -> WireMouseButton {
         MouseButton::Right => WireMouseButton::Right,
         _ => WireMouseButton::Middle,
     }
+}
+
+/// SGR (xterm 1006) mouse sequence — a local copy of the CLI client's helper,
+/// used to forward wheel events to mouse-reporting programs.
+fn sgr_mouse(button: u8, col: u16, row: u16, release: bool) -> Vec<u8> {
+    let b = if release { button | 3 } else { button };
+    format!("\x1b[<{b};{col};{row}{}", if release { "m" } else { "M" }).into_bytes()
 }
 
 fn wire_modifiers(m: gpui::Modifiers) -> WireModifiers {
