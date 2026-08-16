@@ -48,7 +48,7 @@ enum UpdateMsg {
 }
 
 use crate::panes::{
-    CellRect, PaneMetrics, SplitDrag, SplitGeom, TerminalPane,
+    CellRect, PaneMetrics, Sel, SplitDrag, SplitGeom, TerminalPane,
 };
 use crate::sidebar::Sidebar;
 
@@ -73,6 +73,9 @@ pub(crate) struct KumoWindow {
     splitters: Vec<SplitGeom>,
     drag: Option<SplitDrag>,
     hover_splitter: Option<u64>,
+    /// Client-side text selection in one pane (kept visible after mouse-up,
+    /// cleared by the next click that starts a gesture in a pane).
+    sel: Option<Sel>,
     sidebar_collapsed: bool,
     /// Mouse-down on the custom titlebar strip: the next mouse-move hands the
     /// drag to AppKit so the frameless window follows the pointer.
@@ -139,6 +142,7 @@ impl KumoWindow {
             splitters: Vec::new(),
             drag: None,
             hover_splitter: None,
+            sel: None,
             sidebar_collapsed: false,
             titlebar_drag_armed: false,
             bootstrap_requested: false,
@@ -467,6 +471,28 @@ impl KumoWindow {
     // Input
     // ------------------------------------------------------------------
 
+    /// Whether a pane's program enabled mouse reporting (its own selection,
+    /// etc.) — in that case gestures are forwarded unless Shift is held.
+    fn pane_reports_mouse(&self, pid: u64) -> bool {
+        self.active_session()
+            .and_then(|s| s.root.as_deref())
+            .and_then(|r| find_pane(r, pid))
+            .map(|p| p.mouse_reporting)
+            .unwrap_or(false)
+    }
+
+    /// Clamp a cell position to the pane's actual streamed grid (the layout
+    /// rect is a few cells wider/taller than the terminal inside it).
+    fn clamp_to_grid(&self, pid: u64, col: u16, row: u16) -> (u16, u16) {
+        match self.panes.get(&pid) {
+            Some(g) => {
+                let g = g.borrow();
+                (col.min(g.cols().saturating_sub(1)), row.min(g.rows().saturating_sub(1)))
+            }
+            None => (col, row),
+        }
+    }
+
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
         let button = wire_button(ev.button);
         // Left press on a divider starts a resize drag (the daemon owns the
@@ -479,12 +505,36 @@ impl KumoWindow {
         }
         if let Some((session, pid, col, row)) = self.pane_at_pixel(ev.position) {
             let _ = self.send(Command::PaneFocus { session, pane_id: pid });
-            self.send_mouse(WireMouseKind::Down(button), col, row, ev.modifiers);
+            let reporting = self.pane_reports_mouse(pid);
+            if ev.button == MouseButton::Left && (!reporting || ev.modifiers.shift) {
+                // Plain selection: ours, not the pane program's.
+                let (col, row) = self.clamp_to_grid(pid, col, row);
+                self.sel = Some(Sel { pane_id: pid, start: (col, row), end: (col, row) });
+            } else {
+                self.sel = None;
+                self.send_mouse(WireMouseKind::Down(button), col, row, ev.modifiers);
+            }
         }
     }
 
-    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.drag = None;
+        // Finishing a selection copies it (the highlight stays until the next
+        // click); the Up is not forwarded, matching the TUI.
+        if ev.button == MouseButton::Left {
+            if let Some(sel) = self.sel {
+                let text = self
+                    .panes
+                    .get(&sel.pane_id)
+                    .map(|g| g.borrow().selection_text(sel.start, sel.end))
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+                cx.notify();
+                return;
+            }
+        }
         let button = wire_button(ev.button);
         if let Some((_session, _pid, col, row)) = self.pane_at_pixel(ev.position) {
             self.send_mouse(WireMouseKind::Up(button), col, row, ev.modifiers);
@@ -508,6 +558,23 @@ impl KumoWindow {
                     let _ = self.send(Command::PaneResizeTo { session, split_id: drag.split_id, ratio });
                 }
                 return;
+            }
+        }
+        // Extend an active selection with the pointer (not forwarded to the
+        // pane program while a client-side selection is in progress).
+        if ev.pressed_button == Some(MouseButton::Left) && self.sel.is_some() {
+            if let Some((_session, pid, col, row)) = self.pane_at_pixel(ev.position) {
+                if self.sel.map(|s| s.pane_id) == Some(pid) {
+                    let (col, row) = self.clamp_to_grid(pid, col, row);
+                    let changed = self.sel.map(|s| s.end) != Some((col, row));
+                    if let Some(sel) = &mut self.sel {
+                        sel.end = (col, row);
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                    return;
+                }
             }
         }
         // Hover highlight for the drag separator (native GPUI indicator).
@@ -545,6 +612,20 @@ impl KumoWindow {
     fn resize_focused(&mut self, dir: kumo_protocol::ResizeDir) {
         let Some(session) = self.active_session().map(|s| s.name.clone()) else { return };
         let _ = self.send(Command::PaneResizeRatio { session, dir });
+    }
+
+    /// Copy the active selection (if any) to the clipboard.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(sel) = self.sel {
+            let text = self
+                .panes
+                .get(&sel.pane_id)
+                .map(|g| g.borrow().selection_text(sel.start, sel.end))
+                .unwrap_or_default();
+            if !text.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+        }
     }
 
     fn send_mouse(&mut self, kind: WireMouseKind, col: u16, row: u16, mods: gpui::Modifiers) {
@@ -1006,6 +1087,10 @@ fn main() {
             let ks = ev.keystroke.clone();
             if ks.key == "q" && ks.modifiers.platform {
                 cx.quit();
+                return;
+            }
+            if ks.key == "c" && ks.modifiers.platform {
+                view.update(cx, |this, cx| this.copy_selection(cx));
                 return;
             }
             if ks.key == "v" && ks.modifiers.platform {

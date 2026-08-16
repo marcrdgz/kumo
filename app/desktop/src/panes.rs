@@ -37,6 +37,24 @@ pub(crate) struct SplitGeom {
     pub(crate) strip: CellRect,
 }
 
+/// An active text selection in one pane (cell coords, both corners inclusive).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sel {
+    pub(crate) pane_id: u64,
+    pub(crate) start: (u16, u16),
+    pub(crate) end: (u16, u16),
+}
+
+/// A selection normalized so `start <= end` (row-major), ready for painting.
+pub(crate) fn normalize_sel(sel: Sel) -> ((u16, u16), (u16, u16)) {
+    let (mut r0, mut c0, mut r1, mut c1) = (sel.start.1, sel.start.0, sel.end.1, sel.end.0);
+    if r1 < r0 || (r1 == r0 && c1 < c0) {
+        std::mem::swap(&mut r0, &mut r1);
+        std::mem::swap(&mut c0, &mut c1);
+    }
+    ((r0, c0), (r1, c1))
+}
+
 /// An in-flight divider drag.
 #[derive(Clone, Copy)]
 pub(crate) struct SplitDrag {
@@ -87,6 +105,7 @@ impl Render for TerminalPane {
 // ---------------------------------------------------------------------------
 
 struct CanvasPane {
+    pid: u64,
     grid: Option<std::rc::Rc<std::cell::RefCell<crate::grid::Grid>>>,
     m: PaneMetrics,
 }
@@ -102,6 +121,7 @@ pub(crate) struct CanvasData {
     canvas_origin: Point<Pixels>,
     cell_w: f32,
     cell_h: f32,
+    sel: Option<Sel>,
 }
 
 pub(crate) struct PaneCanvas {
@@ -116,8 +136,9 @@ impl PaneCanvas {
         if let Some(_session) = model.active_session() {
             for (pid, r) in &model.rects {
                 let grid = model.panes.get(pid).cloned();
-                
+
                 panes.push(CanvasPane {
+                    pid: *pid,
                     grid,
                     m: pane_metrics(model, r),
                 });
@@ -135,6 +156,7 @@ impl PaneCanvas {
             canvas_origin: model.canvas_origin,
             cell_w: model.cell_w,
             cell_h: model.cell_h,
+            sel: model.sel,
         }
     }
 }
@@ -218,6 +240,10 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
 
         if let Some(grid) = &pane.grid {
             let mut grid = grid.borrow_mut();
+            let sel = data.sel.filter(|s| s.pane_id == pane.pid);
+            let sel_range = sel.map(normalize_sel);
+            let sel_wash = chrome.accent().with_a(0.25);
+            let grid_cols = grid.cols();
             for row in 0..grid.rows() {
                 if let Some(art) = grid.row_art_cached(row, &data.font, data.default_fg, chrome.card()) {
                     let row_y = m.content_y + px(row as f32 * m.cell_h);
@@ -230,6 +256,23 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
                             ),
                             span.color,
                         ));
+                    }
+                    // Selection tint sits under the glyphs, over the backgrounds.
+                    if let Some(((r0, c0), (r1, c1))) = sel_range {
+                        if row >= r0 && row <= r1 {
+                            let cols = grid_cols;
+                            let sx = if row == r0 { c0 } else { 0 };
+                            let ex = if row == r1 { c1.saturating_add(1) } else { cols };
+                            if ex > sx {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(m.content_x + px(sx as f32 * m.cell_w), row_y),
+                                        size(px((ex - sx) as f32 * m.cell_w), px(m.cell_h)),
+                                    ),
+                                    sel_wash,
+                                ));
+                            }
+                        }
                     }
                     let line = window
                         .text_system()

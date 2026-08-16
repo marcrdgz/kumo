@@ -25,8 +25,41 @@ impl Grid {
         self.rows as u16
     }
 
+    pub fn cols(&self) -> u16 {
+        self.cols as u16
+    }
+
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
+    }
+
+    /// The selected text between two cell corners (inclusive), joined with
+    /// newlines and right-trimmed per row — a port of the TUI client's
+    /// selection so both clients copy identically.
+    pub fn selection_text(&self, a: (u16, u16), b: (u16, u16)) -> String {
+        let (mut r0, mut c0, mut r1, mut c1) = (a.1, a.0, b.1, b.0);
+        if r1 < r0 || (r1 == r0 && c1 < c0) {
+            std::mem::swap(&mut r0, &mut r1);
+            std::mem::swap(&mut c0, &mut c1);
+        }
+        let mut lines = Vec::new();
+        for row in r0..=r1 {
+            let Some(cells) = self.cells.get(row as usize) else { continue };
+            let start = if row == r0 { c0 } else { 0 };
+            // Inclusive of the end column on the last row (both drag corners
+            // select the cell under the pointer), like a terminal's selection.
+            let end = if row == r1 { c1.saturating_add(1) } else { cells.len() as u16 };
+            let mut line = String::new();
+            for (i, cell) in cells.iter().enumerate() {
+                let ci = i as u16;
+                if ci < start || ci >= end || cell.cell_width == 0 {
+                    continue;
+                }
+                line.push_str(&cell.text);
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines.join("\n")
     }
 
     /// The paintable art for a row, rebuilding it only when the row changed
@@ -250,6 +283,50 @@ pub fn dim_text_style(window: &mut gpui::Window) -> TextStyle {
 
 fn hsla_from_hex(hex: u32) -> Hsla {
     gpui::rgba((hex << 8) | 0xff).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(text: &str, width: u16) -> WireCell {
+        WireCell {
+            text: text.into(),
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+            faint: false,
+            cell_width: width,
+        }
+    }
+
+    #[test]
+    fn selection_text_joins_rows_and_skips_continuation() {
+        let mut g = Grid::default();
+        g.cols = 4;
+        g.rows = 3;
+        g.cells = vec![
+            vec![cell("a", 1), cell("b", 1), cell("c", 1), cell("d", 1)],
+            vec![cell("\u{1f600}", 2), cell(" ", 0), cell("x", 1), cell("y", 1)],
+            vec![cell("1", 1), cell("2", 1), cell("3", 1), cell("4", 1)],
+        ];
+        // Same drag as the TUI test: (col 1, row 0) → (col 1, row 1).
+        assert_eq!(g.selection_text((1, 0), (1, 1)), "bcd\n\u{1f600}");
+    }
+
+    #[test]
+    fn selection_text_swaps_reversed_corners() {
+        let mut g = Grid::default();
+        g.cols = 2;
+        g.rows = 2;
+        g.cells = vec![vec![cell("a", 1), cell("b", 1)], vec![cell("c", 1), cell("d", 1)]];
+        // Dragging bottom-right → top-left covers the same cells; the end
+        // corner stays inclusive, so the last row runs through its column.
+        assert_eq!(g.selection_text((1, 1), (0, 0)), "ab\ncd");
+    }
 }
 
 /// Cell geometry ratios for the monospace font: `line_height_ratio` =
