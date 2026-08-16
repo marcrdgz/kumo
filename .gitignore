@@ -28,6 +28,9 @@ ehthumbs.db
 Desktop.ini
 
 # --- Editors & IDEs ---
+# ZCode agent sessions
+.zcode/
+
 # VSCode
 .vscode/*
 !.vscode/settings.json
