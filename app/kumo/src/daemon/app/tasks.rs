@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::alert::{self, AlertKind};
-use crate::agents::AgentStatus;
+use crate::daemon::alert::{self, AlertKind};
+use crate::daemon::agents::AgentStatus;
 
 use super::App;
 
@@ -82,7 +82,7 @@ impl App {
             return;
         }
         self.last_ai_scan = Instant::now();
-        let snapshot = crate::pane::ProcessSnapshot::capture();
+        let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
         for pane in self.panes.values_mut() {
             let name = match (&snapshot, pane.pty.process_id()) {
                 (Some(snap), Some(root)) => snap.ai_cli_in_tree(root),

@@ -17,8 +17,8 @@ use kumo_protocol::{
 
 use super::App;
 use kumo_core::layout;
-use crate::pane::Pane;
-use crate::pty::Pty;
+use crate::daemon::pane::Pane;
+use crate::daemon::pty::Pty;
 
 /// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
 const RESIZE_STEP: f32 = 0.05;
@@ -52,7 +52,7 @@ impl App {
     pub(crate) fn write_key(&mut self, key: KeyEvent) {
         let focus = self.active_focus();
         if let Some(pane) = self.panes.get_mut(&focus) {
-            let bytes = crate::keys::encode(key);
+            let bytes = crate::daemon::keys::encode(key);
             if !bytes.is_empty() {
                 pane.write(&bytes);
             }
@@ -243,7 +243,7 @@ impl App {
         let mut sent = 0usize;
         if let Some(pane) = self.panes.get_mut(&pid) {
             for key in keys {
-                let bytes = crate::keys::encode(key.to_crossterm());
+                let bytes = crate::daemon::keys::encode(key.to_crossterm());
                 if !bytes.is_empty() {
                     pane.write(&bytes);
                     sent += 1;
@@ -313,7 +313,7 @@ impl App {
                                 .agent_status_cache
                                 .get(&pid)
                                 .copied()
-                                .unwrap_or(crate::agents::AgentStatus::Idle)
+                                .unwrap_or(crate::daemon::agents::AgentStatus::Idle)
                                 .into(),
                             cpu,
                             mem_kb,
@@ -364,7 +364,7 @@ impl App {
                         .agent_status_cache
                         .get(&pid)
                         .copied()
-                        .unwrap_or(crate::agents::AgentStatus::Idle)
+                        .unwrap_or(crate::daemon::agents::AgentStatus::Idle)
                         .into(),
                 });
             }

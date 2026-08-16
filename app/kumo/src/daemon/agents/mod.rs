@@ -15,7 +15,7 @@
 pub mod claude;
 pub mod opencode;
 
-use crate::vt;
+use crate::daemon::vt;
 
 /// How many rows from the bottom of the terminal buffer to scan for
 /// agent-state markers. The live prompt/footer and any dialog live in the

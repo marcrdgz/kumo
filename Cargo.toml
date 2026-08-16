@@ -3,8 +3,7 @@ resolver = "2"
 members = [
     "crates/kumo-protocol",
     "crates/kumo-core",
-    "app/daemon",
-    "app/cli",
+    "app/kumo",
     "app/desktop",
 ]
 

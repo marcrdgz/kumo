@@ -34,6 +34,19 @@ use kumo_protocol::{
     WireMouseButton, WireMouseEvent, WireMouseKind,
 };
 
+/// Messages from the background update manager (startup bootstrap + in-app
+/// update checks) to the window.
+enum UpdateMsg {
+    /// The check finished: here is the current status of the CLI and the app.
+    Status(kumo_core::updater::UpdateStatus),
+    /// A transient banner line (installing/updating/results).
+    Banner(String),
+    /// A `kumo` CLI update attempt finished.
+    CliDone(Result<(), String>),
+    /// A desktop self-update attempt finished (`Ok` = app is relaunching).
+    DesktopDone(Result<(), String>),
+}
+
 use crate::panes::{
     CellRect, PaneMetrics, SplitDrag, SplitGeom, TerminalPane,
 };
@@ -70,6 +83,14 @@ pub(crate) struct KumoWindow {
     sidebar: Entity<Sidebar>,
     terminal: Entity<TerminalPane>,
     grid_size: (u16, u16),
+    // update manager (background thread → window)
+    update_tx: mpsc::Sender<UpdateMsg>,
+    update_rx: mpsc::Receiver<UpdateMsg>,
+    updates: kumo_core::updater::UpdateStatus,
+    update_banner: SharedString,
+    update_banner_dismissed: bool,
+    updating_cli: bool,
+    updating_desktop: bool,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -93,6 +114,18 @@ impl KumoWindow {
         let font = base.font();
         let default_fg = base.color;
         let weak_self: WeakEntity<KumoWindow> = cx.weak_entity();
+        // Update manager: install the kumo CLI on first run if missing, then
+        // report update status for the CLI and this app. Runs on its own
+        // thread so a fresh install never blocks the window.
+        let (update_tx, update_rx) = mpsc::channel::<UpdateMsg>();
+        let boot_tx = update_tx.clone();
+        std::thread::spawn(move || {
+            if kumo_core::updater::find_kumo().is_none() {
+                let _ = boot_tx.send(UpdateMsg::Banner("installing kumo CLI…".into()));
+                let _ = kumo_core::updater::install_cli_if_missing();
+            }
+            let _ = boot_tx.send(UpdateMsg::Status(kumo_core::updater::check_all()));
+        });
         let mut this = KumoWindow {
             to_view: conn.to_view,
             from_view: conn.from_view,
@@ -112,6 +145,13 @@ impl KumoWindow {
             sidebar: cx.new(|_cx| Sidebar::new(weak_self.clone())),
             terminal: cx.new(|_cx| TerminalPane::new(weak_self.clone())),
             grid_size: (80, 24),
+            update_tx,
+            update_rx,
+            updates: kumo_core::updater::UpdateStatus::default(),
+            update_banner: SharedString::from(""),
+            update_banner_dismissed: false,
+            updating_cli: false,
+            updating_desktop: false,
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -169,6 +209,43 @@ impl KumoWindow {
 
     fn pump(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
+        while let Ok(msg) = self.update_rx.try_recv() {
+            match msg {
+                UpdateMsg::Status(status) => {
+                    self.updates = status;
+                    self.update_banner = SharedString::from("");
+                    changed = true;
+                }
+                UpdateMsg::Banner(text) => {
+                    self.update_banner = SharedString::from(text);
+                    self.update_banner_dismissed = false;
+                    changed = true;
+                }
+                UpdateMsg::CliDone(result) => {
+                    self.updating_cli = false;
+                    self.update_banner = SharedString::from(match result {
+                        Ok(()) => "kumo CLI updated".to_string(),
+                        Err(e) => format!("kumo CLI update failed: {e}"),
+                    });
+                    changed = true;
+                }
+                UpdateMsg::DesktopDone(result) => {
+                    self.updating_desktop = false;
+                    match result {
+                        Ok(()) => {
+                            // The fresh bundle was installed and a relaunch was
+                            // scheduled; quit so it can take over.
+                            cx.quit();
+                            return;
+                        }
+                        Err(e) => {
+                            self.update_banner = SharedString::from(format!("desktop update failed: {e}"));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
         while let Ok(msg) = self.to_view.try_recv() {
             match msg {
                 DaemonEvent::Welcome { .. } => {
@@ -493,6 +570,156 @@ impl KumoWindow {
             .border_color(theme::hairline())
             .child(StyledText::new(SharedString::from(text)).with_default_highlights(&self.dim, []))
     }
+
+    // ------------------------------------------------------------------
+    // Updates (kumo CLI + desktop app)
+    // ------------------------------------------------------------------
+
+    /// The status line of what has an update available (empty = nothing).
+    fn updates_line(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        match &self.updates.cli {
+            kumo_core::updater::ComponentStatus::OutOfDate { latest, .. } => {
+                parts.push(format!("kumo CLI {latest}"));
+            }
+            kumo_core::updater::ComponentStatus::Missing => {
+                parts.push("kumo CLI not installed".to_string());
+            }
+            _ => {}
+        }
+        if let kumo_core::updater::ComponentStatus::OutOfDate { latest, .. } = &self.updates.desktop {
+            parts.push(format!("Kumo Desktop {latest}"));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    /// A slim banner under the titlebar: update availability + one-click
+    /// buttons, or a transient line while an install/update runs.
+    fn update_banner(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.update_banner.is_empty() {
+            return div()
+                .w_full()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .px(px(10.0))
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme::hairline())
+                .child(StyledText::new(self.update_banner.clone()).with_default_highlights(&self.dim, []))
+                .child(self.banner_dismiss(cx));
+        }
+        if self.update_banner_dismissed {
+            return div();
+        }
+        let Some(line) = self.updates_line() else {
+            return div();
+        };
+        let mut row = div()
+            .w_full()
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .px(px(10.0))
+            .gap(px(12.0))
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(
+                StyledText::new(SharedString::from(format!("↑ {line}")))
+                    .with_default_highlights(&self.dim, []),
+            );
+        if self.updating_cli || self.updating_desktop {
+            row = row.child(
+                div().child("updating…").text_size(px(11.5)).text_color(self.chrome().muted()),
+            );
+        } else {
+            let cli_available = matches!(
+                self.updates.cli,
+                kumo_core::updater::ComponentStatus::OutOfDate { .. }
+                    | kumo_core::updater::ComponentStatus::Missing
+            );
+            if cli_available {
+                row = row.child(self.banner_button(cx, "Update CLI", Self::on_update_cli));
+            }
+            if matches!(self.updates.desktop, kumo_core::updater::ComponentStatus::OutOfDate { .. }) {
+                row = row.child(self.banner_button(cx, "Update Desktop", Self::on_update_desktop));
+            }
+        }
+        row = row.child(self.banner_dismiss(cx));
+        row
+    }
+
+    fn banner_button(
+        &self,
+        cx: &mut Context<Self>,
+        label: &'static str,
+        action: fn(&mut Self, &mut Context<Self>),
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .px(px(8.0))
+            .h(px(18.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::wash(0x0c)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, cx| action(this, cx)))
+            .child(label)
+            .text_size(px(11.0))
+            .text_color(self.chrome().accent())
+    }
+
+    fn banner_dismiss(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(16.0))
+            .rounded(px(5.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::wash(0x0c)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _w, _cx| {
+                this.update_banner_dismissed = true;
+                this.update_banner = SharedString::from("");
+            }))
+            .child("×")
+            .text_size(px(12.0))
+            .text_color(self.chrome().muted())
+    }
+
+    /// Run `kumo update` (via the cargo-dist installer) in the background.
+    fn on_update_cli(&mut self, cx: &mut Context<Self>) {
+        if self.updating_cli {
+            return;
+        }
+        self.updating_cli = true;
+        self.update_banner = SharedString::from("");
+        cx.notify();
+        let tx = self.update_tx.clone();
+        std::thread::spawn(move || {
+            let result = kumo_core::updater::update_cli().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(UpdateMsg::CliDone(result));
+        });
+    }
+
+    /// Download the new `.dmg`, replace this app in /Applications and relaunch.
+    fn on_update_desktop(&mut self, cx: &mut Context<Self>) {
+        if self.updating_desktop {
+            return;
+        }
+        self.updating_desktop = true;
+        self.update_banner = SharedString::from("");
+        cx.notify();
+        let tx = self.update_tx.clone();
+        std::thread::spawn(move || {
+            let result = kumo_core::updater::update_desktop().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(UpdateMsg::DesktopDone(result));
+        });
+    }
 }
 
 impl Render for KumoWindow {
@@ -514,6 +741,7 @@ impl Render for KumoWindow {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(self.titlebar(cx))
+            .child(self.update_banner(cx))
             .child(
                 div()
                     .flex()

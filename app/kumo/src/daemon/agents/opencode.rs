@@ -74,7 +74,7 @@ pub(crate) fn working(snap: &Snapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::after_last_rule;
+    use crate::daemon::agents::after_last_rule;
 
     fn snap(screen: &str, footer: &str) -> Snapshot {
         let form = after_last_rule(screen);

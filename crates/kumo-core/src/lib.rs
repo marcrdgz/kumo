@@ -14,6 +14,7 @@ pub mod layout;
 pub mod protocol;
 pub mod theme;
 pub mod update;
+pub mod updater;
 pub mod worktrees;
 
 pub use launch::Launch;

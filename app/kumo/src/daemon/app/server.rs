@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use ratatui::buffer::Buffer;
 
 use super::{App, Launch};
-use crate::frames;
+use crate::daemon::frames;
 use kumo_core::protocol::{ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
 
 /// One connected client. Reads happen on a per-client reader thread; outgoing
@@ -453,7 +453,7 @@ fn restart_daemon(app: &App) -> Result<()> {
         anyhow::bail!("nothing to resume (no live sessions)");
     };
     let path = kumo_core::config::resume_file();
-    crate::state::save(&path, &state)?;
+    crate::daemon::state::save(&path, &state)?;
     for pane in app.panes.values() {
         if let Some(fd) = pane.pty.raw_fd() {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -474,6 +474,7 @@ fn exec_new_binary(resume: &std::path::Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().context("cannot determine the current executable path")?;
     let err = std::process::Command::new(&exe)
+        .arg("daemon")
         .arg("--resume")
         .arg(resume)
         .exec();

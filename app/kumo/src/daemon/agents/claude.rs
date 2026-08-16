@@ -142,7 +142,7 @@ fn yes_no_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::after_last_rule;
+    use crate::daemon::agents::after_last_rule;
 
     fn snap(screen: &str, title: &str) -> Snapshot {
         let form = after_last_rule(screen);

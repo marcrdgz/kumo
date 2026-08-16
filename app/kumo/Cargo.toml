@@ -1,12 +1,13 @@
 [package]
-name = "kumo-daemon"
+name = "kumo"
 version.workspace = true
 edition.workspace = true
-description = "Headless kumo daemon: owns the PTYs, terminal emulators, and semantic layout, served over the unix socket"
+description = "Kumo terminal multiplexer: daemon + TUI + control CLI in one binary (run `kumo daemon` for the headless server)"
+repository = "https://github.com/marcrdgz/kumo"
 build = "build.rs"
 
 [[bin]]
-name = "kumo-daemon"
+name = "kumo"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,3 +22,7 @@ bincode = { version = "2", features = ["serde"] }
 anyhow = "1"
 log = "0.4"
 libc = "0.2"
+
+[package.metadata.dist]
+repository = "https://github.com/marcrdgz/kumo"
+

@@ -110,7 +110,7 @@ pub(crate) fn pane_frame(
     last: Option<&Buffer>,
     cursor: Option<(u16, u16)>,
     palette: &[ColorRgb; 16],
-    pane: Option<&crate::pane::Pane>,
+    pane: Option<&crate::daemon::pane::Pane>,
     scroll: Option<ScrollState>,
 ) -> PaneFrame {
     let cols = buf.area.width;

@@ -4,16 +4,16 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crate::agents::AgentStatus;
-use crate::pty::{Pty, PtySpec};
+use crate::daemon::agents::AgentStatus;
+use crate::daemon::pty::{Pty, PtySpec};
 use kumo_core::theme::Theme;
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
 
-use crate::vt::{self, find_urls};
+use crate::daemon::vt::{self, find_urls};
 use kumo_core::color::ColorRgb;
-use crate::xtgettcap::XtgettcapTracker;
+use crate::daemon::xtgettcap::XtgettcapTracker;
 
 /// A live pane: PTY + a real terminal emulator (libghostty-vt) fed from it.
 #[allow(dead_code)]
@@ -628,7 +628,7 @@ impl Pane {
     }
 
     /// Agent lifecycle state, derived from a snapshot of the terminal buffer
-    /// (see [`crate::agents`]): Blocked/Working win via distinctive markers,
+    /// (see [`crate::daemon::agents`]): Blocked/Working win via distinctive markers,
     /// Idle is the fallback.
     pub fn agent_status(&self) -> AgentStatus {
         self.compute_agent_status()
@@ -638,7 +638,7 @@ impl Pane {
         if self.dead {
             return AgentStatus::Idle;
         }
-        crate::agents::detect(&crate::agents::Snapshot::capture(&self.vt))
+        crate::daemon::agents::detect(&crate::daemon::agents::Snapshot::capture(&self.vt))
     }
 
     /// Install the terminal's active selection from two viewport coordinates.
@@ -706,7 +706,7 @@ impl Pane {
         // Plain-text URLs on the row, unless an OSC 8 run already covers them.
         let line = self.vt.row_text(row);
         if !line.is_empty() {
-            for (s, e, url) in crate::vt::find_urls(&line) {
+            for (s, e, url) in crate::daemon::vt::find_urls(&line) {
                 let c0 = line[..s].chars().count() as u16;
                 let c1 = line[..e].chars().count() as u16;
                 if !out.iter().any(|r| c0 < r.end && c1 > r.start) {

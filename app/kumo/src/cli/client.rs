@@ -25,7 +25,7 @@ use crossterm::terminal::{
 };
 
 use kumo_core::Launch;
-use crate::client_view::View;
+use crate::cli::client_view::View;
 use kumo_core::protocol::{self, ClientKind, Command, DaemonEvent};
 
 pub fn run(launch: Launch) -> Result<()> {
@@ -256,28 +256,13 @@ fn reconnect() -> Result<UnixStream> {
     }
 }
 
-/// Launch the `kumo-daemon` binary detached (own session, no stdio) so it
-/// survives the client terminal closing. The daemon is a separate binary: a
-/// sibling `kumo-daemon` next to this executable (usual cargo workspace
-/// layout), else `kumo-daemon` on `PATH`.
+/// Launch the `kumo daemon` process detached (own session, no stdio) so it
+/// survives the client terminal closing. The daemon is the same `kumo` binary
+/// (a sibling next to this executable in a cargo workspace, else `kumo` on
+/// `PATH`).
 fn spawn_daemon(workspace: Option<PathBuf>) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-    let bin = kumo_core::daemon::binary()
-        .ok_or_else(|| anyhow::anyhow!("kumo-daemon binary not found (build it with `cargo build -p kumo-daemon`)"))?;
-    let mut cmd = std::process::Command::new(bin);
-    if let Some(ws) = workspace {
-        cmd.arg(ws);
-    }
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn()?;
-    Ok(())
+    kumo_core::daemon::spawn_detached(workspace)
+        .map_err(|e| anyhow::anyhow!("failed to start the kumo daemon: {e}"))
 }
 
 /// Wait (up to a few seconds) for the freshly spawned daemon to bind its socket.

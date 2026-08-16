@@ -1,12 +1,5 @@
-mod bindings;
-mod chrome;
-#[cfg(unix)]
-mod client;
-#[cfg(unix)]
-mod client_view;
+mod daemon;
 mod cli;
-mod mouse;
-mod util;
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -28,6 +21,13 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    // Headless daemon: `kumo daemon [--resume <file>] [WORKSPACE]`. Spawned
+    // detached by the TUI client and the desktop app; also available to start
+    // manually. `--resume <file>` makes it adopt the live PTY masters
+    // inherited from a `kumo update` restart.
+    if args.first().map(|s| s.as_str()) == Some("daemon") {
+        return daemon::run(&args[1..]);
+    }
     if args.first().map(|s| s.as_str()) == Some("update") {
         let opts = update::parse_args(&args[1..])?;
         match update::update(&opts) {
@@ -43,12 +43,6 @@ fn main() -> Result<()> {
             }
         }
     }
-    if args.first().map(|s| s.as_str()) == Some("daemon") {
-        anyhow::bail!(
-            "the daemon is now a separate binary: run `kumo-daemon` ({}).",
-            kumo_core::daemon::binary().map(|p| p.display().to_string()).unwrap_or_else(|| "not on PATH".into())
-        );
-    }
 
     // Control CLI: `kumo session|pane|agent ...` (and the legacy aliases
     // `ls`/`kill`/`reload`/`server restart`).
@@ -57,7 +51,7 @@ fn main() -> Result<()> {
         | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
-                return cli::run(&args);
+                return cli::cli::run(&args);
             }
             #[cfg(not(unix))]
             {
@@ -79,7 +73,7 @@ fn main() -> Result<()> {
 
     #[cfg(unix)]
     {
-        client::run(launch)
+        cli::client::run(launch)
     }
     #[cfg(not(unix))]
     {
@@ -95,6 +89,7 @@ fn print_help() {
     println!("    kumo attach                attach to the running daemon");
     println!("    kumo new [WORKSPACE]       start a fresh session");
     println!("    kumo [WORKSPACE]           start fresh inside this directory");
+    println!("    kumo daemon [WORKSPACE]    run the headless daemon in the foreground");
     println!();
     println!("SESSIONS:");
     println!("    kumo session list");
@@ -116,7 +111,7 @@ fn print_help() {
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart / update");
     println!();
-    println!("The daemon (`kumo-daemon`) runs in the background and owns your panes;");
+    println!("The daemon (`kumo daemon`) runs in the background and owns your panes;");
     println!("the TUI is a client to it, so several terminals and the desktop app can");
     println!("attach at once.");
 }

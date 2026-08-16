@@ -23,9 +23,9 @@ use kumo_protocol::{
     SessionLayout, SplitDir, WireBranch, WireCell, WireWorktree,
 };
 
-use crate::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
-use crate::chrome::{fill, put, text};
-use crate::mouse::sgr_mouse;
+use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
+use crate::cli::chrome::{fill, put, text};
+use crate::cli::mouse::sgr_mouse;
 
 /// Width of the left sidebar (its last column is the separator).
 const SIDEBAR_WIDTH: u16 = 25;
@@ -1424,7 +1424,7 @@ impl View {
                             if let Some(session) = session {
                                 let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
                             }
-                            crate::util::open_url(&url);
+                            crate::cli::util::open_url(&url);
                             return Ok(());
                         }
                     }
@@ -1539,7 +1539,7 @@ impl View {
                     if sel.start != sel.end {
                         let text = self.selection_text(&sel);
                         if !text.is_empty() {
-                            crate::util::copy_to_clipboard(&text);
+                            crate::cli::util::copy_to_clipboard(&text);
                             self.status_msg = Some(("copied to clipboard".to_string(), Instant::now()));
                         }
                     } else {

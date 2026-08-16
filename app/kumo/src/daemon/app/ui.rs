@@ -12,7 +12,7 @@ use ratatui::layout::Rect;
 use kumo_protocol::Layout;
 
 use super::App;
-use crate::vt;
+use crate::daemon::vt;
 
 impl App {
     /// Refresh metadata (git branches, cwd follow, AI detection) and render the
@@ -132,7 +132,7 @@ impl App {
                     .agent_status_cache
                     .get(&pid)
                     .copied()
-                    .unwrap_or(crate::agents::AgentStatus::Idle)
+                    .unwrap_or(crate::daemon::agents::AgentStatus::Idle)
                     .into(),
                 cpu,
                 mem_kb,
@@ -155,18 +155,18 @@ impl App {
 /// Default terminal size for a pane until a client resizes it via `PaneResize`.
 const DEFAULT_PANE_SIZE: (u16, u16) = (80, 24);
 
-impl From<crate::agents::AgentStatus> for kumo_protocol::AgentStatus {
-    fn from(status: crate::agents::AgentStatus) -> Self {
+impl From<crate::daemon::agents::AgentStatus> for kumo_protocol::AgentStatus {
+    fn from(status: crate::daemon::agents::AgentStatus) -> Self {
         match status {
-            crate::agents::AgentStatus::Working => kumo_protocol::AgentStatus::Working,
-            crate::agents::AgentStatus::Blocked => kumo_protocol::AgentStatus::Blocked,
-            crate::agents::AgentStatus::Idle => kumo_protocol::AgentStatus::Idle,
+            crate::daemon::agents::AgentStatus::Working => kumo_protocol::AgentStatus::Working,
+            crate::daemon::agents::AgentStatus::Blocked => kumo_protocol::AgentStatus::Blocked,
+            crate::daemon::agents::AgentStatus::Idle => kumo_protocol::AgentStatus::Idle,
         }
     }
 }
 
-impl From<crate::app::tasks::BranchInfo> for kumo_protocol::WireBranch {
-    fn from(b: crate::app::tasks::BranchInfo) -> Self {
+impl From<crate::daemon::app::tasks::BranchInfo> for kumo_protocol::WireBranch {
+    fn from(b: crate::daemon::app::tasks::BranchInfo) -> Self {
         kumo_protocol::WireBranch { name: b.name, ahead: b.ahead, behind: b.behind }
     }
 }

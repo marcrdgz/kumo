@@ -8,32 +8,38 @@ management, featuring Claude AI integration and TMUX-style session/pane
 management.
 
 ### Architecture
-The daemon and the clients are **separate binaries** in one cargo workspace:
+The daemon and the clients are **one binary plus a desktop app** in one cargo
+workspace:
 
-- **`app/daemon`** (`kumo-daemon`): the headless daemon — owns the PTYs, the
-  ghostty terminal emulators, the semantic layout tree, and agent metadata,
-  served over a unix socket. It **never renders chrome**.
-- **`app/cli`** (`kumo`): the client — the TUI (draws ALL chrome: borders,
-  sidebar, status bar, menus, popups) plus the `kumo session|pane|agent`
-  control CLI and `kumo update`. It has no terminal emulator and no `zig`
-  build step.
-- **`app/desktop`** (`kumo-desktop`): a native GPUI desktop client that also
-  draws its own chrome.
+- **`app/kumo`** (`kumo`): the single binary — the headless **daemon** and the
+  **TUI/control CLI** together. `kumo daemon` runs the headless server, `kumo`
+  launches the TUI, `kumo session|pane|agent` drives it, `kumo update`
+  self-updates. Sources are split into `src/daemon/` (PTYs, ghostty emulators,
+  layout tree, agents) and `src/cli/` (chrome, input, mouse, control CLI).
+- **`app/desktop`** (`kumo-desktop`): a native GPUI desktop client that draws
+  its own chrome. Distributed separately (as a `Kumo-<arch>.dmg` on macOS);
+  it is the "smart" update interface — on launch it checks the `kumo` CLI and
+  the app itself against the latest release and can update both in-app.
 - **`crates/kumo-core`**: shared logic — config, layout tree, themes, update
-  check, worktrees.
+  check, the desktop updater (`updater.rs`), worktrees.
 - **`crates/kumo-protocol`**: the pure wire protocol (`Command`/`DaemonEvent`).
 
-The client and desktop launch `kumo-daemon` (sibling binary or `PATH`); the
-daemon restarts itself in place for `kumo update` (`--resume <file>`).
+The client and desktop launch the daemon via `kumo daemon` (sibling binary or
+`PATH`); the daemon restarts itself in place for `kumo update`
+(`kumo daemon --resume <file>`).
 
 ### Technology Stack
-- **Frontend**: Rust TUI (ratatui + crossterm) in `app/cli`.
+- **Frontend**: Rust TUI (ratatui + crossterm) in `app/kumo/src/cli`.
 - **Terminal Emulator**: `libghostty-vt` vendored in `vendor/`, compiled at
-  build time by `app/daemon/build.rs` via `zig build -Demit-lib-vt`, driven
-  through a hand-written C FFI layer in `app/daemon/src/vt.rs`.
-- **PTY Management**: `portable-pty` (`app/daemon/src/pty.rs`).
+  build time by `app/kumo/build.rs` via `zig build -Demit-lib-vt`, driven
+  through a hand-written C FFI layer in `app/kumo/src/daemon/vt.rs`.
+- **PTY Management**: `portable-pty` (`app/kumo/src/daemon/pty.rs`).
 - **AI Integration**: Claude CLI/agent running in a dedicated AI pane, with
-  live CPU/RAM sampling (`app/daemon/src/app/proc.rs`).
+  live CPU/RAM sampling (`app/kumo/src/daemon/app/proc.rs`).
+- **Updates**: `crates/kumo-core/src/update.rs` (the CLI self-updater) and
+  `crates/kumo-core/src/updater.rs` (the desktop app's manager: checks the
+  `kumo` CLI and the app against the latest release, installs the CLI via
+  `install.sh`, self-updates the app via the `.dmg`).
 - **Target OS**: macOS (primary dev), Linux, Windows.
 
 ---
@@ -49,7 +55,7 @@ daemon restarts itself in place for `kumo update` (`--resume <file>`).
 
 ## Codebase Principles & Rules
 1. **Never Guess Logic or File Structures**: Inspect authoritative source files before referencing Rust/C bindings.
-2. **Clean Abstractions**: Keep PTY/process management (`app/daemon/src/pty.rs`), the terminal emulator FFI (`app/daemon/src/vt.rs`), layout tree management (`crates/kumo-core/src/layout.rs`), and Claude AI integration modular and loosely coupled.
+2. **Clean Abstractions**: Keep PTY/process management (`app/kumo/src/daemon/pty.rs`), the terminal emulator FFI (`app/kumo/src/daemon/vt.rs`), layout tree management (`crates/kumo-core/src/layout.rs`), and Claude AI integration modular and loosely coupled.
 3. **No Superficial Fixes**: Always verify PTY process lifecycle, file descriptor cleanup, and signal handling (`SIGWINCH`, `SIGCHLD`) thoroughly.
 4. **Verification**: Always run build/test commands after editing code to verify compilation and execution success.
 5. **Never commit without asking**: Do not run `git commit` (or amend/push) unless the user explicitly asks. Stage nothing on your own; leave commits to the user.
@@ -58,11 +64,12 @@ daemon restarts itself in place for `kumo update` (`--resume <file>`).
 
 ## Build & Test Commands
 - **Build**: `cargo build --workspace` (from the workspace root)
-- **Run**: `cargo run -p kumo` (or `make run`) — the client; `cargo run -p kumo-daemon` — the daemon
+- **Run**: `cargo run -p kumo` (or `make run`) — the client; the daemon is the same
+  binary: `target/debug/kumo daemon` (or `cargo run -p kumo -- daemon`)
 - **Tests**: `cargo test --workspace`
 - **Lint**: `cargo clippy --workspace`
-- **Note**: building `kumo-daemon` (and `kumo-desktop`'s daemon dependency) requires a `zig`
-  toolchain on `PATH` to compile the vendored `libghostty-vt`; the `kumo` client builds without it.
+- **Note**: building `kumo` requires a `zig` toolchain on `PATH` to compile the
+  vendored `libghostty-vt` (the `build.rs` lives in `app/kumo`).
 
 ## Commit Convention
 - Use **Conventional Commits**: `<type>(<scope>): <summary>` where `type` is one of `feat`, `fix`, `refactor`, `chore`, `docs`, `test`, `build`.
@@ -72,17 +79,19 @@ daemon restarts itself in place for `kumo update` (`--resume <file>`).
 ---
 
 ## Key Architecture References
-- **`app/cli/src/main.rs`**: client entry (control CLI + update + TUI launch).
-- **`app/cli/src/client_view.rs`**: client-side view — geometry, input, mouse, and all chrome rendering.
-- **`app/daemon/src/app.rs`**: the engine — sessions, layout tree ops, PTYs, agents, themes.
-- **`app/daemon/src/app/server.rs`**: headless daemon loop — command dispatch, per-client streams.
-- **`app/daemon/src/app/commands.rs`**: the daemon's command handlers (sessions/panes/agents).
-- **`app/daemon/src/pane.rs`**: Pane = PTY (`app/daemon/src/pty.rs`) + ghostty terminal.
-- **`app/daemon/src/agents/`**: Per-agent lifecycle detection (`opencode.rs`, `claude.rs`),
-  dispatched by `app/daemon/src/agents/mod.rs` from a `Snapshot` of the terminal buffer.
-- **`app/daemon/src/vt.rs`**: Hand-written FFI bindings to the `libghostty-vt` C API
+- **`app/kumo/src/main.rs`**: binary entry — dispatcher (`kumo daemon` | control CLI + update | TUI launch).
+- **`app/kumo/src/daemon/app.rs`**: the engine — sessions, layout tree ops, PTYs, agents, themes.
+- **`app/kumo/src/daemon/app/server.rs`**: headless daemon loop — command dispatch, per-client streams.
+- **`app/kumo/src/daemon/app/commands.rs`**: the daemon's command handlers (sessions/panes/agents).
+- **`app/kumo/src/daemon/pane.rs`**: Pane = PTY (`app/kumo/src/daemon/pty.rs`) + ghostty terminal.
+- **`app/kumo/src/daemon/agents/`**: Per-agent lifecycle detection (`opencode.rs`, `claude.rs`),
+  dispatched by `app/kumo/src/daemon/agents/mod.rs` from a `Snapshot` of the terminal buffer.
+- **`app/kumo/src/daemon/vt.rs`**: Hand-written FFI bindings to the `libghostty-vt` C API
   plus the safe `Terminal` wrapper.
-- **`app/daemon/build.rs`**: Compiles the vendored Zig library at build time.
+- **`app/kumo/src/cli/client_view.rs`**: client-side view — geometry, input, mouse, and all chrome rendering.
+- **`app/kumo/build.rs`**: Compiles the vendored Zig library at build time.
+- **`crates/kumo-core/src/updater.rs`**: the desktop app's update manager (CLI bootstrap + `.dmg` self-update).
+- **`crates/kumo-core/src/daemon.rs`**: locating/spawning the `kumo` daemon binary (`kumo daemon`).
 - **`crates/kumo-core/src/`**: shared config, layout, theme, update, worktrees.
 - **`crates/kumo-protocol/`**: the wire protocol.
 - **`vendor/libghostty-vt/`**: Vendored Ghostty terminal emulator (Zig + C headers).

@@ -53,8 +53,10 @@ fn run(to_view: mpsc::Sender<DaemonEvent>, from_view: mpsc::Receiver<Command>) {
 fn serve(to_view: &mpsc::Sender<DaemonEvent>, from_view: &mpsc::Receiver<Command>, spawned: &mut bool) -> ServeOutcome {
     let path = ipc_socket_path();
     if UnixStream::connect(&path).is_err() {
-        if !*spawned {
-            let _ = spawn_daemon();
+        // Only mark the daemon as spawned on success: if the `kumo` CLI is
+        // missing the update manager is installing it right now, so a failed
+        // spawn must be retried on the next round rather than given up on.
+        if !*spawned && spawn_daemon().is_ok() {
             *spawned = true;
         }
         if !wait_for_socket(&path, Duration::from_secs(10)) {
@@ -110,25 +112,13 @@ fn ipc_socket_path() -> PathBuf {
     dir.join("kumo").join("kumo.sock")
 }
 
-/// Launch the `kumo-daemon` binary detached (own session, no stdio) so it
-/// survives this app closing. The daemon is a separate binary: this app looks
-/// for a sibling `kumo-daemon` next to it (e.g. `target/debug/kumo-daemon` in
-/// a cargo workspace) and falls back to `kumo-daemon` on `PATH`.
+/// Launch the `kumo daemon` process detached (own session, no stdio) so it
+/// survives this app closing. The daemon is the same `kumo` binary as the CLI
+/// (`kumo daemon`): this app looks for a sibling `kumo` next to it (e.g.
+/// `target/debug/kumo` in a cargo workspace) and falls back to `kumo` on
+/// `PATH`.
 fn spawn_daemon() -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-    let Some(bin) = kumo_core::daemon::binary() else {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "kumo-daemon binary not found"));
-    };
-    let mut cmd = std::process::Command::new(bin);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn().map(|_| ())
+    kumo_core::daemon::spawn_detached(None)
 }
 
 /// Wait (up to `timeout`) for a socket to start accepting connections.

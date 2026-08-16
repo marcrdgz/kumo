@@ -3156,7 +3156,10 @@ dependencies = [
  "kumo-protocol",
  "libc",
  "log",
+ "portable-pty",
  "ratatui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3165,6 +3168,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "kumo-protocol",
+ "libc",
  "log",
  "ratatui",
  "semver",
@@ -3172,23 +3176,6 @@ dependencies = [
  "serde_json",
  "toml 0.8.23",
  "ureq",
-]
-
-[[package]]
-name = "kumo-daemon"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "bincode",
- "crossterm",
- "kumo-core",
- "kumo-protocol",
- "libc",
- "log",
- "portable-pty",
- "ratatui",
- "serde",
- "serde_json",
 ]
 
 [[package]]

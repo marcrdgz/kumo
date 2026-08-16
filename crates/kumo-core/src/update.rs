@@ -99,13 +99,19 @@ pub fn read_cache() -> UpdateCache {
         .unwrap_or_default()
 }
 
-fn write_cache(cache: &UpdateCache) {
+pub(crate) fn write_cache(cache: &UpdateCache) {
     if let Some(parent) = cache_path().parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(s) = serde_json::to_string_pretty(cache) {
         let _ = std::fs::write(cache_path(), s);
     }
+}
+
+/// Whether the running binary is a real release build (not a dev build), so
+/// version comparisons apply.
+pub fn is_release_build() -> bool {
+    current_version().is_some()
 }
 
 fn unix_now() -> u64 {
@@ -137,7 +143,7 @@ fn http_get_json(url: &str) -> Result<serde_json::Value> {
 }
 
 /// Stream `url` into `dest`.
-fn download(url: &str, dest: &Path) -> Result<()> {
+pub(crate) fn download(url: &str, dest: &Path) -> Result<()> {
     let resp = http_get(url)?;
     let mut reader = resp.into_body().into_reader();
     let mut file = std::fs::File::create(dest).context("failed to create the download file")?;
@@ -210,7 +216,7 @@ fn parse_release(json: &serde_json::Value) -> Result<Latest> {
 }
 
 /// The (name, download URL) asset list of a release.
-fn release_assets(tag: &str) -> Result<Vec<(String, String)>> {
+pub(crate) fn release_assets(tag: &str) -> Result<Vec<(String, String)>> {
     let json = http_get_json(&format!("{API_BASE}/releases/tags/{tag}"))?;
     let assets = json["assets"].as_array().context("release has no assets array")?;
     Ok(assets
@@ -242,7 +248,7 @@ fn is_update_needed(channel: Channel, latest: &Latest, force: bool) -> bool {
 
 // ----- install -----
 
-fn temp_dir() -> Result<PathBuf> {
+pub(crate) fn temp_dir() -> Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!("kumo-update-{}", std::process::id()));
     std::fs::create_dir_all(&dir).context("failed to create temp dir")?;
     Ok(dir)
@@ -257,7 +263,7 @@ fn select_installer(assets: &[(String, String)], windows: bool) -> Option<&(Stri
     assets.iter().find(|(n, _)| n.ends_with(suffix))
 }
 
-fn install_stable(latest: &Latest) -> Result<()> {
+pub(crate) fn install_stable(latest: &Latest) -> Result<()> {
     let assets = release_assets(&latest.tag)?;
     let (installer, url) = select_installer(&assets, cfg!(windows))
         .context(if cfg!(windows) {
@@ -286,6 +292,14 @@ fn install_stable(latest: &Latest) -> Result<()> {
 }
 
 fn install_nightly(latest: &Latest) -> Result<()> {
+    let exe = std::env::current_exe().context("cannot determine the current executable path")?;
+    install_nightly_to(&exe, latest)
+}
+
+/// Install the `kumo` binary from an archive release to `dest_bin` (atomic:
+/// staged copy + rename). Used by `kumo update --nightly` (into the current
+/// executable) and by the desktop app's bootstrap (into `$CARGO_HOME/bin`).
+pub fn install_nightly_to(dest_bin: &Path, latest: &Latest) -> Result<()> {
     let dir = temp_dir()?;
     let pattern = format!("{APP}-{}.tar.xz", target_triple());
     let assets = release_assets(&latest.tag)?;
@@ -311,9 +325,20 @@ fn install_nightly(latest: &Latest) -> Result<()> {
         bail!("failed to extract {}", archive.display());
     }
     let binary = find_binary(&extract)?;
-    swap_binary(&binary)?;
+    swap_binary_into(&binary, dest_bin)?;
     remove_dir(&dir);
     Ok(())
+}
+
+/// The directory dist's installers place binaries in (and where the desktop
+/// app bootstraps the `kumo` CLI): `$CARGO_HOME/bin`, else `$HOME/.cargo/bin`.
+pub fn cargo_home_bin() -> PathBuf {
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        return PathBuf::from(home).join("bin");
+    }
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".cargo").join("bin"))
+        .unwrap_or_else(|| PathBuf::from(".cargo/bin"))
 }
 
 fn find_binary(dir: &Path) -> Result<PathBuf> {
@@ -332,10 +357,10 @@ fn find_binary(dir: &Path) -> Result<PathBuf> {
     bail!("binary `{APP}` not found in the archive")
 }
 
-fn swap_binary(new_bin: &Path) -> Result<()> {
-    let exe = std::env::current_exe().context("cannot determine the current executable path")?;
-    let exe = exe.canonicalize().unwrap_or(exe);
-    let dir = exe.parent().context("current executable has no parent directory")?;
+fn swap_binary_into(new_bin: &Path, dest: &Path) -> Result<()> {
+    let dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+    let dir = dest.parent().context("destination has no parent directory")?;
+    std::fs::create_dir_all(dir).context("failed to create the install directory")?;
     let staged = dir.join(format!(".{APP}.update.new"));
     std::fs::copy(new_bin, &staged).context("failed to stage the new binary")?;
     #[cfg(unix)]
@@ -343,7 +368,7 @@ fn swap_binary(new_bin: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&staged, &exe).context("failed to replace the kumo binary")?;
+    std::fs::rename(&staged, &dest).context("failed to replace the kumo binary")?;
     Ok(())
 }
 

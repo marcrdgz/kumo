@@ -9,10 +9,10 @@ use ratatui::buffer::Buffer;
 use kumo_core::layout::{LayoutTree, SplitDir};
 use kumo_core::theme::{Theme, THEMES};
 use kumo_core::Launch;
-use crate::agents::AgentStatus;
-use crate::pane::{Pane, PtyEvent};
-use crate::pty::Pty;
-use crate::state::{self, SavedState};
+use crate::daemon::agents::AgentStatus;
+use crate::daemon::pane::{Pane, PtyEvent};
+use crate::daemon::pty::Pty;
+use crate::daemon::state::{self, SavedState};
 
 use self::tasks::BranchInfo;
 
