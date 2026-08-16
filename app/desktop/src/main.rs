@@ -1401,11 +1401,11 @@ impl KumoWindow {
         let chrome = self.chrome();
         let mut title_style = self.base.clone();
         title_style.color = chrome.accent();
-        title_style.font_size = px(12.0).into();
+        title_style.font_size = px(13.0).into();
         title_style.font_weight = gpui::FontWeight::BOLD;
 
         let mut card = div()
-            .w(px(440.0))
+            .w(px(520.0))
             .rounded(px(12.0))
             .border_1()
             .border_color(theme::hairline())
@@ -1446,7 +1446,7 @@ impl KumoWindow {
             let version = env!("CARGO_PKG_VERSION");
             let update = self.updates_line().unwrap_or_else(|| "up to date".into());
             let mut body_style = self.base.clone();
-            body_style.font_size = px(12.0).into();
+            body_style.font_size = px(13.0).into();
             card = card
                 .child(StyledText::new(SharedString::from("KUMO".to_string())).with_default_highlights(&title_style, []))
                 .child(
@@ -1770,7 +1770,7 @@ impl KumoWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(22.0))
+                    .size(px(24.0))
                     .rounded(px(7.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme::wash(0x0c)))
@@ -1781,7 +1781,7 @@ impl KumoWindow {
                         cx.notify();
                     }))
                     .child("⚙")
-                    .text_size(px(14.0))
+                    .text_size(px(16.0))
                     .text_color(chrome.muted()),
             )
     }

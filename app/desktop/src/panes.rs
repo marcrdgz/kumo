@@ -340,9 +340,15 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
     paint_pane_numbers(data, window, cx);
 }
 
+/// End inset for every divider line: the hairline floats between panes
+/// instead of touching the window edges and crossing perpendicular dividers.
+const DIVIDER_END_GAP: f32 = 10.0;
+
 /// The pane dividers: one hairline centered in each split's separator gap —
 /// visible at rest so panes read as cleanly separated, tightening into the
-/// accent tone (with a narrow glow) on hover and while dragging.
+/// accent tone (with a narrow glow) on hover and while dragging. Each line is
+/// inset at both ends so it never touches the window edge or a crossing
+/// divider.
 fn paint_dividers(data: &CanvasData, window: &mut Window) {
     let active_id = data.drag_splitter.or(data.hover_splitter);
     for split in &data.splitters {
@@ -352,11 +358,15 @@ fn paint_dividers(data: &CanvasData, window: &mut Window) {
         let (cx_px, cy_px, w_px, h_px) = match split.dir {
             SplitDir::Vertical => {
                 let center = data.canvas_origin.x + px((strip.x as f32 + 1.5) * data.cell_w);
-                (center, data.canvas_origin.y + px(strip.y as f32 * data.cell_h), px(0.0), px(strip.height as f32 * data.cell_h))
+                let y = data.canvas_origin.y + px(strip.y as f32 * data.cell_h) + px(DIVIDER_END_GAP);
+                let h = px((strip.height as f32 * data.cell_h) - 2.0 * DIVIDER_END_GAP);
+                (center, y, px(0.0), h)
             }
             SplitDir::Horizontal => {
                 let center = data.canvas_origin.y + px((strip.y as f32 + 1.5) * data.cell_h);
-                (data.canvas_origin.x + px(strip.x as f32 * data.cell_w), center, px(strip.width as f32 * data.cell_w), px(0.0))
+                let x = data.canvas_origin.x + px(strip.x as f32 * data.cell_w) + px(DIVIDER_END_GAP);
+                let w = px((strip.width as f32 * data.cell_w) - 2.0 * DIVIDER_END_GAP);
+                (x, center, w, px(0.0))
             }
         };
 
