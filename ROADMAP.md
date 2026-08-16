@@ -123,7 +123,7 @@ persistent kumo.
 - ✅ **Config reload**: `kumo reload` (CLI) and the MENU `reload` item re-read
   the config and apply `shell`, `ai-cmd`, `leader`, and `keymap.bindings` live
   to panes spawned from then on. `new-cwd` and `agent-sound` apply instantly
-  (read live on use). The auto-reload **file watcher** stays in 0.5.0.
+  (read live on use). The auto-reload **file watcher** stays in 0.6.0.
 - ✅ **MENU `config`** opens the config file in an editor pane (split) inside
   the session — `$VISUAL` → `$EDITOR` → `vi`, preferring `config.toml`.
 
@@ -132,32 +132,53 @@ persistent kumo.
 lossless with 0.6.0's copy-mode/scrollback work), OSC 133 semantic prompts
 (only 0.7.0's command traceback consumes them), the **OSC 7 snippet installer**
 (follow-workspace works without it; it only adds remote-ssh coverage — 0.7.0),
-status-bar layout (lands whole with 0.5.0's widgets), and the control CLI /
+status-bar layout (lands whole with 0.6.0's widgets), and the control CLI /
 scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
 
 ## 🎨 0.5.0 — Theme & chrome
 
-- **Themes**: full color palette customization (Catppuccin-style schemes,
-  light/dark variants, per-scheme backgrounds, status-dot colors, borders) —
-  named colors (`mauve`, `navy`) and the sidebar git-branch (with ahead/behind)
-  already landed; this release turns them into a real theme engine with
-  configurable values (today constants in `app/daemon/src/app.rs`, `app/daemon/src/app/ui.rs`).
-- **Config hot-reload**: watch the config file and reload theme/config live —
-  no restart to pick up changes; lands here so themes are instantly tweakable.
-- **Status bar**: customizable widgets (branch, session, agent status, hostname,
-  clock) — includes the status-bar **layout** config deferred from 0.4.0.
-- **Sidebar**: ✅ SESSIONS and AGENTS are now two full **tabs** in the panel —
-  a tab bar (click to switch, active highlighted) replaces the two stacked,
-  independently-scrolling regions; each tab scrolls and draws its own
-  scrollbar (`app/cli/src/client_view.rs`). Still planned: toggle/order sections, and
-  pane titles + border styling.
-- **Popup input editing**: `cmd+backspace` / `ctrl+backspace` (delete word)
+> ✅ **Released** — `v0.5.0`, 2026-08-16.
+
+- ✅ **Theme picker**: a settings popup with tabs (themes, …) replaces the
+  fixed chrome — Catppuccin-style schemes, light/dark variants, per-scheme
+  backgrounds, status-dot colors, borders. Named colors (`mauve`, `navy`) and
+  the sidebar git-branch (with ahead/behind) are wired through the theme's
+  secondary accent instead of hardcoded constants.
+- ✅ **Sidebar tabs**: SESSIONS and AGENTS are two full **tabs** in the panel —
+  a tab bar (click to switch, active highlighted) with per-tab scrollbars
+  (`app/cli/src/client_view.rs`), active-row highlight across the full width,
+  and clickable git-branch rows.
+- ✅ **Popup input editing**: `cmd+backspace` / `ctrl+backspace` (delete word)
   and `cmd+delete` / `ctrl+delete` (delete forward word) in the rename / new
   popups. Popup keymaps stay deliberately fixed (see 0.4.0) — this is editing
   nicety, not remapping.
+- ✅ **Git worktrees**: create and open git worktrees straight from the
+  sessions list.
+- ✅ **Clickable links**: open URLs on modifier+click, underlined while the
+  modifier is held.
+- ✅ **Selection & copy feedback**: the selection stays highlighted while
+  copying, with a right-aligned copy confirmation in the status bar.
+- ✅ **Chrome tuning**: wider pane left gutter, sidebar slimmed by one column;
+  repaint and mouse-tracking fixes on resumed panes.
+
+**Deferred from 0.5.0** into 0.6.0: configurable theme values (the theme
+engine — today the schemes are picked, not user-editable), the config
+hot-reload file watcher, status-bar widgets/layout, and sidebar section
+toggle/order + pane titles/border styling.
 
 ## 🔍 0.6.0 — Copy-mode, search & pane plumbing
 
+- **Theme engine** (deferred from 0.5.0): user-editable theme values on top
+  of the 0.5.0 picker — full palette customization in `config.toml` (schemes,
+  accents, status dots, borders) instead of the built-in constants.
+- **Config hot-reload** (deferred from 0.5.0): watch the config file and
+  reload theme/config live — extends the manual `kumo reload` (0.4.0) so
+  themes are instantly tweakable without a restart.
+- **Status bar widgets** (deferred from 0.5.0): customizable widgets (branch,
+  session, agent status, hostname, clock) — includes the status-bar **layout**
+  config deferred from 0.4.0.
+- **Sidebar polish** (deferred from 0.5.0): toggle/order sections, pane
+  titles, and border styling.
 - **Tabs (windows) per session**: each session owns an ordered list of tabs,
   each tab its own named pane tree — one session can hold several workspaces /
   worktrees under a single leader. Adds the intermediate "window" level the
