@@ -89,9 +89,9 @@ use crate::panes::{
 use crate::sidebar::Sidebar;
 
 /// Expanded sidebar width — sized to what its rows actually paint (session
-/// name + branch, agent metrics), so the panel doesn't trail into dead glass
-/// that reads as a gap next to the panes.
-pub(crate) const SIDEBAR_W: f32 = 210.0;
+/// name + branch, agent metrics), so the divider line sits right where the
+/// sidebar's content ends.
+pub(crate) const SIDEBAR_W: f32 = 200.0;
 /// Collapsed sidebar width (a slim rail).
 pub(crate) const SIDEBAR_W_COLLAPSED: f32 = 48.0;
 /// Height of the custom drag-to-move titlebar (replaces the hidden native

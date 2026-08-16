@@ -39,12 +39,13 @@ impl Render for Sidebar {
             return self.collapsed_rail(cx, &layout, &chrome, width);
         }
 
+        // Same material as the window background (no panel tint) — the
+        // sidebar is delimited by a single hairline, not a boxed surface.
         div()
             .w(px(width))
             .h_full()
-            .bg(chrome.surface_glass())
             .border_r_1()
-            .border_color(theme::wash(0x20))
+            .border_color(theme::hairline())
             .flex()
             .flex_col()
             .pt(px(8.0))
@@ -371,7 +372,6 @@ impl Sidebar {
         let mut rail = div()
             .w(px(width))
             .h_full()
-            .bg(chrome.surface_glass())
             .child(
                 div()
                     .w_full()

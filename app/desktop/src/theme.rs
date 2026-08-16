@@ -64,12 +64,11 @@ impl Chrome {
         rgba_hsla((self.surface << 8) | 0xff)
     }
 
-    /// Translucent surface for glass compositing — the sidebar on macOS.
-    /// Opaque enough to read as a distinct panel over any wallpaper (so its
-    /// edge — not its text — bounds the pane area), translucent enough to
-    /// keep the vibrancy feel.
+    /// Translucent surface for glass compositing (kept for future surfaces;
+    /// the sidebar itself renders on the bare window background with just a
+    /// hairline divider).
     pub fn surface_glass(&self) -> Hsla {
-        rgba_hsla((self.surface << 8) | 0xbe) // ~75% alpha
+        rgba_hsla((self.surface << 8) | 0x80) // 50% alpha
     }
 
     /// Raised plate tone (hover/active fills, pills that sit proud).
