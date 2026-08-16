@@ -7,6 +7,11 @@
 # the full target matrix can be requested manually via `workflow_dispatch` with
 # the `full-matrix` input.
 #
+# The desktop app (macOS-only) is packaged separately into `Kumo-<arch>.dmg` by
+# the `desktop-dmg.yml` workflow, which triggers on this release being
+# published; nothing extra is needed here beyond shipping the `kumo-desktop`
+# archive on the macOS job.
+#
 # A durable marker tag `nightly-last` records the commit claimed by the most
 # recent nightly run. `prepare` skips commits already claimed, and `publish`
 # only publishes when this run still holds the latest claim -- so a push that
@@ -95,7 +100,7 @@ jobs:
       - id: set
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full-matrix }}" = "true" ]; then
-            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2022"}]}'
+            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"x86_64-apple-darwin","runner":"macos-14"},{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2022"}]}'
           else
             MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"}]}'
           fi

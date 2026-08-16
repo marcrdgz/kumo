@@ -1,0 +1,17 @@
+[package]
+name = "kumo-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Wire protocol shared by the kumo daemon and its clients (TUI, desktop app, mobile)"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+crossterm = { version = "0.29", optional = true }
+
+[features]
+default = []
+# Conversions to/from `crossterm` event types (TUI client + daemon). Kept off by
+# default so desktop/mobile clients never pull `crossterm` in.
+crossterm = ["dep:crossterm"]

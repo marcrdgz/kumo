@@ -1,0 +1,17 @@
+[package]
+name = "kumo-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared logic for the kumo daemon and its clients: config, layout, themes, updates, worktrees"
+
+[dependencies]
+kumo-protocol = { path = "../kumo-protocol" }
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+semver = "1"
+ureq = "3"
+toml = "0.8"
+libc = "0.2"

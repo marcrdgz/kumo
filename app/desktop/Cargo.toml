@@ -1,0 +1,33 @@
+[package]
+name = "kumo-desktop"
+version.workspace = true
+edition.workspace = true
+description = "Native desktop client for the kumo daemon (GPUI): full-attach grid viewer + sessions/agents sidebar"
+repository = "https://github.com/marcrdgz/kumo"
+
+# The desktop app is distributed separately (as a `.dmg` on macOS, built by the
+# `desktop-dmg` workflow): it is macOS-only, and it is deliberately excluded
+# from the `kumo-installer.sh`/`installer.ps1` scripts so installing the CLI
+# never drags the app along (and `kumo update` only touches the CLI).
+[package.metadata.dist]
+repository = "https://github.com/marcrdgz/kumo"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+installers = []
+
+[[bin]]
+name = "kumo-desktop"
+path = "src/main.rs"
+
+[dependencies]
+kumo-core = { path = "../../crates/kumo-core" }
+kumo-protocol = { path = "../../crates/kumo-protocol" }
+# runtime_shaders compiles the Metal shaders at runtime, so the app builds
+# without full Xcode (only Command Line Tools with the Metal runtime).
+gpui = { version = "0.2", features = ["runtime_shaders"] }
+anyhow = "1"
+libc = "0.2"
+# Frameless titlebar drag: gpui 0.2's WindowControlArea::Drag / start_window_move
+# are no-ops on macOS, so the titlebar strip hands the drag to AppKit directly.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+

@@ -12,7 +12,7 @@ run:
 	cargo run -p kumo
 
 install:
-	cargo install --path . --locked
+	cargo install --path app/kumo --locked
 
 clean:
 	cargo clean

@@ -30,15 +30,15 @@ persistent kumo.
 - ✅ Per-agent lifecycle detection split + `claude` support
 - ✅ Mouse SGR forwarding fix; git-cliff changelog pipeline
 - ✅ Rename the `d` binding from *detach* to *exit* until real detach lands
-  (`src/app/bindings.rs`, `src/app.rs`, `src/app/overlays.rs`)
+  (`app/cli/src/bindings.rs`, `app/daemon/src/app.rs`, `app/cli/src/client_view.rs`)
 - ✅ `leader+?` keybind showcase; the leader-mode status-bar hint is generated
-  from the same table (`src/app/bindings.rs`), so the two never drift
+  from the same table (`app/cli/src/bindings.rs`), so the two never drift
 
 ## 🧬 0.3.0 — Daemon core 
 
 > ✅ **Released** — `v0.3.0`, 2026-08-12.
 
-- ✅ **State contract** (`src/state.rs`): serialize sessions, the layout tree, and
+- ✅ **State contract** (`app/daemon/src/state.rs`): serialize sessions, the layout tree, and
   per-pane identity (cwd, title, shell, AI program) into `state_dir()/state.json`.
   Versioned (`v1`), **atomic** write (tmp + rename), **tolerant** load (unknown
   version / corrupt JSON → fresh start, never crashes), pure data decoupled from
@@ -47,7 +47,7 @@ persistent kumo.
   `kumo attach` forces a restore, `kumo new [WORKSPACE]` starts fresh (never
   attaches), and `kumo [WORKSPACE]` remains a fresh-start alias for back-compat.
 - ✅ **Daemon** owning the PTYs and terminal emulators; IPC socket in `runtime_dir`
-  (`src/config.rs`) — the path the state contract reserved.
+  (`crates/kumo-core/src/config.rs`) — the path the state contract reserved.
 - ✅ **Rendering**: the daemon renders the whole UI headlessly and streams
   **dirty-row cell patches** to attached terminals; each terminal is a light
   renderer that draws cells and forwards input (wide chars handled). Re-attach
@@ -62,7 +62,7 @@ persistent kumo.
 - ✅ **Socket hygiene**: owner-only permissions (0o600) plus the same-owner
   check on every accepted connection (`SO_PEERCRED` on Linux, `getpeereid()` on
   macOS/BSD) — a different user's client is rejected, fail closed
-  (`src/app/server.rs`).
+  (`app/daemon/src/app/server.rs`).
 - ✅ **Agents live in the daemon**: lifecycle detection, status, and audible
   alerts already run server-side (visible in the sidebar of any attached
   terminal). `kumo ls` surfaces each AI CLI's status (name + working/blocked/idle)
@@ -85,12 +85,12 @@ persistent kumo.
   fallback (same merge pattern as the legacy `~/.kumo`); the v1 schema that
   1.0 freezes is the TOML schema.
 - ✅ **Custom leader keys**: the leader chord is configurable via
-  `[keymap] leader = "ctrl+b"` (`src/config.rs`, parsed in `src/app/bindings.rs`),
+  `[keymap] leader = "ctrl+b"` (`crates/kumo-core/src/config.rs`, parsed in `app/cli/src/bindings.rs`),
   with clear fallback + warning on invalid values. Per-mode keymaps for
   **popups** (menu / context-menu / popup navigation) stay deliberately fixed —
   like tmux, only the command bindings are remappable.
 - ✅ **Keymap data-driven**: the hard-coded `leader_command` dispatch
-  (`src/app.rs`) is now a single keymap table in `src/app/bindings.rs` — each
+  (`app/daemon/src/app.rs`) is now a single keymap table in `app/cli/src/bindings.rs` — each
   entry a dispatch chord + action, and the same table feeds the dispatch, the
   leader-mode hint, and the `leader+?` showcase, so they never drift. Bindings
   are remappable from `config.toml` (`[keymap.bindings]`, e.g.
@@ -115,7 +115,7 @@ persistent kumo.
   Because it tracks the foreground group — not the deepest process — a
   lingering background job never hijacks the reported location. **OSC 7 /
   OSC 9 / OSC 1337 is wired as a passive complement** (`pwd_changed` now
-  enabled in `src/vt.rs`): shells that already emit OSC 7 (oh-my-zsh, kitty
+  enabled in `app/daemon/src/vt.rs`): shells that already emit OSC 7 (oh-my-zsh, kitty
   distros, fish, …) report their cwd directly, which is the only signal that
   works inside remote `ssh` panes. **ON by default**, `new-cwd = "follow"`, no
   leader binding. The one-shot **snippet installer** for shells that don't
@@ -141,7 +141,7 @@ scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
   light/dark variants, per-scheme backgrounds, status-dot colors, borders) —
   named colors (`mauve`, `navy`) and the sidebar git-branch (with ahead/behind)
   already landed; this release turns them into a real theme engine with
-  configurable values (today constants in `src/app.rs`, `src/app/ui.rs`).
+  configurable values (today constants in `app/daemon/src/app.rs`, `app/daemon/src/app/ui.rs`).
 - **Config hot-reload**: watch the config file and reload theme/config live —
   no restart to pick up changes; lands here so themes are instantly tweakable.
 - **Status bar**: customizable widgets (branch, session, agent status, hostname,
@@ -149,7 +149,7 @@ scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
 - **Sidebar**: ✅ SESSIONS and AGENTS are now two full **tabs** in the panel —
   a tab bar (click to switch, active highlighted) replaces the two stacked,
   independently-scrolling regions; each tab scrolls and draws its own
-  scrollbar (`src/app/sidebar.rs`). Still planned: toggle/order sections, and
+  scrollbar (`app/cli/src/client_view.rs`). Still planned: toggle/order sections, and
   pane titles + border styling.
 - **Popup input editing**: `cmd+backspace` / `ctrl+backspace` (delete word)
   and `cmd+delete` / `ctrl+delete` (delete forward word) in the rename / new
