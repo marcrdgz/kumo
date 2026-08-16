@@ -441,7 +441,10 @@ impl KumoWindow {
                 want.insert(pid);
                 // The pane's terminal matches the daemon's inner() grid: the
                 // rect minus its 1-cell border and the left gutter.
-                let dims = ((r.width.saturating_sub(3)).max(1), (r.height.saturating_sub(2)).max(1));
+                // The full rect is the terminal surface: unlike the TUI, this
+                // client draws no pane borders or gutters, so every cell of
+                // the rect belongs to the grid (no dead glass inside cards).
+                let dims = (r.width.max(1), r.height.max(1));
                 if self.sent_sizes.get(&pid) != Some(&dims) {
                     self.sent_sizes.insert(pid, dims);
                     let _ = self.send(Command::PaneResize { pane_id: pid, cols: dims.0, rows: dims.1 });
@@ -615,11 +618,10 @@ impl KumoWindow {
         }
         let (_, gh) = self.grid_size;
         let pane_rows = (gh.saturating_sub(1)).max(1) as f32;
-        // Vertical inset (top/bottom breathing room). The horizontal inset
-        // next to the sidebar is tighter — panes hug the sidebar panel like
-        // an editor's content area, instead of floating away from it.
-        let pad_y = 12.0;
-        let pad_x = 4.0;
+        // One inset on every side — the gap next to the sidebar, above and
+        // below the pane area all match.
+        let pad_y = 6.0;
+        let pad_x = 6.0;
         let cells_h = (avail_h - 2.0 * pad_y).max(1.0);
         self.cell_h = cells_h / pane_rows;
         self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
