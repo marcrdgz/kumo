@@ -106,6 +106,8 @@ impl Render for TerminalPane {
 
 struct CanvasPane {
     pid: u64,
+    /// 1-based pane number, shown while the pane-number overlay is up.
+    num: Option<u8>,
     grid: Option<std::rc::Rc<std::cell::RefCell<crate::grid::Grid>>>,
     m: PaneMetrics,
 }
@@ -136,11 +138,12 @@ impl PaneCanvas {
         let mut panes = Vec::with_capacity(model.rects.len());
 
         if let Some(_session) = model.active_session() {
-            for (pid, r) in &model.rects {
+            for (i, (pid, r)) in model.rects.iter().enumerate() {
                 let grid = model.panes.get(pid).cloned();
 
                 panes.push(CanvasPane {
                     pid: *pid,
+                    num: model.pane_numbers.map(|_| (i + 1) as u8),
                     grid,
                     m: pane_metrics(model, r),
                 });
@@ -324,6 +327,38 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
     }
 
     paint_splitter_highlights(data, window);
+    paint_pane_numbers(data, window, cx);
+}
+
+/// While the pane-number overlay is up, badge every pane with its 1-based
+/// number (matching the digit that jumps to it).
+fn paint_pane_numbers(data: &CanvasData, window: &mut Window, cx: &mut App) {
+    for pane in &data.panes {
+        let Some(num) = pane.num else { continue };
+        let m = pane.m;
+        let text = SharedString::from(num.to_string());
+        let font_size = px(m.font_size);
+        let line = window.text_system().shape_line(
+            text.clone(),
+            font_size,
+            &[TextRun {
+                len: text.len(),
+                font: data.font.clone(),
+                color: data.chrome.accent(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        let chip_w = line.width + px(10.0);
+        let origin = point(m.x + px(6.0), m.y + px(6.0));
+        window.paint_quad(fill(
+            Bounds::new(origin, size(chip_w, px(m.cell_h + 6.0))),
+            theme::wash(0x30),
+        ));
+        let _ = line.paint(point(origin.x + px(5.0), origin.y + px(3.0)), px(m.cell_h + 6.0), window, cx);
+    }
 }
 
 fn paint_empty_state(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {

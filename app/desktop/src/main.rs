@@ -12,6 +12,7 @@
 //! - [`Sidebar`](crate::sidebar::Sidebar) — collapsible floating pill.
 //! - [`TerminalPane`](crate::panes::TerminalPane) — the GPU pane canvas.
 
+mod actions;
 mod daemon;
 mod grid;
 mod panes;
@@ -61,6 +62,8 @@ pub(crate) const TITLEBAR_H: f32 = 36.0;
 const STATUS_H: f32 = 30.0;
 /// Cursor blink half-period, the common terminal cadence.
 const CURSOR_BLINK: Duration = Duration::from_millis(530);
+/// How long the pane-number overlay stays up after `leader+q`.
+const PANE_NUMBERS_TTL: Duration = Duration::from_millis(1500);
 
 pub(crate) struct KumoWindow {
     to_view: mpsc::Receiver<DaemonEvent>,
@@ -99,6 +102,12 @@ pub(crate) struct KumoWindow {
     // cursor blink (toggled by the pump loop; reset to solid on keystrokes)
     cursor_on: bool,
     last_blink: std::time::Instant,
+    // leader-key dispatch (chords honored from the shared config)
+    keymap: Vec<actions::Binding>,
+    leader: actions::Chord,
+    leader_active: bool,
+    /// Pane-number overlay (`leader+q`), cleared 1.5 s after it appears.
+    pane_numbers: Option<std::time::Instant>,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -163,6 +172,10 @@ impl KumoWindow {
             updating_desktop: false,
             cursor_on: true,
             last_blink: std::time::Instant::now(),
+            keymap: actions::build_keymap(&kumo_core::config::keymap_bindings()),
+            leader: actions::leader_chord(),
+            leader_active: false,
+            pane_numbers: None,
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -262,6 +275,13 @@ impl KumoWindow {
             self.last_blink = std::time::Instant::now();
             self.cursor_on = !self.cursor_on;
             changed = true;
+        }
+        // Pane-number overlay auto-hides after 1.5 s.
+        if let Some(shown_at) = self.pane_numbers {
+            if shown_at.elapsed() >= PANE_NUMBERS_TTL {
+                self.pane_numbers = None;
+                changed = true;
+            }
         }
         while let Ok(msg) = self.to_view.try_recv() {
             match msg {
@@ -661,6 +681,197 @@ impl KumoWindow {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Leader-key dispatch
+    // ------------------------------------------------------------------
+
+    /// Handle a keystroke against the leader keymap. Returns `true` when the
+    /// key was consumed (leader chord or leader-mode dispatch) and must not be
+    /// typed into the pane.
+    fn on_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> bool {
+        // While the pane-number overlay is up, any digit 1-9 jumps there.
+        if self.pane_numbers.is_some() && ks.key.len() == 1 && ks.key.parse::<u8>().is_ok() {
+            let n = ks.key.parse::<usize>().unwrap_or(0);
+            if (1..=9).contains(&n) {
+                self.pane_numbers = None;
+                if let Some(&(pid, _)) = self.rects.get(n - 1) {
+                    if let Some(session) = self.active_session().map(|s| s.name.clone()) {
+                        let _ = self.send(Command::PaneFocus { session, pane_id: pid });
+                    }
+                }
+                cx.notify();
+                return true;
+            }
+        }
+        if self.leader_active {
+            self.leader_active = false;
+            cx.notify();
+            if ks.key != "escape" && !self.leader.matches(ks) {
+                if let Some(binding) = self.keymap.iter().find(|b| b.chord.matches(ks)) {
+                    let action = binding.action;
+                    self.run_action(action, cx);
+                }
+            }
+            // Anything pressed in leader mode is consumed, hit or miss.
+            return true;
+        }
+        if self.leader.matches(ks) {
+            self.leader_active = true;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    fn run_action(&mut self, action: actions::Action, cx: &mut Context<Self>) {
+        use actions::Action;
+        let session = self.active_session().map(|s| s.name.clone());
+        match action {
+            Action::SplitVertical | Action::SplitAi => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::PaneSplit {
+                        session,
+                        dir: SplitDir::Vertical,
+                        is_ai: matches!(action, Action::SplitAi),
+                    });
+                }
+            }
+            Action::SplitHorizontal => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::PaneSplit { session, dir: SplitDir::Horizontal, is_ai: false });
+                }
+            }
+            Action::ClosePane => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::PaneClose { session, pane_id: None });
+                }
+            }
+            Action::Zoom => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::SessionZoom { session });
+                }
+            }
+            Action::Focus(dir) => {
+                let focus = self.active_session().map(|s| s.focus);
+                if let (Some(session), Some(focus)) = (session, focus) {
+                    if let Some(pid) = self.pane_toward(focus, dir) {
+                        let _ = self.send(Command::PaneFocus { session, pane_id: pid });
+                    }
+                }
+            }
+            Action::Resize(dir) => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::PaneResizeRatio { session, dir });
+                }
+            }
+            Action::CyclePane => {
+                let focus = self.active_session().map(|s| s.focus);
+                if let (Some(session), Some(focus)) = (session, focus) {
+                    if let Some(pid) = self.cycle_pane(focus) {
+                        let _ = self.send(Command::PaneFocus { session, pane_id: pid });
+                    }
+                }
+            }
+            Action::SwapPanes => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::PaneSwap { session });
+                }
+            }
+            Action::RotateLayout => {
+                if let Some(session) = session {
+                    let _ = self.send(Command::LayoutRotate { session });
+                }
+            }
+            Action::ShowPaneNumbers => {
+                self.pane_numbers = Some(std::time::Instant::now());
+                cx.notify();
+            }
+            Action::NewSession => {
+                // Named-session popup lands with the popups commit; create an
+                // auto-named session directly for now.
+                let _ = self.send(Command::SessionNew { name: None, workspace: None });
+            }
+            Action::NewWorktree => {
+                self.status = SharedString::from("worktree picker: coming with the popups update");
+                cx.notify();
+            }
+            Action::NextSession => {
+                if let Some(name) = self.cycle_session(1) {
+                    let _ = self.send(Command::SessionFocus { name });
+                }
+            }
+            Action::PrevSession => {
+                if let Some(name) = self.cycle_session(-1) {
+                    let _ = self.send(Command::SessionFocus { name });
+                }
+            }
+            Action::JumpSession(n) => {
+                if let Some(name) = self.session_at(n as usize) {
+                    let _ = self.send(Command::SessionFocus { name });
+                }
+            }
+            Action::ToggleSidebar => self.toggle_sidebar(cx),
+            Action::Detach => {
+                let _ = self.send(Command::Detach);
+            }
+            Action::ShowKeybinds => {
+                self.status = SharedString::from("keybind overlay: coming with the settings update");
+                cx.notify();
+            }
+        }
+    }
+
+    /// Geometric neighbor in a direction (a port of the TUI's `pane_toward`).
+    fn pane_toward(&self, focus: u64, dir: actions::Dir) -> Option<u64> {
+        let cur = self.rects.iter().find(|(pid, _)| *pid == focus)?;
+        let (fx, fy, fw, fh) = (cur.1.x, cur.1.y, cur.1.width, cur.1.height);
+        let mut best: Option<(u64, u32)> = None;
+        for &(pid, r) in &self.rects {
+            if pid == focus {
+                continue;
+            }
+            let v_overlap = fy.abs_diff(r.y).min((fy + fh).abs_diff(r.y + r.height));
+            let h_overlap = fx.abs_diff(r.x).min((fx + fw).abs_diff(r.x + r.width));
+            let score = match dir {
+                actions::Dir::Left if r.x + r.width <= fx => Some((v_overlap + fx - (r.x + r.width)) as u32),
+                actions::Dir::Right if r.x >= fx + fw => Some((v_overlap + r.x - (fx + fw)) as u32),
+                actions::Dir::Up if r.y + r.height <= fy => Some((h_overlap + fy - (r.y + r.height)) as u32),
+                actions::Dir::Down if r.y >= fy + fh => Some((h_overlap + r.y - (fy + fh)) as u32),
+                _ => None,
+            };
+            if let Some(score) = score {
+                if best.map(|(_, s)| score < s).unwrap_or(true) {
+                    best = Some((pid, score));
+                }
+            }
+        }
+        best.map(|(pid, _)| pid)
+    }
+
+    fn cycle_pane(&self, focus: u64) -> Option<u64> {
+        let ids: Vec<u64> = self.rects.iter().map(|(pid, _)| *pid).collect();
+        if ids.len() < 2 {
+            return None;
+        }
+        let idx = ids.iter().position(|p| *p == focus).unwrap_or(usize::MAX);
+        Some(ids[(idx + 1) % ids.len()])
+    }
+
+    fn cycle_session(&self, delta: isize) -> Option<String> {
+        let layout = self.layout.as_ref()?;
+        let names: Vec<&String> = layout.sessions.iter().map(|s| &s.name).collect();
+        if names.is_empty() {
+            return None;
+        }
+        let idx = names.iter().position(|n| Some(*n) == layout.active.as_ref()).unwrap_or(0);
+        let next = ((idx as isize + delta).rem_euclid(names.len() as isize)) as usize;
+        Some(names[next].clone())
+    }
+
+    fn session_at(&self, n: usize) -> Option<String> {
+        self.layout.as_ref()?.sessions.get(n.saturating_sub(1)).map(|s| s.name.clone())
+    }
+
     fn send_mouse(&mut self, kind: WireMouseKind, col: u16, row: u16, mods: gpui::Modifiers) {
         let _ = self.send(Command::Mouse {
             event: WireMouseEvent { kind, col, row, modifiers: wire_modifiers(mods) },
@@ -672,8 +883,9 @@ impl KumoWindow {
     // ------------------------------------------------------------------
 
     fn status_strip(&self) -> impl IntoElement {
+        let leader = if self.leader_active { "   ·  leader (esc to cancel)" } else { "" };
         let text = format!(
-            "{}   session {}   pane {}",
+            "{}{leader}   session {}   pane {}",
             if self.connected { "connected" } else { "disconnected" },
             self.layout.as_ref().and_then(|l| l.active.clone()).unwrap_or_else(|| "-".into()),
             self.focused_pane_label()
@@ -1157,7 +1369,10 @@ fn main() {
                     return;
                 }
             }
-            view.update(cx, move |this, _cx| {
+            view.update(cx, move |this, cx| {
+                if this.on_keystroke(&ks, cx) {
+                    return;
+                }
                 if let Some(key) = wire_key(&ks) {
                     let _ = this.send(Command::Input { key });
                     // Typing resets the blink phase so the cursor shows solid.
