@@ -27,9 +27,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use gpui::{
-    div, point, px, size, App, Application, Bounds, Context, Entity, Font, Hsla, Keystroke,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, StyledText, TextStyle, WeakEntity, Window,
+    div, point, px, size, svg, App, Application, AssetSource, Bounds, Context, Entity, Font, Hsla,
+    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, SharedString, StyledText, TextStyle, WeakEntity, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, prelude::*,
 };
 use kumo_protocol::{
@@ -92,8 +92,9 @@ use crate::sidebar::Sidebar;
 pub(crate) const SIDEBAR_W: f32 = 268.0;
 /// Collapsed sidebar width (a slim rail).
 pub(crate) const SIDEBAR_W_COLLAPSED: f32 = 48.0;
-/// Height of the custom drag-to-move titlebar (replaces the hidden native bar).
-pub(crate) const TITLEBAR_H: f32 = 36.0;
+/// Height of the custom drag-to-move titlebar (replaces the hidden native
+/// bar) — matches macOS's standard 28pt titlebar.
+pub(crate) const TITLEBAR_H: f32 = 28.0;
 /// Cursor blink half-period, the common terminal cadence.
 const CURSOR_BLINK: Duration = Duration::from_millis(530);
 /// How long the pane-number overlay stays up after `leader+q`.
@@ -1711,15 +1712,16 @@ impl KumoWindow {
                     this.titlebar_drag_armed = true;
                 }),
             )
-            // The sidebar lives in the titlebar: one toggle at the left edge
-            // keeps the middle of the window completely free.
+            // The sidebar lives in the titlebar: the cloud logo at the left
+            // edge toggles it, keeping the middle of the window completely
+            // free.
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(26.0))
-                    .rounded(px(8.0))
+                    .size(px(22.0))
+                    .rounded(px(7.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme::wash(0x0c)))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
@@ -1727,9 +1729,16 @@ impl KumoWindow {
                         this.titlebar_drag_armed = false;
                         this.toggle_sidebar(cx);
                     }))
-                    .child("☰")
-                    .text_size(px(15.0))
-                    .text_color(if self.sidebar_collapsed { chrome.muted() } else { chrome.accent() }),
+                    .child(
+                        svg()
+                            .path("logo.svg")
+                            .size(px(15.0))
+                            .text_color(if self.sidebar_collapsed {
+                                chrome.muted()
+                            } else {
+                                chrome.accent()
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -1761,8 +1770,8 @@ impl KumoWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(28.0))
-                    .rounded(px(8.0))
+                    .size(px(22.0))
+                    .rounded(px(7.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme::wash(0x0c)))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
@@ -1772,7 +1781,7 @@ impl KumoWindow {
                         cx.notify();
                     }))
                     .child("⚙")
-                    .text_size(px(17.0))
+                    .text_size(px(14.0))
                     .text_color(chrome.muted()),
             )
     }
@@ -1969,8 +1978,25 @@ fn wire_key(ks: &Keystroke) -> Option<WireKeyEvent> {
     Some(WireKeyEvent::new(code, mods))
 }
 
+/// Embedded asset source: serves the bundled logo (and any future icons)
+/// straight from the binary — no files next to the app.
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match path {
+            "logo.svg" => Ok(Some(include_bytes!("../assets/logo.svg").as_slice().into())),
+            _ => Ok(None),
+        }
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
         let window = cx
             .open_window(
