@@ -614,10 +614,12 @@ impl KumoWindow {
         }
         let (_, gh) = self.grid_size;
         let pane_rows = (gh.saturating_sub(1)).max(1) as f32;
-        // One uniform inset for every side of the pane area — the gap next to
-        // the sidebar matches the top and bottom margins.
-        let pad = 12.0;
-        let cells_h = (avail_h - 2.0 * pad).max(1.0);
+        // Vertical inset (top/bottom breathing room). The horizontal inset
+        // next to the sidebar is tighter — panes hug the sidebar panel like
+        // an editor's content area, instead of floating away from it.
+        let pad_y = 12.0;
+        let pad_x = 4.0;
+        let cells_h = (avail_h - 2.0 * pad_y).max(1.0);
         self.cell_h = cells_h / pane_rows;
         self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
         let gw = self.grid_size.0 as f32;
@@ -630,9 +632,9 @@ impl KumoWindow {
         self.cell_w = cell_w;
         let canvas_w = gw * self.cell_w;
         let total_pane_h = pane_rows * self.cell_h;
-        let y_offset = ((avail_h - total_pane_h) * 0.5).max(pad);
+        let y_offset = ((avail_h - total_pane_h) * 0.5).max(pad_y);
         // canvas_origin es la posición absoluta del canvas en la ventana
-        self.canvas_origin = point(px(self.sidebar_width() + pad), px(TITLEBAR_H + y_offset));
+        self.canvas_origin = point(px(self.sidebar_width() + pad_x), px(TITLEBAR_H + y_offset));
         self.canvas_size = (canvas_w, avail_h);
     }
 

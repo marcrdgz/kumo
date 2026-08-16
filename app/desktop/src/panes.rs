@@ -17,7 +17,7 @@ use crate::theme::{self, corners, Chrome};
 use crate::{KumoWindow, pane_metrics};
 
 /// Pixel gap kept around every pane card (and between adjacent panes).
-pub(crate) const PANE_GAP: f32 = 8.0;
+pub(crate) const PANE_GAP: f32 = 6.0;
 
 /// A rectangle in cell coordinates (client-computed from the semantic tree).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
