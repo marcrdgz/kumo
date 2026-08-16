@@ -134,20 +134,18 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
 
     let result: Result<Exit> = (|| {
         loop {
-            // Daemon events (16ms timeout so local input stays responsive).
+            // Daemon events: block for the first one (16ms keeps local input
+            // responsive), then drain everything already queued so a burst of
+            // pane frames costs a single render instead of one render per frame.
             match ev_rx.recv_timeout(Duration::from_millis(16)) {
                 Ok(ev) => {
-                    let exit = match ev {
-                        DaemonEvent::Detach => Some(Exit::Clean),
-                        DaemonEvent::Restarting => Some(Exit::Restarting),
-                        DaemonEvent::Shutdown => Some(Exit::Clean),
-                        other => {
-                            view.on_event(other);
-                            None
-                        }
-                    };
-                    if let Some(exit) = exit {
+                    if let Some(exit) = apply_daemon_event(&mut view, ev) {
                         return Ok(exit);
+                    }
+                    while let Ok(ev) = ev_rx.try_recv() {
+                        if let Some(exit) = apply_daemon_event(&mut view, ev) {
+                            return Ok(exit);
+                        }
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -160,7 +158,9 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
             if view.detach_requested() {
                 return Ok(Exit::Clean);
             }
-            if crossterm::event::poll(Duration::from_millis(0))? {
+            // Same for local input: apply every pending crossterm event, then
+            // render once for the whole batch.
+            while crossterm::event::poll(Duration::from_millis(0))? {
                 match crossterm::event::read()? {
                     crossterm::event::Event::Key(k) => view.on_key(k)?,
                     crossterm::event::Event::Paste(text) => view.on_paste(&text),
@@ -172,6 +172,7 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
                     _ => {}
                 }
             }
+            view.flush_wheel()?;
             if view.dirty() || view.has_transient() {
                 view.render_now(&mut terminal)?;
             }
@@ -200,6 +201,19 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
             let _ = disable_raw_mode();
             let _ = stdout.flush();
             other
+        }
+    }
+}
+
+/// Apply one daemon event; `Some(exit)` when the render loop should stop.
+fn apply_daemon_event(view: &mut View, ev: DaemonEvent) -> Option<Exit> {
+    match ev {
+        DaemonEvent::Detach => Some(Exit::Clean),
+        DaemonEvent::Restarting => Some(Exit::Restarting),
+        DaemonEvent::Shutdown => Some(Exit::Clean),
+        other => {
+            view.on_event(other);
+            None
         }
     }
 }

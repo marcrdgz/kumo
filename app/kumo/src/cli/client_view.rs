@@ -231,6 +231,10 @@ pub struct View {
     drag: Option<SplitDrag>,
     sel: Option<Sel>,
     pending_click: Option<PendingClick>,
+    /// Wheel bytes accumulated since the last flush, one buffer per pane.
+    /// Coalesced by the input batch so fast scrolling costs one `PaneWrite`
+    /// per pane instead of one IPC frame per wheel tick.
+    pending_wheel: HashMap<u64, Vec<u8>>,
     dirty: bool,
     detach_requested: bool,
 }
@@ -278,6 +282,7 @@ impl View {
             drag: None,
             sel: None,
             pending_click: None,
+            pending_wheel: HashMap::new(),
             dirty: true,
             detach_requested: false,
         };
@@ -312,6 +317,17 @@ impl View {
 
     fn send(&mut self, cmd: &Command) -> Result<()> {
         kumo_core::protocol::write_framed(&mut self.out, cmd)?;
+        Ok(())
+    }
+
+    /// Send the wheel ticks accumulated for the current input batch as one
+    /// `PaneWrite` per pane. Called by the render loop after draining input;
+    /// anything that writes pane bytes mid-batch (keys, clicks, pastes) flushes
+    /// it first to preserve ordering.
+    pub fn flush_wheel(&mut self) -> Result<()> {
+        for (pane_id, bytes) in std::mem::take(&mut self.pending_wheel) {
+            self.send(&Command::PaneWrite { pane_id, bytes })?;
+        }
         Ok(())
     }
 
@@ -528,6 +544,7 @@ impl View {
     // ------------------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.flush_wheel()?;
         self.set_link_mods(key.modifiers.intersects(link_modifiers()));
         if self.popup.open {
             self.on_popup_key(key);
@@ -582,6 +599,7 @@ impl View {
     }
 
     pub fn on_paste(&mut self, text: &str) {
+        let _ = self.flush_wheel();
         if self.popup.open
             || self.menu.open
             || self.ctx_menu.open
@@ -1292,6 +1310,15 @@ impl View {
     // ------------------------------------------------------------------
 
     pub fn on_mouse(&mut self, m: MouseEvent) -> Result<()> {
+        // Clicks and drags write pane bytes themselves: flush the pending wheel
+        // batch first so ordering against them is preserved. Hover moves and
+        // further scrolling never write bytes, so they can keep coalescing.
+        if !matches!(
+            m.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp | MouseEventKind::Moved
+        ) {
+            self.flush_wheel()?;
+        }
         self.set_link_mods(m.modifiers.intersects(link_modifiers()));
         let x = m.column;
         let y = m.row;
@@ -3155,6 +3182,7 @@ mod tests {
             drag: None,
             sel: None,
             pending_click: None,
+            pending_wheel: HashMap::new(),
             dirty: false,
             detach_requested: false,
         }

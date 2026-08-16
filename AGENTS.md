@@ -69,7 +69,12 @@ The client and desktop launch the daemon via `kumo daemon` (sibling binary or
 - **Tests**: `cargo test --workspace`
 - **Lint**: `cargo clippy --workspace`
 - **Note**: building `kumo` requires a `zig` toolchain on `PATH` to compile the
-  vendored `libghostty-vt` (the `build.rs` lives in `app/kumo`).
+  vendored `libghostty-vt` (the `build.rs` lives in `app/kumo`). The vendored
+  build pins zig `0.15.x` (it rejects `0.16+`). On macOS with Xcode ≥ 26.5,
+  also point builds at the CommandLineTools SDK
+  (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`; the Makefile exports
+  it): the Xcode 26.5 SDK's `libSystem.tbd` no longer lists the `arm64-macos`
+  slice, so zig 0.15 fails every native link with undefined libSystem symbols.
 
 ## Commit Convention
 - Use **Conventional Commits**: `<type>(<scope>): <summary>` where `type` is one of `feat`, `fix`, `refactor`, `chore`, `docs`, `test`, `build`.
