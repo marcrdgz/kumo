@@ -159,6 +159,8 @@ pub(crate) struct KumoWindow {
     keybinds_open: bool,
     /// Animated current sidebar width (eases between expanded and rail).
     sidebar_w: f32,
+    /// Measured expanded width: what the current layout's rows actually paint.
+    sidebar_target: f32,
     /// When the current splitter hover started (fades the glow in).
     hover_since: Option<std::time::Instant>,
     /// The settings panel (gear in the titlebar).
@@ -240,6 +242,7 @@ impl KumoWindow {
             settings_open: false,
             settings_about: false,
             sidebar_w: SIDEBAR_W,
+            sidebar_target: SIDEBAR_W,
             hover_since: None,
             cell_w: 7.8,
             cell_h: 17.0,
@@ -282,6 +285,52 @@ impl KumoWindow {
     /// viewport so the panes glide along with it.
     fn sidebar_width(&self) -> f32 {
         self.sidebar_w
+    }
+
+    /// Measure the expanded width the current layout's rows actually paint.
+    /// The font is monospace, so a row's width is exactly its character count
+    /// times the cell advance at that row's font size — the divider line then
+    /// hugs the real content instead of a hand-tuned constant. Caps keep a
+    /// long session name or metrics readout from bloating the panel.
+    fn measured_sidebar_w(&self) -> f32 {
+        let r = self.advance_ratio;
+        let name_cw = 12.0 * r; // session/agent names (12px)
+        let small_cw = 9.5 * r; // branch + metrics (9.5px)
+        let mut w = 170.0; // floor: section labels, the new-session row
+        let Some(layout) = &self.layout else { return w };
+        for s in &layout.sessions {
+            // Session row: paddings(44) + dot + name + branch (capped 110,
+            // matching the render's `max_w`).
+            let name = (s.name.chars().count() as f32 * name_cw).min(120.0);
+            let branch = s.branch.as_ref().map_or(0.0, |b| {
+                let mut chars = b.name.chars().count() as f32;
+                if b.ahead > 0 {
+                    chars += 2.0 + b.ahead.to_string().chars().count() as f32;
+                }
+                if b.behind > 0 {
+                    chars += 2.0 + b.behind.to_string().chars().count() as f32;
+                }
+                (chars * small_cw).min(110.0)
+            });
+            w = w.max(44.0 + name + branch);
+            // Agent rows: paddings(50) + avatar(20) + the wider of name or
+            // the metrics pill (text + 12px pill padding).
+            let mut stack: Vec<&kumo_protocol::LayoutNode> = s.root.as_deref().into_iter().collect();
+            while let Some(node) = stack.pop() {
+                if let kumo_protocol::LayoutNode::Pane(p) = node {
+                    if let Some(a) = &p.agent {
+                        let metrics = format!("{:.1}% CPU · {} MB", a.cpu, a.mem_kb / 1024);
+                        let pill = metrics.chars().count() as f32 * small_cw + 12.0;
+                        let name_w = a.name.chars().count() as f32 * name_cw;
+                        w = w.max(50.0 + name_w.max(pill));
+                    }
+                } else if let kumo_protocol::LayoutNode::Split { a, b, .. } = node {
+                    stack.push(a);
+                    stack.push(b);
+                }
+            }
+        }
+        w.min(280.0)
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -345,8 +394,8 @@ impl KumoWindow {
                 changed = true;
             }
         }
-        // Ease the sidebar toward its target width (rail ↔ expanded pill).
-        let sidebar_target = if self.sidebar_collapsed { SIDEBAR_W_COLLAPSED } else { SIDEBAR_W };
+        // Ease the sidebar toward its target width (rail ↔ content-fit).
+        let sidebar_target = if self.sidebar_collapsed { SIDEBAR_W_COLLAPSED } else { self.sidebar_target };
         if (self.sidebar_w - sidebar_target).abs() > 0.5 {
             self.sidebar_w += (sidebar_target - self.sidebar_w) * 0.28;
             changed = true;
@@ -423,6 +472,7 @@ impl KumoWindow {
     /// request pane sizes, and keep pane subscriptions in sync.
     fn on_layout(&mut self, layout: &Layout) {
         self.layout = Some(layout.clone());
+        self.sidebar_target = self.measured_sidebar_w();
         let mut want: HashSet<u64> = HashSet::new();
         if let Some(session) = layout.sessions.iter().find(|s| Some(&s.name) == layout.active.as_ref()) {
             let (gw, gh) = self.grid_size;
