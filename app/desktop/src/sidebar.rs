@@ -25,12 +25,12 @@ impl Sidebar {
 impl Render for Sidebar {
     /// Comet-style sidebar: a flat, fully transparent column sitting directly
     /// on the frosted window background — the glass reads through it, and the
-    /// rows use low-alpha washes so they never bury the frost.
+    /// rows use low-alpha washes so they never bury the frost. No header: the
+    /// wordmark and the collapse toggle live in the titlebar.
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let parent = self.parent.upgrade().expect("sidebar outlives its window");
         let data = parent.read(cx);
         let chrome = data.chrome();
-        let connected = data.connected;
         let collapsed = data.sidebar_collapsed;
         let layout = data.layout.clone();
         let width = data.sidebar_w;
@@ -47,66 +47,12 @@ impl Render for Sidebar {
             .border_color(theme::hairline())
             .flex()
             .flex_col()
-            .child(self.header(cx, connected, &chrome))
+            .pt(px(8.0))
             .child(self.body(cx, layout.as_ref(), &chrome))
     }
 }
 
 impl Sidebar {
-    // ------------------------------------------------------------------
-    // Header
-    // ------------------------------------------------------------------
-
-    fn header(&self, cx: &mut Context<Self>, connected: bool, chrome: &Chrome) -> impl IntoElement {
-        let dot_color = if connected { chrome.working() } else { chrome.idle() };
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(12.0))
-            .h(px(44.0))
-            .border_b_1()
-            .border_color(theme::hairline())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(div().size(px(7.0)).rounded_full().bg(dot_color))
-                    .child(
-                        div()
-                            .child("KUMO")
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(chrome.accent()),
-                    ),
-            )
-            .child(self.collapse_button(cx, false, chrome))
-    }
-
-    fn collapse_button(&self, cx: &mut Context<Self>, expanded: bool, chrome: &Chrome) -> impl IntoElement {
-        let glyph = if expanded { "→" } else { "←" };
-        let toggle = self.parent.clone();
-        
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(22.0))
-            .rounded(px(7.0))
-            .cursor_pointer()
-            .hover(|style| style.bg(theme::wash(0x0c)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |_this, _ev, _window, cx| {
-                    let _ = toggle.update(cx, |parent, cx| parent.toggle_sidebar(cx));
-                }),
-            )
-            .child(glyph)
-            .text_size(px(12.0))
-            .text_color(chrome.muted())
-    }
-
     // ------------------------------------------------------------------
     // Body: Sessions & Agents
     // ------------------------------------------------------------------
@@ -417,7 +363,7 @@ impl Sidebar {
 
     fn collapsed_rail(
         &self,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
         layout: &Option<Layout>,
         chrome: &Chrome,
         width: f32,
@@ -435,9 +381,8 @@ impl Sidebar {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .pt(px(8.0))
-                    .gap(px(10.0))
-                    .child(self.collapse_button(cx, true, chrome))
+                    .pt(px(12.0))
+                    .gap(px(10.0)),
             );
 
         if let Some(layout) = layout {

@@ -94,7 +94,6 @@ pub(crate) const SIDEBAR_W: f32 = 268.0;
 pub(crate) const SIDEBAR_W_COLLAPSED: f32 = 48.0;
 /// Height of the custom drag-to-move titlebar (replaces the hidden native bar).
 pub(crate) const TITLEBAR_H: f32 = 36.0;
-const STATUS_H: f32 = 30.0;
 /// Cursor blink half-period, the common terminal cadence.
 const CURSOR_BLINK: Duration = Duration::from_millis(530);
 /// How long the pane-number overlay stays up after `leader+q`.
@@ -591,17 +590,6 @@ impl KumoWindow {
         }
     }
 
-    fn focused_pane_label(&self) -> String {
-        let Some(session) = self.active_session() else { return "-".into() };
-        let focus = session.focus;
-        session
-            .root
-            .as_deref()
-            .and_then(|r| find_pane(r, focus))
-            .map(|p| p.title.trim().to_string())
-            .unwrap_or_else(|| format!("pane {focus}"))
-    }
-
     // ------------------------------------------------------------------
     // Geometry
     // ------------------------------------------------------------------
@@ -611,7 +599,7 @@ impl KumoWindow {
     fn update_geometry(&mut self, window: &mut Window) {
         let vp = window.viewport_size();
         let avail_w = (f32::from(vp.width) - self.sidebar_width()).max(1.0);
-        let avail_h = (f32::from(vp.height) - STATUS_H - TITLEBAR_H).max(1.0);
+        let avail_h = (f32::from(vp.height) - TITLEBAR_H).max(1.0);
         let target_w = 13.0 * self.advance_ratio;
         let target_h = 13.0 * self.line_height_ratio;
         let gw = (avail_w / target_w).floor().max(20.0) as u16;
@@ -626,8 +614,10 @@ impl KumoWindow {
         }
         let (_, gh) = self.grid_size;
         let pane_rows = (gh.saturating_sub(1)).max(1) as f32;
-        let pad_y = 12.0;
-        let cells_h = (avail_h - 2.0 * pad_y).max(1.0);
+        // One uniform inset for every side of the pane area — the gap next to
+        // the sidebar matches the top and bottom margins.
+        let pad = 12.0;
+        let cells_h = (avail_h - 2.0 * pad).max(1.0);
         self.cell_h = cells_h / pane_rows;
         self.font_size = (self.cell_h / self.line_height_ratio).clamp(6.0, 34.0);
         let gw = self.grid_size.0 as f32;
@@ -639,15 +629,10 @@ impl KumoWindow {
         }
         self.cell_w = cell_w;
         let canvas_w = gw * self.cell_w;
-        let sidebar_gap = if self.sidebar_collapsed {
-            ((avail_w - canvas_w) * 0.5).clamp(panes::PANE_GAP, 24.0)
-        } else {
-            0.0 // sin gap cuando el sidebar está abierto, los panes pegados al sidebar
-        };
         let total_pane_h = pane_rows * self.cell_h;
-        let y_offset = ((avail_h - total_pane_h) * 0.5).max(pad_y);
+        let y_offset = ((avail_h - total_pane_h) * 0.5).max(pad);
         // canvas_origin es la posición absoluta del canvas en la ventana
-        self.canvas_origin = point(px(self.sidebar_width() + sidebar_gap), px(TITLEBAR_H + y_offset));
+        self.canvas_origin = point(px(self.sidebar_width() + pad), px(TITLEBAR_H + y_offset));
         self.canvas_size = (canvas_w, avail_h);
     }
 
@@ -1109,29 +1094,6 @@ impl KumoWindow {
     }
 
     // ------------------------------------------------------------------
-    // Status strip
-    // ------------------------------------------------------------------
-
-    fn status_strip(&self) -> impl IntoElement {
-        let leader = if self.leader_active { "   ·  leader (esc to cancel)" } else { "" };
-        let text = format!(
-            "{}{leader}   session {}   pane {}",
-            if self.connected { "connected" } else { "disconnected" },
-            self.layout.as_ref().and_then(|l| l.active.clone()).unwrap_or_else(|| "-".into()),
-            self.focused_pane_label()
-        );
-        div()
-            .w_full()
-            .h(px(STATUS_H))
-            .flex()
-            .items_center()
-            .px(px(10.))
-            .border_t_1()
-            .border_color(theme::hairline())
-            .child(StyledText::new(SharedString::from(text)).with_default_highlights(&self.dim, []))
-    }
-
-    // ------------------------------------------------------------------
     // Updates (kumo CLI + desktop app)
     // ------------------------------------------------------------------
 
@@ -1317,8 +1279,7 @@ impl Render for KumoWindow {
                             .flex_col()
                             .flex_grow()
                             .size_full()
-                            .child(self.terminal.clone())
-                            .child(self.status_strip()),
+                            .child(self.terminal.clone()),
                     ),
             )
             .children(self.popup_layer())
@@ -1724,6 +1685,14 @@ impl KumoWindow {
         wordmark.color = chrome.accent();
         wordmark.font_size = px(11.5).into();
         wordmark.font_weight = gpui::FontWeight::BOLD;
+        let mut notice_style = self.dim.clone();
+        notice_style.font_size = px(11.0).into();
+        // Only surface transient notices ("not a git repository", replies…),
+        // not the connection steady-states which add no information.
+        let notice = match self.status.as_ref() {
+            "" | "connected" | "connecting to kumo daemon…" => None,
+            other => Some(SharedString::from(other.to_string())),
+        };
         div()
             .w_full()
             .h(px(TITLEBAR_H))
@@ -1740,15 +1709,58 @@ impl KumoWindow {
                     this.titlebar_drag_armed = true;
                 }),
             )
-            .child(StyledText::new(SharedString::from("KUMO")).with_default_highlights(&wordmark, []))
-            .child(div().flex_1())
+            // The sidebar lives in the titlebar: one toggle at the left edge
+            // keeps the middle of the window completely free.
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(24.0))
-                    .rounded(px(7.0))
+                    .size(px(26.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::wash(0x0c)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.titlebar_drag_armed = false;
+                        this.toggle_sidebar(cx);
+                    }))
+                    .child("☰")
+                    .text_size(px(15.0))
+                    .text_color(if self.sidebar_collapsed { chrome.muted() } else { chrome.accent() }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px(px(6.0))
+                    .child(StyledText::new(SharedString::from("KUMO")).with_default_highlights(&wordmark, [])),
+            )
+            .child(div().flex_1())
+            .children(if self.leader_active {
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .px(px(8.0))
+                        .h(px(18.0))
+                        .rounded(px(6.0))
+                        .bg(chrome.accent_soft())
+                        .child("leader · esc")
+                        .text_size(px(10.5))
+                        .text_color(chrome.accent()),
+                )
+            } else {
+                None
+            })
+            .children(notice.map(|n| StyledText::new(n).with_default_highlights(&notice_style, [])))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(28.0))
+                    .rounded(px(8.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme::wash(0x0c)))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
@@ -1758,7 +1770,7 @@ impl KumoWindow {
                         cx.notify();
                     }))
                     .child("⚙")
-                    .text_size(px(13.0))
+                    .text_size(px(17.0))
                     .text_color(chrome.muted()),
             )
     }
