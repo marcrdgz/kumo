@@ -5,14 +5,12 @@ edition.workspace = true
 description = "Native desktop client for the kumo daemon (GPUI): full-attach grid viewer + sessions/agents sidebar"
 repository = "https://github.com/marcrdgz/kumo"
 
-# The desktop app is distributed separately (as a `.dmg` on macOS, built by the
-# `desktop-dmg` workflow): it is macOS-only, and it is deliberately excluded
-# from the `kumo-installer.sh`/`installer.ps1` scripts so installing the CLI
-# never drags the app along (and `kumo update` only touches the CLI).
+# The desktop app is not deployed yet: it stays in the workspace (so it keeps
+# building locally) but `dist = false` keeps it out of releases entirely — no
+# artifacts, installers, or announcement until it is useful enough to ship.
 [package.metadata.dist]
 repository = "https://github.com/marcrdgz/kumo"
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
-installers = []
+dist = false
 
 [[bin]]
 name = "kumo-desktop"

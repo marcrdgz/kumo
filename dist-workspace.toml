@@ -24,3 +24,9 @@ cache-builds = true
 # Steps run before `dist build` on every build job (installs Zig for build.rs)
 # Kept outside .github/workflows so GitHub doesn't parse it as a workflow file.
 github-build-setup = "../dist-build-setup.yml"
+# Build only the packages each target needs, individually. Without this dist
+# runs `cargo build --workspace`, which also compiles kumo-desktop (excluded
+# from dist but still a workspace member) on Linux/Windows and breaks those
+# release legs (missing libxkbcommon on ARM Linux, unix-only IPC code on
+# Windows).
+precise-builds = true

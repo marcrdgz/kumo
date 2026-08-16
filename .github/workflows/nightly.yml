@@ -7,10 +7,9 @@
 # the full target matrix can be requested manually via `workflow_dispatch` with
 # the `full-matrix` input.
 #
-# The desktop app (macOS-only) is packaged separately into `Kumo-<arch>.dmg` by
-# the `desktop-dmg.yml` workflow, which triggers on this release being
-# published; nothing extra is needed here beyond shipping the `kumo-desktop`
-# archive on the macOS job.
+# The desktop app (macOS-only) is not deployed yet: it stays in the workspace
+# but is excluded from dist (`dist = false`), so nothing extra is needed here
+# beyond shipping the `kumo` CLI.
 #
 # A durable marker tag `nightly-last` records the commit claimed by the most
 # recent nightly run. `prepare` skips commits already claimed, and `publish`
