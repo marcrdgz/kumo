@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.5.0
+
+### 🚀 Features
+
+- *(theme)* Add theme picker with settings popup
+- *(settings)* Redesign theme picker as a tabbed settings panel
+- *(sidebar)* Tabbed sessions/agents panel
+- *(sessions)* Create and open git worktrees
+- *(ui)* Widen pane left gutter and slim sidebar by one column
+- *(links)* Open URLs on modifier+click and underline while held
+- *(mouse)* Keep selection highlighted and toast on copy
+- *(popup)* Word-delete editing in the rename/new popups
+- *(status)* Show copy confirmation right-aligned in the status bar
+
+### 🐛 Bug Fixes
+
+- *(mouse)* Restore mouse tracking on resumed panes
+- *(theme)* Use secondary accent instead of hardcoded mauve
+- *(sidebar)* Extend active row highlight to full width
+- *(sidebar)* Make git branch rows clickable
+- *(restart)* Repaint resumed panes in inactive sessions
+- *(build)* Gate the control cli module behind unix
+
+### 💼 Other
+
+- Daemon + smart-client architecture, workspace split (cli/daemon/desktop/kumo-core) (#1)
+- *(release)* Stop shipping the desktop app until it's useful
+
+### ⚙️ Miscellaneous Tasks
+
+- Ignore cargo-release per-crate changelogs
+- Release 0.5.0
 ## v0.4.0
 
 ### 🚀 Features
@@ -28,6 +60,10 @@
 ### 🚜 Refactor
 
 - *(bindings)* Drive dispatch from the shared keymap table
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.4.0
 ## v0.3.0
 
 ### 🚀 Features
