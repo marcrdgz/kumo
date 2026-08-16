@@ -12,7 +12,7 @@ integration for AI assistance via Claude.
 
 ### A. Terminal Emulation & Rendering (libghostty-vt + ratatui)
 - Each pane owns a PTY (`portable-pty`) plus a `libghostty-vt`
-  terminal instance (see `src/vt.rs` FFI).
+  terminal instance (see `app/daemon/src/vt.rs` FFI).
 - PTY output is fed into the emulator via `ghostty_terminal_vt_write`.
 - Every frame the emulator's render state is refreshed and its viewport cells
   (text, colors, styles, graphemes) are drawn into a ratatui `Buffer`.
@@ -85,26 +85,27 @@ multiplexer is drivable from the CLI, the TUI, the desktop app, or a script:
 - `kumo agent [spawn|status|kill]`
 
 The daemon's keyboard layer is gone: the TUI client owns the leader keymap
-(`src/app/bindings.rs` is shared) and translates keys into commands
-(`src/client.rs`). Opening/closing a sidebar or resizing is a client concern
-that never mutates the daemon's state beyond a `PaneResize`/command.
+(`app/cli/src/bindings.rs`) and translates keys into commands
+(`app/cli/src/client.rs`). Opening/closing a sidebar or resizing is a client
+concern that never mutates the daemon's state beyond a `PaneResize`/command.
 
 ## 6. Key Source Files
-- **`src/app/server.rs`**: headless daemon loop — command dispatch, per-client
-  routing, layout + pane-frame streaming.
-- **`src/app/commands.rs`**: the daemon's command handlers (sessions/panes/agents).
-- **`src/app/ui.rs`**: per-pane content rendering (`tick`) and the semantic
+- **`app/daemon/src/app/server.rs`**: headless daemon loop — command dispatch,
+  per-client routing, layout + pane-frame streaming.
+- **`app/daemon/src/app/commands.rs`**: the daemon's command handlers (sessions/panes/agents).
+- **`app/daemon/src/app/ui.rs`**: per-pane content rendering (`tick`) and the semantic
   `layout()` export; no chrome.
-- **`src/client.rs`**: the TUI client — a dumb viewport that lays out from the
-  semantic tree, draws borders, and maps the leader keymap to commands.
-- **`src/cli.rs`**: the `kumo session|pane|agent` control CLI.
+- **`app/cli/src/client.rs`**: the TUI client connection/loop.
+- **`app/cli/src/client_view.rs`**: the TUI client — lays out from the semantic
+  tree, draws all chrome, and maps the leader keymap to commands.
+- **`app/cli/src/cli.rs`**: the `kumo session|pane|agent` control CLI.
 - **`crates/kumo-protocol/`**: `Command`/`DaemonEvent`, the semantic
   `LayoutNode`/`Layout`, `PaneFrame`, and pure framing.
-- **`src/frames.rs`**: daemon-side per-pane `Buffer` → `PaneFrame` serialization.
-- **`src/app.rs`**: the engine — sessions, layout tree ops, PTYs, agents.
-- **`apps/kumo-desktop/`**: native macOS desktop client (GPUI) — computes its
+- **`app/daemon/src/frames.rs`**: daemon-side per-pane `Buffer` → `PaneFrame` serialization.
+- **`app/daemon/src/app.rs`**: the engine — sessions, layout tree ops, PTYs, agents.
+- **`app/desktop/`**: native macOS desktop client (GPUI) — computes its
   own geometry from the semantic tree and paints native pane cards.
-- **`src/pane.rs`**: `Pane` = PTY + `libghostty-vt` terminal.
-- **`build.rs`**: compiles the vendored `libghostty-vt` Zig library.
-- **`src/config.rs`**: XDG directory resolution, config parsing.
+- **`app/daemon/src/pane.rs`**: `Pane` = PTY + `libghostty-vt` terminal.
+- **`app/daemon/build.rs`**: compiles the vendored `libghostty-vt` Zig library.
+- **`crates/kumo-core/src/config.rs`**: XDG directory resolution, config parsing.
 - **`vendor/libghostty-vt/`**: vendored Ghostty terminal emulator (Zig + C).

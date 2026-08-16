@@ -1,0 +1,403 @@
+//! The "Spider Web" sidebar: a collapsible, floating macOS-style pill.
+
+use std::time::Duration;
+
+use gpui::{
+    div, pulsating_between, px, prelude::*, Animation, AnimationExt, AnyElement, Context,
+    ElementId, IntoElement, MouseButton, Render, SharedString, WeakEntity, Window,
+};
+
+use kumo_protocol::{AgentInfo, AgentStatus, Layout, LayoutNode, SessionLayout};
+
+use crate::theme::{self, Chrome};
+use crate::{KumoWindow, SIDEBAR_W, SIDEBAR_W_COLLAPSED};
+
+const RAIL_W: f32 = SIDEBAR_W_COLLAPSED;
+
+pub struct Sidebar {
+    parent: WeakEntity<KumoWindow>,
+}
+
+impl Sidebar {
+    pub fn new(parent: WeakEntity<KumoWindow>) -> Self {
+        Self { parent }
+    }
+}
+
+impl Render for Sidebar {
+    /// Comet-style sidebar: a flat, fully transparent column sitting directly
+    /// on the frosted window background — the glass reads through it, and the
+    /// rows use low-alpha washes so they never bury the frost.
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let parent = self.parent.upgrade().expect("sidebar outlives its window");
+        let data = parent.read(cx);
+        let chrome = data.chrome();
+        let connected = data.connected;
+        let collapsed = data.sidebar_collapsed;
+        let layout = data.layout.clone();
+
+        if collapsed {
+            return self.collapsed_rail(cx, &layout, chrome);
+        }
+
+        div()
+            .w(px(SIDEBAR_W))
+            .h_full()
+            .border_r_1()
+            .border_color(theme::hairline())
+            .flex()
+            .flex_col()
+            .child(self.header(cx, connected, chrome))
+            .child(self.body(cx, layout.as_ref(), chrome))
+    }
+}
+
+impl Sidebar {
+    // ------------------------------------------------------------------
+    // Header
+    // ------------------------------------------------------------------
+
+    fn header(&self, cx: &mut Context<Self>, connected: bool, chrome: &Chrome) -> impl IntoElement {
+        let dot_color = if connected { chrome.working() } else { chrome.idle() };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(12.0))
+            .h(px(44.0))
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().size(px(7.0)).rounded_full().bg(dot_color))
+                    .child(
+                        div()
+                            .child("KUMO")
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(chrome.accent()),
+                    ),
+            )
+            .child(self.collapse_button(cx, false, chrome))
+    }
+
+    fn collapse_button(&self, cx: &mut Context<Self>, expanded: bool, chrome: &Chrome) -> impl IntoElement {
+        let glyph = if expanded { "→" } else { "←" };
+        let toggle = self.parent.clone();
+        
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(22.0))
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::wash(0x0c)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_this, _ev, _window, cx| {
+                    let _ = toggle.update(cx, |parent, cx| parent.toggle_sidebar(cx));
+                }),
+            )
+            .child(glyph)
+            .text_size(px(12.0))
+            .text_color(chrome.muted())
+    }
+
+    // ------------------------------------------------------------------
+    // Body: Sessions & Agents
+    // ------------------------------------------------------------------
+
+    fn body(&self, cx: &mut Context<Self>, layout: Option<&Layout>, chrome: &Chrome) -> impl IntoElement {
+        let mut scroll = div()
+            .id("sidebar-scroll")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p(px(6.0))
+            .gap(px(2.0));
+
+        let Some(layout) = layout else {
+            return scroll.child(
+                div()
+                    .p(px(10.0))
+                    .child("connecting to kumo daemon…")
+                    .text_size(px(11.5))
+                    .text_color(chrome.muted()),
+            );
+        };
+
+        if layout.sessions.is_empty() {
+            return scroll.child(
+                div()
+                    .rounded(px(theme::RADIUS_MD))
+                    .border_1()
+                    .border_color(theme::hairline())
+                    .bg(chrome.accent_soft())
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .child("starting a session…")
+                    .text_size(px(11.5))
+                    .text_color(chrome.muted()),
+            );
+        }
+
+        // --- SESSIONS ---
+        scroll = scroll.child(self.section_label("SESSIONS", chrome));
+        for s in &layout.sessions {
+            let is_active = layout.active.as_deref() == Some(&s.name);
+            scroll = scroll.child(self.session_row(cx, s, is_active, chrome));
+        }
+
+        // --- AGENTS (Zero-alloc iteration) ---
+        scroll = scroll.child(self.section_label("AGENTS", chrome));
+        let mut has_agents = false;
+
+        for session in &layout.sessions {
+            collect_agents(&session.root, &mut |agent| {
+                has_agents = true;
+                // `extend(&mut self)` mutates the scroll container in place, so
+                // the FnMut closure never moves the (non-Copy) element out of
+                // its capture.
+                scroll.extend([self.agent_row(cx, &session.name, agent, chrome).into_any_element()]);
+            });
+        }
+
+        if !has_agents {
+            scroll = scroll.child(
+                div()
+                    .p(px(10.0))
+                    .child("no agents running")
+                    .text_size(px(11.5))
+                    .text_color(chrome.muted()),
+            );
+        }
+
+        scroll
+    }
+
+    fn section_label(&self, label: &'static str, chrome: &Chrome) -> impl IntoElement {
+        div()
+            .pt(px(8.0))
+            .pb(px(3.0))
+            .px(px(6.0))
+            .child(label)
+            .text_size(px(9.5))
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(chrome.muted())
+    }
+
+    fn session_row(&self, cx: &mut Context<Self>, s: &SessionLayout, is_active: bool, chrome: &Chrome) -> impl IntoElement {
+        let name = s.name.clone();
+        let toggle = self.parent.clone();
+        let title = if s.zoom { format!("{} (zoom)", s.name) } else { s.name.clone() };
+
+        let bg_color = if is_active { chrome.accent_soft() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) };
+
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(theme::RADIUS_MD))
+            .bg(bg_color)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::wash(0x08)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_this, _ev, _window, cx| {
+                    let _ = toggle.update(cx, |parent, _cx| parent.select_session(name.clone()));
+                }),
+            )
+            .child(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(if is_active { chrome.accent() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .child(title)
+                    .text_size(px(12.0))
+                    .font_weight(if is_active { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
+                    .text_color(if is_active { chrome.accent() } else { chrome.text() }),
+            )
+    }
+
+    fn agent_row(&self, cx: &mut Context<Self>, session: &str, agent: &AgentInfo, chrome: &Chrome) -> impl IntoElement {
+        let session = session.to_string();
+        let toggle = self.parent.clone();
+        let metrics = format!("{:.1}% CPU · {} MB", agent.cpu, agent.mem_kb / 1024);
+
+        div()
+            .w_full()
+            .rounded(px(theme::RADIUS_MD))
+            .px(px(8.0))
+            .py(px(5.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::wash(0x08)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_this, _ev, _window, cx| {
+                    let _ = toggle.update(cx, |parent, _cx| parent.select_session(session.clone()));
+                }),
+            )
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(self.avatar(&agent.name, chrome))
+            .child(
+                div()
+                    .flex_1()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(agent.name.clone())
+                                    .text_size(px(12.0))
+                                    .text_color(chrome.text()),
+                            )
+                            .child(self.status_dot(agent.status, &agent.name, chrome)),
+                    )
+                    .child(self.metrics_pill(metrics, chrome)),
+            )
+    }
+
+    fn avatar(&self, name: &str, chrome: &Chrome) -> impl IntoElement {
+        let glyph = name.chars().next().unwrap_or('?').to_ascii_uppercase().to_string();
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(20.0))
+            .rounded_full()
+            .bg(chrome.accent_soft())
+            .child(glyph)
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(chrome.accent())
+    }
+
+    fn status_dot(&self, status: AgentStatus, key: &str, chrome: &Chrome) -> AnyElement {
+        let dot = div().size(px(8.0)).rounded_full().bg(chrome.status(status));
+        match status {
+            AgentStatus::Working => {
+                // Static key ID to prevent dynamic String allocations per frame
+                let anim_id = ElementId::NamedInteger(SharedString::from("sidebar-dot"), key.len() as u64);
+                dot.with_animation(
+                    anim_id,
+                    Animation::new(Duration::from_millis(1500))
+                        .repeat()
+                        .with_easing(pulsating_between(0.45, 1.0)),
+                    |dot, delta| dot.opacity(delta),
+                )
+                .into_any_element()
+            }
+            _ => dot.into_any_element(),
+        }
+    }
+
+    fn metrics_pill(&self, text: String, chrome: &Chrome) -> impl IntoElement {
+        div()
+            .rounded_full()
+            .px(px(6.0))
+            .py(px(1.0))
+            .bg(theme::wash(0x07))
+            .child(text)
+            .text_size(px(9.5))
+            .text_color(chrome.muted())
+    }
+
+    // ------------------------------------------------------------------
+    // Collapsed Rail
+    // ------------------------------------------------------------------
+
+    fn collapsed_rail(&self, cx: &mut Context<Self>, layout: &Option<Layout>, chrome: &Chrome) -> gpui::Div {
+        let mut rail = div()
+            .w(px(RAIL_W))
+            .h_full()
+            .border_r_1()
+            .border_color(theme::hairline())
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(8.0))
+            .gap(px(10.0))
+            .child(self.collapse_button(cx, true, chrome));
+
+        if let Some(layout) = layout {
+            let mut dots: Vec<AnyElement> = Vec::new();
+            if layout.sessions.iter().any(|s| Some(s.name.as_str()) == layout.active.as_deref()) {
+                dots.push(div().size(px(8.0)).rounded_full().bg(chrome.accent()).into_any_element());
+            }
+
+            for session in &layout.sessions {
+                collect_agents(&session.root, &mut |agent| {
+                    dots.push(self.status_dot(agent.status, &agent.name, chrome));
+                });
+            }
+
+            if !dots.is_empty() {
+                rail = rail.child(
+                    div()
+                        .w_full()
+                        .flex_1()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(6.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(8.0))
+                                .children(dots),
+                        ),
+                );
+            }
+        }
+        rail
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Traverses the layout tree without heap allocations or cloning `AgentInfo`.
+fn collect_agents<'a>(node: &'a Option<Box<LayoutNode>>, callback: &mut impl FnMut(&'a AgentInfo)) {
+    let mut stack = Vec::new();
+    if let Some(n) = node {
+        stack.push(n.as_ref());
+    }
+    while let Some(n) = stack.pop() {
+        match n {
+            LayoutNode::Pane(p) => {
+                if let Some(a) = &p.agent {
+                    callback(a);
+                }
+            }
+            LayoutNode::Split { a, b, .. } => {
+                // `a`/`b` are boxed children; walk both subtrees.
+                stack.push(b.as_ref());
+                stack.push(a.as_ref());
+            }
+        }
+    }
+}

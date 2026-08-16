@@ -237,17 +237,22 @@ exactly where you left it.
 ## 🗂️ Project layout
 
 ```
-Cargo.toml              📄 workspace + package manifest
-build.rs                🏗️ compiles the vendored libghostty-vt (Zig)
-src/main.rs             🚪 TUI entry point
-src/app.rs              🧩 sessions/panes, layout tree, input routing, mouse, rendering
-src/agents/             🔍 per-agent lifecycle detection (opencode.rs, claude.rs)
-src/alert.rs            🔊 audible agent alerts (blocked / finished)
-src/pane.rs             🪟 Pane = PTY + libghostty-vt terminal (agent status, dirty render)
-src/vt.rs               🔌 FFI bindings to libghostty-vt (emulator + native selection)
-src/pty.rs              🔧 portable-pty wrapper
-src/config.rs           ⚙️ shell / AI CLI resolution and ~/.config/kumo config
-src/xtgettcap.rs        🧤 plain-tty capability responder
+Cargo.toml              📄 virtual workspace (kumo-protocol, kumo-core, kumo, kumo-daemon, kumo-desktop)
+app/cli/                🚪 the `kumo` client — TUI (all chrome), control CLI, update
+  src/main.rs             TUI/CLI entry point
+  src/client_view.rs      geometry, input, mouse, and all chrome rendering
+app/daemon/             🐞 the `kumo-daemon` binary
+  build.rs                🏗️ compiles the vendored libghostty-vt (Zig)
+  src/app.rs              sessions/panes, layout tree, PTYs, agents
+  src/pane.rs             🪟 Pane = PTY + libghostty-vt terminal (agent status, dirty render)
+  src/vt.rs               🔌 FFI bindings to libghostty-vt (emulator + native selection)
+  src/pty.rs              🔧 portable-pty wrapper
+  src/agents/             🔍 per-agent lifecycle detection (opencode.rs, claude.rs)
+  src/alert.rs            🔊 audible agent alerts (blocked / finished)
+  src/xtgettcap.rs        🧤 plain-tty capability responder
+app/desktop/            🖥️ native GPUI desktop client (draws its own chrome)
+crates/kumo-core/       📦 shared logic — config, layout, themes, updates, worktrees
+crates/kumo-protocol/   🔌 the pure wire protocol (Command/DaemonEvent)
 vendor/libghostty-vt/   📚 vendored Ghostty terminal emulator (Zig + C headers)
 ```
 

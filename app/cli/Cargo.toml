@@ -1,0 +1,19 @@
+[package]
+name = "kumo"
+version.workspace = true
+edition.workspace = true
+description = "Kumo terminal multiplexer client: TUI frontend + control CLI, driven by the kumo daemon"
+
+[[bin]]
+name = "kumo"
+path = "src/main.rs"
+
+[dependencies]
+kumo-core = { path = "../../crates/kumo-core" }
+kumo-protocol = { path = "../../crates/kumo-protocol", features = ["crossterm"] }
+ratatui = "0.30"
+crossterm = "0.29"
+bincode = { version = "2", features = ["serde"] }
+anyhow = "1"
+log = "0.4"
+libc = "0.2"

@@ -317,7 +317,9 @@ pub enum ResizeDir {
 }
 
 /// One pane as it appears in the semantic tree.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+///
+/// Not `Eq` (contains [`AgentInfo`], whose float metrics are sampled).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct LayoutPane {
     pub id: u64,
     /// Display title (custom name or a default `shell N` / `AI CLI` label).
@@ -407,12 +409,23 @@ pub struct Layout {
 }
 
 /// One AI CLI running inside a pane.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+///
+/// Not `Eq`: `cpu` is a float (sampled daemon-side), so the sidebar's
+/// micro-pill metrics can render live values.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct AgentInfo {
     /// Short AI CLI name, e.g. "opencode".
     pub name: String,
     /// Lifecycle status inferred from the pane's terminal buffer.
     pub status: AgentStatus,
+    /// Sampled CPU usage of the agent's process tree, as a percentage of one
+    /// core (0.0 when the daemon could not sample it). `#[serde(default)]`
+    /// keeps older daemons wire-compatible with this client.
+    #[serde(default)]
+    pub cpu: f32,
+    /// Resident memory of the agent's process tree, in kibibytes.
+    #[serde(default)]
+    pub mem_kb: u64,
 }
 
 /// Wire copy of the daemon's `AgentStatus`: the AI agent's lifecycle state.
@@ -439,7 +452,9 @@ impl AgentStatus {
 
 /// One session, as reported to `kumo session list` (metadata only; the full
 /// semantic tree travels via [`DaemonEvent::Layout`]).
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+///
+/// Not `Eq` (contains [`AgentInfo`]).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SessionInfo {
     pub name: String,
     pub workspace: std::path::PathBuf,
@@ -843,7 +858,12 @@ mod tests {
                         title: " opencode ".into(),
                         cwd: std::path::PathBuf::from("/tmp"),
                         is_ai: true,
-                        agent: Some(AgentInfo { name: "opencode".into(), status: AgentStatus::Blocked }),
+                        agent: Some(AgentInfo {
+                            name: "opencode".into(),
+                            status: AgentStatus::Blocked,
+                            cpu: 0.7,
+                            mem_kb: 6144,
+                        }),
                         mouse_reporting: true,
                         alt_screen: true,
                     })),
