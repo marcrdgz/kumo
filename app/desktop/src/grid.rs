@@ -16,6 +16,8 @@ pub struct Grid {
     rows: usize,
     cells: Vec<Vec<WireCell>>,
     cursor: Option<(u16, u16)>,
+    /// Cached paintable art per row; `None` = stale, rebuilt lazily on paint.
+    art: Vec<Option<RowArt>>,
 }
 
 impl Grid {
@@ -23,12 +25,24 @@ impl Grid {
         self.rows as u16
     }
 
-    pub fn row(&self, row: u16) -> Option<&[WireCell]> {
-        self.cells.get(row as usize).map(|r| r.as_slice())
-    }
-
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
+    }
+
+    /// The paintable art for a row, rebuilding it only when the row changed
+    /// since the last paint (adjacent same-style cells merged into one run).
+    pub fn row_art_cached(
+        &mut self,
+        row: u16,
+        font: &Font,
+        default_fg: Hsla,
+        default_bg: Hsla,
+    ) -> Option<&RowArt> {
+        if self.art.get(row as usize)?.is_none() {
+            let cells = self.cells.get(row as usize)?.clone();
+            self.art[row as usize] = Some(row_art(&cells, font, default_fg, default_bg));
+        }
+        self.art[row as usize].as_ref()
     }
 
     pub fn apply(&mut self, frame: &PaneFrame) {
@@ -36,8 +50,15 @@ impl Grid {
             self.cols = frame.cols as usize;
             self.rows = frame.rows as usize;
             self.cells = vec![vec![blank_cell(); self.cols]; self.rows];
+            self.art = vec![None; self.rows];
         } else if self.rows != frame.rows as usize || self.cols != frame.cols as usize {
             return;
+        } else {
+            for patch in &frame.rows_dirty {
+                if let Some(slot) = self.art.get_mut(patch.row as usize) {
+                    *slot = None;
+                }
+            }
         }
         for patch in &frame.rows_dirty {
             let Some(row) = self.cells.get_mut(patch.row as usize) else { continue };
@@ -76,6 +97,7 @@ pub struct BgSpan {
 
 /// Everything needed to paint one row: text + runs, plus merged background
 /// spans (painted as quads by the caller, before the text).
+#[derive(Clone)]
 pub struct RowArt {
     pub text: String,
     pub runs: Vec<TextRun>,
@@ -101,18 +123,20 @@ fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
     c
 }
 
-/// Turn one row of cells into paintable art. Every visible cell gets a run
-/// (blank cells become spaces with the default foreground), so the runs tile
-/// the text exactly. Continuation cells after a wide grapheme are skipped for
-/// text but still contribute to background coverage.
+/// Turn one row of cells into paintable art. Adjacent cells with the same
+/// resolved style (fg, bg, bold, italic, underline, faint) are merged into a
+/// single run, so a typical row shapes as a handful of runs instead of one per
+/// cell. Continuation cells after a wide grapheme are skipped for text but
+/// still contribute to background coverage.
 ///
 /// Backgrounds are only painted where the program set one (or inverse video
 /// implies one); cells with a default background stay transparent so the
 /// frosted-glass chrome shows through.
 pub fn row_art(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: Hsla) -> RowArt {
     let mut text = String::with_capacity(cells.len());
-    let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
+    let mut runs: Vec<TextRun> = Vec::new();
     let mut bg: Vec<BgSpan> = Vec::new();
+    let mut open: Option<OpenRun> = None;
     for (x, cell) in cells.iter().enumerate() {
         if cell.cell_width == 0 {
             // Continuation cell: no glyph, but cover it with the wide cell's bg.
@@ -122,7 +146,6 @@ pub fn row_art(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: Hs
             continue;
         }
         let symbol = if cell.text.is_empty() { " " } else { cell.text.as_str() };
-        text.push_str(symbol);
         let len = symbol.len();
         if len == 0 {
             continue;
@@ -144,21 +167,55 @@ pub fn row_art(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: Hs
         if let Some(bgc) = bgc {
             push_bg(&mut bg, x as f32, cell.cell_width.max(1) as f32, bgc);
         }
-        let underline = if cell.underline {
-            Some(UnderlineStyle { thickness: px(1.0), color: None, wavy: false })
-        } else {
-            None
+        let mut run_font = font.clone();
+        if cell.bold {
+            run_font.weight = gpui::FontWeight::BOLD;
+        }
+        if cell.italic {
+            run_font.style = gpui::FontStyle::Italic;
+        }
+        // Merge into the open run while the style is identical.
+        let merges = match open.as_ref() {
+            Some(o) => o.fg == fg && o.underline == cell.underline && o.font == run_font,
+            None => false,
         };
-        runs.push(TextRun {
-            len,
-            font: font.clone(),
-            color: fg,
-            background_color: None,
-            underline,
-            strikethrough: None,
-        });
+        if !merges {
+            if let Some(o) = open.take() {
+                runs.push(close_run(o));
+            }
+            open = Some(OpenRun { len: 0, fg, font: run_font, underline: cell.underline });
+        }
+        text.push_str(symbol);
+        open.as_mut().expect("a run is always open").len += len;
+    }
+    if let Some(o) = open.take() {
+        runs.push(close_run(o));
     }
     RowArt { text, runs, bg }
+}
+
+/// The style shared by the cells of the run currently being accumulated.
+struct OpenRun {
+    len: usize,
+    fg: Hsla,
+    font: Font,
+    underline: bool,
+}
+
+fn close_run(o: OpenRun) -> TextRun {
+    let underline = if o.underline {
+        Some(UnderlineStyle { thickness: px(1.0), color: None, wavy: false })
+    } else {
+        None
+    };
+    TextRun {
+        len: o.len,
+        font: o.font,
+        color: o.fg,
+        background_color: None,
+        underline,
+        strikethrough: None,
+    }
 }
 
 /// Append a background span, merging with the previous one when contiguous and

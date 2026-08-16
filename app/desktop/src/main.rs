@@ -66,7 +66,7 @@ pub(crate) struct KumoWindow {
     connected: bool,
     status: SharedString,
     layout: Option<Layout>,
-    panes: HashMap<u64, crate::grid::Grid>,
+    panes: HashMap<u64, std::rc::Rc<std::cell::RefCell<crate::grid::Grid>>>,
     subscribed: HashSet<u64>,
     sent_sizes: HashMap<u64, (u16, u16)>,
     rects: Vec<(u64, CellRect)>,
@@ -265,7 +265,11 @@ impl KumoWindow {
                     changed = true;
                 }
                 DaemonEvent::PaneFrame { frame } => {
-                    self.panes.entry(frame.pane_id).or_default().apply(&frame);
+                    self.panes
+                        .entry(frame.pane_id)
+                        .or_default()
+                        .borrow_mut()
+                        .apply(&frame);
                     changed = true;
                 }
                 DaemonEvent::Reply { message } => {

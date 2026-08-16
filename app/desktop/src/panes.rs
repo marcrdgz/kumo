@@ -87,7 +87,7 @@ impl Render for TerminalPane {
 // ---------------------------------------------------------------------------
 
 struct CanvasPane {
-    grid: Option<crate::grid::Grid>,
+    grid: Option<std::rc::Rc<std::cell::RefCell<crate::grid::Grid>>>,
     m: PaneMetrics,
 }
 
@@ -217,25 +217,26 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
         let line_h = px(m.cell_h);
 
         if let Some(grid) = &pane.grid {
+            let mut grid = grid.borrow_mut();
             for row in 0..grid.rows() {
-                let cells = grid.row(row).unwrap_or_default();
-                let art = crate::grid::row_art(cells, &data.font, data.default_fg, chrome.card());
-                let row_y = m.content_y + px(row as f32 * m.cell_h);
-                // Cell backgrounds first (merged spans), then the glyphs on top.
-                for span in &art.bg {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(m.content_x + px(span.x * m.cell_w), row_y),
-                            size(px(span.w * m.cell_w), px(m.cell_h)),
-                        ),
-                        span.color,
-                    ));
+                if let Some(art) = grid.row_art_cached(row, &data.font, data.default_fg, chrome.card()) {
+                    let row_y = m.content_y + px(row as f32 * m.cell_h);
+                    // Cell backgrounds first (merged spans), then the glyphs on top.
+                    for span in &art.bg {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(m.content_x + px(span.x * m.cell_w), row_y),
+                                size(px(span.w * m.cell_w), px(m.cell_h)),
+                            ),
+                            span.color,
+                        ));
+                    }
+                    let line = window
+                        .text_system()
+                        .shape_line(SharedString::from(art.text.clone()), font_size, &art.runs, None);
+                    let origin = point(m.content_x, row_y);
+                    let _ = line.paint(origin, line_h, window, cx);
                 }
-                let line = window
-                    .text_system()
-                    .shape_line(SharedString::from(art.text), font_size, &art.runs, None);
-                let origin = point(m.content_x, row_y);
-                let _ = line.paint(origin, line_h, window, cx);
             }
 
             if let Some((ccx, ccy)) = grid.cursor() {
