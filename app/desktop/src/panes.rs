@@ -335,9 +335,73 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
         }
     }
 
+    paint_dividers(data, window);
     paint_focus_ring(data, window);
-    paint_splitter_highlights(data, window);
     paint_pane_numbers(data, window, cx);
+}
+
+/// The pane dividers: one hairline centered in each split's separator gap —
+/// visible at rest so panes read as cleanly separated, tightening into the
+/// accent tone (with a narrow glow) on hover and while dragging.
+fn paint_dividers(data: &CanvasData, window: &mut Window) {
+    let active_id = data.drag_splitter.or(data.hover_splitter);
+    for split in &data.splitters {
+        let strip = &split.strip;
+        // The strip spans the separator cell ± 1 cell for grabbing; the
+        // divider itself is drawn at the separator cell's exact center.
+        let (cx_px, cy_px, w_px, h_px) = match split.dir {
+            SplitDir::Vertical => {
+                let center = data.canvas_origin.x + px((strip.x as f32 + 1.5) * data.cell_w);
+                (center, data.canvas_origin.y + px(strip.y as f32 * data.cell_h), px(0.0), px(strip.height as f32 * data.cell_h))
+            }
+            SplitDir::Horizontal => {
+                let center = data.canvas_origin.y + px((strip.y as f32 + 1.5) * data.cell_h);
+                (data.canvas_origin.x + px(strip.x as f32 * data.cell_w), center, px(strip.width as f32 * data.cell_w), px(0.0))
+            }
+        };
+
+        if active_id != Some(split.split_id) {
+            // Rest: a 1px hairline.
+            let bounds = match split.dir {
+                SplitDir::Vertical => Bounds::new(point(cx_px - px(0.5), cy_px), size(px(1.0), h_px)),
+                SplitDir::Horizontal => Bounds::new(point(cx_px, cy_px - px(0.5)), size(w_px, px(1.0))),
+            };
+            window.paint_quad(fill(bounds, theme::wash(0x10)));
+            continue;
+        }
+
+        // Hover/drag: the glow fades in on hover and snaps to full mid-drag.
+        let intensity = if data.drag_splitter == Some(split.split_id) {
+            1.0
+        } else {
+            data.splitter_glow
+        };
+        let chrome = data.chrome;
+        let glow = chrome.accent().with_a(0.12 * intensity);
+        let line = chrome.accent().with_a(0.55 + 0.45 * intensity);
+        match split.dir {
+            SplitDir::Vertical => {
+                window.paint_quad(fill(
+                    Bounds::new(point(cx_px - px(5.0), cy_px), size(px(10.0), h_px)),
+                    glow,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(point(cx_px - px(1.0), cy_px), size(px(2.0), h_px)),
+                    line,
+                ));
+            }
+            SplitDir::Horizontal => {
+                window.paint_quad(fill(
+                    Bounds::new(point(cx_px, cy_px - px(5.0)), size(w_px, px(10.0))),
+                    glow,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(point(cx_px, cy_px - px(1.0)), size(w_px, px(2.0))),
+                    line,
+                ));
+            }
+        }
+    }
 }
 
 /// A neon hairline around the focused pane's card — the accent tone of the
@@ -410,50 +474,6 @@ fn paint_empty_state(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Win
         bounds.center().y - px(7.0),
     );
     let _ = line.paint(origin, px(14.0), window, cx);
-}
-
-fn paint_splitter_highlights(data: &CanvasData, window: &mut Window) {
-    let active = data.drag_splitter.or(data.hover_splitter);
-    let Some(active_id) = active else { return };
-
-    for split in &data.splitters {
-        if split.split_id != active_id {
-            continue;
-        }
-
-        let chrome = data.chrome;
-        let strip = &split.strip;
-        let origin_x = data.canvas_origin.x + px(strip.x as f32 * data.cell_w);
-        let origin_y = data.canvas_origin.y + px(strip.y as f32 * data.cell_h);
-        // The glow fades in on hover and snaps to full while dragging.
-        let intensity = if data.drag_splitter == Some(active_id) {
-            1.0
-        } else {
-            data.splitter_glow
-        };
-        let glow_color = chrome.accent().with_a(0.18 * intensity);
-        let line_color = chrome.accent().with_a(0.55 + 0.45 * intensity);
-
-        let (glow_bounds, line_bounds) = match split.dir {
-            SplitDir::Vertical => {
-                let h = px(strip.height as f32 * data.cell_h);
-                (
-                    Bounds::new(point(origin_x - px(10.0), origin_y), size(px(22.0), h)),
-                    Bounds::new(point(origin_x + px(11.0), origin_y), size(px(2.0), h)),
-                )
-            }
-            SplitDir::Horizontal => {
-                let w = px(strip.width as f32 * data.cell_w);
-                (
-                    Bounds::new(point(origin_x, origin_y - px(10.0)), size(w, px(22.0))),
-                    Bounds::new(point(origin_x, origin_y + px(11.0)), size(w, px(2.0))),
-                )
-            }
-        };
-
-        window.paint_quad(fill(glow_bounds, glow_color));
-        window.paint_quad(fill(line_bounds, line_color));
-    }
 }
 
 // ---------------------------------------------------------------------------
