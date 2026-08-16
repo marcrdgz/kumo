@@ -59,6 +59,8 @@ pub(crate) const SIDEBAR_W_COLLAPSED: f32 = 48.0;
 /// Height of the custom drag-to-move titlebar (replaces the hidden native bar).
 pub(crate) const TITLEBAR_H: f32 = 36.0;
 const STATUS_H: f32 = 30.0;
+/// Cursor blink half-period, the common terminal cadence.
+const CURSOR_BLINK: Duration = Duration::from_millis(530);
 
 pub(crate) struct KumoWindow {
     to_view: mpsc::Receiver<DaemonEvent>,
@@ -94,6 +96,9 @@ pub(crate) struct KumoWindow {
     update_banner_dismissed: bool,
     updating_cli: bool,
     updating_desktop: bool,
+    // cursor blink (toggled by the pump loop; reset to solid on keystrokes)
+    cursor_on: bool,
+    last_blink: std::time::Instant,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -156,6 +161,8 @@ impl KumoWindow {
             update_banner_dismissed: false,
             updating_cli: false,
             updating_desktop: false,
+            cursor_on: true,
+            last_blink: std::time::Instant::now(),
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -249,6 +256,12 @@ impl KumoWindow {
                     }
                 }
             }
+        }
+        // Blink the focused pane's cursor (~530 ms phase, terminal convention).
+        if self.last_blink.elapsed() >= CURSOR_BLINK {
+            self.last_blink = std::time::Instant::now();
+            self.cursor_on = !self.cursor_on;
+            changed = true;
         }
         while let Ok(msg) = self.to_view.try_recv() {
             match msg {
@@ -1147,6 +1160,9 @@ fn main() {
             view.update(cx, move |this, _cx| {
                 if let Some(key) = wire_key(&ks) {
                     let _ = this.send(Command::Input { key });
+                    // Typing resets the blink phase so the cursor shows solid.
+                    this.cursor_on = true;
+                    this.last_blink = std::time::Instant::now();
                 }
             });
         })

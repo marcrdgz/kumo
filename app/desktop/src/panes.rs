@@ -122,6 +122,8 @@ pub(crate) struct CanvasData {
     cell_w: f32,
     cell_h: f32,
     sel: Option<Sel>,
+    cursor_on: bool,
+    focused_pid: Option<u64>,
 }
 
 pub(crate) struct PaneCanvas {
@@ -157,6 +159,8 @@ impl PaneCanvas {
             cell_w: model.cell_w,
             cell_h: model.cell_h,
             sel: model.sel,
+            cursor_on: model.cursor_on,
+            focused_pid: model.active_session().map(|s| s.focus),
         }
     }
 }
@@ -282,7 +286,9 @@ fn paint_canvas(data: &CanvasData, bounds: Bounds<Pixels>, window: &mut Window, 
                 }
             }
 
-            if let Some((ccx, ccy)) = grid.cursor() {
+            // The focused pane's cursor blinks; unfocused panes stay steady.
+            let cursor_visible = data.focused_pid != Some(pane.pid) || data.cursor_on;
+            if let Some((ccx, ccy)) = grid.cursor().filter(|_| cursor_visible) {
                 let cw = px(m.cell_w);
                 let cursor_y = m.content_y + px(ccy as f32 * m.cell_h) + px(m.cell_h) - px(1.5);
                 window.paint_quad(fill(
