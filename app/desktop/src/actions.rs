@@ -64,6 +64,31 @@ impl Chord {
     }
 }
 
+/// Logical group a binding belongs to, used to organize the keybind overlay.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Group {
+    Layout,
+    Panes,
+    Sessions,
+    Chrome,
+    General,
+}
+
+impl Group {
+    pub(crate) const ALL: [Group; 5] =
+        [Group::Layout, Group::Panes, Group::Sessions, Group::Chrome, Group::General];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Group::Layout => "layout",
+            Group::Panes => "panes",
+            Group::Sessions => "sessions",
+            Group::Chrome => "chrome",
+            Group::General => "general",
+        }
+    }
+}
+
 /// One leader binding: the dispatch chord, showcase strings, and its action.
 /// `keys`/`desc` feed the keybind overlay (settings panel).
 #[allow(dead_code)]
@@ -72,6 +97,7 @@ pub(crate) struct Binding {
     pub(crate) chord: Chord,
     pub(crate) keys: &'static str,
     pub(crate) desc: &'static str,
+    pub(crate) group: Group,
     pub(crate) action: Action,
 }
 
@@ -129,6 +155,7 @@ pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> 
             },
             keys,
             desc,
+            group: action_group(*action),
             action: *action,
         })
         .collect();
@@ -136,9 +163,51 @@ pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> 
         let Some(action) = action_from_id(action_str) else { continue };
         let Some(chord) = parse_chord(chord_str) else { continue };
         out.retain(|b| b.chord != chord);
-        out.push(Binding { keys: "", desc: action_desc(action), chord, action });
+        out.push(Binding {
+            keys: "",
+            desc: action_desc(action),
+            group: action_group(action),
+            chord,
+            action,
+        });
     }
     out
+}
+
+/// Showcase group for an action (organizes the keybind overlay).
+pub(crate) fn action_group(action: Action) -> Group {
+    match action {
+        Action::SplitVertical
+        | Action::SplitHorizontal
+        | Action::Zoom
+        | Action::Focus(_)
+        | Action::Resize(_) => Group::Layout,
+        Action::SplitAi | Action::ClosePane | Action::CyclePane | Action::SwapPanes
+        | Action::RotateLayout | Action::ShowPaneNumbers => Group::Panes,
+        Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
+        | Action::JumpSession(_) => Group::Sessions,
+        Action::ToggleSidebar => Group::Chrome,
+        Action::Detach | Action::ShowKeybinds => Group::General,
+    }
+}
+
+/// Human-readable form of a chord, e.g. `v`, `ctrl+b` (for overlay headers).
+pub(crate) fn chord_display(c: &Chord) -> String {
+    let mut s = String::new();
+    if c.ctrl {
+        s.push_str("ctrl+");
+    }
+    if c.shift {
+        s.push_str("shift+");
+    }
+    if c.alt {
+        s.push_str("alt+");
+    }
+    if c.super_key {
+        s.push_str("super+");
+    }
+    s.push_str(&c.key);
+    s
 }
 
 /// The default leader chord: Ctrl+B, or the config's `leader` when set.

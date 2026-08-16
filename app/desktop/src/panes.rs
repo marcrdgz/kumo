@@ -115,7 +115,7 @@ struct CanvasPane {
 pub(crate) struct CanvasData {
     font: Font,
     default_fg: Hsla,
-    chrome: &'static Chrome,
+    chrome: Chrome,
     panes: Vec<CanvasPane>,
     splitters: Vec<SplitGeom>,
     hover_splitter: Option<u64>,

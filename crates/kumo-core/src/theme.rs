@@ -214,3 +214,17 @@ pub const THEMES: [Theme; 5] = [
 
 /// Index of the theme applied on a fresh start.
 pub const DEFAULT_THEME_IDX: usize = 1;
+
+/// Resolve a theme's chrome color reference (accent/fg) to 0xRRGGBB — RGB
+/// directly, or through the theme's ANSI palette for indexed colors. Used by
+/// clients that derive their own chrome from a shared theme.
+pub fn chrome_hex(color: RColor, theme: &Theme) -> Option<u32> {
+    match color {
+        RColor::Rgb(r, g, b) => Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32),
+        RColor::Indexed(i) => theme
+            .palette
+            .get(i as usize)
+            .map(|c| ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32),
+        _ => None,
+    }
+}

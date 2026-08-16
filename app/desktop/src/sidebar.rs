@@ -37,7 +37,7 @@ impl Render for Sidebar {
         let layout = data.layout.clone();
 
         if collapsed {
-            return self.collapsed_rail(cx, &layout, chrome);
+            return self.collapsed_rail(cx, &layout, &chrome);
         }
 
         div()
@@ -48,8 +48,8 @@ impl Render for Sidebar {
             .border_color(theme::hairline())
             .flex()
             .flex_col()
-            .child(self.header(cx, connected, chrome))
-            .child(self.body(cx, layout.as_ref(), chrome))
+            .child(self.header(cx, connected, &chrome))
+            .child(self.body(cx, layout.as_ref(), &chrome))
     }
 }
 

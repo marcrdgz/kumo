@@ -144,10 +144,32 @@ pub const DEFAULT: Chrome = Chrome {
     idle: 0x63_63_66,
 };
 
-/// The chrome palette (comet frost; index kept for call-site parity with the
-/// daemon's `Theme` events).
-pub fn chrome(_idx: usize) -> &'static Chrome {
-    &DEFAULT
+/// The chrome palette for a theme index: the comet frost neutrals with the
+/// accent and text tones re-derived from the daemon's shared theme, so
+/// `SetTheme` re-colors the chrome alongside the terminal panes. Index 0 (or
+/// out of range) is the stock frost.
+pub fn chrome(idx: usize) -> Chrome {
+    let Some(theme) = kumo_core::theme::THEMES.get(idx) else { return DEFAULT };
+    let mut chrome = DEFAULT;
+    if let Some(accent) = kumo_core::theme::chrome_hex(theme.accent, theme) {
+        chrome.accent = accent;
+    }
+    if let Some(text) = kumo_core::theme::chrome_hex(theme.fg, theme) {
+        chrome.text = text;
+        // Muted/faint track the text tone, dimmed by mixing toward black.
+        chrome.muted = dim(text, 0.75);
+        chrome.faint = dim(text, 0.55);
+    }
+    chrome
+}
+
+/// Blend `hex` toward black by `factor` (1.0 = unchanged).
+fn dim(hex: u32, factor: f32) -> u32 {
+    let ch = |shift: u32| -> u32 {
+        let v = ((hex >> shift) & 0xff) as f32;
+        ((v * factor).round() as u32) << shift
+    };
+    ch(16) | ch(8) | ch(0)
 }
 
 // ---------------------------------------------------------------------------

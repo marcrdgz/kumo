@@ -148,6 +148,13 @@ pub(crate) struct KumoWindow {
     picker: Option<Picker>,
     /// The open context menu, if any.
     ctx_menu: Option<CtxMenu>,
+    /// Theme index pushed by the daemon (drives chrome + pane colors).
+    theme_idx: usize,
+    /// The keybind overlay (`leader+?`).
+    keybinds_open: bool,
+    /// The settings panel (gear in the titlebar).
+    settings_open: bool,
+    settings_about: bool,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -219,6 +226,10 @@ impl KumoWindow {
             popup: None,
             picker: None,
             ctx_menu: None,
+            theme_idx: 0,
+            keybinds_open: false,
+            settings_open: false,
+            settings_about: false,
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -249,10 +260,10 @@ impl KumoWindow {
         self.from_view.send(msg).map_err(|_| ())
     }
 
-    /// The active chrome palette (comet frost; the daemon's `Theme` events
-    /// re-color the terminal panes themselves, not the desktop chrome).
-    pub(crate) fn chrome(&self) -> &'static theme::Chrome {
-        theme::chrome(0)
+    /// The active chrome palette — the comet frost re-accented by the
+    /// daemon's current theme (`SetTheme` re-colors chrome and panes alike).
+    pub(crate) fn chrome(&self) -> theme::Chrome {
+        theme::chrome(self.theme_idx)
     }
 
     /// The width the sidebar currently occupies (its collapsed rail or the
@@ -363,6 +374,10 @@ impl KumoWindow {
                         picker.items = items;
                         changed = true;
                     }
+                }
+                DaemonEvent::Theme { idx } => {
+                    self.theme_idx = idx;
+                    changed = true;
                 }
                 DaemonEvent::Restarting => {
                     self.status = SharedString::from("daemon restarting…");
@@ -823,6 +838,15 @@ impl KumoWindow {
     /// key was consumed (popup, leader chord, or leader-mode dispatch) and
     /// must not be typed into the pane.
     fn on_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> bool {
+        // The overlay panels (keybinds / settings) own the keyboard; esc closes.
+        if self.keybinds_open || self.settings_open {
+            if ks.key == "escape" {
+                self.keybinds_open = false;
+                self.settings_open = false;
+            }
+            cx.notify();
+            return true;
+        }
         // The worktree picker owns the keyboard while open.
         if self.picker.is_some() {
             match ks.key.as_str() {
@@ -999,7 +1023,7 @@ impl KumoWindow {
                 let _ = self.send(Command::Detach);
             }
             Action::ShowKeybinds => {
-                self.status = SharedString::from("keybind overlay: coming with the settings update");
+                self.keybinds_open = true;
                 cx.notify();
             }
         }
@@ -1278,6 +1302,224 @@ impl Render for KumoWindow {
             .children(self.popup_layer())
             .children(self.picker_layer(cx))
             .children(self.ctx_menu_layer(cx))
+            .children(self.keybinds_layer())
+            .children(self.settings_layer(cx))
+    }
+}
+
+impl KumoWindow {
+    /// The keybind overlay (`leader+?`): the runtime keymap grouped, sharing
+    /// the same table dispatch reads so it can never drift.
+    fn keybinds_layer(&self) -> Option<impl IntoElement> {
+        if !self.keybinds_open {
+            return None;
+        }
+        let chrome = self.chrome();
+        let mut title_style = self.base.clone();
+        title_style.color = chrome.accent();
+        title_style.font_size = px(12.0).into();
+        title_style.font_weight = gpui::FontWeight::BOLD;
+
+        let mut body = div().flex().flex_col().gap(px(2.0));
+        for group in actions::Group::ALL {
+            body = body.child(
+                div()
+                    .pt(px(8.0))
+                    .pb(px(2.0))
+                    .child(group.label())
+                    .text_size(px(9.5))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(chrome.muted()),
+            );
+            let mut seen: Vec<&str> = Vec::new();
+            for binding in self.keymap.iter().filter(|b| b.group == group && !b.keys.is_empty()) {
+                if seen.contains(&binding.keys) {
+                    continue;
+                }
+                seen.push(binding.keys);
+                body = body.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(10.0))
+                        .py(px(1.5))
+                        .child(
+                            div()
+                                .w(px(72.0))
+                                .flex_none()
+                                .child(binding.keys)
+                                .text_size(px(11.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(chrome.accent()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .child(binding.desc)
+                                .text_size(px(11.5))
+                                .text_color(chrome.text()),
+                        ),
+                );
+            }
+        }
+        let mut hint_style = self.dim.clone();
+        hint_style.font_size = px(11.0).into();
+        let leader = actions::chord_display(&self.leader);
+        Some(
+            div()
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(0x00000066))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("keybinds-scroll")
+                        .w(px(460.0))
+                        .max_h(px(460.0))
+                        .overflow_y_scroll()
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(theme::hairline())
+                        .bg(gpui::rgba(0x121218f2))
+                        .px(px(18.0))
+                        .py(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            StyledText::new(SharedString::from(format!("keybindings · leader {leader}")))
+                                .with_default_highlights(&title_style, []),
+                        )
+                        .child(body)
+                        .child(
+                            StyledText::new(SharedString::from("esc to close"))
+                                .with_default_highlights(&hint_style, []),
+                        ),
+                ),
+        )
+    }
+
+    /// The settings panel (gear in the titlebar): theme picker + about.
+    fn settings_layer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.settings_open {
+            return None;
+        }
+        let chrome = self.chrome();
+        let mut title_style = self.base.clone();
+        title_style.color = chrome.accent();
+        title_style.font_size = px(12.0).into();
+        title_style.font_weight = gpui::FontWeight::BOLD;
+
+        let mut card = div()
+            .w(px(440.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme::hairline())
+            .bg(gpui::rgba(0x121218f2))
+            .px(px(18.0))
+            .py(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+
+        // Tabs: appearance / about.
+        let mut tabs = div().flex().gap(px(14.0));
+        for (label, about) in [("appearance", false), ("about", true)] {
+            let active = self.settings_about == about;
+            tabs = tabs.child(
+                div()
+                    .pb(px(2.0))
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(if active { chrome.accent() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.settings_about = about;
+                        cx.notify();
+                    }))
+                    .child(label)
+                    .text_size(px(12.0))
+                    .font_weight(if active { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
+                    .text_color(if active { chrome.accent() } else { chrome.muted() }),
+            );
+        }
+        card = card.child(tabs);
+
+        if self.settings_about {
+            let version = env!("CARGO_PKG_VERSION");
+            let update = self.updates_line().unwrap_or_else(|| "up to date".into());
+            let mut body_style = self.base.clone();
+            body_style.font_size = px(12.0).into();
+            card = card
+                .child(StyledText::new(SharedString::from("KUMO".to_string())).with_default_highlights(&title_style, []))
+                .child(
+                    StyledText::new(SharedString::from(format!("desktop {version} · {update}")))
+                        .with_default_highlights(&body_style, []),
+                );
+        } else {
+            card = card.child(
+                StyledText::new(SharedString::from("theme")).with_default_highlights(&title_style, []),
+            );
+            for (idx, t) in kumo_core::theme::THEMES.iter().enumerate() {
+                let active = idx == self.theme_idx;
+                card = card.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(theme::RADIUS_MD))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme::wash(0x08)))
+                        .bg(if active { chrome.accent_soft() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            let _ = this.send(Command::SetTheme { idx });
+                        }))
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(if active { chrome.accent() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(t.name)
+                                .text_size(px(12.0))
+                                .text_color(if active { chrome.accent() } else { chrome.text() }),
+                        ),
+                );
+            }
+        }
+        let mut hint_style = self.dim.clone();
+        hint_style.font_size = px(11.0).into();
+        card = card.child(
+            StyledText::new(SharedString::from("esc to close")).with_default_highlights(&hint_style, []),
+        );
+        Some(
+            div()
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(0x00000066))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(card),
+        )
     }
 }
 
@@ -1474,6 +1716,26 @@ impl KumoWindow {
                 }),
             )
             .child(StyledText::new(SharedString::from("KUMO")).with_default_highlights(&wordmark, []))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.0))
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::wash(0x0c)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.titlebar_drag_armed = false;
+                        this.settings_open = !this.settings_open;
+                        cx.notify();
+                    }))
+                    .child("⚙")
+                    .text_size(px(13.0))
+                    .text_color(chrome.muted()),
+            )
     }
 }
 
