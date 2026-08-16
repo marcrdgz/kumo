@@ -11,6 +11,8 @@
 //! (`#060606`/`#0d0d0d`) with an indigo accent (`#7c86ff`), hairline
 //! `rgba(255,255,255,0.08)` borders, and emerald/amber status tones.
 
+#![allow(dead_code)]
+
 use gpui::{BoxShadow, Corners, Hsla, Pixels, px, point, rgba};
 
 use kumo_protocol::AgentStatus;
@@ -19,11 +21,13 @@ use kumo_protocol::AgentStatus;
 /// juggling.
 #[derive(Clone, Copy, Debug)]
 pub struct Chrome {
-    /// Frost scrim painted over the blurred desktop (`#080808` at 80% on
+    /// Frost scrim painted over the blurred window background (`#080808` at 80% on
     /// macOS — see [`Chrome::glass`]).
     pub glass: u32,
     pub glass_alpha: u32,
-    /// Raised plate tone (hover/active fills, pills that sit proud).
+    /// Shell / sidebar surface (`#0d0d0d`).
+    pub surface: u32,
+    /// Raised surface: opaque pills and chips that sit proud of the panel.
     pub surface_raised: u32,
     /// Terminal-card tone; painted translucent ([`Chrome::card`]) so the frost
     /// shows through the panes.
@@ -41,6 +45,8 @@ pub struct Chrome {
     pub working: u32,
     /// Blocked status dot — amber.
     pub blocked: u32,
+    /// Idle status dot.
+    pub idle: u32,
 }
 
 impl Chrome {
@@ -52,11 +58,20 @@ impl Chrome {
         rgba_hsla((self.glass << 8) | self.glass_alpha)
     }
 
-    /// Translucent raised plate — hover/active washes sit at a low alpha so the
-    /// frost stays visible through them (comet's glass lesson: high-opacity
-    /// fills bury the blur and read flat).
+    /// Shell / sidebar surface (`#0d0d0d`). On glass, this is translucent so the
+    /// frost reads through it.
+    pub fn surface(&self) -> Hsla {
+        rgba_hsla((self.surface << 8) | 0xff)
+    }
+
+    /// Translucent surface for glass compositing — the sidebar on macOS.
+    pub fn surface_glass(&self) -> Hsla {
+        rgba_hsla((self.surface << 8) | 0x80) // 50% alpha
+    }
+
+    /// Raised plate tone (hover/active fills, pills that sit proud).
     pub fn surface_raised(&self) -> Hsla {
-        rgba_hsla((self.surface_raised << 8) | 0x59)
+        rgba_hsla((self.surface_raised << 8) | 0xff)
     }
 
     /// Terminal-card fill: translucent so the frosted backdrop shows through
@@ -85,12 +100,17 @@ impl Chrome {
         rgba_hsla((self.muted << 8) | 0xff)
     }
 
+    /// Faint text.
+    pub fn faint(&self) -> Hsla {
+        rgba_hsla((self.faint << 8) | 0xff)
+    }
+
     /// Status-dot color for an agent lifecycle state.
     pub fn status(&self, status: AgentStatus) -> Hsla {
         let hex = match status {
             AgentStatus::Working => self.working,
             AgentStatus::Blocked => self.blocked,
-            AgentStatus::Idle => self.faint,
+            AgentStatus::Idle => self.idle,
         };
         rgba_hsla((hex << 8) | 0xff)
     }
@@ -110,16 +130,18 @@ impl Chrome {
 /// still re-color the terminal panes themselves).
 pub const DEFAULT: Chrome = Chrome {
     glass: 0x08_08_08,
-    glass_alpha: 0xcc, // 80%
+    glass_alpha: 0x80, // 50% — translúcido para que el blur del desktop se vea
+    surface: 0x0d_0d_0d,
     surface_raised: 0x24_24_24,
-    card: 0x0a_0a_0a,
-    card_alpha: 0x8c, // 55%
+    card: 0x1a_1a_1a,
+    card_alpha: 0x99, // 60% — translúcido pero visible
     accent: 0x7c_86_ff, // indigo-400
     text: 0xeb_eb_eb,
     muted: 0xb4_b4_b4,
     faint: 0x8e_8e_8e,
     working: 0x4a_de_80, // emerald-400
     blocked: 0xff_b9_00, // amber-400
+    idle: 0x63_63_66,
 };
 
 /// The chrome palette (comet frost; index kept for call-site parity with the

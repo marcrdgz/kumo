@@ -73,7 +73,11 @@ fn color(hex: u32) -> Hsla {
 /// Shape one row of cells into `(text, runs)`. Every visible cell gets a run
 /// (blank cells become spaces with the default foreground), so the runs tile
 /// the text exactly. Continuation cells after a wide grapheme are skipped.
-pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: Hsla) -> (String, Vec<TextRun>) {
+///
+/// Background colors are intentionally NOT painted — the translucent card
+/// background shows through, giving a uniform frosted-glass look instead of
+/// opaque black cells from the terminal's default background.
+pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, _default_bg: Hsla) -> (String, Vec<TextRun>) {
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
     for cell in cells {
@@ -87,14 +91,10 @@ pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: H
             continue;
         }
         let mut fg = cell.fg.map(color);
-        let mut bg = cell.bg.map(color);
         if cell.inverse {
-            std::mem::swap(&mut fg, &mut bg);
-            if bg.is_none() {
-                bg = Some(default_fg);
-            }
+            // Inverse: swap fg/bg, but since we don't paint bg, just brighten fg
             if fg.is_none() {
-                fg = Some(default_bg);
+                fg = Some(default_fg);
             }
         }
         let mut fg = fg.unwrap_or(default_fg);
@@ -110,7 +110,7 @@ pub fn row_runs(cells: &[WireCell], font: &Font, default_fg: Hsla, default_bg: H
             len,
             font: font.clone(),
             color: fg,
-            background_color: bg,
+            background_color: None, // no background — let the card's translucent fill show through
             underline,
             strikethrough: None,
         });
