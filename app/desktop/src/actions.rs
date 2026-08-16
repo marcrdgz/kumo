@@ -65,6 +65,8 @@ impl Chord {
 }
 
 /// One leader binding: the dispatch chord, showcase strings, and its action.
+/// `keys`/`desc` feed the keybind overlay (settings panel).
+#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct Binding {
     pub(crate) chord: Chord,

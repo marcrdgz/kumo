@@ -127,14 +127,23 @@ impl KumoWindow {
     /// `leader+w`: name a git worktree branch for a new session. Requires the
     /// active session's workspace to be a git repository.
     pub(crate) fn open_worktree_popup(&mut self, cx: &mut gpui::Context<Self>) {
-        let ws = self.active_session().map(|s| s.workspace.clone());
+        let session = self.active_session().map(|s| s.name.clone()).unwrap_or_default();
+        self.open_worktree_popup_for(session, cx);
+    }
+
+    /// Context menu → new worktree for a specific session.
+    pub(crate) fn open_worktree_popup_for(&mut self, session: String, cx: &mut gpui::Context<Self>) {
+        let ws = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.sessions.iter().find(|s| s.name == session))
+            .map(|s| s.workspace.clone());
         if ws.as_deref().and_then(kumo_core::worktrees::repo_root).is_none() {
             let shown = ws.map(|w| w.display().to_string()).unwrap_or_default();
             self.status = SharedString::from(format!("{shown}: not a git repository"));
             cx.notify();
             return;
         }
-        let session = self.active_session().map(|s| s.name.clone()).unwrap_or_default();
         self.popup = Some(NamePopup::open(
             PopupTarget::NewWorktree(session),
             "new worktree (branch name)",

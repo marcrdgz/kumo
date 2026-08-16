@@ -49,6 +49,39 @@ enum UpdateMsg {
     DesktopDone(Result<(), String>),
 }
 
+/// The open worktree picker (session → worktree rows from `WorktreeList`).
+pub(crate) struct Picker {
+    pub(crate) session: String,
+    pub(crate) items: Vec<kumo_protocol::WireWorktree>,
+    pub(crate) selected: usize,
+}
+
+/// What a context menu operates on (right-click on a pane or a session row).
+#[derive(Clone)]
+pub(crate) enum CtxTarget {
+    Pane(u64),
+    Session(String),
+}
+
+/// The open context menu and where it drops down from.
+pub(crate) struct CtxMenu {
+    pub(crate) target: CtxTarget,
+    pub(crate) origin: Point<Pixels>,
+}
+
+/// One selectable row of a context menu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CtxItem {
+    Rename,
+    Zoom,
+    SplitV,
+    SplitH,
+    Close,
+    NewWorktree,
+    OpenWorktree,
+    Kill,
+}
+
 use crate::panes::{
     CellRect, PaneMetrics, Sel, SplitDrag, SplitGeom, TerminalPane,
 };
@@ -111,6 +144,10 @@ pub(crate) struct KumoWindow {
     pane_numbers: Option<std::time::Instant>,
     /// The open name popup (new session / worktree / rename), if any.
     popup: Option<popup::NamePopup>,
+    /// The open worktree picker, if any.
+    picker: Option<Picker>,
+    /// The open context menu, if any.
+    ctx_menu: Option<CtxMenu>,
     // scaling (recomputed every frame from the window size)
     cell_w: f32,
     cell_h: f32,
@@ -180,6 +217,8 @@ impl KumoWindow {
             leader_active: false,
             pane_numbers: None,
             popup: None,
+            picker: None,
+            ctx_menu: None,
             cell_w: 7.8,
             cell_h: 17.0,
             font_size: 13.0,
@@ -317,6 +356,14 @@ impl KumoWindow {
                     self.status = SharedString::from(message);
                     changed = true;
                 }
+                DaemonEvent::Worktrees { items } => {
+                    // Fill the open picker (replies arrive only on request).
+                    if let Some(picker) = self.picker.as_mut() {
+                        picker.selected = picker.selected.min(items.len().saturating_sub(1));
+                        picker.items = items;
+                        changed = true;
+                    }
+                }
                 DaemonEvent::Restarting => {
                     self.status = SharedString::from("daemon restarting…");
                     changed = true;
@@ -385,6 +432,74 @@ impl KumoWindow {
 
     pub(crate) fn select_session(&mut self, name: String) {
         let _ = self.send(Command::SessionFocus { name });
+    }
+
+    // ------------------------------------------------------------------
+    // Worktree picker & context menus
+    // ------------------------------------------------------------------
+
+    /// Open the worktree picker for a session (rows arrive via `Worktrees`).
+    pub(crate) fn open_worktree_picker(&mut self, session: String, cx: &mut Context<Self>) {
+        let _ = self.send(Command::WorktreeList { session: session.clone() });
+        self.picker = Some(Picker { session, items: Vec::new(), selected: 0 });
+        self.ctx_menu = None;
+        cx.notify();
+    }
+
+    /// `enter` (or a row click) in the picker: open that worktree's session.
+    fn confirm_picker(&mut self, cx: &mut Context<Self>) {
+        let picker = self.picker.take();
+        if let Some(p) = picker {
+            if let Some(item) = p.items.get(p.selected) {
+                let _ = self.send(Command::WorktreeOpen { session: p.session, path: item.path.clone() });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Right-click on a sidebar session row: drop the session menu there.
+    pub(crate) fn open_session_ctx_menu(&mut self, name: String, origin: Point<Pixels>, cx: &mut Context<Self>) {
+        self.ctx_menu = Some(CtxMenu { target: CtxTarget::Session(name), origin });
+        cx.notify();
+    }
+
+    /// Run one context-menu item against the menu's target.
+    fn run_ctx_item(&mut self, item: CtxItem, cx: &mut Context<Self>) {
+        let Some(menu) = self.ctx_menu.take() else { return };
+        match (&menu.target, item) {
+            (CtxTarget::Pane(pid), CtxItem::Rename) => self.open_rename_pane_popup(*pid, cx),
+            (CtxTarget::Pane(_), CtxItem::Zoom) => {
+                if let Some(session) = self.active_session().map(|s| s.name.clone()) {
+                    let _ = self.send(Command::SessionZoom { session });
+                }
+            }
+            (CtxTarget::Pane(_), CtxItem::SplitV) => {
+                if let Some(session) = self.active_session().map(|s| s.name.clone()) {
+                    let _ = self.send(Command::PaneSplit { session, dir: SplitDir::Vertical, is_ai: false });
+                }
+            }
+            (CtxTarget::Pane(_), CtxItem::SplitH) => {
+                if let Some(session) = self.active_session().map(|s| s.name.clone()) {
+                    let _ = self.send(Command::PaneSplit { session, dir: SplitDir::Horizontal, is_ai: false });
+                }
+            }
+            (CtxTarget::Pane(pid), CtxItem::Close) => {
+                if let Some(session) = self.active_session().map(|s| s.name.clone()) {
+                    let _ = self.send(Command::PaneClose { session, pane_id: Some(*pid) });
+                }
+            }
+            (CtxTarget::Session(name), CtxItem::Rename) => self.open_rename_session_popup(name.clone(), cx),
+            (CtxTarget::Session(name), CtxItem::NewWorktree) => self.open_worktree_popup_for(name.clone(), cx),
+            (CtxTarget::Session(name), CtxItem::OpenWorktree) => {
+                self.open_worktree_picker(name.clone(), cx);
+                return;
+            }
+            (CtxTarget::Session(name), CtxItem::Kill) => {
+                let _ = self.send(Command::SessionKill { name: name.clone() });
+            }
+            _ => {}
+        }
+        cx.notify();
     }
 
     /// Pixel card bounds + per-pane cell metrics for a pane rect. Cells are
@@ -530,7 +645,22 @@ impl KumoWindow {
         }
     }
 
-    fn on_mouse_down(&mut self, ev: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Any click dismisses an open context menu (its own rows stop
+        // propagation so they run instead of just closing).
+        if self.ctx_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
+        // Right press on a pane drops its context menu there.
+        if ev.button == MouseButton::Right {
+            if let Some((session, pid, _, _)) = self.pane_at_pixel(ev.position) {
+                let _ = self.send(Command::PaneFocus { session, pane_id: pid });
+                self.ctx_menu = Some(CtxMenu { target: CtxTarget::Pane(pid), origin: ev.position });
+                cx.notify();
+            }
+            return;
+        }
         let button = wire_button(ev.button);
         // Left press on a divider starts a resize drag (the daemon owns the
         // ratios; we stream `PaneResizeTo` as the pointer moves).
@@ -693,6 +823,30 @@ impl KumoWindow {
     /// key was consumed (popup, leader chord, or leader-mode dispatch) and
     /// must not be typed into the pane.
     fn on_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> bool {
+        // The worktree picker owns the keyboard while open.
+        if self.picker.is_some() {
+            match ks.key.as_str() {
+                "escape" => self.picker = None,
+                "enter" => self.confirm_picker(cx),
+                "j" | "down" => {
+                    if let Some(p) = self.picker.as_mut() {
+                        if !p.items.is_empty() {
+                            p.selected = (p.selected + 1) % p.items.len();
+                        }
+                    }
+                }
+                "k" | "up" => {
+                    if let Some(p) = self.picker.as_mut() {
+                        if !p.items.is_empty() {
+                            p.selected = (p.selected + p.items.len() - 1) % p.items.len();
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return true;
+        }
         // The open popup owns the keyboard entirely.
         if self.popup.is_some() {
             match ks.key.as_str() {
@@ -1122,6 +1276,177 @@ impl Render for KumoWindow {
                     ),
             )
             .children(self.popup_layer())
+            .children(self.picker_layer(cx))
+            .children(self.ctx_menu_layer(cx))
+    }
+}
+
+impl KumoWindow {
+    /// The worktree picker: a modal list of the session repo's worktrees.
+    fn picker_layer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let picker = self.picker.as_ref()?;
+        let chrome = self.chrome();
+        let mut title_style = self.base.clone();
+        title_style.color = chrome.accent();
+        title_style.font_size = px(12.0).into();
+        title_style.font_weight = gpui::FontWeight::BOLD;
+
+        let mut list = div().flex().flex_col().gap(px(2.0));
+        if picker.items.is_empty() {
+            list = list.child(
+                div()
+                    .py(px(8.0))
+                    .child("loading worktrees…")
+                    .text_size(px(11.5))
+                    .text_color(chrome.muted()),
+            );
+        }
+        for (i, item) in picker.items.iter().enumerate() {
+            let selected = i == picker.selected;
+            let branch = item.branch.clone().unwrap_or_else(|| "detached".into());
+            let label = if item.is_main {
+                format!("{branch} · main")
+            } else {
+                branch
+            };
+            let label = if item.open { format!("{label} · open") } else { label };
+            list = list.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(theme::RADIUS_MD))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::wash(0x08)))
+                    .bg(if selected { chrome.accent_soft() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        if let Some(p) = this.picker.as_mut() {
+                            p.selected = i;
+                        }
+                        this.confirm_picker(cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .child(label)
+                            .text_size(px(12.0))
+                            .text_color(if selected { chrome.accent() } else { chrome.text() }),
+                    ),
+            );
+        }
+        let mut hint_style = self.dim.clone();
+        hint_style.font_size = px(11.0).into();
+        Some(
+            div()
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(0x00000066))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("picker-scroll")
+                        .w(px(440.0))
+                        .max_h(px(420.0))
+                        .overflow_y_scroll()
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(theme::hairline())
+                        .bg(gpui::rgba(0x121218f2))
+                        .px(px(18.0))
+                        .py(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(StyledText::new(SharedString::from("open worktree")).with_default_highlights(&title_style, []))
+                        .child(list)
+                        .child(
+                            StyledText::new(SharedString::from("j/k to move · enter to open · esc to cancel"))
+                                .with_default_highlights(&hint_style, []),
+                        ),
+                ),
+        )
+    }
+
+    /// The right-click context menu for a pane or a sidebar session row.
+    fn ctx_menu_layer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let menu = self.ctx_menu.as_ref()?;
+        let chrome = self.chrome();
+        let items: Vec<CtxItem> = match &menu.target {
+            CtxTarget::Pane(_) => vec![
+                CtxItem::Rename,
+                CtxItem::Zoom,
+                CtxItem::SplitV,
+                CtxItem::SplitH,
+                CtxItem::Close,
+            ],
+            CtxTarget::Session(_) => {
+                vec![CtxItem::Rename, CtxItem::NewWorktree, CtxItem::OpenWorktree, CtxItem::Kill]
+            }
+        };
+        let zoomed = self.active_session().map(|s| s.zoom).unwrap_or(false);
+        let mut col = div()
+            .min_w(px(170.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme::hairline())
+            .bg(gpui::rgba(0x16161ef5))
+            .py(px(4.0))
+            .flex()
+            .flex_col();
+        for item in items {
+            let label = match item {
+                CtxItem::Rename => "rename",
+                CtxItem::Zoom => if zoomed { "unzoom" } else { "zoom" },
+                CtxItem::SplitV => "split vertical",
+                CtxItem::SplitH => "split horizontal",
+                CtxItem::Close => "close pane",
+                CtxItem::NewWorktree => "new worktree",
+                CtxItem::OpenWorktree => "open worktree",
+                CtxItem::Kill => "close session",
+            };
+            let danger = matches!(item, CtxItem::Close | CtxItem::Kill);
+            col = col.child(
+                div()
+                    .w_full()
+                    .px(px(12.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .mx(px(4.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::wash(0x10)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.run_ctx_item(item, cx);
+                    }))
+                    .child(label)
+                    .text_size(px(12.0))
+                    .text_color(if danger { gpui::rgba(0xff7b72ff).into() } else { chrome.text() }),
+            );
+        }
+        // No backdrop here: clicks outside the menu bubble to the root
+        // handler, which dismisses the menu.
+        Some(
+            div()
+                .absolute()
+                .size_full()
+                .child(
+                    div()
+                        .absolute()
+                        .top(menu.origin.y)
+                        .left(menu.origin.x)
+                        .child(col),
+                ),
+        )
     }
 }
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::{
     div, pulsating_between, px, prelude::*, Animation, AnimationExt, AnyElement, Context,
-    ElementId, IntoElement, MouseButton, Render, SharedString, WeakEntity, Window,
+    ElementId, IntoElement, MouseDownEvent, MouseButton, Render, SharedString, WeakEntity, Window,
 };
 
 use kumo_protocol::{AgentInfo, AgentStatus, Layout, LayoutNode, SessionLayout};
@@ -154,18 +154,19 @@ impl Sidebar {
             let is_active = layout.active.as_deref() == Some(&s.name);
             scroll = scroll.child(self.session_row(cx, s, is_active, chrome));
         }
+        scroll = scroll.child(self.new_session_row(cx, chrome));
 
         // --- AGENTS (Zero-alloc iteration) ---
         scroll = scroll.child(self.section_label("AGENTS", chrome));
         let mut has_agents = false;
 
         for session in &layout.sessions {
-            collect_agents(&session.root, &mut |agent| {
+            collect_agents(&session.root, &mut |pid, agent| {
                 has_agents = true;
                 // `extend(&mut self)` mutates the scroll container in place, so
                 // the FnMut closure never moves the (non-Copy) element out of
                 // its capture.
-                scroll.extend([self.agent_row(cx, &session.name, agent, chrome).into_any_element()]);
+                scroll.extend([self.agent_row(cx, &session.name, pid, agent, chrome).into_any_element()]);
             });
         }
 
@@ -196,11 +197,25 @@ impl Sidebar {
     fn session_row(&self, cx: &mut Context<Self>, s: &SessionLayout, is_active: bool, chrome: &Chrome) -> impl IntoElement {
         let name = s.name.clone();
         let toggle = self.parent.clone();
+        let (name_ctx, toggle_ctx) = (name.clone(), toggle.clone());
         let title = if s.zoom { format!("{} (zoom)", s.name) } else { s.name.clone() };
+        let branch = s
+            .branch
+            .as_ref()
+            .map(|b| {
+                let mut text = b.name.clone();
+                if b.ahead > 0 {
+                    text.push_str(&format!(" ↑{}", b.ahead));
+                }
+                if b.behind > 0 {
+                    text.push_str(&format!(" ~{}", b.behind));
+                }
+                text
+            });
 
         let bg_color = if is_active { chrome.accent_soft() } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) };
 
-        div()
+        let mut row = div()
             .w_full()
             .flex()
             .items_center()
@@ -217,6 +232,14 @@ impl Sidebar {
                     let _ = toggle.update(cx, |parent, _cx| parent.select_session(name.clone()));
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_this: &mut Sidebar, ev: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Sidebar>| {
+                    let _ = toggle_ctx.update(cx, |parent, cx| {
+                        parent.open_session_ctx_menu(name_ctx.clone(), ev.position, cx)
+                    });
+                }),
+            )
             .child(
                 div()
                     .size(px(6.0))
@@ -231,10 +254,68 @@ impl Sidebar {
                     .text_size(px(12.0))
                     .font_weight(if is_active { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
                     .text_color(if is_active { chrome.accent() } else { chrome.text() }),
+            );
+        if let Some(branch) = branch {
+            row = row.child(
+                div()
+                    .truncate()
+                    .max_w(px(110.0))
+                    .child(branch)
+                    .text_size(px(9.5))
+                    .text_color(chrome.muted()),
+            );
+        }
+        row
+    }
+
+    /// The "+ new session" affordance under the session rows (opens the name
+    /// popup, like `leader+c`).
+    fn new_session_row(&self, cx: &mut Context<Self>, chrome: &Chrome) -> impl IntoElement {
+        let toggle = self.parent.clone();
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(theme::RADIUS_MD))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::wash(0x08)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_this, _ev, _window, cx| {
+                    let _ = toggle.update(cx, |parent, cx| parent.open_session_popup(cx));
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(14.0))
+                    .rounded(px(4.0))
+                    .bg(chrome.accent_soft())
+                    .child("+")
+                    .text_size(px(10.0))
+                    .text_color(chrome.accent()),
+            )
+            .child(
+                div()
+                    .child("new session")
+                    .text_size(px(11.5))
+                    .text_color(chrome.muted()),
             )
     }
 
-    fn agent_row(&self, cx: &mut Context<Self>, session: &str, agent: &AgentInfo, chrome: &Chrome) -> impl IntoElement {
+    fn agent_row(
+        &self,
+        cx: &mut Context<Self>,
+        session: &str,
+        pid: u64,
+        agent: &AgentInfo,
+        chrome: &Chrome,
+    ) -> impl IntoElement {
         let session = session.to_string();
         let toggle = self.parent.clone();
         let metrics = format!("{:.1}% CPU · {} MB", agent.cpu, agent.mem_kb / 1024);
@@ -249,7 +330,13 @@ impl Sidebar {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_this, _ev, _window, cx| {
-                    let _ = toggle.update(cx, |parent, _cx| parent.select_session(session.clone()));
+                    // Focus the session AND the pane hosting the agent.
+                    let _ = toggle.update(cx, |parent, _cx| {
+                        let _ = parent.send(crate::Command::PaneFocus {
+                            session: session.clone(),
+                            pane_id: pid,
+                        });
+                    });
                 }),
             )
             .flex()
@@ -355,7 +442,7 @@ impl Sidebar {
             }
 
             for session in &layout.sessions {
-                collect_agents(&session.root, &mut |agent| {
+                collect_agents(&session.root, &mut |_pid, agent| {
                     dots.push(self.status_dot(agent.status, &agent.name, chrome));
                 });
             }
@@ -387,8 +474,9 @@ impl Sidebar {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Traverses the layout tree without heap allocations or cloning `AgentInfo`.
-fn collect_agents<'a>(node: &'a Option<Box<LayoutNode>>, callback: &mut impl FnMut(&'a AgentInfo)) {
+/// Traverses the layout tree without heap allocations or cloning `AgentInfo`,
+/// yielding each agent together with the id of the pane hosting it.
+fn collect_agents<'a>(node: &'a Option<Box<LayoutNode>>, callback: &mut impl FnMut(u64, &'a AgentInfo)) {
     let mut stack = Vec::new();
     if let Some(n) = node {
         stack.push(n.as_ref());
@@ -397,7 +485,7 @@ fn collect_agents<'a>(node: &'a Option<Box<LayoutNode>>, callback: &mut impl FnM
         match n {
             LayoutNode::Pane(p) => {
                 if let Some(a) = &p.agent {
-                    callback(a);
+                    callback(p.id, a);
                 }
             }
             LayoutNode::Split { a, b, .. } => {
