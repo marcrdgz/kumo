@@ -12,6 +12,11 @@ repository = "https://github.com/marcrdgz/kumo"
 repository = "https://github.com/marcrdgz/kumo"
 dist = false
 
+# Likewise, cargo-release ignores the desktop app: it ships separately (its own
+# `Kumo-<arch>.dmg`), never through the `kumo` version releases.
+[package.metadata.release]
+release = false
+
 [[bin]]
 name = "kumo-desktop"
 path = "src/main.rs"

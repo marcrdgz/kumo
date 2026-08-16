@@ -18,8 +18,8 @@ shared-version = "workspace"
 tag-name = "v{{version}}"
 pre-release-commit-message = "chore: release {{version}}"
 # Regenerate the root CHANGELOG.md from conventional commits before the release
-# commit. The hook runs once per released crate with the crate dir as cwd, so
-# anchor to the workspace root; repeated runs just rewrite the same file.
+# commit. The hook runs with the released crate's dir (app/kumo) as cwd, so
+# anchor to the workspace root.
 pre-release-hook = ["sh", "-c", "cd \"$(git rev-parse --show-toplevel)\" && git cliff -o CHANGELOG.md --tag {{tag_name}}"]
 allow-branch = ["main"]
 publish = false

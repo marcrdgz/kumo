@@ -15,3 +15,7 @@ default = []
 # Conversions to/from `crossterm` event types (TUI client + daemon). Kept off by
 # default so desktop/mobile clients never pull `crossterm` in.
 crossterm = ["dep:crossterm"]
+
+# Internal crate: the only released package is the `kumo` binary (app/kumo).
+[package.metadata.release]
+release = false
