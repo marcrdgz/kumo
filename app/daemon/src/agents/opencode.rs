@@ -46,19 +46,18 @@ const WORKING_MARKERS: &[&str] = &[
 /// True when opencode's question dialog is on screen: its footer pairs
 /// "esc dismiss" with an enter action and a navigation hint. Mirrors herdr's
 /// opencode manifest rule (state = "blocked").
-fn question_dialog_visible(screen: &str) -> bool {
-    let lower = screen.to_lowercase();
-    if !lower.contains("esc dismiss") {
+fn question_dialog_visible(screen_lower: &str, screen: &str) -> bool {
+    if !screen_lower.contains("esc dismiss") {
         return false;
     }
-    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| lower.contains(m));
+    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| screen_lower.contains(m));
     let nav = QUESTION_DIALOG_NAV.iter().any(|m| screen.contains(m));
     enter && nav
 }
 
 /// Whether opencode is waiting on a command approval.
 pub(crate) fn blocked(snap: &Snapshot) -> bool {
-    question_dialog_visible(&snap.screen) || BLOCKED_MARKERS.iter().any(|m| snap.screen_lower.contains(m))
+    question_dialog_visible(&snap.screen_lower, &snap.screen) || BLOCKED_MARKERS.iter().any(|m| snap.screen_lower.contains(m))
 }
 
 /// Whether opencode is actively producing output. The footer is scanned

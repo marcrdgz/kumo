@@ -185,7 +185,6 @@ impl Pty {
 
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         self.writer.write_all(data)?;
-        self.writer.flush()?;
         Ok(())
     }
 

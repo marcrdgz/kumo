@@ -42,6 +42,8 @@ pub struct Pane {
     /// Rolling tail of recent output with ANSI escapes stripped, scanned for
     /// blocked (approval) markers.
     recent_text: Vec<u8>,
+    recent_text_start: usize,
+    recent_text_len: usize,
     /// Stripper state, kept across chunks so escapes split at chunk edges are
     /// still removed.
     stripper: TextStripper,
@@ -300,7 +302,9 @@ impl Pane {
             vt,
             dead: false,
             last_output: Instant::now(),
-            recent_text: Vec::with_capacity(256),
+            recent_text: Vec::with_capacity(RECENT_TEXT_BYTES),
+            recent_text_start: 0,
+            recent_text_len: 0,
             stripper: TextStripper::new(),
             dirty: true,
             full_redraw: true,
@@ -335,12 +339,17 @@ impl Pane {
             self.last_output = Instant::now();
             self.dirty = true;
             self.stripper.feed(data, &mut self.recent_text);
-            if self.recent_text.len() > RECENT_TEXT_BYTES {
-                let drop = self.recent_text.len() - RECENT_TEXT_BYTES;
-                self.recent_text.drain(..drop);
+            self.recent_text_len = self.recent_text.len() - self.recent_text_start;
+            if self.recent_text_len > RECENT_TEXT_BYTES {
+                let drop = self.recent_text_len - RECENT_TEXT_BYTES;
+                self.recent_text_start += drop;
+                self.recent_text_len = RECENT_TEXT_BYTES;
+                if self.recent_text_start > RECENT_TEXT_BYTES {
+                    self.recent_text.copy_within(self.recent_text_start.., 0);
+                    self.recent_text.truncate(self.recent_text_len);
+                    self.recent_text_start = 0;
+                }
             }
-            // Answer XTGETTCAP capability probes as a plain xterm so apps
-            // don't enable mouse reporting and steal text selection.
             self.xtgettcap.observe(data);
             for response in self.xtgettcap.drain_pending() {
                 let _ = self.pty.write(&response);
@@ -353,12 +362,6 @@ impl Pane {
     /// an AI CLI (opencode/claude) was detected running inside a plain shell.
     pub fn is_ai_cli(&self) -> bool {
         self.is_ai || self.detected_ai
-    }
-
-    /// Name of the AI CLI currently running in this pane's process tree.
-    pub fn ai_cli_name(&self) -> Option<String> {
-        let root = self.pty.process_id()?;
-        ProcessSnapshot::capture()?.ai_cli_in_tree(root)
     }
 
     /// The current working directory this pane is *actually* in, used by
@@ -404,8 +407,9 @@ impl Pane {
     /// Last `max_chars` of stripped output text. Debug/diagnostics.
     #[allow(dead_code)]
     pub fn recent_text_tail(&self, max_chars: usize) -> String {
-        let start = self.recent_text.len().saturating_sub(max_chars);
-        String::from_utf8_lossy(&self.recent_text[start..]).into_owned()
+        let active = &self.recent_text[self.recent_text_start..];
+        let start = active.len().saturating_sub(max_chars);
+        String::from_utf8_lossy(&active[start..]).into_owned()
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {

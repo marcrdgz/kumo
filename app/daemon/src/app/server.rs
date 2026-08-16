@@ -355,11 +355,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         let mut dead = Vec::new();
+        let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
         for (id, client) in clients.iter_mut() {
             if !client.welcomed {
                 continue;
             }
-            // Semantic layout for all subscribers.
             if let Some(layout) = &layout {
                 if client.wants_layout && (layout_changed || client.pending_layout) {
                     match client.send_msg(DaemonEvent::Layout { layout: layout.clone() }) {
@@ -372,7 +372,6 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
             }
-            // Per-pane content for pane subscribers.
             let pane_ids: Vec<u64> = client.panes_subscribed.iter().copied().collect();
             for pid in pane_ids {
                 let was_pending = client.pane_needs_full.remove(&pid);
@@ -384,7 +383,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 if !was_pending && !resized && !changed.contains(&pid) {
                     continue;
                 }
-                let buf = frames::detach_buffer(cached);
+                let buf = pane_bufs.entry(pid).or_insert_with(|| frames::detach_buffer(cached));
                 let pane = app.panes.get(&pid);
                 let pane_cursor = pane.and_then(|p| {
                     if p.vt.cursor_visible() {
@@ -396,11 +395,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let scroll = pane.map(|p| super::ui::scroll_state(p.scrollbar_data()));
                 let palette = &app.theme.palette;
                 let frame = if was_pending || resized {
-                    frames::pane_frame(pid, &buf, None, pane_cursor, palette, pane, scroll)
+                    frames::pane_frame(pid, buf, None, pane_cursor, palette, pane, scroll)
                 } else {
                     frames::pane_frame(
                         pid,
-                        &buf,
+                        buf,
                         last_pane_bufs.get(&pid),
                         pane_cursor,
                         palette,
@@ -408,7 +407,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         scroll,
                     )
                 };
-                last_pane_bufs.insert(pid, buf);
+                last_pane_bufs.insert(pid, buf.clone());
                 if !frame.full && frame.rows_dirty.is_empty() {
                     continue;
                 }
@@ -437,7 +436,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             break;
         }
 
-        std::thread::sleep(Duration::from_millis(16));
+        std::thread::sleep(Duration::from_millis(8));
     }
 
     let _ = std::fs::remove_file(&path);

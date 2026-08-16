@@ -61,37 +61,49 @@ impl ProcSampler {
 }
 
 #[cfg(target_os = "macos")]
-fn cpu_time_rss(pid: u32) -> Option<(f64, u64)> {
-    use std::process::Command;
-    let out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "time=,rss="]).output().ok()?;
-    if !out.status.success() {
+fn cpu_time_rss(_pid: u32) -> Option<(f64, u64)> {
+    macos_proc_pidinfo_cpu_rss(_pid)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_proc_pidinfo_cpu_rss(pid: u32) -> Option<(f64, u64)> {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret != size {
         return None;
     }
-    let line = String::from_utf8(out.stdout).ok()?;
-    let mut fields = line.split_whitespace();
-    let time = fields.next()?;
-    let rss: u64 = fields.next()?.parse().ok()?;
-    Some((mmss_to_secs(time)?, rss))
+    let cpu_secs = info.pti_total_user as f64 / 1_000_000_000.0
+        + info.pti_total_system as f64 / 1_000_000_000.0;
+    let rss_kb = info.pti_resident_size / 1024;
+    Some((cpu_secs, rss_kb))
 }
 
 #[cfg(target_os = "linux")]
 fn cpu_time_rss(pid: u32) -> Option<(f64, u64)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The `comm` field can contain spaces/parens; fields restart after the
-    // last ')'. After it, index 0 is field 3 (state); utime is field 14 and
-    // stime field 15, so utime = index 11, stime = index 12.
     let close = stat.rfind(')')?;
     let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
     let utime: f64 = rest.get(11)?.parse().ok()?;
     let stime: f64 = rest.get(12)?.parse().ok()?;
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    static CLK_TCK: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    let ticks = *CLK_TCK.get_or_init(|| unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64);
     if ticks <= 0.0 {
         return None;
     }
     let cpu_secs = (utime + stime) / ticks;
     let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
     let rss_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    static PAGESIZE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let page = *PAGESIZE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64);
     Some((cpu_secs, rss_pages * page / 1024))
 }
 
@@ -100,23 +112,18 @@ fn cpu_time_rss(_pid: u32) -> Option<(f64, u64)> {
     None
 }
 
-/// `ps`'s `time=` cumulative CPU format: `MM:SS` (minutes may exceed 59) or
-/// `HH:MM:SS` past an hour.
-fn mmss_to_secs(s: &str) -> Option<f64> {
-    let parts: Vec<u64> = s.split(':').map(|p| p.parse().ok()).collect::<Option<Vec<_>>>()?;
-    match parts.as_slice() {
-        [mm, ss] => Some(*mm as f64 * 60.0 + *ss as f64),
-        [hh, mm, ss] => Some(*hh as f64 * 3600.0 + *mm as f64 * 60.0 + *ss as f64),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn parses_ps_time_format() {
+        let mmss_to_secs = |s: &str| -> Option<f64> {
+            let parts: Vec<u64> = s.split(':').map(|p| p.parse().ok()).collect::<Option<Vec<_>>>()?;
+            match parts.as_slice() {
+                [mm, ss] => Some(*mm as f64 * 60.0 + *ss as f64),
+                [hh, mm, ss] => Some(*hh as f64 * 3600.0 + *mm as f64 * 60.0 + *ss as f64),
+                _ => None,
+            }
+        };
         assert_eq!(mmss_to_secs("00:00"), Some(0.0));
         assert_eq!(mmss_to_secs("12:34"), Some(754.0));
         assert_eq!(mmss_to_secs("90:00"), Some(5400.0));

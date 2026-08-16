@@ -82,8 +82,12 @@ impl App {
             return;
         }
         self.last_ai_scan = Instant::now();
+        let snapshot = crate::pane::ProcessSnapshot::capture();
         for pane in self.panes.values_mut() {
-            let name = pane.ai_cli_name();
+            let name = match (&snapshot, pane.pty.process_id()) {
+                (Some(snap), Some(root)) => snap.ai_cli_in_tree(root),
+                _ => None,
+            };
             pane.detected_ai_name = name.clone();
             if !pane.is_ai {
                 pane.detected_ai = name.is_some();
