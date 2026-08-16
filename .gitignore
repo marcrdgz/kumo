@@ -1,6 +1,14 @@
 # --- Rust ---
 /target/
 
+# --- Release tooling ---
+# cargo-release regenerates a per-crate changelog with git-cliff on every run;
+# only the root CHANGELOG.md is kept in the repo.
+/app/desktop/CHANGELOG.md
+/app/kumo/CHANGELOG.md
+/crates/kumo-core/CHANGELOG.md
+/crates/kumo-protocol/CHANGELOG.md
+
 # --- C/C++ & Native Libraries Cache ---
 *.o
 *.a
