@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.5.2
+
+### 🚀 Features
+
+- Update libghostty-vt to latest upstream (zig 0.16, new APIs)
+- Implement bell callback to trigger audible alerts on BEL character
+- Implement OSC 52 clipboard write callback for system clipboard integration
+
+### 🐛 Bug Fixes
+
+- Enable grapheme cluster mode (2027) for multi-codepoint emoji rendering
+- *(client)* Avoid clone in render_pane_content borrow
+- *(client)* Highlight only focused agent in active session
+- *(agents)* Filter dingbat completion summaries as working
+- *(ui)* Remove duplicate status dot in agents tab
+- *(ci)* Bump zig to 0.16.0 for libghostty-vt compatibility
+- *(ci)* Bump zig to 0.16.0 in dist-build-setup for libghostty-vt
+
+### ⚡ Performance
+
+- Reduce render loop latency (daemon 8ms→4ms, client 16ms→8ms)
+- Optimize dirty tracking (early-exit + selective clear)
+- Use batch queries in refresh() to reduce FFI overhead
+- Use batch queries in for_each_cell to reduce FFI overhead
+- *(client)* Cache rendered rows to avoid O(cols×rows) per frame
+- *(daemon)* Move git status and ps to background threads
+- *(daemon)* Wrap client socket in BufWriter to reduce syscalls
+- *(daemon)* Eliminate buf.clone() with persistent pane buffer cache
 ## v0.5.1
 
 ### 🐛 Bug Fixes
@@ -14,6 +42,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Ignore the zcode agent session directory
+- Release 0.5.1
 ## v0.5.0
 
 ### 🚀 Features
