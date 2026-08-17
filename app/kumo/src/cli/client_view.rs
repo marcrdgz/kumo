@@ -182,7 +182,6 @@ impl Grid {
         row: usize,
         selected: Option<Sel>,
         link_mods: bool,
-        links: &HashMap<u16, Vec<LinkRange>>,
     ) -> Option<&Vec<ratatui::buffer::Cell>> {
         if row >= self.rows {
             return None;
@@ -205,7 +204,7 @@ impl Grid {
                 }
                 // Link underline
                 if link_mods {
-                    if let Some(row_links) = links.get(&(row as u16)) {
+                    if let Some(row_links) = self.links.get(&(row as u16)) {
                         if row_links.iter().any(|l| (c as u16) >= l.start && (c as u16) < l.end) {
                             style = style.add_modifier(Modifier::UNDERLINED);
                         }
@@ -314,7 +313,7 @@ fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, sel
             break;
         }
         // Get the cached rendered row, rebuilding only if dirty
-        let Some(rendered_row) = grid.get_rendered_row(r, selected, link_mods, &grid.links.clone()) else {
+        let Some(rendered_row) = grid.get_rendered_row(r, selected, link_mods) else {
             continue;
         };
         for (c, cell) in rendered_row.iter().enumerate() {
