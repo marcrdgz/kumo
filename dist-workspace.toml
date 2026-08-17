@@ -17,16 +17,12 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# Publish build provenance to GitHub (SLSA-style attestations)
+# Whether to enable GitHub Attestations
 github-attestations = true
-# Cache cargo builds between CI runs (libghostty-vt is slow to compile)
+# Whether builds should try to be cached in CI
 cache-builds = true
 # Steps run before `dist build` on every build job (installs Zig for build.rs)
 # Kept outside .github/workflows so GitHub doesn't parse it as a workflow file.
 github-build-setup = "../dist-build-setup.yml"
-# Build only the packages each target needs, individually. Without this dist
-# runs `cargo build --workspace`, which also compiles kumo-desktop (excluded
-# from dist but still a workspace member) on Linux/Windows and breaks those
-# release legs (missing libxkbcommon on ARM Linux, unix-only IPC code on
-# Windows).
+# Build only the required packages, and individually
 precise-builds = true
