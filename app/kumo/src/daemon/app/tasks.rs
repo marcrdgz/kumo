@@ -21,18 +21,32 @@ const ALERT_COOLDOWN: Duration = Duration::from_secs(3);
 
 impl App {
     /// Refresh cached git branches for all session workspaces (every
-    /// `BRANCH_REFRESH`). Runs `git` off the hot frame path (once per frame).
+    /// `BRANCH_REFRESH`). Spawns background threads for git lookups to avoid
+    /// blocking the main loop.
     pub(super) fn refresh_branches(&mut self) {
         let now = Instant::now();
         let live: Vec<PathBuf> = self.sessions.iter().map(|s| s.workspace.clone()).collect();
+
+        // Drain completed background git lookups
+        while let Ok((ws, branch)) = self.branch_rx.try_recv() {
+            self.pending_branch_lookups.remove(&ws);
+            self.branch_cache.insert(ws, (branch, now));
+        }
+
+        // Spawn background lookups for stale workspaces
         for ws in &live {
             let stale = match self.branch_cache.get(ws) {
                 Some((_, t)) => now.duration_since(*t) >= BRANCH_REFRESH,
                 None => true,
             };
-            if stale {
-                let branch = git_branch(ws);
-                self.branch_cache.insert(ws.clone(), (branch, now));
+            if stale && !self.pending_branch_lookups.contains_key(ws) {
+                self.pending_branch_lookups.insert(ws.clone(), now);
+                let tx = self.branch_tx.clone();
+                let ws_clone = ws.clone();
+                std::thread::spawn(move || {
+                    let branch = git_branch(&ws_clone);
+                    let _ = tx.send((ws_clone, branch));
+                });
             }
         }
         self.branch_cache.retain(|ws, _| live.contains(ws));
@@ -76,25 +90,47 @@ impl App {
 
     /// Mark plain shell panes as AI CLI panes when opencode/claude is running
     /// inside them, and clear the flag once the process exits. Runs at most
-    /// every `AI_SCAN_INTERVAL`.
+    /// every `AI_SCAN_INTERVAL`. Spawns a background thread for the process
+    /// scan to avoid blocking the main loop.
     pub(super) fn refresh_ai_cli(&mut self) {
+        // Drain completed background AI scans
+        while let Ok((snapshot, pane_pids)) = self.ai_rx.try_recv() {
+            for (pane_id, pid) in pane_pids {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    let name = match (&snapshot, pid) {
+                        (Some(snap), Some(root)) => snap.ai_cli_in_tree(root),
+                        _ => None,
+                    };
+                    pane.detected_ai_name = name.clone();
+                    if !pane.is_ai {
+                        pane.detected_ai = name.is_some();
+                    }
+                }
+            }
+            self.ai_scan_in_progress = false;
+        }
+
         if self.last_ai_scan.elapsed() < AI_SCAN_INTERVAL {
             return;
         }
-        self.last_ai_scan = Instant::now();
-        let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
-        for pane in self.panes.values_mut() {
-            let name = match (&snapshot, pane.pty.process_id()) {
-                (Some(snap), Some(root)) => snap.ai_cli_in_tree(root),
-                _ => None,
-            };
-            pane.detected_ai_name = name.clone();
-            if !pane.is_ai {
-                pane.detected_ai = name.is_some();
-            }
+
+        // Spawn a new scan if not already in progress
+        if !self.ai_scan_in_progress {
+            self.last_ai_scan = Instant::now();
+            self.ai_scan_in_progress = true;
+            // Capture pane IDs and their process IDs before spawning the thread
+            let pane_pids: Vec<(u64, Option<u32>)> = self
+                .panes
+                .iter()
+                .map(|(&id, pane)| (id, pane.pty.process_id()))
+                .collect();
+            let tx = self.ai_tx.clone();
+            std::thread::spawn(move || {
+                let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
+                let _ = tx.send((snapshot, pane_pids));
+            });
         }
     }
-
     /// Recomputed agent status from the terminal buffer at most every
     /// `STATUS_REFRESH`, independent of pane dirty state. `render_dirty` only
     /// refreshes the status when the pane produces output or scrolls, so a

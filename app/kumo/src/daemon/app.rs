@@ -86,6 +86,18 @@ pub struct App {
     update_notice: Option<kumo_core::update::UpdateNotice>,
     /// Receives the background update check result.
     update_rx: mpsc::Receiver<Option<kumo_core::update::UpdateNotice>>,
+    /// Receives background git branch results (workspace -> branch info).
+    branch_rx: mpsc::Receiver<(PathBuf, Option<BranchInfo>)>,
+    /// Sender for background git branch jobs.
+    branch_tx: mpsc::Sender<(PathBuf, Option<BranchInfo>)>,
+    /// Receives background AI CLI scan results (snapshot + pane IDs with their process IDs).
+    ai_rx: mpsc::Receiver<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>,
+    /// Sender for background AI CLI scan jobs.
+    ai_tx: mpsc::Sender<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>,
+    /// Workspaces with pending git branch lookups.
+    pending_branch_lookups: HashMap<PathBuf, Instant>,
+    /// Whether an AI CLI scan is currently in progress.
+    ai_scan_in_progress: bool,
 }
 
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
@@ -107,6 +119,8 @@ impl App {
 
         let (events_tx, events_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
+        let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
+        let (ai_tx, ai_rx) = mpsc::channel::<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>();
         std::thread::spawn(move || {
             let notice = kumo_core::update::poll_update_notice();
             let _ = update_tx.send(notice);
@@ -137,6 +151,12 @@ impl App {
             theme_idx: kumo_core::theme::DEFAULT_THEME_IDX,
             update_notice: None,
             update_rx,
+            branch_rx,
+            branch_tx,
+            pending_branch_lookups: HashMap::new(),
+            ai_rx,
+            ai_tx,
+            ai_scan_in_progress: false,
         };
 
         match launch {
