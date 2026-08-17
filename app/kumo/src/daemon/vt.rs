@@ -494,6 +494,13 @@ unsafe extern "C" {
         data: i32,
         out: *mut c_void,
     ) -> Result;
+    fn ghostty_render_state_row_get_multi(
+        iterator: RowIteratorHandle,
+        count: usize,
+        keys: *const i32,
+        values: *mut *mut c_void,
+        out_written: *mut usize,
+    ) -> Result;
     fn ghostty_render_state_row_set(
         iterator: RowIteratorHandle,
         option: i32,
@@ -1359,7 +1366,6 @@ impl Terminal {
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
                 return;
             }
-            // Populate the iterator's row data from the render state.
             ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
             let mut cells: RowCellsHandle = ptr::null_mut();
             if !ghostty_render_state_row_cells_new(ptr::null(), &mut cells).is_ok() {
@@ -1370,21 +1376,55 @@ impl Terminal {
             let mut row_idx: usize = 0;
             while ghostty_render_state_row_iterator_next(iter) {
                 let mut row_dirty: bool = false;
-                ghostty_render_state_row_get(iter, ROW_DATA_DIRTY, &mut row_dirty as *mut bool as *mut c_void);
-                // Row-local selection range (inclusive), if this row intersects.
                 let mut row_sel = RenderStateRowSelection {
                     size: size_of::<RenderStateRowSelection>(),
                     start_x: 0,
                     end_x: 0,
                 };
-                let sel_ok = ghostty_render_state_row_get(
-                    iter,
-                    ROW_DATA_SELECTION,
+                let mut cells_handle: RowCellsHandle = ptr::null_mut();
+
+                let keys = [ROW_DATA_DIRTY, ROW_DATA_SELECTION, ROW_DATA_CELLS];
+                let mut values: [*mut c_void; 3] = [
+                    &mut row_dirty as *mut bool as *mut c_void,
                     &mut row_sel as *mut RenderStateRowSelection as *mut c_void,
+                    &mut cells_handle as *mut RowCellsHandle as *mut c_void,
+                ];
+                let mut written: usize = 0;
+                let batch_ok = ghostty_render_state_row_get_multi(
+                    iter,
+                    keys.len(),
+                    keys.as_ptr(),
+                    values.as_mut_ptr(),
+                    &mut written,
                 )
                 .is_ok();
-                // Populate the cells container with the current row's data.
-                ghostty_render_state_row_get(iter, ROW_DATA_CELLS, &mut cells as *mut RowCellsHandle as *mut c_void);
+
+                let sel_ok = batch_ok && written >= 2;
+                if batch_ok && written >= 3 {
+                    cells = cells_handle;
+                } else if !batch_ok {
+                    ghostty_render_state_row_get(iter, ROW_DATA_DIRTY, &mut row_dirty as *mut bool as *mut c_void);
+                    let sel_res = ghostty_render_state_row_get(
+                        iter,
+                        ROW_DATA_SELECTION,
+                        &mut row_sel as *mut RenderStateRowSelection as *mut c_void,
+                    );
+                    let sel_ok_fallback = sel_res.is_ok();
+                    ghostty_render_state_row_get(iter, ROW_DATA_CELLS, &mut cells as *mut RowCellsHandle as *mut c_void);
+                    let mut col_idx: usize = 0;
+                    while ghostty_render_state_row_cells_next(cells) {
+                        if let Some(rc) = self.read_cell(cells) {
+                            let selected = sel_ok_fallback
+                                && col_idx >= row_sel.start_x as usize
+                                && col_idx <= row_sel.end_x as usize;
+                            f(row_idx, col_idx, &rc, selected, row_dirty);
+                        }
+                        col_idx += 1;
+                    }
+                    row_idx += 1;
+                    continue;
+                }
+
                 let mut col_idx: usize = 0;
                 while ghostty_render_state_row_cells_next(cells) {
                     if let Some(rc) = self.read_cell(cells) {
