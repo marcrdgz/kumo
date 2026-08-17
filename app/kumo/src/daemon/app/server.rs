@@ -8,7 +8,7 @@
 //! worktrees, theme). Every client draws its own chrome.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -492,11 +492,16 @@ fn send_to(clients: &mut HashMap<usize, Client>, id: usize, msg: &DaemonEvent) -
 /// Writer loop for one client: drains its outgoing queue and writes frames to
 /// the socket. A client that stops reading blocks here (isolated in this
 /// thread) while the daemon loop keeps running and drops frames for it.
-fn client_write_loop(mut stream: UnixStream, rx: mpsc::Receiver<DaemonEvent>) {
+fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<DaemonEvent>) {
+    let mut writer = std::io::BufWriter::new(stream);
     while let Ok(msg) = rx.recv() {
-        if kumo_core::protocol::write_framed(&mut stream, &msg).is_err() {
+        if kumo_core::protocol::write_framed(&mut writer, &msg).is_err() {
             break;
         }
+        // Flush after each message to ensure timely delivery. The BufWriter
+        // reduces syscalls by buffering small writes, but we still want each
+        // logical frame to reach the client promptly.
+        let _ = writer.flush();
     }
 }
 
