@@ -379,6 +379,7 @@ pub const TERMINAL_OPT_COLOR_BACKGROUND: i32 = 12;
 pub const TERMINAL_OPT_COLOR_CURSOR: i32 = 13;
 pub const TERMINAL_OPT_COLOR_PALETTE: i32 = 14;
 pub const TERMINAL_OPT_PWD_CHANGED: i32 = 25;
+pub const TERMINAL_OPT_MODE: i32 = 34;
 
 pub const TERMINAL_DATA_COLS: i32 = 1;
 pub const TERMINAL_DATA_ROWS: i32 = 2;
@@ -402,6 +403,8 @@ pub const MODE_ALT_SCREEN: u16 = 1047;
 pub const MODE_MOUSE_NORMAL: u16 = 1000;
 /// ANSI mode 2004: bracketed paste.
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
+/// DEC private mode 2027: grapheme cluster mode.
+pub const MODE_GRAPHEME_CLUSTER: u16 = 2027;
 
 // ---------------------------------------------------------------------------
 // Render state data identifiers
@@ -826,6 +829,17 @@ impl Terminal {
             ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const c_void);
+        }
+
+        // Enable grapheme cluster mode (DEC private mode 2027) so multi-codepoint
+        // graphemes (emoji flags, ZWJ sequences, etc.) are kept together in a
+        // single cell instead of being split across multiple cells.
+        let mode_config = TerminalModeConfig {
+            mode: MODE_GRAPHEME_CLUSTER,
+            value: true,
+        };
+        unsafe {
+            ghostty_terminal_set(term, TERMINAL_OPT_MODE, &mode_config as *const TerminalModeConfig as *const c_void);
         }
 
         Ok(Terminal {
