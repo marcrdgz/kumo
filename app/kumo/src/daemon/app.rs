@@ -695,6 +695,10 @@ impl App {
         let PtyEvent::Output { pane_id, data } = ev;
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             pane.feed(&data);
+            // Check if the terminal bell was rung and trigger an alert
+            if pane.vt.take_bell_count() > 0 {
+                crate::daemon::alert::play(crate::daemon::alert::AlertKind::Finished);
+            }
         }
     }
 

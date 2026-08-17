@@ -554,6 +554,9 @@ struct CbCell {
     /// Raw pwd bytes the shell reported (a `file://` URI for OSC 7, a bare
     /// path for OSC 9 / OSC 1337). Empty when cleared or never reported.
     pwd: Vec<u8>,
+    /// Number of BEL characters received since last check. Used to trigger
+    /// audible alerts when programs ring the terminal bell.
+    bell_count: u32,
 }
 
 /// Write pty callback: forwards query responses to the installed pty writer.
@@ -631,6 +634,15 @@ unsafe extern "C" fn color_scheme_cb(
 unsafe extern "C" fn enquiry_cb(_term: TerminalHandle, _userdata: *mut c_void) -> StringSlice {
     static EMPTY: &[u8] = b"";
     StringSlice { ptr: EMPTY.as_ptr(), len: 0 }
+}
+
+/// Bell callback: increment the bell counter so the daemon can trigger alerts.
+unsafe extern "C" fn bell_cb(_term: TerminalHandle, userdata: *mut c_void) {
+    if userdata.is_null() {
+        return;
+    }
+    let cell = userdata as *mut CbCell;
+    (*cell).bell_count = (*cell).bell_count.saturating_add(1);
 }
 
 /// Percent-decode a `file://` URI path (`%20` → space, `%2F` → `/`).
@@ -820,7 +832,7 @@ impl Terminal {
         // The callbacks need a stable place to find the current pty writer
         // and the last reported pwd. Allocate a heap cell and use it as the
         // USERDATA pointer.
-        let cell: Box<CbCell> = Box::new(CbCell { writer: None, pwd: Vec::new() });
+        let cell: Box<CbCell> = Box::new(CbCell { writer: None, pwd: Vec::new(), bell_count: 0 });
         let userdata = (&*cell) as *const CbCell as *mut c_void;
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const c_void);
@@ -829,6 +841,7 @@ impl Terminal {
             ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_BELL, bell_cb as *const c_void);
         }
 
         // Enable grapheme cluster mode (DEC private mode 2027) so multi-codepoint
@@ -897,6 +910,15 @@ impl Terminal {
         };
         let pb = PathBuf::from(path);
         (!pb.as_os_str().is_empty()).then_some(pb)
+    }
+
+    /// Return and reset the number of BEL characters received since the last
+    /// call. Used by the daemon to trigger audible alerts when programs ring
+    /// the terminal bell.
+    pub fn take_bell_count(&mut self) -> u32 {
+        let count = self.cell.bell_count;
+        self.cell.bell_count = 0;
+        count
     }
 
     /// Install a linear selection covering two viewport coordinates
