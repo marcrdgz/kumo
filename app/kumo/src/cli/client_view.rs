@@ -2400,12 +2400,18 @@ impl View {
                         SidebarRow::AgentName(i, pid, third, status) => (i, pid, third, status, false),
                         _ => unreachable!(),
                     };
-                    let focused = self
+                    let session_active = self
+                        .layout
+                        .as_ref()
+                        .map(|l| l.active.as_deref() == Some(&self.session_name(*i)))
+                        .unwrap_or(false);
+                    let pane_focused = self
                         .layout
                         .as_ref()
                         .and_then(|l| l.sessions.get(*i))
                         .map(|s| s.focus == *pid)
                         .unwrap_or(false);
+                    let focused = session_active && pane_focused;
                     let bg = if focused { theme.panel_sep } else { RColor::Reset };
                     if focused {
                         fill(f, Rect::new(x, y, w, 1), bg);
