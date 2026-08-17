@@ -98,7 +98,14 @@ pub struct DeviceAttributesPrimary {
 pub struct DeviceAttributesSecondary {
     pub device_type: u16,
     pub firmware_version: u16,
-    pub rom_cartridge: u16,
+}
+
+/// Terminal mode configuration (mode + value).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TerminalModeConfig {
+    pub mode: u16,
+    pub value: bool,
 }
 
 /// Tertiary device attributes (DA3).
@@ -306,6 +313,54 @@ pub struct ScrollViewport {
     pub value: ScrollViewportValue,
 }
 
+/// Render-state cursor information (sized struct for GHOSTTY_RENDER_STATE_DATA_CURSOR).
+#[repr(C)]
+pub struct RenderStateCursor {
+    pub size: usize,
+    pub viewport_has_value: bool,
+    pub viewport_x: u16,
+    pub viewport_y: u16,
+    pub wide_tail: bool,
+    pub visible: bool,
+    pub blinking: bool,
+    pub password_input: bool,
+    pub visual_style: i32,
+}
+
+impl RenderStateCursor {
+    pub fn new() -> Self {
+        Self {
+            size: std::mem::size_of::<Self>(),
+            viewport_has_value: false,
+            viewport_x: 0,
+            viewport_y: 0,
+            wide_tail: false,
+            visible: false,
+            blinking: false,
+            password_input: false,
+            visual_style: 0,
+        }
+    }
+}
+
+/// Render-state color information (sized struct for GHOSTTY_RENDER_STATE_DATA_COLORS).
+#[repr(C)]
+pub struct RenderStateColors {
+    pub size: usize,
+    pub background: ColorRgb,
+    pub foreground: ColorRgb,
+}
+
+impl RenderStateColors {
+    pub fn new() -> Self {
+        Self {
+            size: std::mem::size_of::<Self>(),
+            background: ColorRgb { r: 0, g: 0, b: 0 },
+            foreground: ColorRgb { r: 0, g: 0, b: 0 },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Terminal data / option identifiers
 // ---------------------------------------------------------------------------
@@ -337,6 +392,7 @@ pub const TERMINAL_DATA_TOTAL_ROWS: i32 = 14;
 pub const TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
 pub const TERMINAL_DATA_COLOR_FOREGROUND: i32 = 18;
 pub const TERMINAL_DATA_COLOR_BACKGROUND: i32 = 19;
+pub const TERMINAL_DATA_MODE: i32 = 37;
 
 /// DEC private mode 25 (DECTCEM): cursor visible.
 pub const MODE_CURSOR_VISIBLE: u16 = 25;
@@ -357,6 +413,8 @@ pub const RENDER_DATA_CURSOR_VIEWPORT_Y: i32 = 16;
 
 pub const RENDER_DATA_ROW_ITERATOR: i32 = 4;
 pub const RENDER_STATE_DATA_DIRTY: i32 = 3;
+pub const RENDER_STATE_DATA_CURSOR: i32 = 18;
+pub const RENDER_STATE_DATA_COLORS: i32 = 19;
 pub const RENDER_STATE_OPTION_DIRTY: i32 = 0;
 pub const ROW_DATA_DIRTY: i32 = 1;
 pub const ROW_OPTION_DIRTY: i32 = 0;
@@ -401,8 +459,6 @@ unsafe extern "C" {
     fn ghostty_terminal_vt_write(terminal: TerminalHandle, data: *const u8, len: usize);
     fn ghostty_terminal_scroll_viewport(terminal: TerminalHandle, behavior: ScrollViewport);
     fn ghostty_terminal_get(terminal: TerminalHandle, data: i32, out: *mut c_void) -> Result;
-    fn ghostty_terminal_mode_get(terminal: TerminalHandle, mode: u16, out_value: *mut bool) -> Result;
-    fn ghostty_terminal_mode_set(terminal: TerminalHandle, mode: u16, value: bool) -> Result;
 
     fn ghostty_render_state_new(
         allocator: *const c_void,
@@ -412,6 +468,7 @@ unsafe extern "C" {
     fn ghostty_render_state_update(state: RenderStateHandle, terminal: TerminalHandle) -> Result;
     fn ghostty_render_state_get(state: RenderStateHandle, data: i32, out: *mut c_void) -> Result;
     fn ghostty_render_state_set(state: RenderStateHandle, option: i32, value: *const c_void) -> Result;
+    fn ghostty_render_state_clean(state: RenderStateHandle) -> Result;
     fn ghostty_render_state_row_iterator_new(
         allocator: *const c_void,
         out_iterator: *mut RowIteratorHandle,
@@ -1103,11 +1160,11 @@ impl Terminal {
 
     /// Current value of a terminal mode.
     pub fn mode_get(&self, mode: u16) -> bool {
-        let mut out: bool = false;
+        let mut config = TerminalModeConfig { mode, value: false };
         unsafe {
-            ghostty_terminal_mode_get(self.term, mode, &mut out);
+            ghostty_terminal_get(self.term, TERMINAL_DATA_MODE, &mut config as *mut TerminalModeConfig as *mut c_void);
         }
-        out
+        config.value
     }
 
     /// Set a DEC private mode on/off. Used to restore mouse tracking (mode
@@ -1116,7 +1173,8 @@ impl Terminal {
     /// kumo would grab the mouse and its fallback (which cannot scroll a
     /// full-screen app) would take over.
     pub fn mode_set(&self, mode: u16, value: bool) -> bool {
-        unsafe { ghostty_terminal_mode_set(self.term, mode, value).is_ok() }
+        let config = TerminalModeConfig { mode, value };
+        unsafe { ghostty_terminal_set(self.term, TERMINAL_DATA_MODE, &config as *const TerminalModeConfig as *const c_void).is_ok() }
     }
 
     /// Refresh render state, viewport cursor, default colors, and scrollbar
@@ -1149,17 +1207,15 @@ impl Terminal {
         }
         self.scrollbar = scrollbar;
 
-        let mut has: bool = false;
-        let mut cx: u16 = 0;
-        let mut cy: u16 = 0;
+        let mut cursor_data = RenderStateCursor::new();
         unsafe {
-            ghostty_render_state_get(self.render, RENDER_DATA_CURSOR_VIEWPORT_HAS_VALUE, &mut has as *mut bool as *mut c_void);
-            if has {
-                ghostty_render_state_get(self.render, RENDER_DATA_CURSOR_VIEWPORT_X, &mut cx as *mut u16 as *mut c_void);
-                ghostty_render_state_get(self.render, RENDER_DATA_CURSOR_VIEWPORT_Y, &mut cy as *mut u16 as *mut c_void);
-            }
+            ghostty_render_state_get(self.render, RENDER_STATE_DATA_CURSOR, &mut cursor_data as *mut RenderStateCursor as *mut c_void);
         }
-        self.cursor = if has { Some((cx, cy)) } else { None };
+        self.cursor = if cursor_data.viewport_has_value {
+            Some((cursor_data.viewport_x, cursor_data.viewport_y))
+        } else {
+            None
+        };
     }
 
     /// Global render-state dirty level (DIRTY_FALSE/PARTIAL/FULL) after a
@@ -1200,8 +1256,15 @@ impl Terminal {
 
     /// Reset the per-row dirty flags and the global dirty state to clean, so
     /// the next `refresh` only reports changes since this point.
-    /// If `rows` is empty, clears all rows. Otherwise, only clears the specified rows.
+    /// If `rows` is empty, uses `ghostty_render_state_clean()` for efficiency.
+    /// Otherwise, only clears the specified rows.
     pub fn clear_dirty(&mut self, rows: &[usize]) {
+        if rows.is_empty() {
+            unsafe {
+                ghostty_render_state_clean(self.render);
+            }
+            return;
+        }
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -1209,20 +1272,14 @@ impl Terminal {
             }
             ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
             let clear: bool = false;
-            if rows.is_empty() {
-                while ghostty_render_state_row_iterator_next(iter) {
+            let mut row = 0usize;
+            let mut rows_iter = rows.iter().peekable();
+            while ghostty_render_state_row_iterator_next(iter) {
+                if rows_iter.peek() == Some(&&row) {
                     ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
+                    rows_iter.next();
                 }
-            } else {
-                let mut row = 0usize;
-                let mut rows_iter = rows.iter().peekable();
-                while ghostty_render_state_row_iterator_next(iter) {
-                    if rows_iter.peek() == Some(&&row) {
-                        ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
-                        rows_iter.next();
-                    }
-                    row += 1;
-                }
+                row += 1;
             }
             ghostty_render_state_row_iterator_free(iter);
         }
