@@ -459,6 +459,13 @@ unsafe extern "C" {
     fn ghostty_terminal_vt_write(terminal: TerminalHandle, data: *const u8, len: usize);
     fn ghostty_terminal_scroll_viewport(terminal: TerminalHandle, behavior: ScrollViewport);
     fn ghostty_terminal_get(terminal: TerminalHandle, data: i32, out: *mut c_void) -> Result;
+    fn ghostty_terminal_get_multi(
+        terminal: TerminalHandle,
+        count: usize,
+        keys: *const i32,
+        values: *mut *mut c_void,
+        out_written: *mut usize,
+    ) -> Result;
 
     fn ghostty_render_state_new(
         allocator: *const c_void,
@@ -467,6 +474,13 @@ unsafe extern "C" {
     fn ghostty_render_state_free(state: RenderStateHandle);
     fn ghostty_render_state_update(state: RenderStateHandle, terminal: TerminalHandle) -> Result;
     fn ghostty_render_state_get(state: RenderStateHandle, data: i32, out: *mut c_void) -> Result;
+    fn ghostty_render_state_get_multi(
+        state: RenderStateHandle,
+        count: usize,
+        keys: *const i32,
+        values: *mut *mut c_void,
+        out_written: *mut usize,
+    ) -> Result;
     fn ghostty_render_state_set(state: RenderStateHandle, option: i32, value: *const c_void) -> Result;
     fn ghostty_render_state_clean(state: RenderStateHandle) -> Result;
     fn ghostty_render_state_row_iterator_new(
@@ -1188,23 +1202,20 @@ impl Terminal {
 
         let mut fg = self.default_fg;
         let mut bg = self.default_bg;
+        let mut scrollbar = TerminalScrollbar::default();
+
+        let keys = [TERMINAL_DATA_COLOR_FOREGROUND, TERMINAL_DATA_COLOR_BACKGROUND, TERMINAL_DATA_SCROLLBAR];
+        let mut values: [*mut c_void; 3] = [
+            &mut fg as *mut ColorRgb as *mut c_void,
+            &mut bg as *mut ColorRgb as *mut c_void,
+            &mut scrollbar as *mut TerminalScrollbar as *mut c_void,
+        ];
+        let mut written: usize = 0;
         unsafe {
-            let mut c: ColorRgb = self.default_fg;
-            if ghostty_terminal_get(self.term, TERMINAL_DATA_COLOR_FOREGROUND, &mut c as *mut _ as *mut c_void).is_ok() {
-                fg = c;
-            }
-            let mut c: ColorRgb = self.default_bg;
-            if ghostty_terminal_get(self.term, TERMINAL_DATA_COLOR_BACKGROUND, &mut c as *mut _ as *mut c_void).is_ok() {
-                bg = c;
-            }
+            ghostty_terminal_get_multi(self.term, keys.len(), keys.as_ptr(), values.as_mut_ptr(), &mut written);
         }
         self.default_fg = fg;
         self.default_bg = bg;
-
-        let mut scrollbar = TerminalScrollbar::default();
-        unsafe {
-            ghostty_terminal_get(self.term, TERMINAL_DATA_SCROLLBAR, &mut scrollbar as *mut _ as *mut c_void);
-        }
         self.scrollbar = scrollbar;
 
         let mut cursor_data = RenderStateCursor::new();
