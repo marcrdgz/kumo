@@ -617,7 +617,8 @@ impl Pane {
             }
         }
 
-        self.vt.clear_dirty();
+        let dirty_vec: Vec<usize> = dirty.iter().copied().collect();
+        self.vt.clear_dirty(&dirty_vec);
         self.dirty = false;
 
         if self.is_ai_cli() {

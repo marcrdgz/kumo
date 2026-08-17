@@ -1175,6 +1175,9 @@ impl Terminal {
     /// Indices of the rows that changed since the last render-state update.
     pub fn dirty_rows(&self) -> Vec<usize> {
         let mut out = Vec::new();
+        if self.render_dirty_level() == DIRTY_FALSE {
+            return out;
+        }
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -1197,7 +1200,8 @@ impl Terminal {
 
     /// Reset the per-row dirty flags and the global dirty state to clean, so
     /// the next `refresh` only reports changes since this point.
-    pub fn clear_dirty(&mut self) {
+    /// If `rows` is empty, clears all rows. Otherwise, only clears the specified rows.
+    pub fn clear_dirty(&mut self, rows: &[usize]) {
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -1205,8 +1209,20 @@ impl Terminal {
             }
             ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
             let clear: bool = false;
-            while ghostty_render_state_row_iterator_next(iter) {
-                ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
+            if rows.is_empty() {
+                while ghostty_render_state_row_iterator_next(iter) {
+                    ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
+                }
+            } else {
+                let mut row = 0usize;
+                let mut rows_iter = rows.iter().peekable();
+                while ghostty_render_state_row_iterator_next(iter) {
+                    if rows_iter.peek() == Some(&&row) {
+                        ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
+                        rows_iter.next();
+                    }
+                    row += 1;
+                }
             }
             ghostty_render_state_row_iterator_free(iter);
         }
