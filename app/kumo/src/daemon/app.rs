@@ -699,6 +699,42 @@ impl App {
             if pane.vt.take_bell_count() > 0 {
                 crate::daemon::alert::play(crate::daemon::alert::AlertKind::Finished);
             }
+            // Check if there's a clipboard write request (OSC 52)
+            if let Some(text) = pane.vt.take_clipboard_text() {
+                // Copy to system clipboard using pbcopy on macOS, xclip/xsel on Linux
+                #[cfg(target_os = "macos")]
+                {
+                    use std::io::Write;
+                    use std::process::{Command, Stdio};
+                    if let Ok(mut child) = Command::new("pbcopy")
+                        .stdin(Stdio::piped())
+                        .spawn()
+                    {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = stdin.write_all(text.as_bytes());
+                        }
+                        let _ = child.wait();
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    use std::io::Write;
+                    use std::process::{Command, Stdio};
+                    for cmd in ["xclip", "xsel"] {
+                        if let Ok(mut child) = Command::new(cmd)
+                            .args(["-selection", "clipboard"])
+                            .stdin(Stdio::piped())
+                            .spawn()
+                        {
+                            if let Some(mut stdin) = child.stdin.take() {
+                                let _ = stdin.write_all(text.as_bytes());
+                            }
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 

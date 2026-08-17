@@ -128,6 +128,41 @@ pub struct DeviceAttributes {
 pub const COLOR_SCHEME_LIGHT: i32 = 0;
 pub const COLOR_SCHEME_DARK: i32 = 1;
 
+/// Clipboard location (which clipboard to write to).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ClipboardLocation(pub i32);
+
+/// A single MIME representation of clipboard content.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ClipboardContent {
+    pub mime: StringSlice,
+    pub data: StringSlice,
+}
+
+/// A semantic, atomic clipboard write request.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ClipboardWrite {
+    pub size: usize,
+    pub location: ClipboardLocation,
+    pub contents: *const ClipboardContent,
+    pub contents_len: usize,
+}
+
+/// Result of a clipboard write operation.
+#[repr(i32)]
+#[derive(Clone, Copy)]
+pub enum ClipboardWriteResult {
+    Success = 0,
+    Denied = 1,
+    Unsupported = 2,
+    Busy = 3,
+    InvalidData = 4,
+    IoError = 5,
+}
+
 // ---------------------------------------------------------------------------
 // Native selection types (GhosttyPoint / GridRef / Selection)
 // ---------------------------------------------------------------------------
@@ -379,6 +414,7 @@ pub const TERMINAL_OPT_COLOR_BACKGROUND: i32 = 12;
 pub const TERMINAL_OPT_COLOR_CURSOR: i32 = 13;
 pub const TERMINAL_OPT_COLOR_PALETTE: i32 = 14;
 pub const TERMINAL_OPT_PWD_CHANGED: i32 = 25;
+pub const TERMINAL_OPT_CLIPBOARD_WRITE: i32 = 26;
 pub const TERMINAL_OPT_MODE: i32 = 34;
 
 pub const TERMINAL_DATA_COLS: i32 = 1;
@@ -557,6 +593,9 @@ struct CbCell {
     /// Number of BEL characters received since last check. Used to trigger
     /// audible alerts when programs ring the terminal bell.
     bell_count: u32,
+    /// Text from the last OSC 52 clipboard write request. The daemon checks
+    /// this after each PTY event and copies it to the system clipboard.
+    clipboard_text: String,
 }
 
 /// Write pty callback: forwards query responses to the installed pty writer.
@@ -643,6 +682,38 @@ unsafe extern "C" fn bell_cb(_term: TerminalHandle, userdata: *mut c_void) {
     }
     let cell = userdata as *mut CbCell;
     (*cell).bell_count = (*cell).bell_count.saturating_add(1);
+}
+
+/// Clipboard write callback: handle OSC 52 clipboard write requests.
+unsafe extern "C" fn clipboard_write_cb(
+    _term: TerminalHandle,
+    userdata: *mut c_void,
+    write: *const ClipboardWrite,
+) -> ClipboardWriteResult {
+    if userdata.is_null() || write.is_null() {
+        return ClipboardWriteResult::InvalidData;
+    }
+    let write = &*write;
+    if write.contents_len == 0 {
+        // Clear clipboard request
+        return ClipboardWriteResult::Success;
+    }
+    // Find the first text/plain content
+    for i in 0..write.contents_len {
+        let content = &*write.contents.add(i);
+        let mime = std::slice::from_raw_parts(content.mime.ptr, content.mime.len);
+        let data = std::slice::from_raw_parts(content.data.ptr, content.data.len);
+        // Accept text/plain or empty mime (defaults to text/plain)
+        if mime.is_empty() || mime == b"text/plain" {
+            if let Ok(text) = std::str::from_utf8(data) {
+                // Store the text in the callback cell for the daemon to process
+                let cell = userdata as *mut CbCell;
+                (*cell).clipboard_text = text.to_string();
+                return ClipboardWriteResult::Success;
+            }
+        }
+    }
+    ClipboardWriteResult::Unsupported
 }
 
 /// Percent-decode a `file://` URI path (`%20` → space, `%2F` → `/`).
@@ -832,7 +903,12 @@ impl Terminal {
         // The callbacks need a stable place to find the current pty writer
         // and the last reported pwd. Allocate a heap cell and use it as the
         // USERDATA pointer.
-        let cell: Box<CbCell> = Box::new(CbCell { writer: None, pwd: Vec::new(), bell_count: 0 });
+        let cell: Box<CbCell> = Box::new(CbCell {
+            writer: None,
+            pwd: Vec::new(),
+            bell_count: 0,
+            clipboard_text: String::new(),
+        });
         let userdata = (&*cell) as *const CbCell as *mut c_void;
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const c_void);
@@ -842,6 +918,7 @@ impl Terminal {
             ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_BELL, bell_cb as *const c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_CLIPBOARD_WRITE, clipboard_write_cb as *const c_void);
         }
 
         // Enable grapheme cluster mode (DEC private mode 2027) so multi-codepoint
@@ -919,6 +996,17 @@ impl Terminal {
         let count = self.cell.bell_count;
         self.cell.bell_count = 0;
         count
+    }
+
+    /// Return and reset the text from the last OSC 52 clipboard write request.
+    /// Used by the daemon to copy text to the system clipboard when programs
+    /// request it via OSC 52.
+    pub fn take_clipboard_text(&mut self) -> Option<String> {
+        if self.cell.clipboard_text.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.cell.clipboard_text))
+        }
     }
 
     /// Install a linear selection covering two viewport coordinates
