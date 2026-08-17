@@ -96,7 +96,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
     let mut last_layout: Option<Layout> = None;
-    let mut last_pane_bufs: HashMap<u64, Buffer> = HashMap::new();
+    // Previous frame buffer per pane, used for diffing. Updated in-place each
+    // tick to avoid cloning. When a pane is not dirty, this stays unchanged.
+    let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
     let mut kill = false;
 
     loop {
@@ -355,7 +357,6 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         let mut dead = Vec::new();
-        let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
         for (id, client) in clients.iter_mut() {
             if !client.welcomed {
                 continue;
@@ -376,14 +377,13 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             for pid in pane_ids {
                 let was_pending = client.pane_needs_full.remove(&pid);
                 let Some(cached) = app.pane_cache.get(&pid) else { continue };
-                let resized = last_pane_bufs
+                let resized = pane_bufs
                     .get(&pid)
                     .map(|l| l.area != cached.area)
                     .unwrap_or(true);
                 if !was_pending && !resized && !changed.contains(&pid) {
                     continue;
                 }
-                let buf = pane_bufs.entry(pid).or_insert_with(|| frames::detach_buffer(cached));
                 let pane = app.panes.get(&pid);
                 let pane_cursor = pane.and_then(|p| {
                     if p.vt.cursor_visible() {
@@ -395,19 +395,19 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let scroll = pane.map(|p| super::ui::scroll_state(p.scrollbar_data()));
                 let palette = &app.theme.palette;
                 let frame = if was_pending || resized {
-                    frames::pane_frame(pid, buf, None, pane_cursor, palette, pane, scroll)
+                    // Full frame: no previous buffer to diff against
+                    let buf = frames::detach_buffer(cached);
+                    let frame = frames::pane_frame(pid, &buf, None, pane_cursor, palette, pane, scroll);
+                    pane_bufs.insert(pid, buf);
+                    frame
                 } else {
-                    frames::pane_frame(
-                        pid,
-                        buf,
-                        last_pane_bufs.get(&pid),
-                        pane_cursor,
-                        palette,
-                        pane,
-                        scroll,
-                    )
+                    // Partial frame: diff against the previous buffer
+                    let prev = pane_bufs.get(&pid);
+                    let buf = frames::detach_buffer(cached);
+                    let frame = frames::pane_frame(pid, &buf, prev, pane_cursor, palette, pane, scroll);
+                    pane_bufs.insert(pid, buf);
+                    frame
                 };
-                last_pane_bufs.insert(pid, buf.clone());
                 if !frame.full && frame.rows_dirty.is_empty() {
                     continue;
                 }
