@@ -99,6 +99,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     // Previous frame buffer per pane, used for diffing. Updated in-place each
     // tick to avoid cloning. When a pane is not dirty, this stays unchanged.
     let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
+    let mut pane_cursors: HashMap<u64, Option<(u16, u16)>> = HashMap::new();
     let mut kill = false;
 
     loop {
@@ -408,9 +409,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     pane_bufs.insert(pid, buf);
                     frame
                 };
-                if !frame.full && frame.rows_dirty.is_empty() {
+                let cursor_changed = pane_cursors.get(&pid) != Some(&pane_cursor);
+                if !frame.full && frame.rows_dirty.is_empty() && !cursor_changed {
                     continue;
                 }
+                pane_cursors.insert(pid, pane_cursor);
                 match client.send_msg(DaemonEvent::PaneFrame { frame }) {
                     SendOutcome::Ok => {}
                     SendOutcome::Lagging => {
