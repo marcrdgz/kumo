@@ -69,19 +69,25 @@ pub(crate) fn blocked(snap: &Snapshot) -> bool {
 /// whatever frame the spinner is on.
 const DINGBAT_SPINNER: &[char] = &[
     '\u{2722}', // ✢
-    '\u{2733}', // ✳
     '\u{2736}', // ✶
     '\u{273b}', // ✻
     '\u{273d}', // ✽
 ];
 
+/// Maximum trimmed line length for a dingbat to count as a working spinner.
+/// Real spinners are short (`✻`, `✻ Thinking…`); completion summaries like
+/// `✻ Sautéed for 43s` exceed this threshold.
+const DINGBAT_LINE_MAX_LEN: usize = 16;
+
 /// Whether Claude is actively working. Signals, oldest to newest:
-/// - a braille spinner leading the OSC window title (older claude);
+/// - a braille or half-circle spinner leading the OSC window title;
 /// - the `/btw` reasoning overlay;
 /// - newer claude's working prompt box: a `· esc to interrupt ·` hint or a
-///   dingbat spinner in the live form/footer region.
+///   short dingbat spinner in the live form/footer region.
 pub(crate) fn working(snap: &Snapshot) -> bool {
-    if snap.title.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
+    if snap.title.chars().next().is_some_and(|c| {
+        ('\u{2800}'..='\u{28ff}').contains(&c) || ('\u{25d0}'..='\u{25d3}').contains(&c)
+    }) {
         return true;
     }
     // The working prompt box pins `· esc to interrupt ·` only while a task
@@ -89,10 +95,21 @@ pub(crate) fn working(snap: &Snapshot) -> bool {
     if snap.form_lower.contains("esc to interrupt") || snap.footer_lower.contains("esc to interrupt") {
         return true;
     }
-    if DINGBAT_SPINNER.iter().any(|c| snap.form.contains(*c) || snap.footer.contains(*c)) {
+    if dingbat_spinner_in(&snap.form) || dingbat_spinner_in(&snap.footer) {
         return true;
     }
     btw_overlay(&snap.screen)
+}
+
+/// True when `text` contains a dingbat spinner on a short line (≤16 chars
+/// trimmed). Longer lines like `✻ Sautéed for 43s` are completion summaries,
+/// not active spinners.
+fn dingbat_spinner_in(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.len() <= DINGBAT_LINE_MAX_LEN
+            && DINGBAT_SPINNER.iter().any(|c| trimmed.contains(*c))
+    })
 }
 
 /// True when Claude's `/btw` reasoning overlay is on screen: within the last
@@ -218,9 +235,33 @@ mod tests {
 
     #[test]
     fn working_on_prompt_box_dingbat_spinner() {
-        // Newer claude spins dingbats (✢✳✶✻✽) in the prompt box while working.
-        let s = snap("─────\n✢\n✳\n✶\nNoodling…\n", "");
+        // Newer claude spins dingbats (✢✶✻✽) in the prompt box while working.
+        let s = snap("─────\n✢\n✶\n✻\nNoodling…\n", "");
         assert!(working(&s));
+    }
+
+    #[test]
+    fn not_working_on_completion_summary() {
+        // "✻ Sautéed for 43s" (18 chars) is a completion summary, not an
+        // active spinner.
+        let s = snap("─────\n✻ Sautéed for 43s\n", "");
+        assert!(!working(&s));
+    }
+
+    #[test]
+    fn working_on_short_dingbat_line() {
+        // Short dingbat lines (≤30 chars) are active spinners.
+        let s = snap("─────\n✻ Thinking…\n", "");
+        assert!(working(&s));
+    }
+
+    #[test]
+    fn working_on_half_circle_osc_title() {
+        // Claude 2.1.228+ uses half-circles (◐◓◑◒) as busy spinners in OSC title.
+        for title in ["◐ Working", "◑ Processing", "◒ Thinking", "◓ Busy"] {
+            let s = snap("", title);
+            assert!(working(&s), "should detect {title:?} as working");
+        }
     }
 
     #[test]
