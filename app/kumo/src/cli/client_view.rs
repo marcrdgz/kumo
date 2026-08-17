@@ -143,6 +143,11 @@ struct Grid {
     cursor: Option<(u16, u16)>,
     scroll: Option<ScrollState>,
     links: HashMap<u16, Vec<LinkRange>>,
+    /// Cached ratatui cells per row; `None` = stale, rebuilt lazily on render.
+    /// Only dirty rows are rebuilt, avoiding O(cols × rows) work per frame.
+    rendered: Vec<Option<Vec<ratatui::buffer::Cell>>>,
+    /// Rows that changed since the last render (from `PaneFrame.rows_dirty`).
+    dirty_rows: HashSet<u16>,
 }
 
 impl Grid {
@@ -151,15 +156,75 @@ impl Grid {
             self.cols = frame.cols as usize;
             self.rows = frame.rows as usize;
             self.cells = vec![Vec::new(); self.rows];
+            self.rendered = vec![None; self.rows];
+            self.dirty_rows = HashSet::new();
         }
         for patch in &frame.rows_dirty {
             if (patch.row as usize) < self.rows {
                 self.cells[patch.row as usize] = patch.cells.clone();
+                // Invalidate the cached render for this row
+                if let Some(slot) = self.rendered.get_mut(patch.row as usize) {
+                    *slot = None;
+                }
+                self.dirty_rows.insert(patch.row);
             }
             self.links.insert(patch.row, patch.links.clone());
         }
         self.cursor = frame.cursor;
         self.scroll = frame.scroll;
+    }
+
+    /// Get the rendered ratatui cells for a row, rebuilding only if the row
+    /// changed since the last render. This avoids O(cols × rows) work per frame
+    /// by only rebuilding dirty rows.
+    fn get_rendered_row(
+        &mut self,
+        row: usize,
+        selected: Option<Sel>,
+        link_mods: bool,
+        links: &HashMap<u16, Vec<LinkRange>>,
+    ) -> Option<&Vec<ratatui::buffer::Cell>> {
+        if row >= self.rows {
+            return None;
+        }
+        // Rebuild the row if it's not cached
+        if self.rendered.get(row).map(|r| r.is_none()).unwrap_or(true) {
+            let cells = self.cells.get(row)?;
+            let mut rendered = Vec::with_capacity(cells.len());
+            for (c, cell) in cells.iter().enumerate() {
+                if cell.cell_width == 0 {
+                    continue;
+                }
+                let mut style = cell_style(cell);
+                // Selection highlight
+                if let Some(sel) = selected {
+                    let ((tr, tc), (br, bc)) = sel_corners(&sel);
+                    if (row as u16, c as u16) >= (tr, tc) && (row as u16, c as u16) <= (br, bc) {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                }
+                // Link underline
+                if link_mods {
+                    if let Some(row_links) = links.get(&(row as u16)) {
+                        if row_links.iter().any(|l| (c as u16) >= l.start && (c as u16) < l.end) {
+                            style = style.add_modifier(Modifier::UNDERLINED);
+                        }
+                    }
+                }
+                let ch = if cell.text.trim().is_empty() { " " } else { &cell.text };
+                let mut ratatui_cell = ratatui::buffer::Cell::default();
+                ratatui_cell.set_symbol(ch);
+                ratatui_cell.set_style(style);
+                if cell.cell_width == 0 {
+                    ratatui_cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+                }
+                rendered.push(ratatui_cell);
+            }
+            if let Some(slot) = self.rendered.get_mut(row) {
+                *slot = Some(rendered);
+            }
+        }
+        self.rendered.get(row).and_then(|r| r.as_ref())
     }
 }
 
@@ -237,6 +302,64 @@ pub struct View {
     pending_wheel: HashMap<u64, Vec<u8>>,
     dirty: bool,
     detach_requested: bool,
+}
+
+fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, selected: Option<Sel>, link_mods: bool, theme_idx: usize) {
+    let inner = PaneGeom { pane_id: pid, rect }.inner();
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    for r in 0..grid.rows {
+        if r as u16 >= inner.height {
+            break;
+        }
+        // Get the cached rendered row, rebuilding only if dirty
+        let Some(rendered_row) = grid.get_rendered_row(r, selected, link_mods, &grid.links.clone()) else {
+            continue;
+        };
+        for (c, cell) in rendered_row.iter().enumerate() {
+            if c as u16 >= inner.width {
+                break;
+            }
+            // Skip continuation cells (wide character tails)
+            if matches!(cell.diff_option, ratatui::buffer::CellDiffOption::Skip) {
+                continue;
+            }
+            let x = inner.x + c as u16;
+            let y = inner.y + r as u16;
+            if let Some(target) = f.buffer_mut().cell_mut(Position::new(x, y)) {
+                *target = cell.clone();
+            }
+        }
+    }
+    // Scrollbar on the last content column when the pane has scrollback.
+    if let Some(scroll) = grid.scroll {
+        render_scrollbar(f, inner, scroll, theme_idx);
+    }
+}
+
+fn render_scrollbar(f: &mut Frame, inner: Rect, sb: ScrollState, theme_idx: usize) {
+    let total = sb.total as usize;
+    let screen = sb.screen as usize;
+    if total <= screen || screen == 0 {
+        return;
+    }
+    let theme = &THEMES[theme_idx];
+    let hist = total - screen;
+    let bar_h = inner.height as usize;
+    let thumb = ((screen * bar_h) / total).max(1).min(bar_h);
+    let off = sb.offset as usize;
+    let y_max = bar_h.saturating_sub(thumb);
+    let y_start = off.saturating_mul(y_max) / hist.max(1);
+    let x = inner.x + inner.width.saturating_sub(1);
+    for i in 0..bar_h {
+        let y = inner.y + i as u16;
+        if i >= y_start && i < y_start + thumb {
+            put(f, x, y, "▐", Style::default().fg(theme.secondary));
+        } else {
+            put(f, x, y, "░", Style::default().fg(theme.panel_sep));
+        }
+    }
 }
 
 impl View {
@@ -386,6 +509,8 @@ impl View {
             cursor: None,
             scroll: None,
             links: HashMap::new(),
+            rendered: Vec::new(),
+            dirty_rows: HashSet::new(),
         });
         grid.apply(&frame);
         self.mark_dirty();
@@ -2084,15 +2209,18 @@ impl View {
         Ok(())
     }
 
-    fn draw(&self, f: &mut Frame) {
+    fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        let link_mods = self.link_mods;
+        let selected = self.sel;
+        let theme_idx = self.theme_idx;
         // Pane frames (borders + titles + content).
         for &(pid, rect) in &self.rects {
             let focused = self.active_session().map(|s| s.focus == pid).unwrap_or(false);
             let title = self.pane_title(pid, focused);
             self.render_pane_frame(f, rect, focused, &title);
-            if let Some(grid) = self.grids.get(&pid) {
-                self.render_pane_content(f, pid, rect, grid);
+            if let Some(grid) = self.grids.get_mut(&pid) {
+                render_pane_content(f, pid, rect, grid, selected, link_mods, theme_idx);
             }
         }
         self.render_pane_numbers(f);
@@ -2173,76 +2301,6 @@ impl View {
         };
         for (i, ch) in title.chars().take(max).enumerate() {
             put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
-        }
-    }
-
-    fn render_pane_content(&self, f: &mut Frame, pid: u64, rect: Rect, grid: &Grid) {
-        let inner = PaneGeom { pane_id: pid, rect }.inner();
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
-        let selected = self.sel.filter(|s| s.pane_id == pid);
-        for (r, row) in grid.cells.iter().enumerate() {
-            if r as u16 >= inner.height {
-                break;
-            }
-            for (c, cell) in row.iter().enumerate() {
-                if c as u16 >= inner.width {
-                    break;
-                }
-                if cell.cell_width == 0 {
-                    continue;
-                }
-                let mut style = cell_style(cell);
-                // Selection highlight: the (row, col) rectangle between the
-                // drag corners, matching what `selection_text` copies.
-                if let Some(sel) = selected {
-                    let ((tr, tc), (br, bc)) = sel_corners(&sel);
-                    if (r as u16, c as u16) >= (tr, tc) && (r as u16, c as u16) <= (br, bc) {
-                        style = style.add_modifier(Modifier::REVERSED);
-                    }
-                }
-                // Link underline while a link modifier is held.
-                if self.link_mods {
-                    if let Some(links) = grid.links.get(&(r as u16)) {
-                        if links.iter().any(|l| (c as u16) >= l.start && (c as u16) < l.end) {
-                            style = style.add_modifier(Modifier::UNDERLINED);
-                        }
-                    }
-                }
-                let x = inner.x + c as u16;
-                let y = inner.y + r as u16;
-                let ch = if cell.text.trim().is_empty() { " " } else { &cell.text };
-                put(f, x, y, ch, style);
-            }
-        }
-        // Scrollbar on the last content column when the pane has scrollback.
-        if let Some(scroll) = grid.scroll {
-            self.render_scrollbar(f, inner, scroll);
-        }
-    }
-
-    fn render_scrollbar(&self, f: &mut Frame, inner: Rect, sb: ScrollState) {
-        let total = sb.total as usize;
-        let screen = sb.screen as usize;
-        if total <= screen || screen == 0 {
-            return;
-        }
-        let theme = &THEMES[self.theme_idx];
-        let hist = total - screen;
-        let bar_h = inner.height as usize;
-        let thumb = ((screen * bar_h) / total).max(1).min(bar_h);
-        let off = sb.offset as usize;
-        let y_max = bar_h.saturating_sub(thumb);
-        let y_start = off.saturating_mul(y_max) / hist.max(1);
-        let x = inner.x + inner.width.saturating_sub(1);
-        for i in 0..bar_h {
-            let y = inner.y + i as u16;
-            if i >= y_start && i < y_start + thumb {
-                put(f, x, y, "▐", Style::default().fg(theme.secondary));
-            } else {
-                put(f, x, y, "░", Style::default().fg(theme.panel_sep));
-            }
         }
     }
 
@@ -3147,7 +3205,7 @@ mod tests {
     }
 
     fn grid() -> Grid {
-        Grid { cols: 4, rows: 3, cells: Vec::new(), cursor: None, scroll: None, links: HashMap::new() }
+        Grid { cols: 4, rows: 3, cells: Vec::new(), cursor: None, scroll: None, links: HashMap::new(), rendered: Vec::new(), dirty_rows: HashSet::new() }
     }
 
     fn test_view() -> View {
