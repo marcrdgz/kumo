@@ -134,10 +134,10 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
 
     let result: Result<Exit> = (|| {
         loop {
-            // Daemon events: block for the first one (16ms keeps local input
+            // Daemon events: block for the first one (8ms keeps local input
             // responsive), then drain everything already queued so a burst of
             // pane frames costs a single render instead of one render per frame.
-            match ev_rx.recv_timeout(Duration::from_millis(16)) {
+            match ev_rx.recv_timeout(Duration::from_millis(8)) {
                 Ok(ev) => {
                     if let Some(exit) = apply_daemon_event(&mut view, ev) {
                         return Ok(exit);

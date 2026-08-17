@@ -436,7 +436,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             break;
         }
 
-        std::thread::sleep(Duration::from_millis(8));
+        std::thread::sleep(Duration::from_millis(4));
     }
 
     let _ = std::fs::remove_file(&path);
