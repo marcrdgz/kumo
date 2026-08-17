@@ -2427,7 +2427,9 @@ impl View {
                     } else {
                         Style::default().fg(status_color).bg(bg)
                     };
-                    put(f, x + 2, y, dot, Style::default().fg(status_color).bg(bg));
+                    if !is_dir {
+                        put(f, x + 2, y, dot, Style::default().fg(status_color).bg(bg));
+                    }
                     if is_dir {
                         let path_color = if focused { theme.fg } else { theme.panel_muted };
                         text(f, x + 4, y, third, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
