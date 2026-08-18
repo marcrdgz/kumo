@@ -297,6 +297,10 @@ fn read_reply(stream: &mut UnixStream) -> Result<()> {
                 println!("{message}");
                 return Ok(());
             }
+            Ok(DaemonEvent::Restarting) => {
+                println!("daemon restarting…");
+                return Ok(());
+            }
             Ok(DaemonEvent::ConfigReloaded { notice }) => {
                 println!("{notice}");
                 return Ok(());

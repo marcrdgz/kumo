@@ -72,7 +72,20 @@ pub(crate) fn row_cells(buf: &Buffer, row: u16, cols: u16, palette: &[ColorRgb; 
 fn row_changed(buf: &Buffer, last: &Buffer, row: u16, cols: u16) -> bool {
     let s = row as usize * cols as usize;
     let e = s + cols as usize;
-    buf.content[s..e] != last.content[s..e]
+    // Compare only visible attributes (symbol, fg, bg, modifier), ignoring
+    // `diff_option`. The width fix introduces `ForcedWidth(2)`/`Skip` on
+    // emoji cells, which would otherwise cause `row_changed` to report
+    // "changed" even when the visible content is identical — or, worse,
+    // miss actual visible changes when the diff_options happen to match.
+    buf.content[s..e]
+        .iter()
+        .zip(last.content[s..e].iter())
+        .any(|(a, b)| {
+            a.symbol() != b.symbol()
+                || a.fg != b.fg
+                || a.bg != b.bg
+                || a.modifier != b.modifier
+        })
 }
 
 /// Serialize one `ratatui` cell into a wire cell.
@@ -117,7 +130,7 @@ pub(crate) fn pane_frame(
     let rows = buf.area.height;
     let links = |row: u16| pane.map(|p| p.link_ranges(row)).unwrap_or_default();
     let full = last.map(|l| l.area != buf.area).unwrap_or(true);
-    let rows_dirty = if full {
+    let rows_dirty: Vec<RowPatch> = if full {
         (0..rows)
             .map(|row| RowPatch {
                 row,

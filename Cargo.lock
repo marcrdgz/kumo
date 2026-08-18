@@ -3160,6 +3160,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "unicode-properties",
 ]
 
 [[package]]

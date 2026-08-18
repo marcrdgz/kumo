@@ -191,9 +191,6 @@ impl Grid {
             let cells = self.cells.get(row)?;
             let mut rendered = Vec::with_capacity(cells.len());
             for (c, cell) in cells.iter().enumerate() {
-                if cell.cell_width == 0 {
-                    continue;
-                }
                 let mut style = cell_style(cell);
                 // Selection highlight
                 if let Some(sel) = selected {
@@ -215,7 +212,18 @@ impl Grid {
                 ratatui_cell.set_symbol(ch);
                 ratatui_cell.set_style(style);
                 if cell.cell_width == 0 {
+                    // Continuation cell after a wide glyph: skip it so the wide
+                    // glyph's right half is never overwritten.
                     ratatui_cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+                } else if cell.cell_width == 2 {
+                    // Pin the width so ratatui emits this glyph as 2 columns
+                    // even when `unicode-width` under-counts it (text-presentation
+                    // emoji like ⚡ ✨ are `So` symbols rated 1 column but drawn 2).
+                    // Otherwise the terminal shifts the rest of the row right and
+                    // a full-line highlight's last cell lands on the pane border.
+                    ratatui_cell.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+                        std::num::NonZeroU16::new(2).expect("2 is non-zero"),
+                    ));
                 }
                 rendered.push(ratatui_cell);
             }
@@ -320,7 +328,9 @@ fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, sel
             if c as u16 >= inner.width {
                 break;
             }
-            // Skip continuation cells (wide character tails)
+            // Skip continuation cells (wide character tails). Wide glyphs at
+            // the pane's right edge are already clipped by the daemon, so the
+            // grid never carries a wide glyph in the last column.
             if matches!(cell.diff_option, ratatui::buffer::CellDiffOption::Skip) {
                 continue;
             }

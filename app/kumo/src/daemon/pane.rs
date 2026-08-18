@@ -10,6 +10,7 @@ use kumo_core::theme::Theme;
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 use crate::daemon::vt::{self, find_urls};
 use kumo_core::color::ColorRgb;
@@ -555,7 +556,29 @@ impl Pane {
             // terminal's defaults (native).
             let cell_fg = if rc.has_fg { rgb(rc.fg) } else { RColor::Reset };
             let cell_bg = if rc.has_bg { rgb(rc.bg) } else { RColor::Reset };
+            // Effective glyph width. Most wide glyphs are already reported as
+            // 2 columns by `unicode-width` (CJK, EAW=Wide emoji, VS16/ZWJ
+            // sequences). But a few "text-presentation" emoji — ⚡ ✨ ❤ ⭐ …
+            // (General_Category `So`) are rated 1 column yet drawn 2 columns
+            // by every modern terminal. Accounting them as wide keeps the
+            // client's rows aligned: otherwise the terminal renders the rest
+            // of the row shifted right and a full-line highlight's last cell
+            // lands on the client's pane border.
+            let w = rc.text.cell_width();
+            let wide = w >= 2
+                || (w == 1
+                    && rc.text
+                        .chars()
+                        .next()
+                        .is_some_and(|c| !c.is_ascii() && c.general_category() == GeneralCategory::OtherSymbol));
             if rc.text.is_empty() {
+                bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
+                bcell.modifier = mods;
+            } else if wide && col + 1 >= aw as usize {
+                // A wide character at the last column: its right half would
+                // hang off the grid and spill over the client's pane border
+                // (the `│`). Clip it to a blank cell with its style, the same
+                // way a real terminal clips a wide glyph at the right edge.
                 bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
             } else {
@@ -564,13 +587,20 @@ impl Pane {
                 // tones, and ZWJ sequences like family emoji.
                 bcell.set_symbol(&rc.text).set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
-                // A wide character occupies two columns; mark the continuation
-                // cell as `skip` so `from_ratatui` serializes it with
-                // `cell_width = 0` and the client skips it. Otherwise the
-                // continuation is sent as a normal space and the client
-                // overwrites the wide character's right half, leaving visual
-                // residue (ghost letters after emoji).
-                if rc.text.cell_width() == 2 && col + 1 < aw as usize {
+                // A wide character occupies two columns. Pin its reported width
+                // to 2 so the wire carries `cell_width = 2` even when
+                // `unicode-width` under-counts it (the `So` emoji above), and
+                // mark the continuation cell as `skip` so `from_ratatui`
+                // serializes it with `cell_width = 0` and the client skips it.
+                // Otherwise the continuation is sent as a normal space and the
+                // client overwrites the wide character's right half, leaving
+                // visual residue (ghost letters after emoji).
+                if wide && w < 2 {
+                    bcell.set_diff_option(CellDiffOption::ForcedWidth(
+                        std::num::NonZeroU16::new(2).expect("2 is non-zero"),
+                    ));
+                }
+                if wide && col + 1 < aw as usize {
                     let next_xy = (area_x + col as u16 + 1, area_y + row as u16);
                     if let Some(next) = cache.cell_mut(next_xy) {
                         if next.symbol().chars().all(|c| c.is_whitespace()) {
