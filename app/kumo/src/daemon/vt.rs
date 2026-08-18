@@ -576,11 +576,55 @@ unsafe extern "C" {
         buf_len: usize,
         out_len: *mut usize,
     ) -> Result;
+
+    /// Display width of a single codepoint in grid cells (0, 1, or 2),
+    /// using the exact width table the terminal uses when laying out text.
+    fn ghostty_unicode_codepoint_width(cp: u32) -> u8;
+
+    /// Measures the first grapheme cluster in `cps` with the terminal's exact
+    /// segmentation and cluster width rules (VS16/VS15, ZWJ, skin tones,
+    /// regional indicators). Returns the number of codepoints consumed and
+    /// stores the cluster's width (0-2) in `width`.
+    fn ghostty_unicode_grapheme_width(cps: *const u32, len: usize, width: *mut u8) -> usize;
 }
 
 // ---------------------------------------------------------------------------
 // Safe wrapper
 // ---------------------------------------------------------------------------
+
+/// Terminal display width in grid cells (0, 1, or 2) of a full grapheme
+/// cluster, using the exact rules the terminal applies when printing text:
+/// VS16 forces emoji presentation (wide), VS15 forces text presentation
+/// (narrow), and ZWJ/skin-tone/regional-indicator sequences widen the
+/// cluster. This matches how the client terminal lays the cell out, so the
+/// daemon can mirror it without maintaining its own width tables.
+pub fn grapheme_width(text: &str) -> u8 {
+    let mut cps = [0u32; 32];
+    let mut n = 0;
+    for c in text.chars() {
+        if n == cps.len() {
+            // Extremely long clusters (rare) are measured from a heap buffer.
+            let cps: Vec<u32> = text.chars().map(|c| c as u32).collect();
+            let mut width: u8 = 0;
+            unsafe {
+                ghostty_unicode_grapheme_width(cps.as_ptr(), cps.len(), &mut width);
+            }
+            return width;
+        }
+        cps[n] = c as u32;
+        n += 1;
+    }
+    let mut width: u8 = 0;
+    unsafe {
+        ghostty_unicode_grapheme_width(cps.as_ptr(), n, &mut width);
+    }
+    width
+}
+
+/// Terminal display width of a single codepoint in grid cells (0, 1, or 2).
+pub fn codepoint_width(cp: char) -> u8 {
+    unsafe { ghostty_unicode_codepoint_width(cp as u32) }
+}
 
 /// Shared callback cell installed as the terminal's USERDATA. Holds the
 /// current pty writer (for query responses) and the last OSC 7 / OSC 9 /

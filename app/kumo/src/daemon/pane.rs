@@ -10,7 +10,6 @@ use kumo_core::theme::Theme;
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 use crate::daemon::vt::{self, find_urls};
 use kumo_core::color::ColorRgb;
@@ -556,21 +555,16 @@ impl Pane {
             // terminal's defaults (native).
             let cell_fg = if rc.has_fg { rgb(rc.fg) } else { RColor::Reset };
             let cell_bg = if rc.has_bg { rgb(rc.bg) } else { RColor::Reset };
-            // Effective glyph width. Most wide glyphs are already reported as
-            // 2 columns by `unicode-width` (CJK, EAW=Wide emoji, VS16/ZWJ
-            // sequences). But a few "text-presentation" emoji — ⚡ ✨ ❤ ⭐ …
-            // (General_Category `So`) are rated 1 column yet drawn 2 columns
-            // by every modern terminal. Accounting them as wide keeps the
-            // client's rows aligned: otherwise the terminal renders the rest
-            // of the row shifted right and a full-line highlight's last cell
-            // lands on the client's pane border.
+            // Effective glyph width. `unicode-width` covers the common case
+            // (CJK, EAW=Wide emoji). The emulator's own grapheme width handles
+            // the rest with its exact text-layout rules: VS16 forces emoji
+            // presentation (wide), VS15 forces text presentation (narrow),
+            // and ZWJ/skin-tone/regional-indicator sequences widen the
+            // cluster. This mirrors what the client terminal draws, so narrow
+            // symbols like arrows (↑ ↓ ← →) stay at width 1 and starship's
+            // `[(↑)]` keeps its closing bracket.
             let w = rc.text.cell_width();
-            let wide = w >= 2
-                || (w == 1
-                    && rc.text
-                        .chars()
-                        .next()
-                        .is_some_and(|c| !c.is_ascii() && c.general_category() == GeneralCategory::OtherSymbol));
+            let wide = w >= 2 || (!rc.text.is_empty() && vt::grapheme_width(&rc.text) == 2);
             if rc.text.is_empty() {
                 bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
@@ -1000,6 +994,33 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
     use std::sync::mpsc;
+
+    #[test]
+    fn grapheme_width_matches_terminal_layout_rules() {
+        // Wide via East Asian Width.
+        assert_eq!(vt::grapheme_width("🚀"), 2);
+        assert_eq!(vt::grapheme_width("中"), 2);
+        // VS16 forces emoji presentation (wide) on a valid emoji base like ❤.
+        assert_eq!(vt::grapheme_width("❤\u{FE0F}"), 2);
+        // VS16 after a non-emoji base (↑) is ignored: starship's `[(↑)]`
+        // keeps its closing bracket with or without the selector.
+        assert_eq!(vt::grapheme_width("↑\u{FE0F}"), 1);
+        // VS15 forces text presentation (narrow).
+        assert_eq!(vt::grapheme_width("★\u{FE0E}"), 1);
+        // ZWJ family sequence stays a single 2-column cluster.
+        assert_eq!(vt::grapheme_width("👨\u{200D}👩\u{200D}👧"), 2);
+        // Regional-indicator flag pair.
+        assert_eq!(vt::grapheme_width("\u{1F1EA}\u{1F1F8}"), 2);
+        // Lone variation selector is zero-width.
+        assert_eq!(vt::grapheme_width("\u{FE0F}"), 0);
+        // Plain text symbols and arrows stay width 1.
+        assert_eq!(vt::grapheme_width("↑"), 1);
+        assert_eq!(vt::grapheme_width("⌘"), 1);
+        assert_eq!(vt::grapheme_width("❤"), 1);
+        // Per-codepoint helper agrees for single chars.
+        assert_eq!(vt::codepoint_width('中'), 2);
+        assert_eq!(vt::codepoint_width('a'), 1);
+    }
 
     fn test_theme() -> &'static Theme {
         &kumo_core::theme::THEMES[kumo_core::theme::DEFAULT_THEME_IDX]
