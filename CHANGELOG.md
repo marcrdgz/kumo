@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.3
+
+### 🐛 Bug Fixes
+
+- *(claude)* Track cursor movement
+- *(ui)* Pin wide emoji width and handle daemon restarting
+- *(ui)* Use emulator grapheme width instead of hardcoded emoji table
 ## v0.5.2
 
 ### 🚀 Features
@@ -28,6 +35,10 @@
 - *(daemon)* Move git status and ps to background threads
 - *(daemon)* Wrap client socket in BufWriter to reduce syscalls
 - *(daemon)* Eliminate buf.clone() with persistent pane buffer cache
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.5.2
 ## v0.5.1
 
 ### 🐛 Bug Fixes
