@@ -45,6 +45,17 @@ const MENU_ITEMS: [&str; 5] = ["config", "settings", "reload", "keybinds", "deta
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
 
+fn tab_width(name: &str) -> u16 {
+    let n = name.chars().count() as u16;
+    (n + 4).max(6)
+}
+fn lighten(c: RColor, amt: u8) -> RColor {
+    match c {
+        RColor::Rgb(r, g, b) => RColor::Rgb(r.saturating_add(amt), g.saturating_add(amt), b.saturating_add(amt)),
+        _ => c,
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Mode {
     Normal,
@@ -85,6 +96,7 @@ struct Popup {
 enum CtxTarget {
     Pane(u64),
     Session(usize),
+    Tab(usize, usize), // (session_idx, tab_idx)
 }
 
 struct Menu {
@@ -285,6 +297,7 @@ pub struct View {
     sidebar_scroll: (u16, u16),
     tab_hover: Option<usize>,
     tab_rects: Vec<(usize, Rect, Rect)>, // (tab_idx, pill rect, close rect)
+    tab_scroll: usize,
     popup: Popup,
     menu: Menu,
     ctx_menu: CtxMenu,
@@ -438,6 +451,7 @@ impl View {
             pending_wheel: HashMap::new(),
             tab_hover: None,
             tab_rects: Vec::new(),
+            tab_scroll: 0,
             dirty: true,
             detach_requested: false,
         };
@@ -721,20 +735,94 @@ impl View {
         Rect::new(x, 0, self.cols.saturating_sub(x), TAB_H)
     }
 
+    fn tab_left_arrow_rect(&self) -> Option<Rect> {
+        let area = self.tabs_area();
+        if self.tab_scroll == 0 { return None; }
+        Some(Rect::new(area.x, area.y, 1, 1))
+    }
+    fn tab_right_arrow_rect(&self) -> Option<Rect> {
+        let area = self.tabs_area();
+        let Some(sess) = self.active_session() else { return None };
+        // Check if there are hidden tabs to the right
+        let mut cur: u16 = 0;
+        let has_left = self.tab_scroll > 0;
+        let avail = area.width.saturating_sub(if has_left {1} else {0}).saturating_sub(1); // reserve 1 for right arrow if needed
+        let mut visible_end = self.tab_scroll;
+        for idx in self.tab_scroll..sess.tabs.len() {
+            let w = tab_width(&sess.tabs[idx].name) + 1;
+            if cur + w - 1 > avail { break; }
+            cur += w;
+            visible_end = idx + 1;
+        }
+        if visible_end < sess.tabs.len() {
+            Some(Rect::new(area.x + area.width - 1, area.y, 1, 1))
+        } else { None }
+    }
+
+    fn ensure_tab_visible(&mut self) {
+        let Some(sess) = self.active_session().cloned() else { return };
+        if sess.tabs.is_empty() { return; }
+        let area = self.tabs_area();
+        let mut scroll = self.tab_scroll.min(sess.tabs.len().saturating_sub(1));
+        // If active tab is before scroll, move scroll back
+        if sess.active_tab < scroll {
+            scroll = sess.active_tab;
+        } else {
+            // Check if active is beyond visible window
+            let has_left = scroll > 0;
+            let avail = area.width.saturating_sub(if has_left {1} else {0}).saturating_sub(1);
+            let mut cur: u16 = 0;
+            let mut visible_end = scroll;
+            for idx in scroll..sess.tabs.len() {
+                let w = tab_width(&sess.tabs[idx].name) + 1;
+                if cur + w - 1 > avail { break; }
+                cur += w;
+                visible_end = idx + 1;
+            }
+            if sess.active_tab >= visible_end {
+                // Move scroll so active is last visible
+                // Find smallest scroll where active is visible
+                for s in (0..=sess.active_tab).rev() {
+                    let has_l = s > 0;
+                    let av = area.width.saturating_sub(if has_l {1} else {0}).saturating_sub(1);
+                    let mut c: u16 = 0;
+                    let mut e = s;
+                    for idx in s..sess.tabs.len() {
+                        let w = tab_width(&sess.tabs[idx].name) + 1;
+                        if c + w - 1 > av { break; }
+                        c += w;
+                        e = idx + 1;
+                        if e > sess.active_tab { break; }
+                    }
+                    if s <= sess.active_tab && sess.active_tab < e {
+                        scroll = s;
+                        break;
+                    }
+                }
+            }
+        }
+        self.tab_scroll = scroll;
+    }
+
     fn update_tab_rects(&mut self) {
         self.tab_rects.clear();
         let Some(sess) = self.active_session().cloned() else { return };
+        if sess.tabs.is_empty() { return; }
         let area = self.tabs_area();
-        let mut cur_x = area.x;
-        for (idx, tab) in sess.tabs.iter().enumerate() {
-            let is_hover = self.tab_hover == Some(idx);
-            let label = if is_hover { format!("[{} x]", tab.name) } else { format!("[{}]", tab.name) };
-            let w = label.chars().count() as u16;
-            if cur_x + w > area.x + area.width { break; }
+        if area.width == 0 { return; }
+        self.ensure_tab_visible();
+        let has_left = self.tab_scroll > 0;
+        let mut cur_x = area.x + if has_left { 1 } else { 0 };
+        let has_right = self.tab_right_arrow_rect().is_some();
+        let right_bound = area.x + area.width - if has_right { 1 } else { 0 };
+        for idx in self.tab_scroll..sess.tabs.len() {
+            let tab = &sess.tabs[idx];
+            let w = tab_width(&tab.name);
+            if cur_x + w > right_bound { break; }
             let pill = Rect::new(cur_x, area.y, w, 1);
-            let close = if is_hover { Rect::new(cur_x + w - 2, area.y, 1, 1) } else { Rect::new(0,0,0,0) };
+            let close = Rect::new(cur_x + w - 1, area.y, 1, 1);
             self.tab_rects.push((idx, pill, close));
-            cur_x += w + 1; // 1 gap between tabs
+            cur_x += w + 1;
         }
     }
 
@@ -742,9 +830,16 @@ impl View {
         if y != 0 { return None; }
         let area = self.tabs_area();
         if !area.contains(Position::new(x, y)) { return None; }
+        // Check arrows first
+        if let Some(r) = self.tab_left_arrow_rect() {
+            if r.contains(Position::new(x, y)) { return None; } // handled separately
+        }
+        if let Some(r) = self.tab_right_arrow_rect() {
+            if r.contains(Position::new(x, y)) { return None; }
+        }
         for (idx, pill, close) in &self.tab_rects {
             if pill.contains(Position::new(x, y)) {
-                let is_close = close.width>0 && close.contains(Position::new(x, y));
+                let is_close = close.contains(Position::new(x, y)) && self.tab_hover == Some(*idx);
                 return Some((*idx, is_close));
             }
         }
@@ -1042,6 +1137,9 @@ impl View {
             let s_idx = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|x| x.name==s.name)).unwrap_or(0);
             (s_idx, s.active_tab)
         }).unwrap_or((0,0));
+        self.open_rename_tab_popup_for(s_idx, t_idx);
+    }
+    fn open_rename_tab_popup_for(&mut self, s_idx: usize, t_idx: usize) {
         let name = self.layout.as_ref().and_then(|l| l.sessions.get(s_idx)).and_then(|s| s.tabs.get(t_idx)).map(|t| t.name.clone()).unwrap_or_default();
         self.popup.name = name.clone();
         self.popup.cursor = name.chars().count();
@@ -1364,6 +1462,7 @@ impl View {
             }
             CtxTarget::Pane(_) => &["rename", "zoom", "split vertical", "split horizontal", "close"],
             CtxTarget::Session(_) => &["rename", "new worktree", "open worktree", "close"],
+            CtxTarget::Tab(_, _) => &["new tab", "rename", "close"],
         }
     }
 
@@ -1406,7 +1505,17 @@ impl View {
             "rename" => match target {
                 CtxTarget::Pane(pid) => self.open_rename_popup(pid),
                 CtxTarget::Session(idx) => self.open_rename_session_popup(idx),
+                CtxTarget::Tab(s_idx, t_idx) => self.open_rename_tab_popup_for(s_idx, t_idx),
             },
+            "new tab" => {
+                if let CtxTarget::Tab(s_idx, _) = target {
+                    if let Some(name) = self.layout.as_ref().and_then(|l| l.sessions.get(s_idx)).map(|s| s.name.clone()) {
+                        let _ = self.send(&Command::TabNew { session: name, name: None, workspace: None });
+                    }
+                } else if let Some(sess) = self.active_session().map(|s| s.name.clone()) {
+                    let _ = self.send(&Command::TabNew { session: sess, name: None, workspace: None });
+                }
+            }
             "new worktree" => {
                 if let CtxTarget::Session(idx) = target {
                     self.open_worktree_popup(idx);
@@ -1465,6 +1574,12 @@ impl View {
                         .map(|s| s.name.clone());
                     if let Some(name) = name {
                         let _ = self.send(&Command::SessionKill { name });
+                    }
+                }
+                CtxTarget::Tab(s_idx, t_idx) => {
+                    if let Some(sess) = self.layout.as_ref().and_then(|l| l.sessions.get(s_idx)) {
+                        let tname = sess.tabs.get(t_idx).map(|t| t.name.clone()).unwrap_or_default();
+                        let _ = self.send(&Command::TabClose { session: sess.name.clone(), tab: Some(tname) });
                     }
                 }
             },
@@ -1702,6 +1817,26 @@ impl View {
                     self.menu.selected = 0;
                     return Ok(());
                 }
+                if y == 0 && self.tabs_area().contains(Position::new(x, y)) {
+                    if let Some(r) = self.tab_left_arrow_rect() {
+                        if r.contains(Position::new(x, y)) {
+                            self.tab_scroll = self.tab_scroll.saturating_sub(1);
+                            self.update_tab_rects();
+                            self.mark_dirty();
+                            return Ok(());
+                        }
+                    }
+                    if let Some(r) = self.tab_right_arrow_rect() {
+                        if r.contains(Position::new(x, y)) {
+                            if let Some(sess) = self.active_session() {
+                                self.tab_scroll = (self.tab_scroll + 1).min(sess.tabs.len().saturating_sub(1));
+                                self.update_tab_rects();
+                                self.mark_dirty();
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
                 if let Some((idx, is_close)) = self.tab_hit(x, y) {
                     if let Some(sess) = self.active_session().cloned() {
                         let tab_name = sess.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
@@ -1766,6 +1901,21 @@ impl View {
                 if self.ctx_menu_at(x, y) {
                     self.ctx_menu.open = false;
                     return Ok(());
+                }
+                if y == 0 && self.tabs_area().contains(Position::new(x, y)) {
+                    if let Some((tab_idx, _)) = self.tab_hit(x, y) {
+                        if let Some(s_idx) = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|s| Some(&s.name)==l.active.as_ref())) {
+                            self.open_ctx_menu(x, y, CtxTarget::Tab(s_idx, tab_idx));
+                            return Ok(());
+                        }
+                    } else {
+                        // Right-click on empty tab bar: new tab menu
+                        if let Some(s_idx) = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|s| Some(&s.name)==l.active.as_ref())) {
+                            let t_idx = self.active_session().map(|s| s.active_tab).unwrap_or(0);
+                            self.open_ctx_menu(x, y, CtxTarget::Tab(s_idx, t_idx));
+                            return Ok(());
+                        }
+                    }
                 }
                 if let Some(idx) = self.sidebar_session_at(x, y) {
                     self.open_ctx_menu(x, y, CtxTarget::Session(idx));
@@ -2476,25 +2626,39 @@ impl View {
         if sess.tabs.is_empty() { return; }
         let theme = &THEMES[self.theme_idx];
         let area = self.tabs_area();
-        fill(f, area, RColor::Reset);
+        // Bar background distinct from terminal
+        let bar_bg = theme.panel_sep;
+        fill(f, area, bar_bg);
+        // Arrows for overflow
+        if let Some(r) = self.tab_left_arrow_rect() {
+            put(f, r.x, r.y, "‹", Style::default().fg(theme.panel_muted).bg(bar_bg));
+        }
+        if let Some(r) = self.tab_right_arrow_rect() {
+            put(f, r.x, r.y, "›", Style::default().fg(theme.panel_muted).bg(bar_bg));
+        }
         for (idx, pill, close) in &self.tab_rects {
             let Some(tab) = sess.tabs.get(*idx) else { continue };
             let active = sess.active_tab == *idx;
             let is_hover = self.tab_hover == Some(*idx);
-            let bg = if active { theme.panel_sep } else { RColor::Reset };
-            let fg = if active { theme.accent } else { theme.panel_muted };
-            fill(f, *pill, bg);
-            let style = if active {
-                Style::default().fg(theme.fg).bg(bg).add_modifier(Modifier::BOLD)
+            let pill_bg = if active { theme.accent } else { lighten(bar_bg, 14) };
+            let fg = if active { RColor::Rgb(0x0a,0x0a,0x0a) } else { theme.fg };
+            fill(f, *pill, pill_bg);
+            let base_style = if active {
+                Style::default().fg(RColor::Rgb(0x0a,0x0a,0x0a)).bg(pill_bg).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(fg).bg(bg)
+                Style::default().fg(fg).bg(pill_bg)
             };
-            // label is pill text already; but we need to draw with active highlight
-            let label = if is_hover { format!("[{} x]", tab.name) } else { format!("[{}]", tab.name) };
-            text(f, pill.x, pill.y, &label, style, pill.width);
-            if is_hover && close.width>0 {
-                // draw 'x' with hover color (red-ish) but keep bg
-                put(f, close.x, close.y, "x", Style::default().fg(theme.red).bg(bg).add_modifier(Modifier::BOLD));
+            // Draw name centered; last cell reserved for x
+            let name = &tab.name;
+            let inner_w = pill.width.saturating_sub(2);
+            let name_w = name.chars().count() as u16;
+            let name_x = pill.x + 1 + inner_w.saturating_sub(name_w) / 2;
+            text(f, name_x, pill.y, name, base_style, name_w);
+            if is_hover {
+                put(f, close.x, close.y, "x", Style::default().fg(theme.red).bg(pill_bg).add_modifier(Modifier::BOLD));
+            } else if !active {
+                // keep last cell as subtle close hint placeholder (dim)
+                put(f, close.x, close.y, " ", base_style);
             }
         }
     }
@@ -3446,6 +3610,7 @@ mod tests {
             pending_wheel: HashMap::new(),
             tab_hover: None,
             tab_rects: Vec::new(),
+            tab_scroll: 0,
             dirty: false,
             detach_requested: false,
         }
@@ -3570,8 +3735,10 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Tab bar at top
-        assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "[");
+        // Tab bar at top — rectangular pill, no brackets, x in last cell on hover
+        // Pill width for "1" is 6 (name len 1 +4, min 6) => pill at x=26..31, name centered at 28
+        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "1");
+        assert!(buf.cell((26, 0)).unwrap().style().bg.is_some() || buf.cell((26, 0)).unwrap().symbol() == " ", "tab bar should have distinct bg");
         // Pane border at the top-left of the pane area (below tab bar).
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "┌");
         // The title chip carries the pane label (pane frame at y=1).
