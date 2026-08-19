@@ -50,15 +50,15 @@ impl Session {
         &self.tabs[self.active_tab]
     }
     fn tab_index_by_spec(&self, spec: &str) -> Option<usize> {
-        // by id (numeric), by name, or by 1-based index
+        // by name, then id, then 1-based index — name takes precedence so a
+        // tab named "2" (id 4) is not shadowed by the tab whose id is 2
+        if let Some(idx) = self.tabs.iter().position(|t| t.name == spec) {
+            return Some(idx);
+        }
         if let Ok(id) = spec.parse::<u64>() {
             if let Some(idx) = self.tabs.iter().position(|t| t.id == id) {
                 return Some(idx);
             }
-            // fall through to name / index
-        }
-        if let Some(idx) = self.tabs.iter().position(|t| t.name == spec) {
-            return Some(idx);
         }
         if let Ok(n) = spec.parse::<usize>() {
             if n >= 1 && n <= self.tabs.len() {
@@ -686,11 +686,16 @@ impl App {
     }
 
     fn default_tab_name(&self, session_idx: usize) -> String {
-        // smallest free numeric name
-        let mut n = 1;
+        // absolute numbering: next id beyond any existing id or numeric name,
+        // so renaming "2" → "doraemon" does not recycle "2" — the 4th tab stays "4"
+        let sess = &self.sessions[session_idx];
+        let max_id = sess.tabs.iter().map(|t| t.id).max().unwrap_or(0);
+        let max_num = sess.tabs.iter().filter_map(|t| t.name.parse::<u64>().ok()).max().unwrap_or(0);
+        let mut n = max_id.max(max_num) + 1;
+        if n == 0 { n = 1; }
         loop {
             let cand = n.to_string();
-            if !self.sessions[session_idx].tabs.iter().any(|t| t.name == cand) {
+            if !sess.tabs.iter().any(|t| t.name == cand) {
                 return cand;
             }
             n += 1;
