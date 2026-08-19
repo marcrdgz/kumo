@@ -49,9 +49,6 @@ impl Session {
     fn active_tab(&self) -> &Tab {
         &self.tabs[self.active_tab]
     }
-    fn active_tab_mut(&mut self) -> &mut Tab {
-        &mut self.tabs[self.active_tab]
-    }
     fn tab_index_by_spec(&self, spec: &str) -> Option<usize> {
         // by id (numeric), by name, or by 1-based index
         if let Ok(id) = spec.parse::<u64>() {

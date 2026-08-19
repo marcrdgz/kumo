@@ -64,7 +64,6 @@ enum PopupTarget {
     RenamePane(u64),
     RenameSession(usize),
     RenameTab { session: usize, tab: usize },
-    NewTab(usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1303,9 +1302,6 @@ impl View {
                     self.popup.open = false;
                     let _ = self.send(&Command::TabRename { session: sname, tab: tname, new_name: name });
                 }
-            }
-            Some(PopupTarget::NewTab(_)) => {
-                self.popup.open = false;
             }
             None => {}
         }
