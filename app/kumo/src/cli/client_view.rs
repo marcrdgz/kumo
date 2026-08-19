@@ -2696,12 +2696,11 @@ impl View {
             } else {
                 Style::default().fg(fg).bg(pill_bg)
             };
-            // Draw name centered; last cell reserved for x
+            // Draw name left-aligned at first cell; last cell reserved for x
             let name = &tab.name;
-            let inner_w = pill.width.saturating_sub(2);
-            let name_w = name.chars().count() as u16;
-            let name_x = pill.x + 1 + inner_w.saturating_sub(name_w) / 2;
-            text(f, name_x, pill.y, name, base_style, name_w);
+            let max_w = pill.width.saturating_sub(1);
+            let name_w = (name.chars().count() as u16).min(max_w);
+            text(f, pill.x, pill.y, name, base_style, name_w);
             if is_hover {
                 let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
@@ -3793,10 +3792,10 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Tab bar at top — rectangular pill, no brackets, x in last cell on hover
-        // Pill width for "1" is 6 (name len 1 +4, min 6) => pill at x=26..31, name centered at 28
-        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "1");
-        assert!(buf.cell((26, 0)).unwrap().style().bg.is_some() || buf.cell((26, 0)).unwrap().symbol() == " ", "tab bar should have distinct bg");
+        // Tab bar at top — rectangular pill, no brackets, x in last cell on hover, name at first cell
+        // Pill width for "1" is 6 => pill at x=26..31, name at 26
+        assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
+        assert!(buf.cell((26, 0)).unwrap().style().bg.is_some(), "tab bar should have distinct bg");
         // Pane border at the top-left of the pane area (below tab bar).
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "┌");
         // The title chip carries the pane label (pane frame at y=1).
