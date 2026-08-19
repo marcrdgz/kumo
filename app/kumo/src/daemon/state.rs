@@ -18,6 +18,36 @@ use serde::{Deserialize, Serialize};
 
 use kumo_core::layout::{self, SplitDir};
 
+mod base64_serde {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => BASE64.encode(bytes).serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt = Option::<String>::deserialize(deserializer)?;
+        match opt {
+            Some(s) if s.is_empty() => Ok(None),
+            Some(s) => BASE64
+                .decode(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Current schema version. On bump, keep the loader able to read older
 /// versions (or reject them gracefully) so restores never crash.
 pub const STATE_VERSION: u32 = 1;
@@ -84,6 +114,10 @@ pub struct SavedPane {
     /// can re-learn it (the live app kept its mouse mode enabled app-side).
     #[serde(default)]
     pub mouse_tracking: bool,
+    /// Inline ghostty snapshot bytes (screen + scrollback + continuation),
+    /// base64-encoded in JSON. `None` for old state or when encode failed.
+    #[serde(default, with = "base64_serde")]
+    pub snapshot: Option<Vec<u8>>,
 }
 
 /// Write `state` to `path` atomically (temp file + rename) so a crash mid-write
@@ -216,6 +250,7 @@ mod tests {
                         cols: 80,
                         rows: 24,
                         mouse_tracking: false,
+                        snapshot: None,
                     },
                     SavedPane {
                         id: 12,
@@ -229,6 +264,7 @@ mod tests {
                         cols: 80,
                         rows: 24,
                         mouse_tracking: true,
+                        snapshot: None,
                     },
                 ],
             }],

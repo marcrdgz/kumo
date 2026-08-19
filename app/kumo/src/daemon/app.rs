@@ -319,6 +319,7 @@ impl App {
                     fd as i32,
                     sp.child_pid.map(|p| p as i32),
                     sp.mouse_tracking,
+                    sp.snapshot,
                     self.events_tx.clone(),
                     &self.theme,
                 )?;
@@ -368,6 +369,10 @@ impl App {
             let mut panes = Vec::new();
             for pid in session.tree.pane_ids() {
                 let Some(pane) = self.panes.get(&pid) else { continue };
+                let snapshot = pane.vt.snapshot_encode();
+                if snapshot.is_none() {
+                    log::warn!("kumo: snapshot encode failed for pane {pid}");
+                }
                 panes.push(state::SavedPane {
                     id: pid,
                     is_ai: pane.is_ai,
@@ -380,6 +385,7 @@ impl App {
                     cols: pane.pty.cols,
                     rows: pane.pty.rows,
                     mouse_tracking: pane.has_mouse_reporting(),
+                    snapshot,
                 });
             }
             sessions.push(state::SavedSession {

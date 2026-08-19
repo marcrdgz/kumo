@@ -236,31 +236,50 @@ impl Pane {
         master_fd: i32,
         child_pid: Option<i32>,
         mouse_tracking: bool,
+        snapshot: Option<Vec<u8>>,
         events_tx: Sender<PtyEvent>,
         theme: &Theme,
     ) -> Result<Pane> {
-        let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
-        let mut pane =
-            Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)?;
+        // Try snapshot first: decode the terminal before creating the PTY so we
+        // can fallback to a blank terminal without losing the PTY fd.
+        let (mut pane, is_snapshot) = if let Some(bytes) = snapshot {
+            match vt::Terminal::from_snapshot(
+                &bytes,
+                &theme.palette,
+                theme.term_fg,
+                theme.term_bg,
+                theme.term_cursor,
+            ) {
+                Ok(vt) => {
+                    let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell.clone())?;
+                    let pane = Self::build_pane(id, session_id, is_ai, program.clone(), cwd.clone(), pty, vt, events_tx.clone())?;
+                    (pane, true)
+                }
+                Err(e) => {
+                    log::warn!("kumo: snapshot decode failed for pane {id}: {e:#}, falling back to blank");
+                    let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
+                    let pane = Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)?;
+                    (pane, false)
+                }
+            }
+        } else {
+            let pty = Pty::resume(id, master_fd, child_pid, cols.max(1), rows.max(1), shell)?;
+            let pane = Self::finish(id, session_id, is_ai, program, cwd, cols, rows, pty, events_tx, theme)?;
+            (pane, false)
+        };
         if mouse_tracking {
             pane.vt.mode_set(vt::MODE_MOUSE_NORMAL, true);
         }
-        // The fresh emulator is blank, and the live child process already runs
-        // inside a PTY that is `cols`x`rows`. If the resumed size happens to
-        // match the first layout (the common restart-in-place case), no later
-        // resize would ever change the size, so the kernel would never fire
-        // SIGWINCH and the process would never repaint into the new emulator —
-        // the pane would stay empty until a manual layout action (e.g. rotate)
-        // forced a genuine resize. Nudge it deterministically now: a brief
-        // size change makes the process redraw its prompt/screen, then restore
-        // the real size. Crucially, the kernel is left one column narrower than
-        // the emulator: the app's first render always resizes a pane exactly
-        // once (its `last_sizes` starts empty), so that render is a *genuine*
-        // size change. TUIs that skip a same-size redraw (opencode, full-screen
-        // apps) ignore a round-trip SIGWINCH but must repaint on a real change.
-        pane.resize(cols.saturating_sub(1).max(1), rows);
-        pane.resize(cols.max(1), rows.max(1));
-        let _ = pane.pty.resize(cols.saturating_sub(1).max(1), rows);
+        if !is_snapshot {
+            // Blank fallback: nudge to force repaint (see original comment).
+            pane.resize(cols.saturating_sub(1).max(1), rows);
+            pane.resize(cols.max(1), rows.max(1));
+            let _ = pane.pty.resize(cols.saturating_sub(1).max(1), rows);
+        } else {
+            // Snapshot case: ensure PTY size matches, no nudge needed.
+            let _ = pane.pty.resize(cols.max(1), rows.max(1));
+            pane.resize(cols.max(1), rows.max(1));
+        }
         Ok(pane)
     }
 
@@ -288,7 +307,42 @@ impl Pane {
             theme.term_bg,
             theme.term_cursor,
         )?;
+        Self::build_pane(id, session_id, is_ai, program, cwd, pty, vt, events_tx)
+    }
 
+    #[allow(dead_code)]
+    fn finish_from_snapshot(
+        id: u64,
+        session_id: u64,
+        is_ai: bool,
+        program: Option<(String, Vec<String>)>,
+        cwd: PathBuf,
+        pty: Pty,
+        snapshot: Vec<u8>,
+        events_tx: Sender<PtyEvent>,
+        theme: &Theme,
+    ) -> Result<Pane> {
+        let vt = vt::Terminal::from_snapshot(
+            &snapshot,
+            &theme.palette,
+            theme.term_fg,
+            theme.term_bg,
+            theme.term_cursor,
+        )
+        .map_err(|e| anyhow::anyhow!("snapshot decode failed: {e:#}"))?;
+        Self::build_pane(id, session_id, is_ai, program, cwd, pty, vt, events_tx)
+    }
+
+    fn build_pane(
+        id: u64,
+        session_id: u64,
+        is_ai: bool,
+        program: Option<(String, Vec<String>)>,
+        cwd: PathBuf,
+        pty: Pty,
+        vt: vt::Terminal,
+        events_tx: Sender<PtyEvent>,
+    ) -> Result<Pane> {
         let mut pane = Pane {
             id,
             session_id,
@@ -1809,6 +1863,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             fd,
             child_pid.map(|c| c as i32),
             true,
+            None,
             tx,
             test_theme(),
         )
@@ -1842,6 +1897,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             fd,
             child_pid.map(|c| c as i32),
             false,
+            None,
             tx,
             test_theme(),
         )
@@ -1936,6 +1992,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             fd,
             child_pid.map(|c| c as i32),
             false,
+            None,
             tx,
             test_theme(),
         )

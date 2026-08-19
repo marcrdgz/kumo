@@ -22,6 +22,7 @@ bincode = { version = "2", features = ["serde"] }
 anyhow = "1"
 log = "0.4"
 libc = "0.2"
+base64 = "0.22"
 
 [package.metadata.dist]
 repository = "https://github.com/marcrdgz/kumo"

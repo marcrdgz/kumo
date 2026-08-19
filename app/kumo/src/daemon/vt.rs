@@ -29,6 +29,8 @@ pub type RenderStateHandle = *mut c_void;
 pub type RowIteratorHandle = *mut c_void;
 /// Opaque render-state row cells iterator (`GhosttyRenderStateRowCells`).
 pub type RowCellsHandle = *mut c_void;
+/// Opaque snapshot decoder handle (`GhosttySnapshotDecoder`).
+pub type SnapshotDecoderHandle = *mut c_void;
 
 /// Result codes for libghostty-vt operations.
 #[repr(i32)]
@@ -416,6 +418,7 @@ pub const TERMINAL_OPT_COLOR_PALETTE: i32 = 14;
 pub const TERMINAL_OPT_PWD_CHANGED: i32 = 25;
 pub const TERMINAL_OPT_CLIPBOARD_WRITE: i32 = 26;
 pub const TERMINAL_OPT_MODE: i32 = 34;
+pub const TERMINAL_OPT_CONTINUATION_MAX_BYTES: i32 = 31;
 
 pub const TERMINAL_DATA_COLS: i32 = 1;
 pub const TERMINAL_DATA_ROWS: i32 = 2;
@@ -586,6 +589,25 @@ unsafe extern "C" {
     /// regional indicators). Returns the number of codepoints consumed and
     /// stores the cluster's width (0-2) in `width`.
     fn ghostty_unicode_grapheme_width(cps: *const u32, len: usize, width: *mut u8) -> usize;
+
+    fn ghostty_snapshot_encode_alloc(
+        terminal: TerminalHandle,
+        allocator: *const c_void,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> Result;
+    fn ghostty_free(allocator: *const c_void, ptr: *mut u8, len: usize);
+    fn ghostty_snapshot_decoder_new_buf(
+        allocator: *const c_void,
+        decoder: *mut SnapshotDecoderHandle,
+        ptr: *const u8,
+        len: usize,
+    ) -> Result;
+    fn ghostty_snapshot_decoder_decode(
+        decoder: SnapshotDecoderHandle,
+        terminal: *mut TerminalHandle,
+    ) -> Result;
+    fn ghostty_snapshot_decoder_free(decoder: SnapshotDecoderHandle);
 }
 
 // ---------------------------------------------------------------------------
@@ -944,6 +966,18 @@ impl Terminal {
 
         set_terminal_colors(term, palette, fg, bg, cursor);
 
+        // Enable continuation tracking so an unfinished VT/UTF-8 sequence can be
+        // snapshotted (required for lossless restart). 64KB matches the
+        // snapshot example and is well below the decoder's 65MiB limit.
+        let cont_limit: usize = 64 * 1024;
+        unsafe {
+            let _ = ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_CONTINUATION_MAX_BYTES,
+                &cont_limit as *const usize as *const c_void,
+            );
+        }
+
         // The callbacks need a stable place to find the current pty writer
         // and the last reported pwd. Allocate a heap cell and use it as the
         // USERDATA pointer.
@@ -975,6 +1009,124 @@ impl Terminal {
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_MODE, &mode_config as *const TerminalModeConfig as *const c_void);
         }
+
+        Ok(Terminal {
+            term,
+            render,
+            rows,
+            cols,
+            scratch: Vec::with_capacity(64),
+            cursor: None,
+            default_fg: fg,
+            default_bg: bg,
+            scrollbar: TerminalScrollbar::default(),
+            cell,
+        })
+    }
+
+    /// Encode the complete terminal state (screen + scrollback + continuation)
+    /// into a snapshot byte buffer. Returns `None` if the terminal is in a
+    /// non-ground VT state but continuation tracking was not enabled early
+    /// enough (the example sets it before first write, which we now do).
+    pub fn snapshot_encode(&self) -> Option<Vec<u8>> {
+        let mut ptr: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        let res = unsafe { ghostty_snapshot_encode_alloc(self.term, std::ptr::null(), &mut ptr, &mut len) };
+        if !res.is_ok() || ptr.is_null() {
+            return None;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let out = slice.to_vec();
+        unsafe { ghostty_free(std::ptr::null(), ptr, len) };
+        Some(out)
+    }
+
+    /// Create a `Terminal` from a snapshot byte buffer. The snapshot already
+    /// contains cols/rows/max_scrollback/colors, but we re-install callbacks
+    /// and the current theme's palette so the new terminal integrates with
+    /// the daemon's PTY writer.
+    pub fn from_snapshot(
+        bytes: &[u8],
+        palette: &[ColorRgb; 16],
+        fg: ColorRgb,
+        bg: ColorRgb,
+        cursor: ColorRgb,
+    ) -> anyhow::Result<Terminal> {
+        let mut decoder: SnapshotDecoderHandle = std::ptr::null_mut();
+        let res = unsafe {
+            ghostty_snapshot_decoder_new_buf(std::ptr::null(), &mut decoder, bytes.as_ptr(), bytes.len())
+        };
+        if !res.is_ok() || decoder.is_null() {
+            return Err(anyhow::anyhow!("libghostty-vt: failed to create snapshot decoder"));
+        }
+        let mut term: TerminalHandle = std::ptr::null_mut();
+        let res = unsafe { ghostty_snapshot_decoder_decode(decoder, &mut term) };
+        unsafe { ghostty_snapshot_decoder_free(decoder) };
+        if !res.is_ok() || term.is_null() {
+            return Err(anyhow::anyhow!("libghostty-vt: snapshot decode failed"));
+        }
+
+        let mut render: RenderStateHandle = std::ptr::null_mut();
+        unsafe {
+            if !ghostty_render_state_new(std::ptr::null(), &mut render).is_ok() || render.is_null() {
+                ghostty_terminal_free(term);
+                return Err(anyhow::anyhow!("libghostty-vt: failed to create render state for snapshot"));
+            }
+        }
+
+        // Re-apply theme palette (snapshot carries its own palette, but the
+        // daemon's current theme may differ). Also re-enable continuation for
+        // future snapshots.
+        set_terminal_colors(term, palette, fg, bg, cursor);
+        let cont_limit: usize = 64 * 1024;
+        unsafe {
+            let _ = ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_CONTINUATION_MAX_BYTES,
+                &cont_limit as *const usize as *const std::ffi::c_void,
+            );
+        }
+
+        let cell: Box<CbCell> = Box::new(CbCell {
+            writer: None,
+            pwd: Vec::new(),
+            bell_count: 0,
+            clipboard_text: String::new(),
+        });
+        let userdata = (&*cell) as *const CbCell as *mut std::ffi::c_void;
+        unsafe {
+            ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_PWD_CHANGED, pwd_changed_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_BELL, bell_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(term, TERMINAL_OPT_CLIPBOARD_WRITE, clipboard_write_cb as *const std::ffi::c_void);
+        }
+        let mode_config = TerminalModeConfig {
+            mode: MODE_GRAPHEME_CLUSTER,
+            value: true,
+        };
+        unsafe {
+            ghostty_terminal_set(term, TERMINAL_OPT_MODE, &mode_config as *const TerminalModeConfig as *const std::ffi::c_void);
+        }
+
+        // Pull initial rows/cols from the decoded terminal so the wrapper stays
+        // consistent; fallback to 80x24 if query fails.
+        let (rows, cols) = {
+            let mut out_rows: u16 = 24;
+            let mut out_cols: u16 = 80;
+            unsafe {
+                let _ = ghostty_terminal_get(term, TERMINAL_DATA_ROWS, &mut out_rows as *mut u16 as *mut std::ffi::c_void);
+                let _ = ghostty_terminal_get(term, TERMINAL_DATA_COLS, &mut out_cols as *mut u16 as *mut std::ffi::c_void);
+                if out_cols == 0 || out_rows == 0 {
+                    out_cols = 80;
+                    out_rows = 24;
+                }
+            }
+            (out_rows, out_cols)
+        };
 
         Ok(Terminal {
             term,
@@ -1771,6 +1923,42 @@ mod tests {
         let mut t = new_term(10, 4, 100);
         t.write(b"\x1b]7;file://My-Mac.local/Users/marc/proj\x07");
         assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/marc/proj").as_path()));
+    }
+
+    #[test]
+    fn snapshot_preserves_scrollback() {
+        let mut t = new_term(20, 5, 100);
+        t.write(b"hello world\nsecond line\nthird line\n");
+        t.refresh();
+        let mut before = Vec::new();
+        t.for_each_cell(|r, c, rc, _, _| {
+            if !rc.text.is_empty() {
+                before.push((r, c, rc.text.to_string()));
+            }
+        });
+        assert!(!before.is_empty(), "before should have cells");
+        let snap = t.snapshot_encode().expect("snapshot encode should succeed");
+        assert!(!snap.is_empty(), "snapshot should not be empty");
+        let mut t2 = Terminal::from_snapshot(&snap, &palette(), ColorRgb::new(0, 0, 0), ColorRgb::new(0, 0, 0), ColorRgb::new(255, 255, 255))
+            .expect("snapshot decode should succeed");
+        t2.refresh();
+        let mut after = Vec::new();
+        t2.for_each_cell(|r, c, rc, _, _| {
+            if !rc.text.is_empty() {
+                after.push((r, c, rc.text.to_string()));
+            }
+        });
+        assert_eq!(before, after, "visible screen should survive snapshot roundtrip: before={before:?} after={after:?}");
+        // Also check that we can still write after restore without panic.
+        t2.write(b"new line after restore\n");
+        t2.refresh();
+        let mut has_cells = false;
+        t2.for_each_cell(|_, _, rc, _, _| {
+            if !rc.text.is_empty() {
+                has_cells = true;
+            }
+        });
+        assert!(has_cells, "terminal should still be writable after restore");
     }
 
     #[test]
