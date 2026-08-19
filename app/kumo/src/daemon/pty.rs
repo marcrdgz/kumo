@@ -303,6 +303,7 @@ impl Pty {
                                     std::thread::sleep(Duration::from_millis(10));
                                 }
                                 Ok(None) => {
+                                    #[cfg(unix)]
                                     if let Some(pid) = c.process_id() {
                                         unsafe {
                                             libc::kill(pid as i32, libc::SIGKILL);
