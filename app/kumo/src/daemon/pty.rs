@@ -57,6 +57,10 @@ impl Child for DummyChild {
     fn process_id(&self) -> Option<u32> {
         None
     }
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        None
+    }
 }
 
 /// The child process running in the PTY. Spawned panes own a reapable `Child`;
