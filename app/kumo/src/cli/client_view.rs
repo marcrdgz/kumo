@@ -2655,7 +2655,8 @@ impl View {
             let name_x = pill.x + 1 + inner_w.saturating_sub(name_w) / 2;
             text(f, name_x, pill.y, name, base_style, name_w);
             if is_hover {
-                put(f, close.x, close.y, "x", Style::default().fg(theme.red).bg(pill_bg).add_modifier(Modifier::BOLD));
+                let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
+                put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
             } else if !active {
                 // keep last cell as subtle close hint placeholder (dim)
                 put(f, close.x, close.y, " ", base_style);
