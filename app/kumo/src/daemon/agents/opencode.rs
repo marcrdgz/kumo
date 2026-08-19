@@ -5,7 +5,7 @@
 //! progress bar) pinned to the bottom rows while working. Mirrors herdr's
 //! bundled `opencode.toml` manifest.
 
-use super::Snapshot;
+use super::{contains_ci, Snapshot};
 
 /// Output markers that indicate the agent is waiting on a command approval.
 ///
@@ -46,25 +46,25 @@ const WORKING_MARKERS: &[&str] = &[
 /// True when opencode's question dialog is on screen: its footer pairs
 /// "esc dismiss" with an enter action and a navigation hint. Mirrors herdr's
 /// opencode manifest rule (state = "blocked").
-fn question_dialog_visible(screen_lower: &str, screen: &str) -> bool {
-    if !screen_lower.contains("esc dismiss") {
+fn question_dialog_visible(snap: &Snapshot) -> bool {
+    if !contains_ci(&snap.screen, "esc dismiss") {
         return false;
     }
-    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| screen_lower.contains(m));
-    let nav = QUESTION_DIALOG_NAV.iter().any(|m| screen.contains(m));
+    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| contains_ci(&snap.screen, m));
+    let nav = QUESTION_DIALOG_NAV.iter().any(|m| snap.screen.contains(m));
     enter && nav
 }
 
 /// Whether opencode is waiting on a command approval.
 pub(crate) fn blocked(snap: &Snapshot) -> bool {
-    question_dialog_visible(&snap.screen_lower, &snap.screen) || BLOCKED_MARKERS.iter().any(|m| snap.screen_lower.contains(m))
+    question_dialog_visible(snap) || BLOCKED_MARKERS.iter().any(|m| contains_ci(&snap.screen, m))
 }
 
 /// Whether opencode is actively producing output. The footer is scanned
 /// instead of the whole screen so a frozen "esc interrupt" from an earlier
 /// turn in the scrolled transcript is not misread as currently working.
 pub(crate) fn working(snap: &Snapshot) -> bool {
-    WORKING_MARKERS.iter().any(|m| snap.footer_lower.contains(m))
+    WORKING_MARKERS.iter().any(|m| contains_ci(&snap.footer, m))
         // Knight-rider status bar: 4+ block cells in a row.
         || ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| snap.footer.contains(p))
         // Braille spinner (tool call / thinking) in the prompt footer.
@@ -80,11 +80,8 @@ mod tests {
         let form = after_last_rule(screen);
         Snapshot {
             screen: screen.to_string(),
-            screen_lower: screen.to_lowercase(),
-            form: form.clone(),
-            form_lower: form.to_lowercase(),
+            form,
             footer: footer.to_string(),
-            footer_lower: footer.to_lowercase(),
             title: String::new(),
         }
     }

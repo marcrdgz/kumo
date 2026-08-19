@@ -6,7 +6,7 @@
 //! appear) plus a status spinner in the OSC window title (a braille spinner
 //! while working, `✳ ` when idle).
 
-use super::Snapshot;
+use super::{contains_ci, ends_with_ci, Snapshot};
 
 /// Navigation hints in Claude's option lists, paired with "enter to select".
 const NAV_HINTS: &[&str] = &[
@@ -21,33 +21,30 @@ const NAV_HINTS: &[&str] = &[
 /// `snap.form` (the text below the last horizontal rule) is the live
 /// prompt/forms region; `snap.screen` is the recent buffer tail.
 pub(crate) fn blocked(snap: &Snapshot) -> bool {
-    let sl = &snap.screen_lower;
-    let fl = &snap.form_lower;
-
     // Live form / select prompt: "esc to cancel" plus a confirm or select
     // action (a select list also needs a navigation hint).
-    if fl.contains("esc to cancel")
-        && (fl.contains("enter to confirm")
-            || (fl.contains("enter to select") && NAV_HINTS.iter().any(|m| fl.contains(m))))
+    if contains_ci(&snap.form, "esc to cancel")
+        && (contains_ci(&snap.form, "enter to confirm")
+            || (contains_ci(&snap.form, "enter to select") && NAV_HINTS.iter().any(|m| contains_ci(&snap.form, m))))
     {
         return true;
     }
     // Dynamic workflow confirmation.
-    if fl.contains("run a dynamic workflow?") && fl.contains("esc to cancel") {
+    if contains_ci(&snap.form, "run a dynamic workflow?") && contains_ci(&snap.form, "esc to cancel") {
         return true;
     }
     // Bash command approval: "do you want to proceed?" with command chrome and
     // a yes/no option line.
-    if sl.contains("do you want to proceed?")
+    if contains_ci(&snap.screen, "do you want to proceed?")
         && ["bash command", "bash(", "contains expansion", "tab to amend", "ctrl+e to explain"]
             .iter()
-            .any(|m| sl.contains(m))
+            .any(|m| contains_ci(&snap.screen, m))
         && snap.screen.lines().any(yes_no_line)
     {
         return true;
     }
     // Generic permission with numbered yes/no options rendered in the form.
-    if fl.contains("do you want to proceed?") && fl.contains("esc to cancel") && snap.form.lines().any(yes_no_line) {
+    if contains_ci(&snap.form, "do you want to proceed?") && contains_ci(&snap.form, "esc to cancel") && snap.form.lines().any(yes_no_line) {
         return true;
     }
     // Standalone approval markers (legacy / connection / bash-approval hints).
@@ -60,7 +57,7 @@ pub(crate) fn blocked(snap: &Snapshot) -> bool {
         "ctrl+e to explain",
     ]
     .iter()
-    .any(|m| sl.contains(m))
+    .any(|m| contains_ci(&snap.screen, m))
 }
 
 /// Dingbat spinner glyphs newer Claude paints inside the prompt box while
@@ -92,7 +89,7 @@ pub(crate) fn working(snap: &Snapshot) -> bool {
     }
     // The working prompt box pins `· esc to interrupt ·` only while a task
     // runs; at idle it shows `? for shortcuts · ← for agents` instead.
-    if snap.form_lower.contains("esc to interrupt") || snap.footer_lower.contains("esc to interrupt") {
+    if contains_ci(&snap.form, "esc to interrupt") || contains_ci(&snap.footer, "esc to interrupt") {
         return true;
     }
     if dingbat_spinner_in(&snap.form) || dingbat_spinner_in(&snap.footer) {
@@ -126,7 +123,7 @@ fn btw_overlay(screen: &str) -> bool {
     let has_btw = tail
         .iter()
         .any(|l| l.trim_start().starts_with("/btw") && l.trim_start()[4..].chars().next().is_none_or(char::is_whitespace));
-    let has_close = tail.iter().any(|l| l.to_lowercase().ends_with("esc to close"));
+    let has_close = tail.iter().any(|l| ends_with_ci(l, "esc to close"));
     has_btw && has_close
 }
 
@@ -165,11 +162,8 @@ mod tests {
         let form = after_last_rule(screen);
         Snapshot {
             screen: screen.to_string(),
-            screen_lower: screen.to_lowercase(),
-            form: form.clone(),
-            form_lower: form.to_lowercase(),
+            form,
             footer: String::new(),
-            footer_lower: String::new(),
             title: title.to_string(),
         }
     }
@@ -278,11 +272,8 @@ mod tests {
         let form = after_last_rule(&s.screen);
         let snap = Snapshot {
             screen: s.screen.clone(),
-            screen_lower: s.screen_lower.clone(),
-            form: form.clone(),
-            form_lower: form.to_lowercase(),
+            form,
             footer: "  · esc to interrupt ·".to_string(),
-            footer_lower: "  · esc to interrupt ·".to_string(),
             title: String::new(),
         };
         assert!(working(&snap));

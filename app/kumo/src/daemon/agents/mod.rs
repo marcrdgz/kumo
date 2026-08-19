@@ -41,21 +41,15 @@ pub enum AgentStatus {
 /// (not the viewport) so detection ignores whatever the user is scrolling.
 pub struct Snapshot {
     /// Recent screen-buffer tail (`bottom_text(DETECTION_TAIL_LINES)`).
-    screen: String,
-    /// Lowercased `screen`, for case-insensitive marker scans.
-    screen_lower: String,
+    pub(crate) screen: String,
     /// Text below the last horizontal rule: the live prompt/forms region
     /// where Claude Code renders its approval dialogs.
-    form: String,
-    /// Lowercased `form`.
-    form_lower: String,
+    pub(crate) form: String,
     /// Bottom rows pinned to opencode's prompt footer
     /// (`bottom_text(DETECTION_FOOTER_LINES)`).
-    footer: String,
-    /// Lowercased `footer`.
-    footer_lower: String,
+    pub(crate) footer: String,
     /// The OSC window title (Claude Code's status spinner).
-    title: String,
+    pub(crate) title: String,
 }
 
 impl Snapshot {
@@ -65,15 +59,66 @@ impl Snapshot {
         let form = after_last_rule(&screen);
         let footer = vt.bottom_text(DETECTION_FOOTER_LINES);
         Snapshot {
-            screen_lower: screen.to_lowercase(),
-            form_lower: form.to_lowercase(),
-            footer_lower: footer.to_lowercase(),
             screen,
             form,
             footer,
             title: vt.title(),
         }
     }
+}
+
+/// ASCII case-insensitive `contains` (markers are ASCII lowercase).
+pub(crate) fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let n = needle.as_bytes();
+    let h = haystack.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    // Sliding window with ascii lowercasing on the fly.
+    for i in 0..=h.len() - n.len() {
+        let mut ok = true;
+        for j in 0..n.len() {
+            let a = h[i + j].to_ascii_lowercase();
+            let b = n[j];
+            if a != b {
+                ok = false;
+                break;
+            }
+            // For ASCII markers, ensure we don't split a multi-byte char in
+            // haystack mid-codepoint: if haystack byte is part of UTF-8
+            // continuation, its ascii lowercased value is the same byte, but
+            // the alignment may be off. This is fine for ASCII needle scans
+            // as they will simply not match inside a multi-byte sequence in a
+            // way that affects correctness (false negatives are rare and markers
+            // are outside CJK/emoji runs).
+        }
+        if ok {
+            // Verify the match is on char boundaries for haystack (optional,
+            // but prevents matching inside a multi-byte char's bytes that happen
+            // to equal ascii). For ASCII needle, the bytes must be ascii, so
+            // the haystack bytes must be ascii as well.
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn ends_with_ci(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    let start = h.len() - n.len();
+    for i in 0..n.len() {
+        if h[start + i].to_ascii_lowercase() != n[i] {
+            return false;
+        }
+    }
+    true
 }
 
 /// Detect the agent lifecycle state across every implemented agent. A blocked
@@ -115,11 +160,8 @@ mod tests {
         let form = after_last_rule(screen);
         Snapshot {
             screen: screen.to_string(),
-            screen_lower: screen.to_lowercase(),
-            form: form.clone(),
-            form_lower: form.to_lowercase(),
+            form,
             footer: footer.to_string(),
-            footer_lower: footer.to_lowercase(),
             title: title.to_string(),
         }
     }
