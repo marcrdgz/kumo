@@ -524,23 +524,27 @@ fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<DaemonEvent>) {
 fn client_read_loop(mut stream: UnixStream, tx: mpsc::Sender<(usize, Command)>, id: usize) {
     let mut reader = kumo_core::protocol::FrameReader::default();
     let mut buf = [0u8; 8192];
-    loop {
+    'outer: loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
             Ok(n) => {
                 let mut frames = Vec::new();
-                reader.push(&buf[..n], &mut frames);
+                let is_err = reader.push(&buf[..n], &mut frames);
+                if is_err {
+                    // Oversized frame: framing is desynced — drop the client.
+                    break;
+                }
                 for f in frames {
                     let Ok((msg, _)) = bincode::serde::decode_from_slice::<Command, _>(
                         &f,
                         bincode::config::standard(),
                     ) else {
-                        return;
+                        break 'outer;
                     };
                     if tx.send((id, msg)).is_err() {
-                        return;
+                        break 'outer;
                     }
                 }
             }

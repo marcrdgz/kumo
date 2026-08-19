@@ -748,24 +748,35 @@ pub struct FrameReader {
 
 impl FrameReader {
     /// Feed a chunk of bytes; yields every complete frame it contained.
-    pub fn push(&mut self, data: &[u8], out: &mut Vec<Vec<u8>>) {
+    ///
+    /// Returns `true` if the stream contained an oversized frame header
+    /// (`len > MAX_FRAME_LEN`). This is unrecoverable framing corruption —
+    /// the caller must drop the connection. The internal buffer is cleared
+    /// so the `FrameReader` can be reused, but no further frames from this
+    /// stream should be processed.
+    pub fn push(&mut self, data: &[u8], out: &mut Vec<Vec<u8>>) -> bool {
         self.buf.extend_from_slice(data);
         loop {
             if self.buf.len() < 4 {
-                return;
+                return false;
             }
             let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
             if len > MAX_FRAME_LEN {
                 // Unrecoverable framing corruption; drop the connection.
                 self.buf.clear();
-                return;
+                return true;
             }
             if self.buf.len() < 4 + len {
-                return;
+                return false;
             }
             out.push(self.buf[4..4 + len].to_vec());
             self.buf.drain(..4 + len);
         }
+    }
+
+    /// Whether the internal buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 }
 

@@ -238,7 +238,10 @@ fn reader_loop(
             Err(_) => return,
             Ok(n) => {
                 let mut frames = Vec::new();
-                reader.push(&buf[..n], &mut frames);
+                let is_err = reader.push(&buf[..n], &mut frames);
+                if is_err {
+                    return;
+                }
                 for f in frames {
                     let Ok((msg, _)) =
                         bincode::serde::decode_from_slice::<DaemonEvent, _>(&f, bincode::config::standard())
