@@ -298,6 +298,7 @@ pub struct View {
     tab_hover: Option<usize>,
     tab_rects: Vec<(usize, Rect, Rect)>, // (tab_idx, pill rect, close rect)
     tab_scroll: usize,
+    plus_rect: Option<Rect>,
     popup: Popup,
     menu: Menu,
     ctx_menu: CtxMenu,
@@ -452,6 +453,7 @@ impl View {
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
+            plus_rect: None,
             dirty: true,
             detach_requested: false,
         };
@@ -743,20 +745,26 @@ impl View {
     fn tab_right_arrow_rect(&self) -> Option<Rect> {
         let area = self.tabs_area();
         let Some(sess) = self.active_session() else { return None };
-        // Check if there are hidden tabs to the right
-        let mut cur: u16 = 0;
         let has_left = self.tab_scroll > 0;
-        let avail = area.width.saturating_sub(if has_left {1} else {0}).saturating_sub(1); // reserve 1 for right arrow if needed
+        // Reserve for plus (3) + gap (1) and maybe right arrow
+        let mut cur: u16 = 0;
+        let plus_reserve: u16 = 4; // 3 for plus + 1 gap
+        let base_avail = area.width.saturating_sub(if has_left {1} else {0});
+        // First check without right arrow
         let mut visible_end = self.tab_scroll;
+        let avail_no_arrow = base_avail.saturating_sub(plus_reserve);
         for idx in self.tab_scroll..sess.tabs.len() {
             let w = tab_width(&sess.tabs[idx].name) + 1;
-            if cur + w - 1 > avail { break; }
+            if cur + w - 1 > avail_no_arrow { break; }
             cur += w;
             visible_end = idx + 1;
         }
         if visible_end < sess.tabs.len() {
-            Some(Rect::new(area.x + area.width - 1, area.y, 1, 1))
-        } else { None }
+            return Some(Rect::new(area.x + area.width - 1, area.y, 1, 1));
+        }
+        // Check with right arrow reserved (if we would need it, avail reduces)
+        // But if no overflow without arrow, no arrow needed
+        None
     }
 
     fn ensure_tab_visible(&mut self) {
@@ -764,13 +772,13 @@ impl View {
         if sess.tabs.is_empty() { return; }
         let area = self.tabs_area();
         let mut scroll = self.tab_scroll.min(sess.tabs.len().saturating_sub(1));
-        // If active tab is before scroll, move scroll back
         if sess.active_tab < scroll {
             scroll = sess.active_tab;
         } else {
-            // Check if active is beyond visible window
             let has_left = scroll > 0;
-            let avail = area.width.saturating_sub(if has_left {1} else {0}).saturating_sub(1);
+            // Reserve for plus (3+1) and maybe right arrow
+            let plus_reserve: u16 = 4;
+            let avail = area.width.saturating_sub(if has_left {1} else {0}).saturating_sub(plus_reserve).saturating_sub(1);
             let mut cur: u16 = 0;
             let mut visible_end = scroll;
             for idx in scroll..sess.tabs.len() {
@@ -780,11 +788,9 @@ impl View {
                 visible_end = idx + 1;
             }
             if sess.active_tab >= visible_end {
-                // Move scroll so active is last visible
-                // Find smallest scroll where active is visible
                 for s in (0..=sess.active_tab).rev() {
                     let has_l = s > 0;
-                    let av = area.width.saturating_sub(if has_l {1} else {0}).saturating_sub(1);
+                    let av = area.width.saturating_sub(if has_l {1} else {0}).saturating_sub(plus_reserve).saturating_sub(1);
                     let mut c: u16 = 0;
                     let mut e = s;
                     for idx in s..sess.tabs.len() {
@@ -806,15 +812,25 @@ impl View {
 
     fn update_tab_rects(&mut self) {
         self.tab_rects.clear();
+        self.plus_rect = None;
         let Some(sess) = self.active_session().cloned() else { return };
-        if sess.tabs.is_empty() { return; }
+        if sess.tabs.is_empty() {
+            // Still show plus even with no tabs? single session has at least 1 tab, but handle
+            let area = self.tabs_area();
+            if area.width >= 3 {
+                self.plus_rect = Some(Rect::new(area.x + if self.tab_scroll>0 {1} else {0}, area.y, 3, 1));
+            }
+            return;
+        }
         let area = self.tabs_area();
         if area.width == 0 { return; }
         self.ensure_tab_visible();
         let has_left = self.tab_scroll > 0;
         let mut cur_x = area.x + if has_left { 1 } else { 0 };
+        // Reserve for right arrow and plus
         let has_right = self.tab_right_arrow_rect().is_some();
-        let right_bound = area.x + area.width - if has_right { 1 } else { 0 };
+        let plus_w: u16 = 3;
+        let right_bound = (area.x as i32 + area.width as i32 - if has_right {1} else {0} - plus_w as i32 - 1).max(area.x as i32) as u16;
         for idx in self.tab_scroll..sess.tabs.len() {
             let tab = &sess.tabs[idx];
             let w = tab_width(&tab.name);
@@ -823,6 +839,14 @@ impl View {
             let close = Rect::new(cur_x + w - 1, area.y, 1, 1);
             self.tab_rects.push((idx, pill, close));
             cur_x += w + 1;
+        }
+        // Plus button after last visible tab
+        let right_edge = (area.x as i32 + area.width as i32 - if has_right {1} else {0}).max(area.x as i32) as u16;
+        if cur_x + plus_w <= right_edge {
+            self.plus_rect = Some(Rect::new(cur_x, area.y, plus_w, 1));
+        } else if self.tab_rects.is_empty() && area.width >= plus_w {
+            // Fallback: show plus alone if no tabs fit
+            self.plus_rect = Some(Rect::new(area.x + if has_left {1} else {0}, area.y, plus_w, 1));
         }
     }
 
@@ -1016,9 +1040,25 @@ impl View {
                 let _ = self.send(&Command::TabNew { session, name: None, workspace: None });
             }
             Action::CloseTab => {
+                if let Some(idx) = self.tab_hover {
+                    if let Some(sess) = self.active_session() {
+                        if let Some(tab) = sess.tabs.get(idx) {
+                            let _ = self.send(&Command::TabClose { session: session.clone(), tab: Some(tab.name.clone()) });
+                            self.mark_dirty();
+                            return Ok(());
+                        }
+                    }
+                }
                 let _ = self.send(&Command::TabClose { session, tab: None });
             }
             Action::RenameTab => {
+                if let Some(idx) = self.tab_hover {
+                    if let Some(s_idx) = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|s| s.name == session)) {
+                        self.open_rename_tab_popup_for(s_idx, idx);
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
                 self.open_rename_tab_popup();
             }
             Action::NextSession => {
@@ -1832,6 +1872,14 @@ impl View {
                                 self.tab_scroll = (self.tab_scroll + 1).min(sess.tabs.len().saturating_sub(1));
                                 self.update_tab_rects();
                                 self.mark_dirty();
+                            }
+                            return Ok(());
+                        }
+                    }
+                    if let Some(pr) = self.plus_rect {
+                        if pr.contains(Position::new(x, y)) {
+                            if let Some(sess) = self.active_session().map(|s| s.name.clone()) {
+                                let _ = self.send(&Command::TabNew { session: sess, name: None, workspace: None });
                             }
                             return Ok(());
                         }
@@ -2661,6 +2709,14 @@ impl View {
                 // keep last cell as subtle close hint placeholder (dim)
                 put(f, close.x, close.y, " ", base_style);
             }
+        }
+        // Plus button
+        if let Some(pr) = self.plus_rect {
+            let plus_bg = lighten(bar_bg, 10);
+            fill(f, pr, plus_bg);
+            let style = Style::default().fg(theme.panel_muted).bg(plus_bg).add_modifier(Modifier::BOLD);
+            // Center "+" in the 3-wide pill
+            put(f, pr.x + 1, pr.y, "+", style);
         }
     }
 
@@ -3612,6 +3668,7 @@ mod tests {
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
+            plus_rect: None,
             dirty: false,
             detach_requested: false,
         }
