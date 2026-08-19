@@ -33,21 +33,33 @@ impl App {
             self.branch_cache.insert(ws, (branch, now));
         }
 
-        // Spawn background lookups for stale workspaces
-        for ws in &live {
-            let stale = match self.branch_cache.get(ws) {
-                Some((_, t)) => now.duration_since(*t) >= BRANCH_REFRESH,
-                None => true,
-            };
-            if stale && !self.pending_branch_lookups.contains_key(ws) {
+        // Spawn a single background worker for all stale workspaces to avoid
+        // thread explosion (one thread per workspace every 3s). The worker
+        // processes workspaces sequentially and reports via the channel.
+        let stale: Vec<PathBuf> = live
+            .iter()
+            .filter(|ws| {
+                let is_stale = match self.branch_cache.get(*ws) {
+                    Some((_, t)) => now.duration_since(*t) >= BRANCH_REFRESH,
+                    None => true,
+                };
+                is_stale && !self.pending_branch_lookups.contains_key(*ws)
+            })
+            .cloned()
+            .collect();
+        if !stale.is_empty() {
+            for ws in &stale {
                 self.pending_branch_lookups.insert(ws.clone(), now);
-                let tx = self.branch_tx.clone();
-                let ws_clone = ws.clone();
-                std::thread::spawn(move || {
-                    let branch = git_branch(&ws_clone);
-                    let _ = tx.send((ws_clone, branch));
-                });
             }
+            let tx = self.branch_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name("kumo-git-branch".into())
+                .spawn(move || {
+                    for ws in stale {
+                        let branch = git_branch(&ws);
+                        let _ = tx.send((ws, branch));
+                    }
+                });
         }
         self.branch_cache.retain(|ws, _| live.contains(ws));
     }
@@ -125,10 +137,12 @@ impl App {
                 .map(|(&id, pane)| (id, pane.pty.process_id()))
                 .collect();
             let tx = self.ai_tx.clone();
-            std::thread::spawn(move || {
-                let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
-                let _ = tx.send((snapshot, pane_pids));
-            });
+            let _ = std::thread::Builder::new()
+                .name("kumo-ai-scan".into())
+                .spawn(move || {
+                    let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
+                    let _ = tx.send((snapshot, pane_pids));
+                });
         }
     }
     /// Recomputed agent status from the terminal buffer at most every

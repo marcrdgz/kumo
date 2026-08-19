@@ -12,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -21,6 +22,14 @@ use ratatui::buffer::Buffer;
 use super::{App, Launch};
 use crate::daemon::frames;
 use kumo_core::protocol::{ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
+
+#[cfg(unix)]
+static TERM_FLAG: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn handle_term(_: libc::c_int) {
+    TERM_FLAG.store(true, Ordering::Relaxed);
+}
 
 /// One connected client. Reads happen on a per-client reader thread; outgoing
 /// messages go through a per-client writer thread with a bounded queue, so a
@@ -82,6 +91,20 @@ pub fn run_daemon(launch: Launch) -> Result<()> {
 /// Run the daemon serving `path` (the socket). Split out so tests can drive a
 /// daemon on a scratch socket without spawning a subprocess.
 fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Graceful SIGTERM/SIGINT: set a flag and let the main loop exit
+        // cleanly (remove socket, kill PTYs). The daemon is normally stopped
+        // via `kumo kill` (Command::KillServer), but the OS will send SIGTERM
+        // on shutdown/logout/kill and the user may hit Ctrl-C when running
+        // `kumo daemon` in the foreground.
+        TERM_FLAG.store(false, Ordering::Relaxed);
+        unsafe {
+            libc::signal(libc::SIGTERM, handle_term as *const () as usize);
+            libc::signal(libc::SIGINT, handle_term as *const () as usize);
+        }
+    }
+
     // Create the app first: it resolves the shell/config and spawns panes. The
     // socket appears only once that's done, so callers (and tests) know the
     // daemon is fully up when they can connect.
@@ -103,8 +126,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let mut kill = false;
 
     loop {
+        #[cfg(unix)]
+        if TERM_FLAG.load(Ordering::Relaxed) {
+            kill = true;
+        }
         // Accept new clients (each gets a reader thread + a writer thread).
         while let Ok((stream, _)) = listener.accept() {
+            if clients.len() >= 32 {
+                log::warn!("daemon: rejecting client, too many clients ({} open)", clients.len());
+                continue;
+            }
             if !peer_owned_by_same_user(&stream) {
                 log::warn!("daemon: rejecting connection from a different user");
                 continue;
@@ -115,11 +146,15 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let _ = stream.set_nonblocking(false);
             let Ok(read_half) = stream.try_clone() else { continue };
             let (writer_tx, writer_rx) = mpsc::sync_channel::<DaemonEvent>(8);
-            std::thread::spawn(move || client_write_loop(stream, writer_rx));
-            let tx = input_tx.clone();
             let id = next_id;
             next_id += 1;
-            std::thread::spawn(move || client_read_loop(read_half, tx, id));
+            let _ = std::thread::Builder::new()
+                .name(format!("kumo-writer-{id}"))
+                .spawn(move || client_write_loop(stream, writer_rx));
+            let tx = input_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("kumo-reader-{id}"))
+                .spawn(move || client_read_loop(read_half, tx, id));
             clients.insert(id, Client::new(writer_tx));
         }
 
@@ -436,6 +471,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 }
             }
         }
+        let idle = changed.is_empty() && !layout_changed && dead.is_empty();
         for id in dead {
             clients.remove(&id);
         }
@@ -449,7 +485,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             break;
         }
 
-        std::thread::sleep(Duration::from_millis(4));
+        // Adaptive sleep: 2ms when there was work (pane frames/layout changed)
+        // for responsiveness, 10ms when idle to reduce wakeups from 250Hz to
+        // 100Hz. This replaces the fixed 4ms busy poll.
+        std::thread::sleep(Duration::from_millis(if idle { 10 } else { 2 }));
     }
 
     let _ = std::fs::remove_file(&path);

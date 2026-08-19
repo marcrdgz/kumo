@@ -121,10 +121,12 @@ impl App {
         let (update_tx, update_rx) = mpsc::channel();
         let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
         let (ai_tx, ai_rx) = mpsc::channel::<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>();
-        std::thread::spawn(move || {
-            let notice = kumo_core::update::poll_update_notice();
-            let _ = update_tx.send(notice);
-        });
+        let _ = std::thread::Builder::new()
+            .name("kumo-update-check".into())
+            .spawn(move || {
+                let notice = kumo_core::update::poll_update_notice();
+                let _ = update_tx.send(notice);
+            });
         let mut app = App {
             sessions: Vec::new(),
             active: 0,
