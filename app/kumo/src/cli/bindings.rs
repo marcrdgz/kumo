@@ -78,6 +78,12 @@ pub(crate) enum Action {
     NextSession,
     PrevSession,
     JumpSession(u8),
+    NewTab,
+    CloseTab,
+    RenameTab,
+    NextTab,
+    PrevTab,
+    JumpTab(u8),
     ToggleSidebar,
     Detach,
     ShowKeybinds,
@@ -88,19 +94,21 @@ pub(crate) enum Action {
 pub(crate) enum Group {
     Layout,
     Panes,
+    Tabs,
     Sessions,
     Chrome,
     General,
 }
 
 impl Group {
-    pub(crate) const ALL: [Group; 5] =
-        [Group::Layout, Group::Panes, Group::Sessions, Group::Chrome, Group::General];
+    pub(crate) const ALL: [Group; 6] =
+        [Group::Layout, Group::Panes, Group::Tabs, Group::Sessions, Group::Chrome, Group::General];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Group::Layout => "layout",
             Group::Panes => "panes",
+            Group::Tabs => "tabs",
             Group::Sessions => "sessions",
             Group::Chrome => "chrome",
             Group::General => "general",
@@ -155,6 +163,10 @@ const fn chord_shift(code: KeyCode) -> Chord {
     Chord::new(code, KeyModifiers::SHIFT)
 }
 
+const fn chord_alt(code: KeyCode) -> Chord {
+    Chord::new(code, KeyModifiers::ALT)
+}
+
 /// Stock leader bindings, in showcase order. Bindings that share a `keys`
 /// display string must stay adjacent so the showcase collapses them into one
 /// grouped row.
@@ -176,19 +188,33 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('s')), keys: "s", desc: "swap the focused pane with its sibling", group: Group::Panes, action: Action::SwapPanes },
     BindingSpec { key: chord(KeyCode::Char('o')), keys: "o", desc: "rotate the pane layout", group: Group::Panes, action: Action::RotateLayout },
     BindingSpec { key: chord(KeyCode::Char('q')), keys: "q", desc: "show pane numbers (press a number to jump)", group: Group::Panes, action: Action::ShowPaneNumbers },
+    BindingSpec { key: chord(KeyCode::Char('t')), keys: "t", desc: "create a new tab", group: Group::Tabs, action: Action::NewTab },
+    BindingSpec { key: chord(KeyCode::Char('&')), keys: "&", desc: "close the active tab", group: Group::Tabs, action: Action::CloseTab },
+    BindingSpec { key: chord(KeyCode::Char(',')), keys: ",", desc: "rename the active tab", group: Group::Tabs, action: Action::RenameTab },
+    BindingSpec { key: chord(KeyCode::Char('n')), keys: "n/p", desc: "cycle to the next / previous tab", group: Group::Tabs, action: Action::NextTab },
+    BindingSpec { key: chord(KeyCode::Char('p')), keys: "n/p", desc: "cycle to the next / previous tab", group: Group::Tabs, action: Action::PrevTab },
+    BindingSpec { key: chord(KeyCode::Char('1')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(1) },
+    BindingSpec { key: chord(KeyCode::Char('2')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(2) },
+    BindingSpec { key: chord(KeyCode::Char('3')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(3) },
+    BindingSpec { key: chord(KeyCode::Char('4')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(4) },
+    BindingSpec { key: chord(KeyCode::Char('5')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(5) },
+    BindingSpec { key: chord(KeyCode::Char('6')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(6) },
+    BindingSpec { key: chord(KeyCode::Char('7')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(7) },
+    BindingSpec { key: chord(KeyCode::Char('8')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(8) },
+    BindingSpec { key: chord(KeyCode::Char('9')), keys: "1-9", desc: "jump to the tab at that position", group: Group::Tabs, action: Action::JumpTab(9) },
     BindingSpec { key: chord(KeyCode::Char('c')), keys: "c", desc: "create a new session (name it in the popup)", group: Group::Sessions, action: Action::NewSession },
     BindingSpec { key: chord(KeyCode::Char('w')), keys: "w", desc: "create a git worktree in a new session", group: Group::Sessions, action: Action::NewWorktree },
-    BindingSpec { key: chord(KeyCode::Char('n')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::NextSession },
-    BindingSpec { key: chord(KeyCode::Char('p')), keys: "n/p", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::PrevSession },
-    BindingSpec { key: chord(KeyCode::Char('1')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(1) },
-    BindingSpec { key: chord(KeyCode::Char('2')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(2) },
-    BindingSpec { key: chord(KeyCode::Char('3')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(3) },
-    BindingSpec { key: chord(KeyCode::Char('4')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(4) },
-    BindingSpec { key: chord(KeyCode::Char('5')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(5) },
-    BindingSpec { key: chord(KeyCode::Char('6')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(6) },
-    BindingSpec { key: chord(KeyCode::Char('7')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(7) },
-    BindingSpec { key: chord(KeyCode::Char('8')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(8) },
-    BindingSpec { key: chord(KeyCode::Char('9')), keys: "1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(9) },
+    BindingSpec { key: chord(KeyCode::Char(']')), keys: "]/[", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::NextSession },
+    BindingSpec { key: chord(KeyCode::Char('[')), keys: "]/[", desc: "cycle to the next / previous session", group: Group::Sessions, action: Action::PrevSession },
+    BindingSpec { key: chord_alt(KeyCode::Char('1')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(1) },
+    BindingSpec { key: chord_alt(KeyCode::Char('2')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(2) },
+    BindingSpec { key: chord_alt(KeyCode::Char('3')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(3) },
+    BindingSpec { key: chord_alt(KeyCode::Char('4')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(4) },
+    BindingSpec { key: chord_alt(KeyCode::Char('5')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(5) },
+    BindingSpec { key: chord_alt(KeyCode::Char('6')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(6) },
+    BindingSpec { key: chord_alt(KeyCode::Char('7')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(7) },
+    BindingSpec { key: chord_alt(KeyCode::Char('8')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(8) },
+    BindingSpec { key: chord_alt(KeyCode::Char('9')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(9) },
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
@@ -312,6 +338,23 @@ pub(crate) fn action_id(action: Action) -> &'static str {
             9 => "jump-session-9",
             _ => unreachable!("jump-session only supports 1-9"),
         },
+        Action::NewTab => "new-tab",
+        Action::CloseTab => "close-tab",
+        Action::RenameTab => "rename-tab",
+        Action::NextTab => "next-tab",
+        Action::PrevTab => "prev-tab",
+        Action::JumpTab(n) => match n {
+            1 => "jump-tab-1",
+            2 => "jump-tab-2",
+            3 => "jump-tab-3",
+            4 => "jump-tab-4",
+            5 => "jump-tab-5",
+            6 => "jump-tab-6",
+            7 => "jump-tab-7",
+            8 => "jump-tab-8",
+            9 => "jump-tab-9",
+            _ => unreachable!("jump-tab only supports 1-9"),
+        },
         Action::ToggleSidebar => "toggle-sidebar",
         Action::Detach => "detach",
         Action::ShowKeybinds => "show-keybinds",
@@ -351,6 +394,20 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "jump-session-7" => Action::JumpSession(7),
         "jump-session-8" => Action::JumpSession(8),
         "jump-session-9" => Action::JumpSession(9),
+        "new-tab" => Action::NewTab,
+        "close-tab" => Action::CloseTab,
+        "rename-tab" => Action::RenameTab,
+        "next-tab" => Action::NextTab,
+        "prev-tab" => Action::PrevTab,
+        "jump-tab-1" => Action::JumpTab(1),
+        "jump-tab-2" => Action::JumpTab(2),
+        "jump-tab-3" => Action::JumpTab(3),
+        "jump-tab-4" => Action::JumpTab(4),
+        "jump-tab-5" => Action::JumpTab(5),
+        "jump-tab-6" => Action::JumpTab(6),
+        "jump-tab-7" => Action::JumpTab(7),
+        "jump-tab-8" => Action::JumpTab(8),
+        "jump-tab-9" => Action::JumpTab(9),
         "toggle-sidebar" => Action::ToggleSidebar,
         "detach" => Action::Detach,
         "show-keybinds" => Action::ShowKeybinds,
@@ -376,6 +433,11 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::ShowPaneNumbers => "show pane numbers (press a number to jump)",
         Action::NextSession | Action::PrevSession => "cycle to the next / previous session",
         Action::JumpSession(_) => "jump to the session at that list position",
+        Action::NewTab => "create a new tab",
+        Action::CloseTab => "close the active tab",
+        Action::RenameTab => "rename the active tab",
+        Action::NextTab | Action::PrevTab => "cycle to the next / previous tab",
+        Action::JumpTab(_) => "jump to the tab at that position",
         Action::ToggleSidebar => "toggle the sidebar",
         Action::Detach => "detach (daemon keeps running)",
         Action::ShowKeybinds => "show all keybindings",
@@ -392,6 +454,7 @@ pub(crate) fn action_group(action: Action) -> Group {
         | Action::Resize(_) => Group::Layout,
         Action::SplitAi | Action::ClosePane | Action::CyclePane | Action::SwapPanes
         | Action::RotateLayout | Action::ShowPaneNumbers => Group::Panes,
+        Action::NewTab | Action::CloseTab | Action::RenameTab | Action::NextTab | Action::PrevTab | Action::JumpTab(_) => Group::Tabs,
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
         | Action::JumpSession(_) => Group::Sessions,
         Action::ToggleSidebar => Group::Chrome,

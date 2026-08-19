@@ -55,8 +55,8 @@ impl App {
         self.pane_sizes.get(&pid).copied().unwrap_or(DEFAULT_PANE_SIZE)
     }
 
-    /// Display label of a pane in the active session, without the focus/zoom
-    /// suffix. A custom name wins; otherwise the AI CLI marker or `shell N`.
+    /// Display label of a pane in the active session's active tab, without the
+    /// focus/zoom suffix. A custom name wins; otherwise the AI CLI marker or `shell N`.
     pub(super) fn pane_label(&self, pid: u64) -> String {
         let Some(pane) = self.panes.get(&pid) else {
             return " pane ".to_string();
@@ -67,9 +67,9 @@ impl App {
         if pane.is_ai_cli() {
             return " AI CLI ".to_string();
         }
-        if self.sessions[self.active].tree.pane_count() > 1 {
-            let n = self
-                .sessions[self.active]
+        let active_tab = &self.sessions[self.active].tabs[self.sessions[self.active].active_tab];
+        if active_tab.tree.pane_count() > 1 {
+            let n = active_tab
                 .tree
                 .pane_ids()
                 .into_iter()
@@ -99,13 +99,25 @@ impl App {
             .sessions
             .iter()
             .enumerate()
-            .map(|(i, s)| kumo_protocol::SessionLayout {
-                name: s.name.clone(),
-                workspace: s.workspace.clone(),
-                focus: s.tree.focus,
-                zoom: s.zoom,
-                root: s.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
-                branch: self.session_branch(i).map(Into::into),
+            .map(|(i, s)| {
+                let tabs: Vec<kumo_protocol::TabLayout> = s.tabs.iter().map(|t| kumo_protocol::TabLayout {
+                    id: t.id,
+                    name: t.name.clone(),
+                    focus: t.tree.focus,
+                    zoom: t.zoom,
+                    root: t.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
+                }).collect();
+                let active = tabs.get(s.active_tab).cloned();
+                kumo_protocol::SessionLayout {
+                    name: s.name.clone(),
+                    workspace: s.workspace.clone(),
+                    active_tab: s.active_tab,
+                    tabs,
+                    branch: self.session_branch(i).map(Into::into),
+                    focus: active.as_ref().map(|t| t.focus).unwrap_or(0),
+                    zoom: active.as_ref().map(|t| t.zoom).unwrap_or(false),
+                    root: active.as_ref().and_then(|t| t.root.clone()),
+                }
             })
             .collect();
         let layout = Layout { active, sessions };

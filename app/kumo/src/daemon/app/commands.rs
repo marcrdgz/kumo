@@ -38,9 +38,9 @@ fn config_editor() -> (String, Vec<String>) {
 }
 
 impl App {
-    /// The focused pane of the active session.
+    /// The focused pane of the active session's active tab.
     pub(crate) fn active_focus(&self) -> u64 {
-        self.sessions.get(self.active).map(|s| s.tree.focus).unwrap_or(0)
+        self.sessions.get(self.active).map(|s| s.active_tab().tree.focus).unwrap_or(0)
     }
 
     // ------------------------------------------------------------------
@@ -126,19 +126,19 @@ impl App {
         Ok(format!("split {session:?}"))
     }
 
-    /// Close a pane in the named session (default: the focused pane).
+    /// Close a pane in the named session (default: the focused pane of the active tab).
     pub(crate) fn close_pane_in_session(&mut self, session: &str, pane_id: Option<u64>) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
         let pid = match pane_id {
             Some(pid) => {
-                if !self.sessions[idx].tree.contains(pid) {
+                if !self.sessions[idx].contains_pane(pid) {
                     return Ok(format!("no pane {pid} in {session:?}"));
                 }
                 pid
             }
-            None => self.sessions[idx].tree.focus,
+            None => self.sessions[idx].active_tab().tree.focus,
         };
         // Route through the active-session close logic by temporarily focusing
         // the target session; restore the previous active session unless the
@@ -154,7 +154,7 @@ impl App {
     }
 
     /// Nudge the ratio of the split separating the focused pane from its
-    /// neighbor in `dir`.
+    /// neighbor in `dir` (active tab).
     pub(crate) fn resize_split_in_session(&mut self, session: &str, dir: kumo_protocol::ResizeDir) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
@@ -165,8 +165,9 @@ impl App {
             kumo_protocol::ResizeDir::Up => kumo_core::layout::ResizeDir::Up,
             kumo_protocol::ResizeDir::Right => kumo_core::layout::ResizeDir::Right,
         };
-        let focus = self.sessions[idx].tree.focus;
-        if !self.sessions[idx].tree.resize_pane(focus, dir, RESIZE_STEP) {
+        let focus = self.sessions[idx].active_tab().tree.focus;
+        let t = self.sessions[idx].active_tab;
+        if !self.sessions[idx].tabs[t].tree.resize_pane(focus, dir, RESIZE_STEP) {
             return Ok(format!("nothing to resize in that direction in {session:?}"));
         }
         self.bump_layout_version();
@@ -175,7 +176,7 @@ impl App {
 
     /// Set the ratio of a specific split (identified by the id shipped in the
     /// semantic layout) to an absolute value — the daemon-side half of a
-    /// desktop drag on the divider.
+    /// desktop drag on the divider (active tab).
     pub(crate) fn set_split_ratio_in_session(
         &mut self,
         session: &str,
@@ -185,18 +186,20 @@ impl App {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
-        self.sessions[idx].tree.set_ratio(split_id, ratio);
+        let t = self.sessions[idx].active_tab;
+        self.sessions[idx].tabs[t].tree.set_ratio(split_id, ratio);
         self.bump_layout_version();
         Ok(format!("set split {split_id} ratio in {session:?}"))
     }
 
-    /// Swap the focused pane with its sibling in the named session.
+    /// Swap the focused pane with its sibling in the named session's active tab.
     pub(crate) fn swap_focused(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
-        let focus = self.sessions[idx].tree.focus;
-        if self.sessions[idx].tree.swap_with_sibling(focus) {
+        let focus = self.sessions[idx].active_tab().tree.focus;
+        let t = self.sessions[idx].active_tab;
+        if self.sessions[idx].tabs[t].tree.swap_with_sibling(focus) {
             self.bump_layout_version();
             Ok(format!("swapped pane in {session:?}"))
         } else {
@@ -204,27 +207,29 @@ impl App {
         }
     }
 
-    /// Mirror (rotate) the layout tree of the named session.
+    /// Mirror (rotate) the layout tree of the named session's active tab.
     pub(crate) fn rotate_layout(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
-        self.sessions[idx].tree.mirror();
+        let t = self.sessions[idx].active_tab;
+        self.sessions[idx].tabs[t].tree.mirror();
         self.bump_layout_version();
         Ok(format!("rotated layout in {session:?}"))
     }
 
-    /// Toggle the named session's zoom.
+    /// Toggle the active tab's zoom in the named session.
     pub(crate) fn zoom_session(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
-        self.sessions[idx].zoom = !self.sessions[idx].zoom;
+        let t = self.sessions[idx].active_tab;
+        self.sessions[idx].tabs[t].zoom = !self.sessions[idx].tabs[t].zoom;
         self.bump_layout_version();
         Ok(format!("toggled zoom in {session:?}"))
     }
 
-    /// Send key events to a pane in the named session (default: focused).
+    /// Send key events to a pane in the named session (default: focused of active tab).
     pub(crate) fn send_keys(
         &mut self,
         session: &str,
@@ -235,17 +240,23 @@ impl App {
             return Ok(format!("no session {session:?}"));
         };
         let prev_active = self.active;
-        let prev_focus = self.sessions[idx].tree.focus;
+        let s_idx = idx;
+        let t_idx = self.sessions[s_idx].active_tab;
+        let prev_focus = self.sessions[s_idx].tabs[t_idx].tree.focus;
         self.active = idx;
         let pid = match pane_id {
             Some(pid) => {
-                if !self.sessions[idx].tree.contains(pid) {
+                if !self.sessions[idx].contains_pane(pid) {
                     return Ok(format!("no pane {pid} in {session:?}"));
                 }
-                self.sessions[idx].tree.focus = pid;
+                // focus the tab containing that pane
+                if let Some(t) = self.sessions[idx].find_tab_containing(pid) {
+                    self.sessions[idx].active_tab = t;
+                    self.sessions[idx].tabs[t].tree.focus = pid;
+                }
                 pid
             }
-            None => self.sessions[idx].tree.focus,
+            None => self.sessions[idx].active_tab().tree.focus,
         };
         if prev_active != idx || prev_focus != pid {
             self.bump_layout_version();
@@ -300,36 +311,44 @@ impl App {
         self.sessions
             .iter()
             .enumerate()
-            .map(|(i, s)| SessionInfo {
-                name: s.name.clone(),
-                workspace: s.workspace.clone(),
-                pane_count: s.tree.pane_count(),
-                zoomed: s.zoom,
-                active: i == self.active,
-                focus: (s.tree.pane_count() > 0).then_some(s.tree.focus),
-                agents: s
-                    .tree
-                    .pane_ids()
-                    .into_iter()
-                    .filter_map(|pid| {
-                        let pane = self.panes.get(&pid)?;
-                        if !pane.is_ai_cli() {
-                            return None;
-                        }
-                        let (cpu, mem_kb) = self.agent_proc_cache.get(&pid).copied().unwrap_or((0.0, 0));
-                        Some(AgentInfo {
-                            name: self.agent_label(pid),
-                            status: self
-                                .agent_status_cache
-                                .get(&pid)
-                                .copied()
-                                .unwrap_or(crate::daemon::agents::AgentStatus::Idle)
-                                .into(),
-                            cpu,
-                            mem_kb,
+            .map(|(i, s)| {
+                let zoomed = s.active_tab().zoom;
+                let focus = s.active_tab().tree.pane_count().checked_sub(0).and_then(|_| {
+                    if s.active_tab().tree.pane_count() > 0 { Some(s.active_tab().tree.focus) } else { None }
+                });
+                // collect pane ids across all tabs for agent scan
+                let all_pids: Vec<u64> = s.tabs.iter().flat_map(|t| t.tree.pane_ids()).collect();
+                SessionInfo {
+                    name: s.name.clone(),
+                    workspace: s.workspace.clone(),
+                    tab_count: s.tabs.len(),
+                    pane_count: s.pane_count(),
+                    zoomed,
+                    active: i == self.active,
+                    active_tab: Some(s.active_tab().name.clone()),
+                    focus,
+                    tabs: s.tabs.iter().enumerate().map(|(ti, t)| kumo_protocol::TabInfo {
+                        id: t.id,
+                        name: t.name.clone(),
+                        pane_count: t.tree.pane_count(),
+                        zoomed: t.zoom,
+                        active: ti == s.active_tab,
+                        focus: (t.tree.pane_count()>0).then_some(t.tree.focus),
+                    }).collect(),
+                    agents: all_pids
+                        .into_iter()
+                        .filter_map(|pid| {
+                            let pane = self.panes.get(&pid)?;
+                            if !pane.is_ai_cli() { return None; }
+                            let (cpu, mem_kb) = self.agent_proc_cache.get(&pid).copied().unwrap_or((0.0, 0));
+                            Some(AgentInfo {
+                                name: self.agent_label(pid),
+                                status: self.agent_status_cache.get(&pid).copied().unwrap_or(crate::daemon::agents::AgentStatus::Idle).into(),
+                                cpu, mem_kb,
+                            })
                         })
-                    })
-                    .collect(),
+                        .collect(),
+                }
             })
             .collect()
     }
@@ -361,22 +380,17 @@ impl App {
     pub(crate) fn agent_status_lines(&self) -> Vec<AgentStatusLine> {
         let mut out = Vec::new();
         for s in &self.sessions {
-            for pid in s.tree.pane_ids() {
-                let Some(pane) = self.panes.get(&pid) else { continue };
-                if !pane.is_ai_cli() {
-                    continue;
+            for tab in &s.tabs {
+                for pid in tab.tree.pane_ids() {
+                    let Some(pane) = self.panes.get(&pid) else { continue };
+                    if !pane.is_ai_cli() { continue; }
+                    out.push(AgentStatusLine {
+                        session: s.name.clone(),
+                        pane_id: pid,
+                        name: self.agent_label(pid),
+                        status: self.agent_status_cache.get(&pid).copied().unwrap_or(crate::daemon::agents::AgentStatus::Idle).into(),
+                    });
                 }
-                out.push(AgentStatusLine {
-                    session: s.name.clone(),
-                    pane_id: pid,
-                    name: self.agent_label(pid),
-                    status: self
-                        .agent_status_cache
-                        .get(&pid)
-                        .copied()
-                        .unwrap_or(crate::daemon::agents::AgentStatus::Idle)
-                        .into(),
-                });
             }
         }
         out
@@ -396,21 +410,15 @@ impl App {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
-        if !self.sessions[idx].tree.contains(pane_id) {
+        if !self.sessions[idx].contains_pane(pane_id) {
             return Ok(format!("no pane {pane_id} in {session:?}"));
         }
         let name = name.trim().to_string();
         if name.is_empty() {
             return Ok("name cannot be empty".to_string());
         }
-        let taken = self
-            .sessions[idx]
-            .tree
-            .pane_ids()
-            .into_iter()
-            .filter(|id| *id != pane_id)
-            .map(|id| self.pane_label(id))
-            .any(|l| l.trim() == name);
+        let all_ids: Vec<u64> = self.sessions[idx].tabs.iter().flat_map(|t| t.tree.pane_ids()).collect();
+        let taken = all_ids.into_iter().filter(|id| *id != pane_id).map(|id| self.pane_label(id)).any(|l| l.trim() == name);
         if taken {
             return Ok(format!("a pane named '{name}' already exists"));
         }
@@ -510,7 +518,7 @@ impl App {
     }
 
     /// MENU `config`: open the config file in an editor pane inside the named
-    /// session (vertical split). Uses `$VISUAL`, then `$EDITOR`, then `vi`.
+    /// session's active tab (vertical split). Uses `$VISUAL`, then `$EDITOR`, then `vi`.
     pub(crate) fn open_config_in_session(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
@@ -519,27 +527,15 @@ impl App {
         let path = kumo_core::config::config_file_toml();
         let path = if path.is_file() { path } else { kumo_core::config::config_file() };
         args.push(path.to_string_lossy().into_owned());
-        let focus = self.sessions[idx].tree.focus;
+        let focus = self.sessions[idx].active_tab().tree.focus;
         let sid = self.sessions[idx].id;
+        let t = self.sessions[idx].active_tab;
         let pid = Pty::next_pane_id();
         let (cols, rows) = self.pane_sizes.get(&focus).copied().unwrap_or(super::DEFAULT_PANE_DIMS);
-        let pane = Pane::spawn(
-            sid,
-            pid,
-            self.shell.clone(),
-            Some((prog, args)),
-            Some(self.sessions[idx].workspace.clone()),
-            cols,
-            rows,
-            false,
-            self.events_tx.clone(),
-            &self.theme,
-        )?;
+        let pane = Pane::spawn(sid, pid, self.shell.clone(), Some((prog, args)), Some(self.sessions[idx].workspace.clone()), cols, rows, false, self.events_tx.clone(), &self.theme)?;
         self.panes.insert(pid, pane);
-        if !self.sessions[idx].tree.split(focus, pid, kumo_core::layout::SplitDir::V) {
-            if let Some(mut p) = self.panes.remove(&pid) {
-                p.pty.kill();
-            }
+        if !self.sessions[idx].tabs[t].tree.split(focus, pid, kumo_core::layout::SplitDir::V) {
+            if let Some(mut p) = self.panes.remove(&pid) { p.pty.kill(); }
             return Ok(format!("no room to open the editor in {session:?}"));
         }
         self.bump_layout_version();

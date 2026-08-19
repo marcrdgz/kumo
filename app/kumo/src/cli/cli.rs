@@ -22,6 +22,11 @@ enum CliCmd {
     SessionNew { name: Option<String>, workspace: Option<PathBuf> },
     SessionKill { name: String },
     SessionAttach { name: String },
+    TabList { session: Option<String> },
+    TabNew { session: Option<String>, name: Option<String>, workspace: Option<PathBuf> },
+    TabClose { session: Option<String>, tab: String },
+    TabFocus { session: Option<String>, tab: String },
+    TabRename { session: Option<String>, tab: String, new_name: String },
     PaneSplit { session: Option<String>, dir: SplitDir, ai: bool },
     PaneClose { session: Option<String>, pane: Option<u64> },
     PaneFocus { session: Option<String>, pane: u64 },
@@ -38,6 +43,24 @@ pub fn run(args: &[String]) -> Result<()> {
     let cmd = parse(args)?;
     let mut stream = connect_daemon()?;
 
+    // Tab list is special: it needs SessionList filtering
+    if let CliCmd::TabList { session } = cmd {
+        let target = resolve_session(&mut stream, session)?;
+        kumo_core::protocol::write_framed(&mut stream, &Command::SessionList)?;
+        stream.set_read_timeout(Some(Duration::from_millis(800)))?;
+        loop {
+            match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                Ok(DaemonEvent::SessionList { sessions }) => {
+                    print_tab_list(&sessions, &target);
+                    return Ok(());
+                }
+                Ok(_) => continue,
+                Err(e) if is_timeout(&e) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     let command = match cmd {
         CliCmd::List => Command::SessionList,
         CliCmd::Kill => Command::KillServer,
@@ -48,6 +71,25 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         CliCmd::SessionKill { name } => Command::SessionKill { name },
         CliCmd::SessionAttach { name } => Command::SessionFocus { name },
+        CliCmd::TabList { .. } => unreachable!(),
+        CliCmd::TabNew { session, name, workspace } => Command::TabNew {
+            session: resolve_session(&mut stream, session)?,
+            name,
+            workspace,
+        },
+        CliCmd::TabClose { session, tab } => Command::TabClose {
+            session: resolve_session(&mut stream, session)?,
+            tab: Some(tab),
+        },
+        CliCmd::TabFocus { session, tab } => Command::TabFocus {
+            session: resolve_session(&mut stream, session)?,
+            tab,
+        },
+        CliCmd::TabRename { session, tab, new_name } => Command::TabRename {
+            session: resolve_session(&mut stream, session)?,
+            tab,
+            new_name,
+        },
         CliCmd::PaneSplit { session, dir, ai } => Command::PaneSplit {
             session: resolve_session(&mut stream, session)?,
             dir,
@@ -100,6 +142,7 @@ fn parse(args: &[String]) -> Result<CliCmd> {
         "session" => parse_session(rest),
         "pane" => parse_pane(rest),
         "agent" => parse_agent(rest),
+        "tab" => parse_tab(rest),
         "ls" | "list" => Ok(CliCmd::List),
         "kill" => Ok(CliCmd::Kill),
         "reload" => Ok(CliCmd::Reload),
@@ -184,6 +227,61 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             pane: pane_id.ok_or_else(|| anyhow::anyhow!("agent kill needs -p PANE_ID"))?,
         }),
         other => anyhow::bail!("unknown agent subcommand {other:?}"),
+    }
+}
+
+fn parse_tab(args: &[String]) -> Result<CliCmd> {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        anyhow::bail!("usage: kumo tab [list|new [WORKSPACE] [--name NAME]|focus TAB|kill TAB|rename TAB NEW_NAME] [-s SESSION]");
+    };
+    // Extract -s/--session wherever it appears
+    let mut session: Option<String> = None;
+    let mut filtered: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                if let Some(v) = args.get(i+1) { session = Some(v.clone()); }
+                i += 2;
+            }
+            _ => { filtered.push(args[i].clone()); i+=1; }
+        }
+    }
+    match sub {
+        "list" => Ok(CliCmd::TabList { session }),
+        "new" => {
+            let mut name = None;
+            let mut workspace = None;
+            let mut j = 0;
+            while j < filtered.len() {
+                match filtered[j].as_str() {
+                    "--name" => {
+                        name = Some(need(&filtered, j+1, "a name after --name")?);
+                        j += 2;
+                    }
+                    arg if workspace.is_none() => {
+                        workspace = Some(PathBuf::from(arg));
+                        j += 1;
+                    }
+                    _ => { j += 1; }
+                }
+            }
+            Ok(CliCmd::TabNew { session, name, workspace })
+        }
+        "close" | "kill" => {
+            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab close needs TAB name/id"))?;
+            Ok(CliCmd::TabClose { session, tab })
+        }
+        "focus" => {
+            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab focus needs TAB name/id"))?;
+            Ok(CliCmd::TabFocus { session, tab })
+        }
+        "rename" => {
+            let tab = filtered.get(0).cloned().ok_or_else(|| anyhow::anyhow!("tab rename needs TAB and NEW_NAME"))?;
+            let new_name = filtered.get(1).cloned().ok_or_else(|| anyhow::anyhow!("tab rename needs NEW_NAME"))?;
+            Ok(CliCmd::TabRename { session, tab, new_name })
+        }
+        other => anyhow::bail!("unknown tab subcommand {other:?}"),
     }
 }
 
@@ -330,14 +428,22 @@ fn print_session_list(sessions: &[kumo_protocol::SessionInfo]) {
     for s in sessions {
         let mark = if s.active { "* " } else { "  " };
         let pane_word = if s.pane_count == 1 { "pane" } else { "panes" };
+        let tab_word = if s.tab_count == 1 { "tab" } else { "tabs" };
         println!(
-            "{mark}{}: {} {} · {}{}",
+            "{mark}{}: {} {tab_word} · {} {} · {}{}",
             s.name,
+            s.tab_count,
             s.pane_count,
             pane_word,
             s.workspace.display(),
             if s.zoomed { " (zoomed)" } else { "" }
         );
+        // tabs detail (for tab-aware ls)
+        for tab in &s.tabs {
+            let tmark = if tab.active { "  * " } else { "    " };
+            let pw = if tab.pane_count == 1 { "pane" } else { "panes" };
+            println!("{tmark}[{}] (id {}): {} {}{}", tab.name, tab.id, tab.pane_count, pw, if tab.zoomed { " (zoomed)" } else { "" });
+        }
         let color = io::stdout().is_terminal();
         for agent in &s.agents {
             let label = agent.status.label();
@@ -356,6 +462,22 @@ fn print_session_list(sessions: &[kumo_protocol::SessionInfo]) {
     }
     if sessions.is_empty() {
         println!("(no sessions)");
+    }
+}
+
+fn print_tab_list(sessions: &[kumo_protocol::SessionInfo], target: &str) {
+    let Some(s) = sessions.iter().find(|s| s.name == target) else {
+        println!("no session {target:?}");
+        return;
+    };
+    if s.tabs.is_empty() {
+        println!("(no tabs)");
+        return;
+    }
+    for tab in &s.tabs {
+        let mark = if tab.active { "* " } else { "  " };
+        let pw = if tab.pane_count == 1 { "pane" } else { "panes" };
+        println!("{mark}{} (id {}): {} {}{}", tab.name, tab.id, tab.pane_count, pw, if tab.zoomed { " (zoomed)" } else { "" });
     }
 }
 

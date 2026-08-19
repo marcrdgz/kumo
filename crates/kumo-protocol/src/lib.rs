@@ -42,8 +42,8 @@ mod crossterm;
 /// with a mismatched version. v5 removes the composed-grid channel entirely:
 /// every client draws its own chrome from the semantic layout + per-pane
 /// content, and the chrome actions (rename, worktrees, theme) travel as
-/// commands.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// commands. v6 introduces tabs: sessions → tabs → panes.
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -354,19 +354,36 @@ pub enum LayoutNode {
     },
 }
 
+/// One tab (window) inside a session: its own pane tree and focus/zoom.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct TabLayout {
+    pub id: u64,
+    pub name: String,
+    /// The focused pane in this tab.
+    pub focus: u64,
+    /// When zoomed, only the focused pane is shown full-size.
+    pub zoom: bool,
+    pub root: Option<Box<LayoutNode>>,
+}
+
 /// One session's semantic tree, as pushed to layout subscribers.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SessionLayout {
     pub name: String,
     pub workspace: std::path::PathBuf,
-    /// The focused pane in this session.
-    pub focus: u64,
-    /// When zoomed, only the focused pane is shown full-size.
-    pub zoom: bool,
-    pub root: Option<Box<LayoutNode>>,
+    /// Index of the active tab in `tabs`.
+    pub active_tab: usize,
+    pub tabs: Vec<TabLayout>,
     /// Git branch of the session's workspace (name + ahead/behind), for the
     /// client's sidebar.
     pub branch: Option<WireBranch>,
+    // Deprecated mirrors of the active tab — kept for desktop compat and smooth upgrade.
+    #[serde(default)]
+    pub focus: u64,
+    #[serde(default)]
+    pub zoom: bool,
+    #[serde(default)]
+    pub root: Option<Box<LayoutNode>>,
 }
 
 /// Git branch state of a session's workspace, as shown in the sidebar.
@@ -450,6 +467,17 @@ impl AgentStatus {
     }
 }
 
+/// Minimal info about one tab, for `kumo tab list`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct TabInfo {
+    pub id: u64,
+    pub name: String,
+    pub pane_count: usize,
+    pub zoomed: bool,
+    pub active: bool,
+    pub focus: Option<u64>,
+}
+
 /// One session, as reported to `kumo session list` (metadata only; the full
 /// semantic tree travels via [`DaemonEvent::Layout`]).
 ///
@@ -458,10 +486,14 @@ impl AgentStatus {
 pub struct SessionInfo {
     pub name: String,
     pub workspace: std::path::PathBuf,
+    pub tab_count: usize,
     pub pane_count: usize,
     pub zoomed: bool,
     pub active: bool,
+    pub active_tab: Option<String>,
     pub focus: Option<u64>,
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
     /// AI CLIs running inside this session.
     pub agents: Vec<AgentInfo>,
 }
@@ -517,8 +549,32 @@ pub enum Command {
         name: String,
     },
 
+    // -- tabs ---------------------------------------------------------------
+    /// Create a new tab in `session`.
+    TabNew {
+        session: String,
+        name: Option<String>,
+        workspace: Option<std::path::PathBuf>,
+    },
+    /// Close a tab in `session` (default: active tab).
+    TabClose {
+        session: String,
+        tab: Option<String>,
+    },
+    /// Focus a tab in `session` (by id, name or 1-based index).
+    TabFocus {
+        session: String,
+        tab: String,
+    },
+    /// Rename a tab.
+    TabRename {
+        session: String,
+        tab: String,
+        new_name: String,
+    },
+
     // -- panes ---------------------------------------------------------------
-    /// Split a pane (default: the focused one in `session`).
+    /// Split a pane (default: the focused one in `session`'s active tab).
     PaneSplit {
         session: String,
         dir: SplitDir,
@@ -843,42 +899,45 @@ mod tests {
 
     #[test]
     fn layout_tree_roundtrip() {
+        let root = Some(Box::new(LayoutNode::Split {
+            id: 7,
+            dir: SplitDir::Vertical,
+            ratio: 0.7,
+            a: Box::new(LayoutNode::Pane(LayoutPane {
+                id: 11,
+                title: " shell ".into(),
+                cwd: std::path::PathBuf::from("/tmp"),
+                is_ai: false,
+                agent: None,
+                mouse_reporting: false,
+                alt_screen: false,
+            })),
+            b: Box::new(LayoutNode::Pane(LayoutPane {
+                id: 12,
+                title: " opencode ".into(),
+                cwd: std::path::PathBuf::from("/tmp"),
+                is_ai: true,
+                agent: Some(AgentInfo {
+                    name: "opencode".into(),
+                    status: AgentStatus::Blocked,
+                    cpu: 0.7,
+                    mem_kb: 6144,
+                }),
+                mouse_reporting: true,
+                alt_screen: true,
+            })),
+        }));
         let layout = Layout {
             active: Some("session-1".into()),
             sessions: vec![SessionLayout {
                 name: "session-1".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![TabLayout { id: 1, name: "1".into(), focus: 11, zoom: false, root: root.clone() }],
+                branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
                 focus: 11,
                 zoom: false,
-                branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
-                root: Some(Box::new(LayoutNode::Split {
-                    id: 7,
-                    dir: SplitDir::Vertical,
-                    ratio: 0.7,
-                    a: Box::new(LayoutNode::Pane(LayoutPane {
-                        id: 11,
-                        title: " shell ".into(),
-                        cwd: std::path::PathBuf::from("/tmp"),
-                        is_ai: false,
-                        agent: None,
-                        mouse_reporting: false,
-                        alt_screen: false,
-                    })),
-                    b: Box::new(LayoutNode::Pane(LayoutPane {
-                        id: 12,
-                        title: " opencode ".into(),
-                        cwd: std::path::PathBuf::from("/tmp"),
-                        is_ai: true,
-                        agent: Some(AgentInfo {
-                            name: "opencode".into(),
-                            status: AgentStatus::Blocked,
-                            cpu: 0.7,
-                            mem_kb: 6144,
-                        }),
-                        mouse_reporting: true,
-                        alt_screen: true,
-                    })),
-                })),
+                root,
             }],
         };
         let mut buf = Vec::new();

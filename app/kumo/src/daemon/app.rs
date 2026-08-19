@@ -30,12 +30,55 @@ pub(crate) mod proc;
 /// Default pane size until a client requests a real size via `PaneResize`.
 const DEFAULT_PANE_DIMS: (u16, u16) = (80, 24);
 
-struct Session {
+struct Tab {
     id: u64,
     name: String,
     tree: LayoutTree,
     zoom: bool,
+}
+
+struct Session {
+    id: u64,
+    name: String,
+    tabs: Vec<Tab>,
+    active_tab: usize,
     workspace: PathBuf,
+}
+
+impl Session {
+    fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active_tab]
+    }
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active_tab]
+    }
+    fn tab_index_by_spec(&self, spec: &str) -> Option<usize> {
+        // by id (numeric), by name, or by 1-based index
+        if let Ok(id) = spec.parse::<u64>() {
+            if let Some(idx) = self.tabs.iter().position(|t| t.id == id) {
+                return Some(idx);
+            }
+            // fall through to name / index
+        }
+        if let Some(idx) = self.tabs.iter().position(|t| t.name == spec) {
+            return Some(idx);
+        }
+        if let Ok(n) = spec.parse::<usize>() {
+            if n >= 1 && n <= self.tabs.len() {
+                return Some(n - 1);
+            }
+        }
+        None
+    }
+    fn pane_count(&self) -> usize {
+        self.tabs.iter().map(|t| t.tree.pane_count()).sum()
+    }
+    fn contains_pane(&self, pid: u64) -> bool {
+        self.tabs.iter().any(|t| t.tree.contains(pid))
+    }
+    fn find_tab_containing(&self, pid: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.tree.contains(pid))
+    }
 }
 
 #[allow(dead_code)]
@@ -223,10 +266,12 @@ impl App {
         // Assign a fresh pane id per saved id, consistently across sessions.
         let mut map = std::collections::HashMap::new();
         for session in &state.sessions {
-            let mut ids = Vec::new();
-            state::tree_pane_ids(&session.tree, &mut ids);
-            for old in ids {
-                map.entry(old).or_insert_with(Pty::next_pane_id);
+            for tab in &session.tabs {
+                let mut ids = Vec::new();
+                state::tree_pane_ids(&tab.tree, &mut ids);
+                for old in ids {
+                    map.entry(old).or_insert_with(Pty::next_pane_id);
+                }
             }
         }
         state::remap_pane_ids(&mut state, &map);
@@ -253,19 +298,24 @@ impl App {
                 pane.custom_name = sp.custom_name;
                 self.panes.insert(sp.id, pane);
             }
-            let mut tree = LayoutTree::from_node(state::to_layout_node(&saved.tree), saved.focus);
-            if !tree.contains(tree.focus) {
-                if let Some(&first) = tree.pane_ids().first() {
-                    tree.focus = first;
+            let mut tabs = Vec::new();
+            for saved_tab in saved.tabs {
+                let mut tree = LayoutTree::from_node(state::to_layout_node(&saved_tab.tree), saved_tab.focus);
+                if !tree.contains(tree.focus) {
+                    if let Some(&first) = tree.pane_ids().first() {
+                        tree.focus = first;
+                    }
+                }
+                tabs.push(Tab { id: saved_tab.id, name: saved_tab.name, tree, zoom: saved_tab.zoom });
+            }
+            // If the state had no tabs (should not happen after v2), create a default.
+            if tabs.is_empty() {
+                if let Some(pid) = self.panes.keys().next().copied() {
+                    tabs.push(Tab { id: 1, name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false });
                 }
             }
-            self.sessions.push(Session {
-                id: sid,
-                name: saved.name,
-                tree,
-                zoom: saved.zoom,
-                workspace: saved.workspace,
-            });
+            let active_tab = saved.active_tab.min(tabs.len().saturating_sub(1));
+            self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace });
             self.active = i;
         }
         if self.sessions.is_empty() {
@@ -288,10 +338,12 @@ impl App {
         // Assign a fresh pane id per saved id, consistently across sessions.
         let mut map = std::collections::HashMap::new();
         for session in &state.sessions {
-            let mut ids = Vec::new();
-            state::tree_pane_ids(&session.tree, &mut ids);
-            for old in ids {
-                map.entry(old).or_insert_with(Pty::next_pane_id);
+            for tab in &session.tabs {
+                let mut ids = Vec::new();
+                state::tree_pane_ids(&tab.tree, &mut ids);
+                for old in ids {
+                    map.entry(old).or_insert_with(Pty::next_pane_id);
+                }
             }
         }
         state::remap_pane_ids(&mut state, &map);
@@ -326,24 +378,29 @@ impl App {
                 pane.custom_name = sp.custom_name;
                 self.panes.insert(sp.id, pane);
             }
-            let mut tree = LayoutTree::from_node(state::to_layout_node(&saved.tree), saved.focus);
-            // A pane with no recordable master fd was skipped: drop it from the
-            // tree so no dangling pane id is ever rendered.
-            for pid in missing {
-                tree.remove_pane(pid);
-            }
-            if !tree.contains(tree.focus) {
-                if let Some(&first) = tree.pane_ids().first() {
-                    tree.focus = first;
+            let mut tabs = Vec::new();
+            for saved_tab in saved.tabs {
+                let mut tree = LayoutTree::from_node(state::to_layout_node(&saved_tab.tree), saved_tab.focus);
+                for pid in &missing { tree.remove_pane(*pid); }
+                if !tree.contains(tree.focus) {
+                    if let Some(&first) = tree.pane_ids().first() {
+                        tree.focus = first;
+                    }
                 }
+                if tree.pane_count() == 0 {
+                    continue;
+                }
+                tabs.push(Tab { id: saved_tab.id, name: saved_tab.name, tree, zoom: saved_tab.zoom });
             }
-            self.sessions.push(Session {
-                id: sid,
-                name: saved.name,
-                tree,
-                zoom: saved.zoom,
-                workspace: saved.workspace,
-            });
+            if tabs.is_empty() && !self.panes.is_empty() {
+                // Should not happen, but keep daemon alive
+                continue;
+            }
+            if tabs.is_empty() {
+                continue;
+            }
+            let active_tab = saved.active_tab.min(tabs.len().saturating_sub(1));
+            self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace });
             self.active = i;
         }
         if self.sessions.is_empty() {
@@ -365,13 +422,20 @@ impl App {
         }
         let mut sessions = Vec::new();
         for session in &self.sessions {
-            let root = session.tree.root.as_ref()?;
             let mut panes = Vec::new();
-            for pid in session.tree.pane_ids() {
+            let mut pane_ids = Vec::new();
+            for tab in &session.tabs {
+                pane_ids.extend(tab.tree.pane_ids());
+            }
+            for pid in pane_ids {
                 let Some(pane) = self.panes.get(&pid) else { continue };
                 let snapshot = pane.vt.snapshot_encode();
                 if snapshot.is_none() {
                     log::warn!("kumo: snapshot encode failed for pane {pid}");
+                }
+                // dedup if a pane id somehow appears in multiple tabs (should not happen)
+                if panes.iter().any(|p: &state::SavedPane| p.id == pid) {
+                    continue;
                 }
                 panes.push(state::SavedPane {
                     id: pid,
@@ -388,12 +452,24 @@ impl App {
                     snapshot,
                 });
             }
+            let tabs = session.tabs.iter().filter_map(|tab| {
+                let root = tab.tree.root.as_ref()?;
+                Some(state::SavedTab {
+                    id: tab.id,
+                    name: tab.name.clone(),
+                    zoom: tab.zoom,
+                    focus: tab.tree.focus,
+                    tree: state::from_layout_node(root),
+                })
+            }).collect::<Vec<_>>();
+            if tabs.is_empty() {
+                continue;
+            }
             sessions.push(state::SavedSession {
                 name: session.name.clone(),
                 workspace: session.workspace.clone(),
-                zoom: session.zoom,
-                focus: session.tree.focus,
-                tree: state::from_layout_node(root),
+                active_tab: session.active_tab,
+                tabs,
                 panes,
             });
         }
@@ -472,13 +548,8 @@ impl App {
             &self.theme,
         )?;
         self.panes.insert(pid, pane);
-        self.sessions.push(Session {
-            id: sid,
-            name,
-            tree: LayoutTree::new(pid),
-            zoom: false,
-            workspace,
-        });
+        let tab = Tab { id: self.next_tab_id(), name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false };
+        self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace });
         self.active = self.sessions.len() - 1;
         self.bump_layout_version();
         Ok(())
@@ -505,13 +576,8 @@ impl App {
             &self.theme,
         )?;
         self.panes.insert(pid, pane);
-        self.sessions.push(Session {
-            id: sid,
-            name,
-            tree: LayoutTree::new(pid),
-            zoom: false,
-            workspace,
-        });
+        let tab = Tab { id: self.next_tab_id(), name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false };
+        self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace });
         self.active = self.sessions.len() - 1;
         self.bump_layout_version();
         Ok(())
@@ -603,14 +669,156 @@ impl App {
         max + 1
     }
 
+    fn next_tab_id(&self) -> u64 {
+        self.sessions.iter().flat_map(|s| s.tabs.iter().map(|t| t.id)).max().unwrap_or(0) + 1
+    }
+
+    fn unique_tab_name(&self, session_idx: usize, base: &str) -> String {
+        let session = &self.sessions[session_idx];
+        if !session.tabs.iter().any(|t| t.name == base) {
+            return base.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let cand = format!("{base}-{n}");
+            if !session.tabs.iter().any(|t| t.name == cand) {
+                return cand;
+            }
+            n += 1;
+        }
+    }
+
+    fn default_tab_name(&self, session_idx: usize) -> String {
+        // smallest free numeric name
+        let mut n = 1;
+        loop {
+            let cand = n.to_string();
+            if !self.sessions[session_idx].tabs.iter().any(|t| t.name == cand) {
+                return cand;
+            }
+            n += 1;
+        }
+    }
+
+    pub(crate) fn new_tab_in_session(&mut self, session_name: &str, name: Option<&str>, workspace: Option<PathBuf>) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session_name) else {
+            return Ok(format!("no session {session_name:?}"));
+        };
+        let ws = workspace.unwrap_or_else(|| self.sessions[idx].workspace.clone());
+        let tab_name = name.map(|n| self.unique_tab_name(idx, n)).unwrap_or_else(|| self.default_tab_name(idx));
+        let sid = self.sessions[idx].id;
+        let pid = Pty::next_pane_id();
+        let (cols, rows) = DEFAULT_PANE_DIMS;
+        let pane = Pane::spawn(sid, pid, self.shell.clone(), None, Some(ws), cols, rows, false, self.events_tx.clone(), &self.theme)?;
+        self.panes.insert(pid, pane);
+        let tab_id = self.next_tab_id();
+        let tab = Tab { id: tab_id, name: tab_name.clone(), tree: LayoutTree::new(pid), zoom: false };
+        self.sessions[idx].tabs.push(tab);
+        self.sessions[idx].active_tab = self.sessions[idx].tabs.len() - 1;
+        self.bump_layout_version();
+        Ok(format!("created tab {tab_name:?} in {session_name:?}"))
+    }
+
+    pub(crate) fn close_tab_in_session(&mut self, session_name: &str, tab_spec: Option<&str>) -> Result<String> {
+        let Some(s_idx) = self.sessions.iter().position(|s| s.name == session_name) else {
+            return Ok(format!("no session {session_name:?}"));
+        };
+        let t_idx = match tab_spec {
+            Some(spec) => match self.sessions[s_idx].tab_index_by_spec(spec) {
+                Some(i) => i,
+                None => return Ok(format!("no tab {spec:?} in {session_name:?}")),
+            },
+            None => self.sessions[s_idx].active_tab,
+        };
+        if self.sessions[s_idx].tabs.len() <= 1 {
+            // last tab: close the whole session (mirrors pane close that empties session)
+            self.close_session(s_idx);
+            return Ok(format!("closed tab and session {session_name:?}"));
+        }
+        let tab = self.sessions[s_idx].tabs.remove(t_idx);
+        for pid in tab.tree.pane_ids() {
+            let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
+            if let Some(mut pane) = self.panes.remove(&pid) { pane.pty.kill(); }
+            self.pane_cache.remove(&pid);
+            self.pane_sizes.remove(&pid);
+            self.agent_status_cache.remove(&pid);
+            self.last_agent_status.remove(&pid);
+            self.last_agent_sound.remove(&pid);
+            self.agent_proc_cache.remove(&pid);
+            if let Some(os_pid) = os_pid { self.proc.forget(os_pid); }
+        }
+        // fix active_tab
+        if t_idx < self.sessions[s_idx].active_tab {
+            self.sessions[s_idx].active_tab -= 1;
+        } else if t_idx == self.sessions[s_idx].active_tab {
+            self.sessions[s_idx].active_tab = self.sessions[s_idx].active_tab.min(self.sessions[s_idx].tabs.len() - 1);
+        }
+        self.bump_layout_version();
+        Ok(format!("closed tab {:?} in {:?}", tab.name, session_name))
+    }
+
+    pub(crate) fn focus_tab_in_session_named(&mut self, session_name: &str, tab_spec: &str) -> bool {
+        let Some(s_idx) = self.sessions.iter().position(|s| s.name == session_name) else { return false };
+        if let Some(t_idx) = self.sessions[s_idx].tab_index_by_spec(tab_spec) {
+            self.sessions[s_idx].active_tab = t_idx;
+            self.bump_layout_version();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn rename_tab_in_session(&mut self, session: &str, tab: &str, new_name: &str) -> Result<String> {
+        let Some(s_idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let Some(t_idx) = self.sessions[s_idx].tab_index_by_spec(tab) else {
+            return Ok(format!("no tab {tab:?} in {session:?}"));
+        };
+        let name = new_name.trim().to_string();
+        if name.is_empty() { return Ok("name cannot be empty".to_string()); }
+        if self.sessions[s_idx].tabs.iter().enumerate().any(|(i,t)| i!=t_idx && t.name==name) {
+            return Ok(format!("a tab named '{name}' already exists"));
+        }
+        self.sessions[s_idx].tabs[t_idx].name = name.clone();
+        self.bump_layout_version();
+        Ok(format!("renamed tab to {name:?}"))
+    }
+
+    pub(crate) fn cycle_tab_in_session(&mut self, session: &str, delta: isize) -> Result<String> {
+        let Some(s_idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let len = self.sessions[s_idx].tabs.len();
+        if len < 2 { return Ok(format!("only one tab in {session:?}")); }
+        let cur = self.sessions[s_idx].active_tab as isize;
+        let next = ((cur + delta).rem_euclid(len as isize)) as usize;
+        self.sessions[s_idx].active_tab = next;
+        self.bump_layout_version();
+        Ok(format!("focused tab {}", self.sessions[s_idx].tabs[next].name))
+    }
+
+    pub(crate) fn jump_tab_in_session(&mut self, session: &str, n: usize) -> Result<String> {
+        let Some(s_idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        if n == 0 || n > self.sessions[s_idx].tabs.len() {
+            return Ok(format!("no tab {n} in {session:?}"));
+        }
+        self.sessions[s_idx].active_tab = n - 1;
+        self.bump_layout_version();
+        Ok(format!("focused tab {}", self.sessions[s_idx].tabs[n-1].name))
+    }
+
     fn bump_layout_version(&mut self) {
         self.layout_version = self.layout_version.wrapping_add(1);
         self.cached_layout = None;
     }
 
     fn split_active(&mut self, dir: SplitDir, is_ai: bool) -> Result<()> {
-        let focus = self.sessions[self.active].tree.focus;
-        let sid = self.sessions[self.active].id;
+        let (focus, sid) = {
+            let sess = &self.sessions[self.active];
+            (sess.active_tab().tree.focus, sess.id)
+        };
         let pid = Pty::next_pane_id();
         let (cols, rows) = self.pane_sizes.get(&focus).copied().unwrap_or(DEFAULT_PANE_DIMS);
         let (program, shell) = if is_ai {
@@ -631,7 +839,8 @@ impl App {
             &self.theme,
         )?;
         self.panes.insert(pid, pane);
-        if !self.sessions[self.active].tree.split(focus, pid, dir) {
+        let active_tab = self.sessions[self.active].active_tab;
+        if !self.sessions[self.active].tabs[active_tab].tree.split(focus, pid, dir) {
             if let Some(mut p) = self.panes.remove(&pid) {
                 p.pty.kill();
             }
@@ -656,15 +865,30 @@ impl App {
             self.proc.forget(os_pid);
         }
 
-        let empty = self.sessions[self.active].tree.remove_pane(pid);
-        if empty {
-            self.sessions.remove(self.active);
-            if self.sessions.is_empty() {
-                self.quit = true;
+        let s_idx = self.active;
+        let t_idx = self.sessions[s_idx].find_tab_containing(pid).unwrap_or(self.sessions[s_idx].active_tab);
+        let empty_tab = self.sessions[s_idx].tabs[t_idx].tree.remove_pane(pid);
+        if empty_tab {
+            self.sessions[s_idx].tabs.remove(t_idx);
+            if self.sessions[s_idx].tabs.is_empty() {
+                self.sessions.remove(s_idx);
+                if self.sessions.is_empty() {
+                    self.quit = true;
+                    self.bump_layout_version();
+                    return;
+                }
+                self.active = self.active.min(self.sessions.len() - 1);
                 self.bump_layout_version();
                 return;
             }
-            self.active = self.active.min(self.sessions.len() - 1);
+            // adjust active_tab
+            if t_idx < self.sessions[s_idx].active_tab {
+                self.sessions[s_idx].active_tab -= 1;
+            } else if t_idx == self.sessions[s_idx].active_tab {
+                self.sessions[s_idx].active_tab = self.sessions[s_idx].active_tab.min(self.sessions[s_idx].tabs.len() - 1);
+            } else if self.sessions[s_idx].active_tab >= self.sessions[s_idx].tabs.len() {
+                self.sessions[s_idx].active_tab = self.sessions[s_idx].tabs.len() - 1;
+            }
         }
         self.bump_layout_version();
     }
@@ -674,19 +898,21 @@ impl App {
         if self.sessions.get(idx).is_none() {
             return;
         }
-        for pid in self.sessions[idx].tree.pane_ids() {
-            let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
-            if let Some(mut pane) = self.panes.remove(&pid) {
-                pane.pty.kill();
-            }
-            self.pane_cache.remove(&pid);
-            self.pane_sizes.remove(&pid);
-            self.agent_status_cache.remove(&pid);
-            self.last_agent_status.remove(&pid);
-            self.last_agent_sound.remove(&pid);
-            self.agent_proc_cache.remove(&pid);
-            if let Some(os_pid) = os_pid {
-                self.proc.forget(os_pid);
+        for tab in &self.sessions[idx].tabs {
+            for pid in tab.tree.pane_ids() {
+                let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
+                if let Some(mut pane) = self.panes.remove(&pid) {
+                    pane.pty.kill();
+                }
+                self.pane_cache.remove(&pid);
+                self.pane_sizes.remove(&pid);
+                self.agent_status_cache.remove(&pid);
+                self.last_agent_status.remove(&pid);
+                self.last_agent_sound.remove(&pid);
+                self.agent_proc_cache.remove(&pid);
+                if let Some(os_pid) = os_pid {
+                    self.proc.forget(os_pid);
+                }
             }
         }
         self.sessions.remove(idx);
@@ -717,7 +943,7 @@ impl App {
             }
             let mut idx = None;
             for (i, s) in self.sessions.iter().enumerate() {
-                if s.tree.contains(pid) {
+                if s.contains_pane(pid) {
                     idx = Some(i);
                     break;
                 }
@@ -742,15 +968,30 @@ impl App {
         if let Some(os_pid) = os_pid {
             self.proc.forget(os_pid);
         }
-        let empty = self.sessions[idx].tree.remove_pane(pid);
-        if empty {
-            self.sessions.remove(idx);
-            if self.sessions.is_empty() {
-                self.quit = true;
+        let t_idx_opt = self.sessions[idx].find_tab_containing(pid);
+        let Some(t_idx) = t_idx_opt else {
+            self.bump_layout_version();
+            return;
+        };
+        let empty_tab = self.sessions[idx].tabs[t_idx].tree.remove_pane(pid);
+        if empty_tab {
+            self.sessions[idx].tabs.remove(t_idx);
+            if self.sessions[idx].tabs.is_empty() {
+                self.sessions.remove(idx);
+                if self.sessions.is_empty() {
+                    self.quit = true;
+                    self.bump_layout_version();
+                    return;
+                }
+                self.active = self.active.saturating_sub(1).min(self.sessions.len() - 1);
                 self.bump_layout_version();
                 return;
             }
-            self.active = self.active.saturating_sub(1).min(self.sessions.len() - 1);
+            if t_idx < self.sessions[idx].active_tab {
+                self.sessions[idx].active_tab -= 1;
+            } else if t_idx == self.sessions[idx].active_tab {
+                self.sessions[idx].active_tab = self.sessions[idx].active_tab.min(self.sessions[idx].tabs.len() - 1);
+            }
         }
         self.bump_layout_version();
     }
@@ -815,19 +1056,19 @@ impl App {
     }
 
     /// Focus a specific pane inside a named session (desktop pane click). Also
-    /// activates the session. Returns whether the pane exists in it.
+    /// activates the session and its tab. Returns whether the pane exists in it.
     pub(crate) fn focus_pane_in_session(&mut self, name: &str, pane_id: u64) -> bool {
         let Some(i) = self.sessions.iter().position(|s| s.name == name) else {
             return false;
         };
-        if self.sessions[i].tree.pane_ids().contains(&pane_id) {
-            self.active = i;
-            self.sessions[i].tree.focus = pane_id;
-            self.bump_layout_version();
-            true
-        } else {
-            false
-        }
+        let Some(t_idx) = self.sessions[i].find_tab_containing(pane_id) else {
+            return false;
+        };
+        self.active = i;
+        self.sessions[i].active_tab = t_idx;
+        self.sessions[i].tabs[t_idx].tree.focus = pane_id;
+        self.bump_layout_version();
+        true
     }
 
     /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from

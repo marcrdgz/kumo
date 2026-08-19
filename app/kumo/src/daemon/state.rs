@@ -50,9 +50,9 @@ mod base64_serde {
 
 /// Current schema version. On bump, keep the loader able to read older
 /// versions (or reject them gracefully) so restores never crash.
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
-/// The full persisted state: every session, its layout tree and its panes.
+/// The full persisted state: every session, its tabs and panes.
 #[derive(Serialize, Deserialize)]
 pub struct SavedState {
     pub version: u32,
@@ -61,16 +61,25 @@ pub struct SavedState {
     pub sessions: Vec<SavedSession>,
 }
 
-/// One restored session. Pane ids inside `tree`/`focus` refer to the saved
-/// (pre-remap) ids stored in each `SavedPane`.
-#[derive(Serialize, Deserialize)]
+/// One restored session — now a collection of tabs sharing one workspace.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SavedSession {
     pub name: String,
     pub workspace: PathBuf,
+    #[serde(default)]
+    pub active_tab: usize,
+    pub tabs: Vec<SavedTab>,
+    pub panes: Vec<SavedPane>,
+}
+
+/// One restored tab (window) — its own layout tree.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedTab {
+    pub id: u64,
+    pub name: String,
     pub zoom: bool,
     pub focus: u64,
     pub tree: SavedNode,
-    pub panes: Vec<SavedPane>,
 }
 
 /// Layout tree mirror of `layout::Node`, independent of `LayoutTree` bookkeeping.
@@ -94,7 +103,7 @@ pub enum SavedNode {
 /// restarted daemon can adopt the inherited PTY master descriptors. They are
 /// `#[serde(default)]` so ordinary persisted state (and 0.4.0's snapshots)
 /// round-trip unchanged.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SavedPane {
     pub id: u64,
     pub is_ai: bool,
@@ -135,22 +144,58 @@ pub fn save(path: &Path, state: &SavedState) -> Result<()> {
 
 /// Load `path`. Missing file → `Ok(None)`. Corrupt JSON or an unknown schema
 /// version → warn and treat as no state (fresh start), never crash.
+/// v1 state is migrated: each old session's single tree becomes one tab "1".
 pub fn load(path: &Path) -> Result<Option<SavedState>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    match serde_json::from_str::<SavedState>(&content) {
-        Ok(s) if s.version == STATE_VERSION => Ok(Some(s)),
-        Ok(s) => {
-            log::warn!("kumo: ignoring state.json with unknown version {}", s.version);
+    // Peek version without fully decoding.
+    #[derive(Deserialize)]
+    struct VersionPeek { version: u32 }
+    let version: Option<u32> = serde_json::from_str::<VersionPeek>(&content).ok().map(|v| v.version);
+    match version {
+        Some(2) => match serde_json::from_str::<SavedState>(&content) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) => {
+                log::warn!("kumo: ignoring unreadable state.json: {e}");
+                Ok(None)
+            }
+        },
+        Some(1) => match serde_json::from_str::<SavedStateV1>(&content) {
+            Ok(v1) => Ok(Some(v1.into_v2())),
+            Err(e) => {
+                log::warn!("kumo: ignoring unreadable state.json: {e}");
+                Ok(None)
+            }
+        },
+        Some(v) => {
+            log::warn!("kumo: ignoring state.json with unknown version {v}");
             Ok(None)
         }
-        Err(e) => {
-            log::warn!("kumo: ignoring unreadable state.json: {e}");
+        None => {
+            log::warn!("kumo: ignoring unreadable state.json");
             Ok(None)
         }
+    }
+}
+
+/// v1 types for migration.
+#[derive(Deserialize)]
+struct SavedStateV1 { version: u32, active: usize, sessions: Vec<SavedSessionV1> }
+#[derive(Deserialize, Clone)]
+struct SavedSessionV1 { name: String, workspace: PathBuf, zoom: bool, focus: u64, tree: SavedNode, panes: Vec<SavedPane> }
+impl SavedStateV1 {
+    fn into_v2(self) -> SavedState {
+        let sessions = self.sessions.into_iter().map(|s| SavedSession {
+            name: s.name,
+            workspace: s.workspace,
+            active_tab: 0,
+            tabs: vec![SavedTab { id: 1, name: "1".to_string(), zoom: s.zoom, focus: s.focus, tree: s.tree }],
+            panes: s.panes,
+        }).collect();
+        SavedState { version: STATE_VERSION, active: self.active, sessions }
     }
 }
 
@@ -159,8 +204,10 @@ pub fn load(path: &Path) -> Result<Option<SavedState>> {
 /// from `map` are dropped.
 pub fn remap_pane_ids(state: &mut SavedState, map: &HashMap<u64, u64>) {
     for session in &mut state.sessions {
-        remap_node(&mut session.tree, map);
-        session.focus = map.get(&session.focus).copied().unwrap_or(0);
+        for tab in &mut session.tabs {
+            remap_node(&mut tab.tree, map);
+            tab.focus = map.get(&tab.focus).copied().unwrap_or(0);
+        }
         session.panes.retain(|p| map.contains_key(&p.id));
         for pane in &mut session.panes {
             pane.id = map[&pane.id];
@@ -228,15 +275,20 @@ mod tests {
             sessions: vec![SavedSession {
                 name: "session-1".into(),
                 workspace: PathBuf::from("/work"),
-                zoom: false,
-                focus: 11,
-                tree: SavedNode::Split {
-                    id: 7,
-                    dir: SplitDir::V,
-                    ratio: 0.5,
-                    a: Box::new(SavedNode::Pane { id: 11 }),
-                    b: Box::new(SavedNode::Pane { id: 12 }),
-                },
+                active_tab: 0,
+                tabs: vec![SavedTab {
+                    id: 1,
+                    name: "1".into(),
+                    zoom: false,
+                    focus: 11,
+                    tree: SavedNode::Split {
+                        id: 7,
+                        dir: SplitDir::V,
+                        ratio: 0.5,
+                        a: Box::new(SavedNode::Pane { id: 11 }),
+                        b: Box::new(SavedNode::Pane { id: 12 }),
+                    },
+                }],
                 panes: vec![
                     SavedPane {
                         id: 11,
@@ -314,12 +366,19 @@ mod tests {
     fn old_state_without_resume_fields_loads() {
         // A pre-resume `state.json` (no fd/pid/size fields) must still load via
         // the serde defaults, so nothing written before breaks a later update.
-        let json = r#"{"version":1,"active":0,"sessions":[{"name":"session-1","workspace":"/tmp","zoom":false,"focus":11,"tree":{"Pane":{"id":11}},"panes":[{"id":11,"is_ai":false,"shell":"/bin/sh","program":null,"cwd":"/tmp","custom_name":null}]}]}"#;
-        let loaded = serde_json::from_str::<SavedState>(json).unwrap();
+        let json_v1 = r#"{"version":1,"active":0,"sessions":[{"name":"session-1","workspace":"/tmp","zoom":false,"focus":11,"tree":{"Pane":{"id":11}},"panes":[{"id":11,"is_ai":false,"shell":"/bin/sh","program":null,"cwd":"/tmp","custom_name":null}]}]}"#;
+        let dir = std::env::temp_dir().join(format!("kumo-state-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, json_v1).unwrap();
+        let loaded = load(&path).unwrap().expect("migrated");
+        assert_eq!(loaded.version, STATE_VERSION);
         let p = &loaded.sessions[0].panes[0];
         assert_eq!(p.master_fd, None);
         assert_eq!(p.child_pid, None);
         assert_eq!((p.cols, p.rows), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -362,10 +421,10 @@ mod tests {
         map.insert(12, 200);
         remap_pane_ids(&mut state, &map);
         let s = &state.sessions[0];
-        assert_eq!(s.focus, 100);
+        assert_eq!(s.tabs[0].focus, 100);
         assert_eq!(s.panes[0].id, 100);
         assert_eq!(s.panes[1].id, 200);
-        assert!(matches!(s.tree, SavedNode::Split { ref a, ref b, .. }
+        assert!(matches!(s.tabs[0].tree, SavedNode::Split { ref a, ref b, .. }
             if matches!(**a, SavedNode::Pane { id: 100 }) && matches!(**b, SavedNode::Pane { id: 200 })));
     }
 
@@ -377,5 +436,22 @@ mod tests {
         remap_pane_ids(&mut state, &map);
         assert_eq!(state.sessions[0].panes.len(), 1);
         assert_eq!(state.sessions[0].panes[0].id, 100);
+    }
+
+    #[test]
+    fn v1_migrates_to_single_tab() {
+        let json_v1 = r#"{"version":1,"active":0,"sessions":[{"name":"s1","workspace":"/tmp","zoom":true,"focus":42,"tree":{"Pane":{"id":42}},"panes":[{"id":42,"is_ai":false,"shell":"/bin/sh","program":null,"cwd":"/tmp","custom_name":null}]}]}"#;
+        let dir = std::env::temp_dir().join(format!("kumo-state-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, json_v1).unwrap();
+        let loaded = load(&path).unwrap().expect("migrated");
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.sessions[0].tabs.len(), 1);
+        assert_eq!(loaded.sessions[0].tabs[0].name, "1");
+        assert_eq!(loaded.sessions[0].tabs[0].focus, 42);
+        assert!(loaded.sessions[0].tabs[0].zoom);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

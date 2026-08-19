@@ -315,7 +315,7 @@ impl KumoWindow {
             w = w.max(44.0 + name + branch);
             // Agent rows: paddings(50) + avatar(20) + the wider of name or
             // the metrics pill (text + 12px pill padding).
-            let mut stack: Vec<&kumo_protocol::LayoutNode> = s.root.as_deref().into_iter().collect();
+            let mut stack: Vec<&kumo_protocol::LayoutNode> = s.tabs.iter().filter_map(|t| t.root.as_deref()).collect();
             while let Some(node) = stack.pop() {
                 if let kumo_protocol::LayoutNode::Pane(p) = node {
                     if let Some(a) = &p.agent {
@@ -477,9 +477,11 @@ impl KumoWindow {
         if let Some(session) = layout.sessions.iter().find(|s| Some(&s.name) == layout.active.as_ref()) {
             let (gw, gh) = self.grid_size;
             let area = CellRect { x: 0, y: 0, width: gw, height: gh.saturating_sub(1) };
-            let (rects, splitters) = if session.zoom {
-                (vec![(session.focus, area)], Vec::new())
-            } else if let Some(root) = &session.root {
+            let active_tab = session.tabs.get(session.active_tab);
+            let (rects, splitters) = if active_tab.map(|t| t.zoom).unwrap_or(false) {
+                let focus = active_tab.map(|t| t.focus).unwrap_or(0);
+                (vec![(focus, area)], Vec::new())
+            } else if let Some(root) = active_tab.and_then(|t| t.root.as_ref()) {
                 let mut splitters = Vec::new();
                 let rects = compute_rects(root, area);
                 compute_splitters(root, area, &mut splitters);

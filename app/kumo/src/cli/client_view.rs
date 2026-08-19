@@ -29,6 +29,8 @@ use crate::cli::mouse::sgr_mouse;
 
 /// Width of the left sidebar (its last column is the separator).
 const SIDEBAR_WIDTH: u16 = 25;
+/// Height of the tab bar (row 0, above panes).
+const TAB_H: u16 = 1;
 /// Height of the status bar (last row).
 const STATUS_H: u16 = 1;
 /// How long the `leader+q` pane-number overlay stays up without a keypress.
@@ -61,6 +63,8 @@ enum PopupTarget {
     NewWorktree(usize),
     RenamePane(u64),
     RenameSession(usize),
+    RenameTab { session: usize, tab: usize },
+    NewTab(usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -280,6 +284,8 @@ pub struct View {
     sidebar_open: bool,
     sidebar_tab: SidebarTab,
     sidebar_scroll: (u16, u16),
+    tab_hover: Option<usize>,
+    tab_rects: Vec<(usize, Rect, Rect)>, // (tab_idx, pill rect, close rect)
     popup: Popup,
     menu: Menu,
     ctx_menu: CtxMenu,
@@ -431,6 +437,8 @@ impl View {
             sel: None,
             pending_click: None,
             pending_wheel: HashMap::new(),
+            tab_hover: None,
+            tab_rects: Vec::new(),
             dirty: true,
             detach_requested: false,
         };
@@ -522,6 +530,7 @@ impl View {
 
     fn on_layout(&mut self, layout: Layout) {
         self.layout = Some(layout);
+        self.update_tab_rects();
         self.recompute_geometry();
     }
 
@@ -551,8 +560,13 @@ impl View {
         layout.sessions.iter().find(|s| s.name == name)
     }
 
+    fn active_tab(&self) -> Option<&kumo_protocol::TabLayout> {
+        let s = self.active_session()?;
+        s.tabs.get(s.active_tab)
+    }
+
     fn session_zoom(&self) -> bool {
-        self.active_session().map(|s| s.zoom).unwrap_or(false)
+        self.active_tab().map(|t| t.zoom).unwrap_or(false)
     }
 
     fn panes_area(&self) -> Rect {
@@ -561,18 +575,18 @@ impl View {
         } else {
             0
         };
-        Rect::new(x, 0, self.cols.saturating_sub(x), self.rows.saturating_sub(STATUS_H))
+        Rect::new(x, TAB_H, self.cols.saturating_sub(x), self.rows.saturating_sub(STATUS_H + TAB_H))
     }
 
-    /// Lay the active session's tree out over the pane area (wire tree → the
+    /// Lay the active tab's tree out over the pane area (wire tree → the
     /// crate's geometry, which reserves a 1-cell separator per split).
     fn active_geom(&self) -> TreeGeom {
         let mut geom = TreeGeom::default();
         let area = self.panes_area();
-        if let Some(session) = self.active_session() {
-            if session.zoom {
-                geom.panes.push(PaneGeom { pane_id: session.focus, rect: area });
-            } else if let Some(root) = &session.root {
+        if let Some(tab) = self.active_tab() {
+            if tab.zoom {
+                geom.panes.push(PaneGeom { pane_id: tab.focus, rect: area });
+            } else if let Some(root) = &tab.root {
                 let node = wire_to_layout(root);
                 layout::compute_geometry(&node, area, &mut geom);
             }
@@ -615,6 +629,7 @@ impl View {
             self.grids.remove(&pid);
             self.sel = None;
         }
+        self.update_tab_rects();
         self.mark_dirty();
     }
 
@@ -687,6 +702,54 @@ impl View {
     fn session_at(&self, n: usize) -> Option<String> {
         let layout = self.layout.as_ref()?;
         layout.sessions.get(n.saturating_sub(1)).map(|s| s.name.clone())
+    }
+
+    fn cycle_tab(&self, delta: isize) -> Option<String> {
+        let sess = self.active_session()?;
+        if sess.tabs.is_empty() { return None; }
+        let cur = sess.active_tab as isize;
+        let next = ((cur + delta).rem_euclid(sess.tabs.len() as isize)) as usize;
+        Some(sess.tabs[next].name.clone())
+    }
+
+    fn tab_at_index(&self, n: usize) -> Option<String> {
+        let sess = self.active_session()?;
+        sess.tabs.get(n.saturating_sub(1)).map(|t| t.name.clone())
+    }
+
+    fn tabs_area(&self) -> Rect {
+        let x = if self.sidebar_open { (SIDEBAR_WIDTH + 1).min(self.cols.saturating_sub(1)) } else { 0 };
+        Rect::new(x, 0, self.cols.saturating_sub(x), TAB_H)
+    }
+
+    fn update_tab_rects(&mut self) {
+        self.tab_rects.clear();
+        let Some(sess) = self.active_session().cloned() else { return };
+        let area = self.tabs_area();
+        let mut cur_x = area.x;
+        for (idx, tab) in sess.tabs.iter().enumerate() {
+            let is_hover = self.tab_hover == Some(idx);
+            let label = if is_hover { format!("[{} x]", tab.name) } else { format!("[{}]", tab.name) };
+            let w = label.chars().count() as u16;
+            if cur_x + w > area.x + area.width { break; }
+            let pill = Rect::new(cur_x, area.y, w, 1);
+            let close = if is_hover { Rect::new(cur_x + w - 2, area.y, 1, 1) } else { Rect::new(0,0,0,0) };
+            self.tab_rects.push((idx, pill, close));
+            cur_x += w + 1; // 1 gap between tabs
+        }
+    }
+
+    fn tab_hit(&self, x: u16, y: u16) -> Option<(usize, bool)> {
+        if y != 0 { return None; }
+        let area = self.tabs_area();
+        if !area.contains(Position::new(x, y)) { return None; }
+        for (idx, pill, close) in &self.tab_rects {
+            if pill.contains(Position::new(x, y)) {
+                let is_close = close.width>0 && close.contains(Position::new(x, y));
+                return Some((*idx, is_close));
+            }
+        }
+        None
     }
 
     // ------------------------------------------------------------------
@@ -810,7 +873,7 @@ impl View {
                 let _ = self.send(&Command::SessionZoom { session });
             }
             Action::Focus(dir) => {
-                let focus = self.active_session().map(|s| s.focus).unwrap_or(0);
+                let focus = self.active_tab().map(|t| t.focus).unwrap_or(0);
                 if let Some(pid) = self.pane_toward(focus, dir) {
                     let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
                 }
@@ -825,7 +888,7 @@ impl View {
                 let _ = self.send(&Command::PaneResizeRatio { session, dir });
             }
             Action::CyclePane => {
-                let focus = self.active_session().map(|s| s.focus).unwrap_or(0);
+                let focus = self.active_tab().map(|t| t.focus).unwrap_or(0);
                 if let Some(pid) = self.cycle_pane(focus) {
                     let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
                 }
@@ -839,6 +902,30 @@ impl View {
             Action::ShowPaneNumbers => {
                 self.pane_numbers = Some(Instant::now());
                 self.mark_dirty();
+            }
+            Action::NextTab => {
+                if let Some(name) = self.cycle_tab(1) {
+                    let _ = self.send(&Command::TabFocus { session, tab: name });
+                }
+            }
+            Action::PrevTab => {
+                if let Some(name) = self.cycle_tab(-1) {
+                    let _ = self.send(&Command::TabFocus { session, tab: name });
+                }
+            }
+            Action::JumpTab(n) => {
+                if let Some(name) = self.tab_at_index(n as usize) {
+                    let _ = self.send(&Command::TabFocus { session, tab: name });
+                }
+            }
+            Action::NewTab => {
+                let _ = self.send(&Command::TabNew { session, name: None, workspace: None });
+            }
+            Action::CloseTab => {
+                let _ = self.send(&Command::TabClose { session, tab: None });
+            }
+            Action::RenameTab => {
+                self.open_rename_tab_popup();
             }
             Action::NextSession => {
                 if let Some(name) = self.cycle_session(1) {
@@ -946,6 +1033,22 @@ impl View {
         self.popup.error = None;
         self.popup.hover = None;
         self.popup.target = Some(PopupTarget::RenameSession(idx));
+        self.popup.open = true;
+        self.ctx_menu.open = false;
+        self.mark_dirty();
+    }
+
+    fn open_rename_tab_popup(&mut self) {
+        let (s_idx, t_idx) = self.active_session().map(|s| {
+            let s_idx = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|x| x.name==s.name)).unwrap_or(0);
+            (s_idx, s.active_tab)
+        }).unwrap_or((0,0));
+        let name = self.layout.as_ref().and_then(|l| l.sessions.get(s_idx)).and_then(|s| s.tabs.get(t_idx)).map(|t| t.name.clone()).unwrap_or_default();
+        self.popup.name = name.clone();
+        self.popup.cursor = name.chars().count();
+        self.popup.error = None;
+        self.popup.hover = None;
+        self.popup.target = Some(PopupTarget::RenameTab { session: s_idx, tab: t_idx });
         self.popup.open = true;
         self.ctx_menu.open = false;
         self.mark_dirty();
@@ -1193,6 +1296,16 @@ impl View {
                     self.popup.open = false;
                     let _ = self.send(&Command::SessionRename { session: old, new_name: name });
                 }
+            }
+            Some(PopupTarget::RenameTab { session, tab }) => {
+                let (sname, tname) = self.layout.as_ref().and_then(|l| l.sessions.get(session)).and_then(|s| s.tabs.get(tab).map(|t| (s.name.clone(), t.name.clone()))).unwrap_or_default();
+                if !sname.is_empty() {
+                    self.popup.open = false;
+                    let _ = self.send(&Command::TabRename { session: sname, tab: tname, new_name: name });
+                }
+            }
+            Some(PopupTarget::NewTab(_)) => {
+                self.popup.open = false;
             }
             None => {}
         }
@@ -1472,6 +1585,15 @@ impl View {
         self.set_link_mods(m.modifiers.intersects(link_modifiers()));
         let x = m.column;
         let y = m.row;
+        // Tab bar hover tracking (y==0) — update before click handling so close "x" appears
+        if m.kind == MouseEventKind::Moved {
+            let new_hover = self.tab_hit(x, y).map(|(idx, _)| idx);
+            if new_hover != self.tab_hover {
+                self.tab_hover = new_hover;
+                self.update_tab_rects();
+                self.mark_dirty();
+            }
+        }
         if m.kind == MouseEventKind::Down(MouseButton::Left) && self.update_notice_close_at(x, y) {
             if let Some((key, _)) = self.update_notice.clone() {
                 let _ = self.send(&Command::UpdateDismiss { key });
@@ -1582,6 +1704,17 @@ impl View {
                 if self.menu_btn_at(x, y) {
                     self.menu.open = !self.menu.open;
                     self.menu.selected = 0;
+                    return Ok(());
+                }
+                if let Some((idx, is_close)) = self.tab_hit(x, y) {
+                    if let Some(sess) = self.active_session().cloned() {
+                        let tab_name = sess.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
+                        if is_close {
+                            let _ = self.send(&Command::TabClose { session: sess.name, tab: Some(tab_name) });
+                        } else {
+                            let _ = self.send(&Command::TabFocus { session: sess.name, tab: tab_name });
+                        }
+                    }
                     return Ok(());
                 }
                 if self.sidebar_open && x < SIDEBAR_WIDTH && self.sidebar_hit(x, y) {
@@ -1796,16 +1929,14 @@ impl View {
 
     fn pane_mouse_reporting(&self, pid: u64) -> bool {
         self.active_session()
-            .and_then(|s| s.root.as_deref())
-            .and_then(|r| find_pane(r, pid))
+            .and_then(|s| find_pane_in_session(s, pid))
             .map(|p| p.mouse_reporting)
             .unwrap_or(false)
     }
 
     fn pane_alt_screen(&self, pid: u64) -> bool {
         self.active_session()
-            .and_then(|s| s.root.as_deref())
-            .and_then(|r| find_pane(r, pid))
+            .and_then(|s| find_pane_in_session(s, pid))
             .map(|p| p.alt_screen)
             .unwrap_or(false)
     }
@@ -1889,7 +2020,7 @@ impl View {
         let mut out: Vec<(u8, usize, u64, SidebarRow)> = Vec::new();
         if let Some(layout) = &self.layout {
             for (i, s) in layout.sessions.iter().enumerate() {
-                for (_, pane) in session_panes(&s.root) {
+                for (_, pane) in session_panes_all(s) {
                     if let Some(agent) = pane.agent.as_ref() {
                         if pane.is_ai {
                             let status = agent.status;
@@ -2241,13 +2372,14 @@ impl View {
         let theme_idx = self.theme_idx;
         // Pane frames (borders + titles + content).
         for &(pid, rect) in &self.rects {
-            let focused = self.active_session().map(|s| s.focus == pid).unwrap_or(false);
+            let focused = self.active_tab().map(|t| t.focus == pid).unwrap_or(false);
             let title = self.pane_title(pid, focused);
             self.render_pane_frame(f, rect, focused, &title);
             if let Some(grid) = self.grids.get_mut(&pid) {
                 render_pane_content(f, pid, rect, grid, selected, link_mods, theme_idx);
             }
         }
+        self.render_tab_bar(f);
         self.render_pane_numbers(f);
         if self.sidebar_open {
             self.render_sidebar(f, area);
@@ -2264,8 +2396,7 @@ impl View {
 
     fn pane_label(&self, pid: u64) -> String {
         self.active_session()
-            .and_then(|s| s.root.as_deref())
-            .and_then(|r| find_pane(r, pid))
+            .and_then(|s| find_pane_in_session(s, pid))
             .map(|p| p.title.clone())
             .unwrap_or_else(|| " pane ".to_string())
     }
@@ -2289,8 +2420,7 @@ impl View {
             *r == rect
                 && self
                     .active_session()
-                    .and_then(|s| s.root.as_deref())
-                    .and_then(|root| find_pane(root, *pid))
+                    .and_then(|s| find_pane_in_session(s, *pid))
                     .map(|p| p.agent.as_ref().map(|a| a.status == AgentStatus::Blocked).unwrap_or(false))
                     .unwrap_or(false)
         });
@@ -2342,6 +2472,34 @@ impl View {
         for (i, (_, rect)) in self.rects.iter().enumerate() {
             let Some(digit) = char::from_digit((i + 1) as u32, 10) else { continue };
             put(f, rect.x + rect.width / 2, rect.y + rect.height / 2, &digit.to_string(), style);
+        }
+    }
+
+    fn render_tab_bar(&self, f: &mut Frame) {
+        let Some(sess) = self.active_session() else { return };
+        if sess.tabs.is_empty() { return; }
+        let theme = &THEMES[self.theme_idx];
+        let area = self.tabs_area();
+        fill(f, area, RColor::Reset);
+        for (idx, pill, close) in &self.tab_rects {
+            let Some(tab) = sess.tabs.get(*idx) else { continue };
+            let active = sess.active_tab == *idx;
+            let is_hover = self.tab_hover == Some(*idx);
+            let bg = if active { theme.panel_sep } else { RColor::Reset };
+            let fg = if active { theme.accent } else { theme.panel_muted };
+            fill(f, *pill, bg);
+            let style = if active {
+                Style::default().fg(theme.fg).bg(bg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(fg).bg(bg)
+            };
+            // label is pill text already; but we need to draw with active highlight
+            let label = if is_hover { format!("[{} x]", tab.name) } else { format!("[{}]", tab.name) };
+            text(f, pill.x, pill.y, &label, style, pill.width);
+            if is_hover && close.width>0 {
+                // draw 'x' with hover color (red-ish) but keep bg
+                put(f, close.x, close.y, "x", Style::default().fg(theme.red).bg(bg).add_modifier(Modifier::BOLD));
+            }
         }
     }
 
@@ -2435,7 +2593,7 @@ impl View {
                         .layout
                         .as_ref()
                         .and_then(|l| l.sessions.get(*i))
-                        .map(|s| s.focus == *pid)
+                        .map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == *pid).unwrap_or(false))
                         .unwrap_or(false);
                     let focused = session_active && pane_focused;
                     let bg = if focused { theme.panel_sep } else { RColor::Reset };
@@ -2543,12 +2701,14 @@ impl View {
 
         let session = self.active_session();
         let n = session.map(pane_count).unwrap_or(0);
+        let t = session.map(|s| s.tabs.len()).unwrap_or(0);
         let mut spans: Vec<ratatui::text::Span> = vec![
             ratatui::text::Span::raw(" "),
             ratatui::text::Span::styled(session.map(|s| s.name.clone()).unwrap_or_default(), Style::default().fg(theme.fg).bg(RColor::Reset)),
-            ratatui::text::Span::styled(format!(" · {n} panes"), Style::default().fg(theme.panel_muted).bg(RColor::Reset)),
+            ratatui::text::Span::styled(format!(" · {t} tabs · {n} panes"), Style::default().fg(theme.panel_muted).bg(RColor::Reset)),
         ];
-        if session.map(|s| s.zoom).unwrap_or(false) {
+        let zoomed = self.active_tab().map(|tab| tab.zoom).unwrap_or(false);
+        if zoomed {
             spans.push(ratatui::text::Span::styled(" · zoomed", Style::default().fg(theme.secondary).bg(RColor::Reset)));
         }
         if !self.sidebar_open {
@@ -2916,7 +3076,7 @@ impl View {
                 return Ok(());
             }
         }
-        let focus = self.active_session().map(|s| s.focus);
+        let focus = self.active_tab().map(|t| t.focus);
         if let Some(focus) = focus {
             if let Some((_, rect)) = self.rects.iter().find(|(pid, _)| *pid == focus) {
                 let inner = PaneGeom { pane_id: focus, rect: *rect }.inner();
@@ -2959,21 +3119,35 @@ fn wire_to_layout(node: &LayoutNode) -> kumo_core::layout::Node {
 }
 
 fn pane_count(s: &SessionLayout) -> usize {
-    let mut n = 0;
-    let mut stack: Vec<&LayoutNode> = Vec::new();
-    if let Some(root) = &s.root {
-        stack.push(root);
-    }
-    while let Some(node) = stack.pop() {
-        match node {
-            LayoutNode::Pane(_) => n += 1,
-            LayoutNode::Split { a, b, .. } => {
-                stack.push(a);
-                stack.push(b);
+    s.tabs.iter().map(|t| {
+        let mut n = 0;
+        let mut stack: Vec<&LayoutNode> = Vec::new();
+        if let Some(root) = &t.root { stack.push(root); }
+        while let Some(node) = stack.pop() {
+            match node {
+                LayoutNode::Pane(_) => n += 1,
+                LayoutNode::Split { a, b, .. } => { stack.push(a); stack.push(b); }
             }
         }
+        n
+    }).sum()
+}
+
+fn find_pane_in_session(s: &SessionLayout, pid: u64) -> Option<&kumo_protocol::LayoutPane> {
+    for tab in &s.tabs {
+        if let Some(root) = &tab.root {
+            if let Some(p) = find_pane(root, pid) { return Some(p); }
+        }
     }
-    n
+    None
+}
+
+fn session_panes_all(s: &SessionLayout) -> Vec<(u64, kumo_protocol::LayoutPane)> {
+    let mut out = Vec::new();
+    for tab in &s.tabs {
+        out.extend(session_panes(&tab.root));
+    }
+    out
 }
 
 fn find_pane(node: &LayoutNode, pid: u64) -> Option<&kumo_protocol::LayoutPane> {
@@ -3274,6 +3448,8 @@ mod tests {
             sel: None,
             pending_click: None,
             pending_wheel: HashMap::new(),
+            tab_hover: None,
+            tab_rects: Vec::new(),
             dirty: false,
             detach_requested: false,
         }
@@ -3369,6 +3545,8 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
                 zoom: false,
                 branch: None,
@@ -3389,18 +3567,20 @@ mod tests {
         view.layout = Some(layout);
         view.grids.insert(1, g);
         view.recompute_geometry();
-        // 80x24 with sidebar: the pane area starts at col 26.
-        assert_eq!(view.rects, vec![(1, Rect::new(26, 0, 54, 23))]);
+        // 80x24 with sidebar+tab bar: the pane area starts at col 26, row 1 (tab bar at row 0).
+        assert_eq!(view.rects, vec![(1, Rect::new(26, 1, 54, 22))]);
 
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Pane border at the top-left of the pane area.
-        assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "┌");
-        // The title chip carries the pane label.
-        assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
-        assert!(buf.cell((28, 0)).unwrap().symbol() == "s" || buf.cell((28, 0)).unwrap().symbol() == " ");
+        // Tab bar at top
+        assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "[");
+        // Pane border at the top-left of the pane area (below tab bar).
+        assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "┌");
+        // The title chip carries the pane label (pane frame at y=1).
+        assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
+        assert!(buf.cell((28, 1)).unwrap().symbol() == "s" || buf.cell((28, 1)).unwrap().symbol() == " ");
         // The status bar shows NORMAL + the session name.
         let status_line: String = (0..40).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
         assert!(status_line.contains("NORMAL"), "status chip missing: {status_line:?}");
@@ -3414,6 +3594,8 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
                 zoom: false,
                 branch: None,
@@ -3453,6 +3635,8 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
                 zoom: false,
                 branch: None,
@@ -3508,6 +3692,8 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
                 zoom: false,
                 branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),

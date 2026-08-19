@@ -321,6 +321,21 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 Command::SessionFocus { name } => {
                     let _ = app.focus_session_named(&name);
                 }
+                Command::TabNew { session, name, workspace } => {
+                    let reply = app.new_tab_in_session(&session, name.as_deref(), workspace).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::TabClose { session, tab } => {
+                    let reply = app.close_tab_in_session(&session, tab.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::TabFocus { session, tab } => {
+                    let _ = app.focus_tab_in_session_named(&session, &tab);
+                }
+                Command::TabRename { session, tab, new_name } => {
+                    let reply = app.rename_tab_in_session(&session, &tab, &new_name).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
                 Command::PaneSplit { session, dir, is_ai } => {
                     let reply = app.split_in_session(&session, dir, is_ai).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
@@ -793,7 +808,7 @@ mod tests {
             }
         };
         assert_eq!(layout.sessions.len(), 1, "one initial session");
-        let root = layout.sessions[0].root.as_deref().unwrap();
+        let root = layout.sessions[0].tabs[layout.sessions[0].active_tab].root.as_deref().unwrap();
         assert!(
             matches!(root, LayoutNode::Pane(_)),
             "the semantic tree must be plain panes/splits, never a composed grid"
@@ -814,7 +829,7 @@ mod tests {
         assert_eq!(layout.active.as_deref(), Some("two"));
         let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
         assert_eq!(two.workspace, PathBuf::from("/tmp"));
-        let two_pane = match two.root.as_deref().unwrap() {
+        let two_pane = match two.tabs[two.active_tab].root.as_deref().unwrap() {
             LayoutNode::Pane(p) => p.id,
             _ => panic!("expected a single pane"),
         };
@@ -830,7 +845,7 @@ mod tests {
             match next_event(&mut stream, Duration::from_secs(10), "split Layout") {
                 DaemonEvent::Layout { layout } => {
                     let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
-                    if let Some(root) = &two.root {
+                    if let Some(root) = &two.tabs[two.active_tab].root {
                         if matches!(root.as_ref(), LayoutNode::Split { .. }) {
                             break layout;
                         }
@@ -841,7 +856,7 @@ mod tests {
             }
         };
         let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
-        let root = two.root.as_deref().unwrap();
+        let root = two.tabs[two.active_tab].root.as_deref().unwrap();
         match root {
             LayoutNode::Split { dir, ratio, a, b, .. } => {
                 assert_eq!(*dir, SplitDir::Vertical);
@@ -888,7 +903,7 @@ mod tests {
             match next_event(&mut stream, Duration::from_secs(10), "renamed Layout") {
                 DaemonEvent::Layout { layout } => {
                     let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
-                    if let Some(root) = &two.root {
+                    if let Some(root) = &two.tabs[two.active_tab].root {
                         if pane_title_contains(root, "editor") {
                             break layout;
                         }
@@ -899,7 +914,7 @@ mod tests {
             }
         };
         let two = layout.sessions.iter().find(|s| s.name == "two").unwrap();
-        let root = two.root.as_deref().unwrap();
+        let root = two.tabs[two.active_tab].root.as_deref().unwrap();
         assert!(
             pane_title_contains(root, "editor"),
             "the pane title must carry the custom name"

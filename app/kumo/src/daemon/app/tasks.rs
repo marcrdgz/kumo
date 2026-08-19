@@ -92,7 +92,7 @@ impl App {
             return;
         }
         self.last_follow_scan = Instant::now();
-        let focus = self.sessions[self.active].tree.focus;
+        let focus = self.sessions[self.active].active_tab().tree.focus;
         let cwd = {
             let Some(pane) = self.panes.get_mut(&focus) else { return };
             pane.detected_cwd()

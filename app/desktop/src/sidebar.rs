@@ -107,13 +107,12 @@ impl Sidebar {
         let mut has_agents = false;
 
         for session in &layout.sessions {
-            collect_agents(&session.root, &mut |pid, agent| {
-                has_agents = true;
-                // `extend(&mut self)` mutates the scroll container in place, so
-                // the FnMut closure never moves the (non-Copy) element out of
-                // its capture.
-                scroll.extend([self.agent_row(cx, &session.name, pid, agent, chrome).into_any_element()]);
-            });
+            for tab in &session.tabs {
+                collect_agents(&tab.root, &mut |pid, agent| {
+                    has_agents = true;
+                    scroll.extend([self.agent_row(cx, &session.name, pid, agent, chrome).into_any_element()]);
+                });
+            }
         }
 
         if !has_agents {
@@ -144,7 +143,8 @@ impl Sidebar {
         let name = s.name.clone();
         let toggle = self.parent.clone();
         let (name_ctx, toggle_ctx) = (name.clone(), toggle.clone());
-        let title = if s.zoom { format!("{} (zoom)", s.name) } else { s.name.clone() };
+        let is_zoomed = s.tabs.get(s.active_tab).map(|t| t.zoom).unwrap_or(false);
+        let title = if is_zoomed { format!("{} (zoom)", s.name) } else { s.name.clone() };
         let branch = s
             .branch
             .as_ref()
@@ -392,9 +392,11 @@ impl Sidebar {
             }
 
             for session in &layout.sessions {
-                collect_agents(&session.root, &mut |_pid, agent| {
-                    dots.push(self.status_dot(agent.status, &agent.name, chrome));
-                });
+                for tab in &session.tabs {
+                    collect_agents(&tab.root, &mut |_pid, agent| {
+                        dots.push(self.status_dot(agent.status, &agent.name, chrome));
+                    });
+                }
             }
 
             if !dots.is_empty() {
