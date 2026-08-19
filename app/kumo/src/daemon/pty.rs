@@ -37,6 +37,28 @@ impl Drop for PtyMaster {
     }
 }
 
+#[derive(Debug)]
+struct DummyChild;
+impl portable_pty::ChildKiller for DummyChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(DummyChild)
+    }
+}
+impl Child for DummyChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+    }
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+        Ok(portable_pty::ExitStatus::with_exit_code(0))
+    }
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+}
+
 /// The child process running in the PTY. Spawned panes own a reapable `Child`;
 /// resumed panes can only signal the (now-reparented) process by pid.
 pub enum PtyChild {
@@ -204,16 +226,18 @@ impl Pty {
     where
         F: Fn(Vec<u8>) + Send + 'static,
     {
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            let mut reader = reader;
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => on_data(buf[..n].to_vec()),
+        let _ = std::thread::Builder::new()
+            .name("kumo-pty-reader".into())
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                let mut reader = reader;
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => on_data(buf[..n].to_vec()),
+                    }
                 }
-            }
-        });
+            });
     }
 
     /// The child's process id (to signal it), if known.
@@ -236,10 +260,14 @@ impl Pty {
                     let rc = unsafe { libc::kill(*pid, 0) };
                     if rc == 0 {
                         Ok(None)
-                    } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
-                        Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
                     } else {
-                        Ok(None)
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::ESRCH) {
+                            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+                        } else {
+                            // EPERM or other: process exists but we lack permission, treat as alive.
+                            Ok(None)
+                        }
                     }
                 }
                 None => Ok(Some(portable_pty::ExitStatus::with_exit_code(0))),
@@ -249,21 +277,69 @@ impl Pty {
 
     /// Kill the child process. Spawned children are reaped too; resumed
     /// children were reparented to init by the previous daemon's exec, so they
-    /// are only signalled.
+    /// are only signalled. Never blocks the daemon loop: the actual `wait` and
+    /// `SIGKILL` fallback run in a detached thread.
     pub fn kill(&mut self) {
-        match &mut self.child {
-            PtyChild::Spawned(c) => {
+        // Take ownership of the child so we can move it into a waiter thread.
+        #[cfg(unix)]
+        let child = std::mem::replace(&mut self.child, PtyChild::Pid { pid: None });
+        #[cfg(not(unix))]
+        let child = std::mem::replace(
+            &mut self.child,
+            PtyChild::Spawned(Box::new(DummyChild)),
+        );
+        match child {
+            PtyChild::Spawned(mut c) => {
                 let _ = c.kill();
-                let _ = c.wait();
+                let _ = std::thread::Builder::new()
+                    .name("kumo-pty-killer".into())
+                    .spawn(move || {
+                        use std::time::{Duration, Instant};
+                        let deadline = Instant::now() + Duration::from_millis(500);
+                        loop {
+                            match c.try_wait() {
+                                Ok(Some(_)) => break,
+                                Ok(None) if Instant::now() < deadline => {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                Ok(None) => {
+                                    if let Some(pid) = c.process_id() {
+                                        unsafe {
+                                            libc::kill(pid as i32, libc::SIGKILL);
+                                        }
+                                    }
+                                    let _ = c.wait();
+                                    break;
+                                }
+                                Err(_) => {
+                                    let _ = c.wait();
+                                    break;
+                                }
+                            }
+                        }
+                    });
             }
             #[cfg(unix)]
             PtyChild::Pid { pid } => {
                 if let Some(pid) = pid {
                     unsafe {
-                        libc::kill(*pid, libc::SIGTERM);
+                        // Signal the process group and the pid itself.
+                        libc::kill(-pid, libc::SIGTERM);
+                        libc::kill(pid, libc::SIGTERM);
                     }
+                    let _ = std::thread::Builder::new()
+                        .name("kumo-pty-killer".into())
+                        .spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            unsafe {
+                                libc::kill(-pid, libc::SIGKILL);
+                                libc::kill(pid, libc::SIGKILL);
+                            }
+                        });
                 }
             }
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 
