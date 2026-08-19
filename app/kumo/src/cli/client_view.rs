@@ -177,36 +177,27 @@ impl Grid {
     /// Get the rendered ratatui cells for a row, rebuilding only if the row
     /// changed since the last render. This avoids O(cols × rows) work per frame
     /// by only rebuilding dirty rows.
+    /// 
+    /// Note: The cache stores only base terminal styles. Selection highlights
+    /// and link underlines are applied at blit time in `render_pane_content()`
+    /// because they change independently of terminal content (client-side state).
     fn get_rendered_row(
         &mut self,
         row: usize,
-        selected: Option<Sel>,
-        link_mods: bool,
     ) -> Option<&Vec<ratatui::buffer::Cell>> {
         if row >= self.rows {
             return None;
+        }
+        // Ensure the rendered cache is initialized to the right size
+        if self.rendered.len() != self.rows {
+            self.rendered = vec![None; self.rows];
         }
         // Rebuild the row if it's not cached
         if self.rendered.get(row).map(|r| r.is_none()).unwrap_or(true) {
             let cells = self.cells.get(row)?;
             let mut rendered = Vec::with_capacity(cells.len());
-            for (c, cell) in cells.iter().enumerate() {
-                let mut style = cell_style(cell);
-                // Selection highlight
-                if let Some(sel) = selected {
-                    let ((tr, tc), (br, bc)) = sel_corners(&sel);
-                    if (row as u16, c as u16) >= (tr, tc) && (row as u16, c as u16) <= (br, bc) {
-                        style = style.add_modifier(Modifier::REVERSED);
-                    }
-                }
-                // Link underline
-                if link_mods {
-                    if let Some(row_links) = self.links.get(&(row as u16)) {
-                        if row_links.iter().any(|l| (c as u16) >= l.start && (c as u16) < l.end) {
-                            style = style.add_modifier(Modifier::UNDERLINED);
-                        }
-                    }
-                }
+            for cell in cells.iter() {
+                let style = cell_style(cell);
                 let ch = if cell.text.trim().is_empty() { " " } else { &cell.text };
                 let mut ratatui_cell = ratatui::buffer::Cell::default();
                 ratatui_cell.set_symbol(ch);
@@ -316,12 +307,22 @@ fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, sel
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    // Pre-compute selection corners once per frame (not per cell)
+    // Only apply selection if this pane is the one being selected
+    let sel_corners = selected.filter(|sel| sel.pane_id == pid).map(|sel| sel_corners(&sel));
     for r in 0..grid.rows {
         if r as u16 >= inner.height {
             break;
         }
+        // Get link ranges for this row (if link mods are active)
+        // Clone before calling get_rendered_row() to avoid borrow conflicts
+        let row_links = if link_mods {
+            grid.links.get(&(r as u16)).cloned()
+        } else {
+            None
+        };
         // Get the cached rendered row, rebuilding only if dirty
-        let Some(rendered_row) = grid.get_rendered_row(r, selected, link_mods) else {
+        let Some(rendered_row) = grid.get_rendered_row(r) else {
             continue;
         };
         for (c, cell) in rendered_row.iter().enumerate() {
@@ -337,7 +338,22 @@ fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, sel
             let x = inner.x + c as u16;
             let y = inner.y + r as u16;
             if let Some(target) = f.buffer_mut().cell_mut(Position::new(x, y)) {
+                // Clone the cached cell
                 *target = cell.clone();
+                
+                // Apply selection highlight (client-side overlay, not cached)
+                if let Some(((tr, tc), (br, bc))) = sel_corners {
+                    if (r as u16, c as u16) >= (tr, tc) && (r as u16, c as u16) <= (br, bc) {
+                        target.set_style(target.style().add_modifier(Modifier::REVERSED));
+                    }
+                }
+                
+                // Apply link underline (client-side overlay, not cached)
+                if let Some(links) = row_links.as_ref() {
+                    if links.iter().any(|l| (c as u16) >= l.start && (c as u16) < l.end) {
+                        target.set_style(target.style().add_modifier(Modifier::UNDERLINED));
+                    }
+                }
             }
         }
     }
