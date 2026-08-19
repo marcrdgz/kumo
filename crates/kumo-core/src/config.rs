@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, SystemTime};
 
 // ---------------------------------------------------------------------------
 // Directory resolution (XDG-style, Ghostty-like)
@@ -107,7 +109,7 @@ fn legacy_workspace_file() -> Option<PathBuf> {
 
 /// Parsed user configuration. Mirrors the flat `key = value` config file;
 /// future knobs (theme, leader, keymaps, status bar) will extend this struct.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Config {
     /// Program + args for the AI pane.
     pub ai_cmd: Option<(String, Vec<String>)>,
@@ -353,6 +355,71 @@ fn load_config() -> Config {
     cfg
 }
 
+fn current_config_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(p) = legacy_config_file() {
+        v.push(p);
+    }
+    v.push(config_file());
+    v.push(config_file_toml());
+    v
+}
+
+struct CacheEntry {
+    config: Config,
+    mtimes: HashMap<PathBuf, Option<SystemTime>>,
+    at: Instant,
+}
+
+static CONFIG_CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
+
+fn cached_config() -> Config {
+    #[cfg(test)]
+    {
+        // Tests mutate env/files under TEST_ENV_LOCK and expect immediate
+        // visibility; bypass the mtime cache.
+        return load_config();
+    }
+    let paths = current_config_paths();
+    let mut current_mtimes: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
+    for p in &paths {
+        current_mtimes.insert(p.clone(), std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    }
+
+    let cache = CONFIG_CACHE.get_or_init(|| Mutex::new(None));
+    // Fast path: check under lock
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(entry) = guard.as_ref() {
+            if entry.mtimes == current_mtimes {
+                return entry.config.clone();
+            }
+        }
+    }
+    // Miss: load fresh (without holding lock)
+    let config = load_config();
+    let mut guard = cache.lock().unwrap();
+    // Double-check after load (another thread may have filled)
+    if let Some(entry) = guard.as_ref() {
+        if entry.mtimes == current_mtimes {
+            return entry.config.clone();
+        }
+    }
+    *guard = Some(CacheEntry {
+        config: config.clone(),
+        mtimes: current_mtimes,
+        at: Instant::now(),
+    });
+    config
+}
+
+/// Invalidate the config cache (used by `kumo reload` and tests).
+pub fn invalidate_cache() {
+    if let Some(cache) = CONFIG_CACHE.get() {
+        let _ = cache.lock().map(|mut g| *g = None);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TOML parser (canonical format)
 // ---------------------------------------------------------------------------
@@ -417,7 +484,7 @@ fn unquote(v: &str) -> &str {
 /// Precedence: the `config` file (`ai-cmd`), then the legacy `~/.kumo` file
 /// (`ai_cmd`), then a built-in default of `opencode`.
 pub fn ai_command() -> (String, Vec<String>) {
-    let cfg = load_config();
+    let cfg = cached_config();
     cfg.ai_cmd.unwrap_or_else(|| (String::from("opencode"), Vec::new()))
 }
 
@@ -446,7 +513,7 @@ pub fn ai_cwd() -> PathBuf {
 
 /// The user's login shell: the `shell` config key, else `$SHELL`, else bash.
 pub fn default_shell() -> String {
-    let cfg = load_config();
+    let cfg = cached_config();
     cfg.shell
         .or_else(|| env_nonempty("SHELL"))
         .unwrap_or_else(|| "/bin/bash".to_string())
@@ -458,7 +525,7 @@ pub fn update_check_enabled() -> bool {
     if std::env::var("KUMO_NO_UPDATE").is_ok() {
         return false;
     }
-    load_config().update_check
+    cached_config().update_check
 }
 
 /// Whether agent lifecycle transitions play an audible alert. Disabled by
@@ -467,26 +534,26 @@ pub fn agent_sound_enabled() -> bool {
     if std::env::var("KUMO_NO_SOUND").is_ok() {
         return false;
     }
-    load_config().agent_sound
+    cached_config().agent_sound
 }
 
 /// The leader chord from the config (`leader = "ctrl+b"`), if set. `None`
 /// means the built-in default (Ctrl+B).
 pub fn leader() -> Option<String> {
-    load_config().leader
+    cached_config().leader
 }
 
 /// `[keymap.bindings]` overrides: chord string → action id. Empty when the
 /// config sets no bindings (the stock keymap applies).
 pub fn keymap_bindings() -> HashMap<String, String> {
-    load_config().keymap_bindings
+    cached_config().keymap_bindings
 }
 
 /// The resolved session working-directory policy (`[terminal] new-cwd`):
 /// `Follow` (default), `Home`, `Current`, or `Fixed(path)`. A `Fixed` mode
 /// without a usable `fixed-cwd` was already normalized to `Current` at load.
 pub fn new_cwd() -> NewCwd {
-    let cfg = load_config();
+    let cfg = cached_config();
     match cfg.new_cwd {
         NewCwdMode::Follow => NewCwd::Follow,
         NewCwdMode::Current => NewCwd::Current,
