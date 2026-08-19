@@ -612,6 +612,7 @@ impl App {
     }
 
     fn close_pane(&mut self, pid: u64) {
+        let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
         if let Some(mut pane) = self.panes.remove(&pid) {
             pane.pty.kill();
         }
@@ -621,7 +622,9 @@ impl App {
         self.last_agent_status.remove(&pid);
         self.last_agent_sound.remove(&pid);
         self.agent_proc_cache.remove(&pid);
-        self.proc.forget(pid as u32);
+        if let Some(os_pid) = os_pid {
+            self.proc.forget(os_pid);
+        }
 
         let empty = self.sessions[self.active].tree.remove_pane(pid);
         if empty {
@@ -640,6 +643,7 @@ impl App {
             return;
         }
         for pid in self.sessions[idx].tree.pane_ids() {
+            let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
             if let Some(mut pane) = self.panes.remove(&pid) {
                 pane.pty.kill();
             }
@@ -649,7 +653,9 @@ impl App {
             self.last_agent_status.remove(&pid);
             self.last_agent_sound.remove(&pid);
             self.agent_proc_cache.remove(&pid);
-            self.proc.forget(pid as u32);
+            if let Some(os_pid) = os_pid {
+                self.proc.forget(os_pid);
+            }
         }
         self.sessions.remove(idx);
         if self.sessions.is_empty() {
@@ -689,15 +695,19 @@ impl App {
     }
 
     fn close_pane_from_session(&mut self, idx: usize, pid: u64) {
+        let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
         if let Some(mut pane) = self.panes.remove(&pid) {
             pane.pty.kill();
         }
         self.pane_cache.remove(&pid);
+        self.pane_sizes.remove(&pid);
         self.agent_status_cache.remove(&pid);
         self.last_agent_status.remove(&pid);
         self.last_agent_sound.remove(&pid);
         self.agent_proc_cache.remove(&pid);
-        self.proc.forget(pid as u32);
+        if let Some(os_pid) = os_pid {
+            self.proc.forget(os_pid);
+        }
         let empty = self.sessions[idx].tree.remove_pane(pid);
         if empty {
             self.sessions.remove(idx);
