@@ -26,6 +26,17 @@ pub enum PtyMaster {
     Inherited { fd: i32 },
 }
 
+#[cfg(unix)]
+impl Drop for PtyMaster {
+    fn drop(&mut self) {
+        if let Self::Inherited { fd } = *self {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+}
+
 /// The child process running in the PTY. Spawned panes own a reapable `Child`;
 /// resumed panes can only signal the (now-reparented) process by pid.
 pub enum PtyChild {
