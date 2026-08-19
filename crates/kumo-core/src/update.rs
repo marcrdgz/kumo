@@ -125,7 +125,7 @@ const API_BASE: &str = "https://api.github.com/repos/marcrdgz/kumo";
 fn http_get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
     ureq::get(url)
         .config()
-        .timeout_global(Some(Duration::from_secs(120)))
+        .timeout_global(Some(Duration::from_secs(10)))
         .user_agent(format!("kumo/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .call()
