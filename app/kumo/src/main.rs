@@ -55,7 +55,7 @@ fn main() -> Result<()> {
             }
             #[cfg(not(unix))]
             {
-                anyhow::bail!("kumo commands need the unix daemon");
+                anyhow::bail!("kumo requires a unix daemon");
             }
         }
         _ => {}
@@ -63,12 +63,52 @@ fn main() -> Result<()> {
 
     // tmux-style launch: `kumo` attaches to the daemon if present (else starts
     // one), `kumo attach` requires a running daemon, `kumo new [dir]` starts a
-    // fresh session.
+    // fresh session. Bare `kumo [WORKSPACE]` is a shorthand for `kumo new [WORKSPACE]`
+    // but only when the argument is an existing directory; otherwise it is an
+    // unknown command (prevents `kumo lits` typo silently creating a session).
     let launch = match args.first().map(|s| s.as_str()) {
-        Some("attach") => Launch::Attach,
-        Some("new") => Launch::New(args.get(1).map(PathBuf::from)),
-        Some(ws) if !ws.starts_with('-') => Launch::New(Some(PathBuf::from(ws))),
-        _ => Launch::Auto,
+        Some("attach") => {
+            if args.len() > 1 {
+                anyhow::bail!("kumo attach takes no arguments");
+            }
+            Launch::Attach
+        }
+        Some("new") => {
+            match args.get(1) {
+                Some(dir) if dir.starts_with('-') => {
+                    anyhow::bail!("unknown option for kumo new: {dir} (expected [WORKSPACE])");
+                }
+                Some(dir) => {
+                    let p = PathBuf::from(dir);
+                    if args.len() > 2 {
+                        anyhow::bail!("kumo new takes at most one directory");
+                    }
+                    if !p.is_dir() {
+                        anyhow::bail!("no such directory: {}", p.display());
+                    }
+                    Launch::New(Some(p))
+                }
+                None => Launch::New(None),
+            }
+        }
+        Some(ws) if !ws.starts_with('-') => {
+            let p = PathBuf::from(ws);
+            if p.is_dir() {
+                if args.len() > 1 {
+                    anyhow::bail!("kumo [WORKSPACE] takes at most one argument");
+                }
+                Launch::New(Some(p))
+            } else {
+                anyhow::bail!("unknown command: {ws} (see `kumo --help`)");
+            }
+        }
+        Some(arg) if arg.starts_with('-') => {
+            anyhow::bail!("unknown option: {arg} (see `kumo --help`)");
+        }
+        Some(other) => {
+            anyhow::bail!("unknown command: {other} (see `kumo --help`)");
+        }
+        None => Launch::Auto,
     };
 
     #[cfg(unix)]
@@ -77,7 +117,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        anyhow::bail!("kumo needs a unix daemon (the TUI client is unix-only)")
+        anyhow::bail!("kumo requires a unix daemon");
     }
 }
 
