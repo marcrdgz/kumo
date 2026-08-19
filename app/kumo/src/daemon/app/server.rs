@@ -350,6 +350,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // Render dirty pane content into the caches, then stream what changed.
         let changed: HashSet<u64> = app.tick().into_iter().collect();
 
+        // Prune per-pane server caches for panes that no longer exist (closed by
+        // user command or process exit). Without this `pane_bufs`/`pane_cursors`
+        // would grow monotonically for the lifetime of the daemon.
+        pane_bufs.retain(|id, _| app.panes.contains_key(id));
+        pane_cursors.retain(|id, _| app.panes.contains_key(id));
+        for client in clients.values_mut() {
+            client.panes_subscribed.retain(|id| app.panes.contains_key(id));
+            client.pane_needs_full.retain(|id| app.panes.contains_key(id));
+        }
+
         let layout_needed = clients.values().any(|c| c.wants_layout);
         let layout: Option<Layout> = if layout_needed { Some(app.layout()) } else { None };
         let layout_changed = layout_needed && last_layout.as_ref() != layout.as_ref();
@@ -606,9 +616,11 @@ fn peer_owned_by_same_user(stream: &UnixStream) -> bool {
         target_os = "dragonfly"
     )))]
     {
-        // No peer-credential API; the socket perms are the only protection.
+        // No peer-credential API available: fail closed rather than trusting
+        // socket perms alone (runtime dir may be world-visible like /tmp).
         let _ = fd;
-        true
+        let _ = our_uid;
+        false
     }
 }
 
