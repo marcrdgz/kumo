@@ -851,8 +851,8 @@ pub fn find_urls(line: &str) -> Vec<(usize, usize, String)> {
 
 /// A viewport cell with resolved colors and a UTF-8 grapheme.
 #[derive(Clone, Debug)]
-pub struct RenderCell {
-    pub text: String,
+pub struct RenderCell<'a> {
+    pub text: &'a str,
     pub fg: ColorRgb,
     pub bg: ColorRgb,
     /// Whether the app set an explicit foreground (else use the terminal's).
@@ -1528,7 +1528,7 @@ impl Terminal {
     /// background. `selected` is true inside the terminal's active selection;
     /// `row_dirty` is true when the row changed since the last render-state
     /// update.
-    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell, bool, bool)) {
+    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell<'_>, bool, bool)) {
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -1612,7 +1612,7 @@ impl Terminal {
     }
 
     /// Read the render-state cell the `cells` iterator currently points at.
-    fn read_cell(&mut self, cells: RowCellsHandle) -> Option<RenderCell> {
+    fn read_cell(&mut self, cells: RowCellsHandle) -> Option<RenderCell<'_>> {
         unsafe {
             // Read the cell's grapheme cluster with a reusable scratch buffer,
             // growing it only when a cell holds more text than fits (so the
@@ -1629,10 +1629,14 @@ impl Terminal {
                     ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut out as *mut Buffer as *mut c_void);
             }
             let has_text = res.is_ok() && out.len > 0;
+            // Borrow directly from scratch to avoid per-cell String allocation.
+            // The `&str` lives as long as `&mut self` is borrowed (until next
+            // `read_cell` call), which is exactly the duration of the
+            // `for_each_cell` closure invocation.
             let text = if has_text {
-                String::from_utf8_lossy(&self.scratch[..out.len]).into_owned()
+                std::str::from_utf8(&self.scratch[..out.len]).unwrap_or("")
             } else {
-                String::new()
+                ""
             };
 
             // OSC 8 hyperlinks live on text cells; query the raw cell's
@@ -1713,7 +1717,7 @@ mod tests {
         let mut out = Vec::new();
         t.for_each_cell(|r, c, rc, _selected, _row_dirty| {
             if !rc.text.is_empty() {
-                out.push((r, c, rc.text.clone()));
+                out.push((r, c, rc.text.to_string()));
             }
         });
         out
@@ -1833,7 +1837,7 @@ mod tests {
         let mut selected = Vec::new();
         t.for_each_cell(|r, c, rc, s, _row_dirty| {
             if s {
-                selected.push((r, c, rc.text.clone()));
+                selected.push((r, c, rc.text.to_string()));
             }
         });
         assert!(!selected.is_empty(), "row should intersect the selection");
@@ -1861,7 +1865,7 @@ mod tests {
         let mut links = Vec::new();
         t.for_each_cell(|r, c, rc, _sel, _dirty| {
             if rc.hyperlink {
-                links.push((r, c, rc.text.clone()));
+                links.push((r, c, rc.text.to_string()));
             }
         });
         assert_eq!(
