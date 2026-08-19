@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.4
+
+### 🐛 Bug Fixes
+
+- *(pty)* Close inherited fd on drop
+- *(daemon)* Forget proc sampler by os pid
+- *(server)* Prune pane caches and fail closed peer check
+- *(protocol)* Disconnect on oversized frame
+- *(pty)* Make kill non-blocking and fix try_wait
+- *(server)* Handle sigterm, reduce poll and bound threads
+- *(cli)* Validate workspace and reject unknown commands
+- *(core)* Reduce update timeout to 10s
+- *(core)* Cache config with mtime to avoid per-access reload
+- *(agents)* Avoid per-pane to_lowercase alloc with case-insensitive search
+- *(server)* Cache layout with version and arc to avoid clones
+- *(vt)* Reuse scratch buffer to avoid per-cell string alloc
+- *(daemon)* Preserve scrollback across restart via inline snapshot
+- *(client)* Restore selection highlight and scope to correct pane
+- *(pty)* Gate SIGKILL fallback behind cfg(unix) for Windows builds
+- *(pty)* Implement as_raw_handle for DummyChild on Windows
 ## v0.5.3
 
 ### 🐛 Bug Fixes
@@ -7,6 +27,10 @@
 - *(claude)* Track cursor movement
 - *(ui)* Pin wide emoji width and handle daemon restarting
 - *(ui)* Use emulator grapheme width instead of hardcoded emoji table
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.5.3
 ## v0.5.2
 
 ### 🚀 Features

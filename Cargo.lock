@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "kumo"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-core"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "kumo-protocol",
@@ -3181,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-desktop"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3193,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-protocol"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "bincode",
