@@ -85,8 +85,15 @@ impl App {
 
     /// Export the full semantic layout tree: sessions → splits (ratios) →
     /// panes (title, cwd, agent status, terminal flags). Pushed to layout
-    /// subscribers; clients derive geometry and draw all chrome.
-    pub(super) fn layout(&self) -> Layout {
+    /// subscribers; clients derive geometry and draw all chrome. Cached via
+    /// `layout_version` so repeated `tick` calls without layout changes are
+    /// cheap (`Arc` clone).
+    pub(super) fn layout(&mut self) -> std::sync::Arc<Layout> {
+        if let Some(cached) = &self.cached_layout {
+            if self.cached_layout_version == self.layout_version {
+                return cached.clone();
+            }
+        }
         let active = self.sessions.get(self.active).map(|s| s.name.clone());
         let sessions = self
             .sessions
@@ -101,7 +108,11 @@ impl App {
                 branch: self.session_branch(i).map(Into::into),
             })
             .collect();
-        Layout { active, sessions }
+        let layout = Layout { active, sessions };
+        let arc = std::sync::Arc::new(layout);
+        self.cached_layout = Some(arc.clone());
+        self.cached_layout_version = self.layout_version;
+        arc
     }
 
     fn layout_node(&self, node: &kumo_core::layout::Node) -> kumo_protocol::LayoutNode {

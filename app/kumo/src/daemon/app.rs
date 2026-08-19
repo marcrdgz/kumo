@@ -98,6 +98,12 @@ pub struct App {
     pending_branch_lookups: HashMap<PathBuf, Instant>,
     /// Whether an AI CLI scan is currently in progress.
     ai_scan_in_progress: bool,
+    /// Monotonic version bumped on every layout change (sessions, tree, focus,
+    /// branch, workspace). Used to avoid deep `Layout` comparisons and clones.
+    layout_version: u64,
+    /// Cached `Arc<Layout>` for the current `layout_version`.
+    cached_layout: Option<std::sync::Arc<kumo_protocol::Layout>>,
+    cached_layout_version: u64,
 }
 
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
@@ -159,6 +165,9 @@ impl App {
             ai_rx,
             ai_tx,
             ai_scan_in_progress: false,
+            layout_version: 0,
+            cached_layout: None,
+            cached_layout_version: 0,
         };
 
         match launch {
@@ -266,6 +275,7 @@ impl App {
         } else {
             self.active = saved_active.min(self.sessions.len() - 1);
         }
+        self.bump_layout_version();
         Ok(())
     }
 
@@ -340,6 +350,7 @@ impl App {
         }
         self.active = saved_active.min(self.sessions.len() - 1);
         self.workspace = self.sessions[self.active].workspace.clone();
+        self.bump_layout_version();
         Ok(true)
     }
 
@@ -463,6 +474,7 @@ impl App {
             workspace,
         });
         self.active = self.sessions.len() - 1;
+        self.bump_layout_version();
         Ok(())
     }
 
@@ -495,6 +507,7 @@ impl App {
             workspace,
         });
         self.active = self.sessions.len() - 1;
+        self.bump_layout_version();
         Ok(())
     }
 
@@ -541,6 +554,7 @@ impl App {
     ) -> Result<()> {
         if let Some(i) = self.session_for_workspace(path) {
             self.active = i;
+            self.bump_layout_version();
             return Ok(());
         }
         let name = branch.map(str::to_string).unwrap_or_else(|| {
@@ -570,6 +584,7 @@ impl App {
     /// `new-cwd` and `agent-sound` are read live from the config on each use.
     /// Applies to panes spawned from now on — existing panes keep their PTY.
     pub(super) fn reload_config(&mut self) {
+        kumo_core::config::invalidate_cache();
         let shell = kumo_core::config::default_shell();
         let (ai_prog, ai_args) = kumo_core::config::ai_command();
         let ai_prog = kumo_core::config::resolve_program(&ai_prog);
@@ -580,6 +595,11 @@ impl App {
     fn next_session_id(&mut self) -> u64 {
         let max = self.sessions.iter().map(|s| s.id).max().unwrap_or(0);
         max + 1
+    }
+
+    fn bump_layout_version(&mut self) {
+        self.layout_version = self.layout_version.wrapping_add(1);
+        self.cached_layout = None;
     }
 
     fn split_active(&mut self, dir: SplitDir, is_ai: bool) -> Result<()> {
@@ -609,6 +629,8 @@ impl App {
             if let Some(mut p) = self.panes.remove(&pid) {
                 p.pty.kill();
             }
+        } else {
+            self.bump_layout_version();
         }
         Ok(())
     }
@@ -633,10 +655,12 @@ impl App {
             self.sessions.remove(self.active);
             if self.sessions.is_empty() {
                 self.quit = true;
+                self.bump_layout_version();
                 return;
             }
             self.active = self.active.min(self.sessions.len() - 1);
         }
+        self.bump_layout_version();
     }
 
     /// Close the session at `idx` and all of its panes.
@@ -662,12 +686,14 @@ impl App {
         self.sessions.remove(idx);
         if self.sessions.is_empty() {
             self.quit = true;
+            self.bump_layout_version();
             return;
         }
         if idx <= self.active {
             self.active = self.active.saturating_sub(1);
         }
         self.active = self.active.min(self.sessions.len() - 1);
+        self.bump_layout_version();
     }
 
     /// Remove panes whose child process has exited, collapsing the layout.
@@ -715,10 +741,12 @@ impl App {
             self.sessions.remove(idx);
             if self.sessions.is_empty() {
                 self.quit = true;
+                self.bump_layout_version();
                 return;
             }
             self.active = self.active.saturating_sub(1).min(self.sessions.len() - 1);
         }
+        self.bump_layout_version();
     }
 
     // ----- events -----
@@ -773,6 +801,7 @@ impl App {
     pub(crate) fn focus_session_named(&mut self, name: &str) -> bool {
         if let Some(i) = self.sessions.iter().position(|s| s.name == name) {
             self.active = i;
+            self.bump_layout_version();
             true
         } else {
             false
@@ -788,6 +817,7 @@ impl App {
         if self.sessions[i].tree.pane_ids().contains(&pane_id) {
             self.active = i;
             self.sessions[i].tree.focus = pane_id;
+            self.bump_layout_version();
             true
         } else {
             false

@@ -169,6 +169,7 @@ impl App {
         if !self.sessions[idx].tree.resize_pane(focus, dir, RESIZE_STEP) {
             return Ok(format!("nothing to resize in that direction in {session:?}"));
         }
+        self.bump_layout_version();
         Ok(format!("resized split in {session:?}"))
     }
 
@@ -185,6 +186,7 @@ impl App {
             return Ok(format!("no session {session:?}"));
         };
         self.sessions[idx].tree.set_ratio(split_id, ratio);
+        self.bump_layout_version();
         Ok(format!("set split {split_id} ratio in {session:?}"))
     }
 
@@ -195,6 +197,7 @@ impl App {
         };
         let focus = self.sessions[idx].tree.focus;
         if self.sessions[idx].tree.swap_with_sibling(focus) {
+            self.bump_layout_version();
             Ok(format!("swapped pane in {session:?}"))
         } else {
             Ok(format!("no sibling to swap in {session:?}"))
@@ -207,6 +210,7 @@ impl App {
             return Ok(format!("no session {session:?}"));
         };
         self.sessions[idx].tree.mirror();
+        self.bump_layout_version();
         Ok(format!("rotated layout in {session:?}"))
     }
 
@@ -216,6 +220,7 @@ impl App {
             return Ok(format!("no session {session:?}"));
         };
         self.sessions[idx].zoom = !self.sessions[idx].zoom;
+        self.bump_layout_version();
         Ok(format!("toggled zoom in {session:?}"))
     }
 
@@ -229,6 +234,8 @@ impl App {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
+        let prev_active = self.active;
+        let prev_focus = self.sessions[idx].tree.focus;
         self.active = idx;
         let pid = match pane_id {
             Some(pid) => {
@@ -240,6 +247,9 @@ impl App {
             }
             None => self.sessions[idx].tree.focus,
         };
+        if prev_active != idx || prev_focus != pid {
+            self.bump_layout_version();
+        }
         let mut sent = 0usize;
         if let Some(pane) = self.panes.get_mut(&pid) {
             for key in keys {
@@ -407,6 +417,7 @@ impl App {
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             pane.custom_name = Some(name.clone());
         }
+        self.bump_layout_version();
         Ok(format!("renamed pane {pane_id} to {name:?}"))
     }
 
@@ -429,6 +440,7 @@ impl App {
             return Ok(format!("a session named '{name}' already exists"));
         }
         self.sessions[idx].name = name.clone();
+        self.bump_layout_version();
         Ok(format!("renamed session to {name:?}"))
     }
 
@@ -530,6 +542,7 @@ impl App {
             }
             return Ok(format!("no room to open the editor in {session:?}"));
         }
+        self.bump_layout_version();
         Ok(format!("opened the config in {session:?}"))
     }
 

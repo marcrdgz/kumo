@@ -28,9 +28,17 @@ impl App {
         let live: Vec<PathBuf> = self.sessions.iter().map(|s| s.workspace.clone()).collect();
 
         // Drain completed background git lookups
+        let mut branch_changed = false;
         while let Ok((ws, branch)) = self.branch_rx.try_recv() {
             self.pending_branch_lookups.remove(&ws);
+            let prev = self.branch_cache.get(&ws).and_then(|(b, _)| b.clone());
+            if prev != branch {
+                branch_changed = true;
+            }
             self.branch_cache.insert(ws, (branch, now));
+        }
+        if branch_changed {
+            self.bump_layout_version();
         }
 
         // Spawn a single background worker for all stale workspaces to avoid
@@ -94,10 +102,18 @@ impl App {
             return;
         }
         let session = &mut self.sessions[self.active];
+        let mut changed = false;
         if session.workspace != cwd {
             session.workspace = cwd.clone();
+            changed = true;
         }
-        self.workspace = cwd;
+        if self.workspace != cwd {
+            self.workspace = cwd;
+            changed = true;
+        }
+        if changed {
+            self.bump_layout_version();
+        }
     }
 
     /// Mark plain shell panes as AI CLI panes when opencode/claude is running
@@ -106,6 +122,7 @@ impl App {
     /// scan to avoid blocking the main loop.
     pub(super) fn refresh_ai_cli(&mut self) {
         // Drain completed background AI scans
+        let mut ai_changed = false;
         while let Ok((snapshot, pane_pids)) = self.ai_rx.try_recv() {
             for (pane_id, pid) in pane_pids {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
@@ -113,13 +130,23 @@ impl App {
                         (Some(snap), Some(root)) => snap.ai_cli_in_tree(root),
                         _ => None,
                     };
+                    if pane.detected_ai_name != name {
+                        ai_changed = true;
+                    }
+                    let new_detected = name.is_some();
+                    if !pane.is_ai && pane.detected_ai != new_detected {
+                        ai_changed = true;
+                    }
                     pane.detected_ai_name = name.clone();
                     if !pane.is_ai {
-                        pane.detected_ai = name.is_some();
+                        pane.detected_ai = new_detected;
                     }
                 }
             }
             self.ai_scan_in_progress = false;
+        }
+        if ai_changed {
+            self.bump_layout_version();
         }
 
         if self.last_ai_scan.elapsed() < AI_SCAN_INTERVAL {
@@ -162,6 +189,7 @@ impl App {
         self.last_status_refresh = Instant::now();
         let now = Instant::now();
         let sound_enabled = kumo_core::config::agent_sound_enabled();
+        let mut status_changed = false;
         for (&pid, pane) in self.panes.iter_mut() {
             if !pane.is_ai_cli() {
                 continue;
@@ -169,12 +197,16 @@ impl App {
             let status = pane.agent_status();
             if self.agent_status_cache.get(&pid) != Some(&status) {
                 self.agent_status_cache.insert(pid, status);
+                status_changed = true;
             }
             // Sample the agent process tree for the sidebar's micro-pill
             // metrics. `pid` here is the kumo pane id (u64); the OS pid comes
             // from the pane's PTY child.
             let os_pid = pane.pty.process_id().unwrap_or(0);
             let metrics = self.proc.sample(os_pid);
+            if self.agent_proc_cache.get(&pid) != Some(&metrics) {
+                status_changed = true;
+            }
             self.agent_proc_cache.insert(pid, metrics);
             let old = self.last_agent_status.get(&pid).copied();
             if let Some(kind) = old.and_then(|old| should_alert(old, status)) {
@@ -189,6 +221,9 @@ impl App {
                 }
             }
             self.last_agent_status.insert(pid, status);
+        }
+        if status_changed {
+            self.bump_layout_version();
         }
     }
 
@@ -232,7 +267,7 @@ impl App {
 
 /// Current git branch of a session's workspace, plus how far it is from its
 /// upstream: `ahead` commits not yet pushed, `behind` commits not yet pulled.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct BranchInfo {
     pub(super) name: String,
     pub(super) ahead: u32,

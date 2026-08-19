@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use ratatui::buffer::Buffer;
 
@@ -118,7 +120,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let (input_tx, input_rx) = mpsc::channel::<(usize, Command)>();
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
-    let mut last_layout: Option<Layout> = None;
+    let mut last_layout: Option<Arc<Layout>> = None;
     // Previous frame buffer per pane, used for diffing. Updated in-place each
     // tick to avoid cloning. When a pane is not dirty, this stays unchanged.
     let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
@@ -396,8 +398,12 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         let layout_needed = clients.values().any(|c| c.wants_layout);
-        let layout: Option<Layout> = if layout_needed { Some(app.layout()) } else { None };
-        let layout_changed = layout_needed && last_layout.as_ref() != layout.as_ref();
+        let layout: Option<Arc<Layout>> = if layout_needed { Some(app.layout()) } else { None };
+        let layout_changed = match (&layout, &last_layout) {
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+            (Some(_), None) => true,
+            _ => false,
+        } && layout_needed;
         if layout_changed {
             last_layout = layout.clone();
         }
@@ -409,7 +415,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             }
             if let Some(layout) = &layout {
                 if client.wants_layout && (layout_changed || client.pending_layout) {
-                    match client.send_msg(DaemonEvent::Layout { layout: layout.clone() }) {
+                    match client.send_msg(DaemonEvent::Layout { layout: (**layout).clone() }) {
                         SendOutcome::Ok => client.pending_layout = false,
                         SendOutcome::Lagging => client.pending_layout = true,
                         SendOutcome::Disconnected => {
