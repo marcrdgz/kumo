@@ -528,12 +528,13 @@ impl Config {
                     }
                 }
                 ThemeValue::Table(tbl) => {
-                    if let Some(n) = tbl.name {
+                    let ThemeSection { name, custom } = *tbl;
+                    if let Some(n) = name {
                         if !n.trim().is_empty() {
                             self.theme = Some(n);
                         }
                     }
-                    if let Some(raw) = tbl.custom {
+                    if let Some(raw) = custom {
                         if let Some(owned) = build_custom_theme(raw) {
                             self.custom_theme = Some(owned);
                         }
@@ -635,7 +636,7 @@ struct ThemeSection {
 #[serde(untagged)]
 enum ThemeValue {
     Simple(String),
-    Table(ThemeSection),
+    Table(Box<ThemeSection>),
 }
 
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
@@ -702,13 +703,15 @@ struct CacheEntry {
 
 static CONFIG_CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
 
+#[cfg(test)]
 fn cached_config() -> Config {
-    #[cfg(test)]
-    {
-        // Tests mutate env/files under TEST_ENV_LOCK and expect immediate
-        // visibility; bypass the mtime cache.
-        return load_config();
-    }
+    // Tests mutate env/files under TEST_ENV_LOCK and expect immediate
+    // visibility; bypass the mtime cache.
+    load_config()
+}
+
+#[cfg(not(test))]
+fn cached_config() -> Config {
     let paths = current_config_paths();
     let mut current_mtimes: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
     for p in &paths {

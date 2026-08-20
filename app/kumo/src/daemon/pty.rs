@@ -325,23 +325,21 @@ impl Pty {
                     });
             }
             #[cfg(unix)]
-            PtyChild::Pid { pid } => {
-                if let Some(pid) = pid {
-                    unsafe {
-                        // Signal the process group and the pid itself.
-                        libc::kill(-pid, libc::SIGTERM);
-                        libc::kill(pid, libc::SIGTERM);
-                    }
-                    let _ = std::thread::Builder::new()
-                        .name("kumo-pty-killer".into())
-                        .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            unsafe {
-                                libc::kill(-pid, libc::SIGKILL);
-                                libc::kill(pid, libc::SIGKILL);
-                            }
-                        });
+            PtyChild::Pid { pid: Some(pid) } => {
+                unsafe {
+                    // Signal the process group and the pid itself.
+                    libc::kill(-pid, libc::SIGTERM);
+                    libc::kill(pid, libc::SIGTERM);
                 }
+                let _ = std::thread::Builder::new()
+                    .name("kumo-pty-killer".into())
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        unsafe {
+                            libc::kill(-pid, libc::SIGKILL);
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                    });
             }
             #[allow(unreachable_patterns)]
             _ => {}

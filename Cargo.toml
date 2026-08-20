@@ -4,7 +4,6 @@ members = [
     "crates/kumo-protocol",
     "crates/kumo-core",
     "app/kumo",
-    "app/desktop",
 ]
 
 [workspace.package]

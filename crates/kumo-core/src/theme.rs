@@ -416,7 +416,7 @@ pub fn parse_rcolor(s: &str) -> Option<RColor> {
 
 /// Normalize a theme name for lookup: lowercase, trim, hyphens/spaces equivalent.
 pub fn normalize_name(s: &str) -> String {
-    s.trim().to_ascii_lowercase().replace(' ', "-").replace('_', "-")
+    s.trim().to_ascii_lowercase().replace([' ', '_'], "-")
 }
 
 /// Find the index of a built-in theme by name (case-insensitive, hyphen/space tolerant).

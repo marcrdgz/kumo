@@ -547,6 +547,7 @@ impl View {
             .unwrap_or_else(|| OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX]))
     }
 
+    #[allow(dead_code)]
     fn theme_at(&self, idx: usize) -> Option<OwnedTheme> {
         self.all_themes().get(idx).cloned()
     }
@@ -805,7 +806,7 @@ impl View {
     }
     fn tab_right_arrow_rect(&self) -> Option<Rect> {
         let area = self.tabs_area();
-        let Some(sess) = self.active_session() else { return None };
+        let sess = self.active_session()?;
         let has_left = self.tab_scroll > 0;
         // Reserve for plus (3) + gap (1) and maybe right arrow
         let mut cur: u16 = 0;

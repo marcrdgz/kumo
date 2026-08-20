@@ -277,7 +277,7 @@ fn parse_tab(args: &[String]) -> Result<CliCmd> {
             Ok(CliCmd::TabFocus { session, tab })
         }
         "rename" => {
-            let tab = filtered.get(0).cloned().ok_or_else(|| anyhow::anyhow!("tab rename needs TAB and NEW_NAME"))?;
+            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab rename needs TAB and NEW_NAME"))?;
             let new_name = filtered.get(1).cloned().ok_or_else(|| anyhow::anyhow!("tab rename needs NEW_NAME"))?;
             Ok(CliCmd::TabRename { session, tab, new_name })
         }

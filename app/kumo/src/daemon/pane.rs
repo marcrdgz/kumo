@@ -217,6 +217,7 @@ impl Pane {
 
     /// Spawn with a built-in `Theme` static (for tests). Delegates to `spawn` via conversion.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn spawn_with_theme(
         session_id: u64,
         id: u64,
@@ -329,6 +330,7 @@ impl Pane {
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     fn finish_from_snapshot(
         id: u64,
         session_id: u64,
@@ -351,6 +353,7 @@ impl Pane {
         Self::build_pane(id, session_id, is_ai, program, cwd, pty, vt, events_tx)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_pane(
         id: u64,
         session_id: u64,
@@ -400,6 +403,7 @@ impl Pane {
 
     /// Recolor the terminal emulator for a newly selected theme. Forces a full
     /// redraw so the new background/palette reach the next render.
+    #[allow(dead_code)]
     pub fn apply_theme(&mut self, theme: &Theme) {
         self.vt.apply_theme(&theme.palette, theme.term_fg, theme.term_bg, theme.term_cursor);
         self.dirty = true;
@@ -602,7 +606,7 @@ impl Pane {
                 return;
             }
             if self.link_mods {
-                row_texts.entry(row).or_default().push_str(&rc.text);
+                row_texts.entry(row).or_default().push_str(rc.text);
             }
             let bcell = cache.cell_mut((area_x + col as u16, area_y + row as u16)).unwrap();
             let mut mods = Modifier::empty();
@@ -642,7 +646,7 @@ impl Pane {
             // symbols like arrows (↑ ↓ ← →) stay at width 1 and starship's
             // `[(↑)]` keeps its closing bracket.
             let w = rc.text.cell_width();
-            let wide = w >= 2 || (!rc.text.is_empty() && vt::grapheme_width(&rc.text) == 2);
+            let wide = w >= 2 || (!rc.text.is_empty() && vt::grapheme_width(rc.text) == 2);
             if rc.text.is_empty() {
                 bcell.set_char(' ').set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
@@ -657,7 +661,7 @@ impl Pane {
                 // Write the full grapheme cluster (not just its first
                 // codepoint) so multi-codepoint emoji survive: flags, skin
                 // tones, and ZWJ sequences like family emoji.
-                bcell.set_symbol(&rc.text).set_fg(cell_fg).set_bg(cell_bg);
+                bcell.set_symbol(rc.text).set_fg(cell_fg).set_bg(cell_bg);
                 bcell.modifier = mods;
                 // A wide character occupies two columns. Pin its reported width
                 // to 2 so the wire carries `cell_width = 2` even when

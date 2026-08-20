@@ -7,7 +7,7 @@ use anyhow::Result;
 use ratatui::buffer::Buffer;
 
 use kumo_core::layout::{LayoutTree, SplitDir};
-use kumo_core::theme::{OwnedTheme, THEMES};
+use kumo_core::theme::OwnedTheme;
 use kumo_core::Launch;
 use crate::daemon::agents::AgentStatus;
 use crate::daemon::pane::{Pane, PtyEvent};
@@ -78,6 +78,8 @@ impl Session {
     }
 }
 
+type AiScanResult = (Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>);
+
 #[allow(dead_code)]
 pub struct App {
     sessions: Vec<Session>,
@@ -131,9 +133,9 @@ pub struct App {
     /// Sender for background git branch jobs.
     branch_tx: mpsc::Sender<(PathBuf, Option<BranchInfo>)>,
     /// Receives background AI CLI scan results (snapshot + pane IDs with their process IDs).
-    ai_rx: mpsc::Receiver<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>,
+    ai_rx: mpsc::Receiver<AiScanResult>,
     /// Sender for background AI CLI scan jobs.
-    ai_tx: mpsc::Sender<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>,
+    ai_tx: mpsc::Sender<AiScanResult>,
     /// Workspaces with pending git branch lookups.
     pending_branch_lookups: HashMap<PathBuf, Instant>,
     /// Whether an AI CLI scan is currently in progress.
@@ -166,7 +168,7 @@ impl App {
         let (events_tx, events_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
         let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
-        let (ai_tx, ai_rx) = mpsc::channel::<(Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>)>();
+        let (ai_tx, ai_rx) = mpsc::channel::<AiScanResult>();
         let _ = std::thread::Builder::new()
             .name("kumo-update-check".into())
             .spawn(move || {
