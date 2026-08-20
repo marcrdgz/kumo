@@ -174,10 +174,14 @@ toggle/order + pane titles/border styling.
 - **Config hot-reload** (deferred from 0.5.0): watch the config file and
   reload theme/config live — extends the manual `kumo reload` (0.4.0) so
   themes are instantly tweakable without a restart.
-- **Status bar widgets** (deferred from 0.5.0): customizable widgets (branch,
+- ✅ **Status bar widgets** (deferred from 0.5.0): customizable widgets (branch,
   session, agent status, hostname, clock) — includes the status-bar **layout**
-  config deferred from 0.4.0.
-- **Sidebar polish** (deferred from 0.5.0): toggle/order sections, pane
+  config deferred from 0.4.0. Configurable via `[status_bar]` (`left`/`center`/`right`
+  widget lists, `enabled`, `[status_bar.widgets.*]` for clock/branch/agent/hostname/session)
+  with live `kumo reload` and per-minute clock tick; collapses to `0` rows when
+  `enabled = false` (`crates/kumo-core/src/config.rs`, `app/kumo/src/cli/status_bar.rs`,
+  `app/kumo/src/cli/client_view.rs`).
+- ✅ **Sidebar polish** (deferred from 0.5.0): toggle/order sections, pane
   titles, and border styling.
 - ✅ **Tabs (windows) per session**: each session owns an ordered list of tabs,
   each tab its own named pane tree — one session can hold several workspaces /
