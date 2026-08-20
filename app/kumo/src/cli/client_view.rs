@@ -4419,11 +4419,12 @@ impl View {
             // Render a small hint line at bottom if in copy mode
             if self.mode != Mode::Copy { return; }
             let theme = self.current_theme();
-            let area = f.area();
-            let y = area.bottom().saturating_sub(1);
-            if y < area.y { return; }
-            let bar_y = if self.status_bar.enabled { y.saturating_sub(1) } else { y };
-            if bar_y < area.y { return; }
+            let pa = self.panes_area();
+            if pa.width == 0 || pa.height == 0 { return; }
+            // Popup just below tabs with a line gap: tabs at y=0, gap at y=1 (pane border), popup at y=2
+            let bar_y = pa.y.saturating_add(1);
+            if bar_y >= pa.y + pa.height { return; }
+            let rect = Rect::new(pa.x, bar_y, pa.width, 1);
             let msg = if cs.hits.is_empty() {
                 if cs.search_query.is_some() { format!(" copy: {} (no matches) — /:? search n/N next q: quit v: select y: yank", cs.search_query.as_deref().unwrap_or("")) }
                 else { " copy: h/j/k/l move 0/$ g/G top/bottom v/V select y yank / ? search n/N next q: quit ".to_string() }
@@ -4432,18 +4433,17 @@ impl View {
                 format!(" copy: {} [{}/{}] n/N next q: quit ", cs.search_query.as_deref().unwrap_or(""), idx, cs.hits.len())
             };
             let style = Style::default().fg(RColor::Black).bg(theme.secondary);
-            let rect = Rect::new(area.x, bar_y, area.width, 1);
             fill(f, rect, theme.secondary);
             text(f, rect.x + 1, rect.y, &msg, style, rect.width.saturating_sub(2));
             return;
         }
-        // Active search input bar
+        // Active search input bar — popup below tabs with a line gap
         let theme = self.current_theme();
-        let area = f.area();
-        let y = area.bottom().saturating_sub(1);
-        if y < area.y { return; }
-        let bar_y = if self.status_bar.enabled { y.saturating_sub(1) } else { y };
-        let rect = Rect::new(area.x, bar_y, area.width, 1);
+        let pa = self.panes_area();
+        if pa.width == 0 || pa.height == 0 { return; }
+        let bar_y = pa.y.saturating_add(1);
+        if bar_y >= pa.y + pa.height { return; }
+        let rect = Rect::new(pa.x, bar_y, pa.width, 1);
         fill(f, rect, theme.input_bg);
         let prefix = if cs.search_forward { "/" } else { "?" };
         let style = Style::default().fg(RColor::Black).bg(theme.input_bg);
