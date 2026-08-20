@@ -168,7 +168,7 @@ toggle/order + pane titles/border styling.
 
 ## 🔍 0.6.0 — Copy-mode, search & pane plumbing
 
-- **Theme engine** (deferred from 0.5.0): user-editable theme values on top
+- ✅ **Theme engine** (deferred from 0.5.0): user-editable theme values on top
   of the 0.5.0 picker — full palette customization in `config.toml` (schemes,
   accents, status dots, borders) instead of the built-in constants.
 - **Config hot-reload** (deferred from 0.5.0): watch the config file and
@@ -179,7 +179,7 @@ toggle/order + pane titles/border styling.
   config deferred from 0.4.0.
 - **Sidebar polish** (deferred from 0.5.0): toggle/order sections, pane
   titles, and border styling.
-- **Tabs (windows) per session**: each session owns an ordered list of tabs,
+- ✅ **Tabs (windows) per session**: each session owns an ordered list of tabs,
   each tab its own named pane tree — one session can hold several workspaces /
   worktrees under a single leader. Adds the intermediate "window" level the
   flat model (sessions → panes) skipped; the layout tree, split keys, and the
