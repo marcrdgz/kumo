@@ -4,6 +4,8 @@ pub mod chrome;
 pub mod client;
 #[cfg(unix)]
 pub mod client_view;
+#[cfg(unix)]
+pub mod status_bar;
 // The control CLI lives in `cli/cli.rs` (the `cli` folder hosts the whole
 // client); the name collision is intentional.
 #[cfg(unix)]
