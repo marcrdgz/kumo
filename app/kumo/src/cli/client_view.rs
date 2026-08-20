@@ -4446,7 +4446,7 @@ impl View {
         let rect = Rect::new(area.x, bar_y, area.width, 1);
         fill(f, rect, theme.input_bg);
         let prefix = if cs.search_forward { "/" } else { "?" };
-        let style = Style::default().fg(theme.fg).bg(theme.input_bg);
+        let style = Style::default().fg(RColor::Black).bg(theme.input_bg);
         let mut x = rect.x + 1;
         put(f, x, rect.y, prefix, style.add_modifier(Modifier::BOLD));
         x += 1;
