@@ -42,8 +42,9 @@ mod crossterm;
 /// with a mismatched version. v5 removes the composed-grid channel entirely:
 /// every client draws its own chrome from the semantic layout + per-pane
 /// content, and the chrome actions (rename, worktrees, theme) travel as
-/// commands. v6 introduces tabs: sessions → tabs → panes.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// commands. v6 introduces tabs: sessions → tabs → panes. v7 adds the custom
+/// theme payload to `DaemonEvent::Theme`.
+pub const PROTOCOL_VERSION: u32 = 7;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -417,6 +418,28 @@ pub struct WireNotice {
     pub display: String,
 }
 
+/// Full theme payload sent when the custom theme is active. Colors are raw
+/// RGB triples `0xRRGGBB` split as `[r,g,b]` so the wire stays independent of
+/// `ratatui`/`kumo-core`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WireTheme {
+    pub name: String,
+    pub palette: [[u8; 3]; 16],
+    pub term_fg: [u8; 3],
+    pub term_bg: [u8; 3],
+    pub term_cursor: [u8; 3],
+    pub fg: [u8; 3],
+    pub accent: [u8; 3],
+    pub secondary: [u8; 3],
+    pub panel_sep: [u8; 3],
+    pub panel_muted: [u8; 3],
+    pub border_idle: [u8; 3],
+    pub green: [u8; 3],
+    pub orange: [u8; 3],
+    pub red: [u8; 3],
+    pub input_bg: [u8; 3],
+}
+
 /// The full layout snapshot pushed on change.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Layout {
@@ -769,9 +792,15 @@ pub enum DaemonEvent {
         frame: PaneFrame,
     },
     /// The active theme index (chrome colors the client renders with). Pushed
-    /// on attach and whenever `SetTheme` applies a new theme.
+    /// on attach and whenever `SetTheme` applies a new theme. When the custom
+    /// theme (defined in `~/.config/kumo/config.toml` as `[theme.custom]`) is
+    /// active, `custom` carries its full palette so even old clients that only
+    /// know `idx` can be upgraded gracefully; missing on the wire decodes as
+    /// `None` via `#[serde(default)]`.
     Theme {
         idx: usize,
+        #[serde(default)]
+        custom: Option<WireTheme>,
     },
     /// Reply to `WorktreeList`.
     Worktrees {

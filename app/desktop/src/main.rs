@@ -447,7 +447,7 @@ impl KumoWindow {
                         changed = true;
                     }
                 }
-                DaemonEvent::Theme { idx } => {
+                DaemonEvent::Theme { idx, .. } => {
                     self.theme_idx = idx;
                     changed = true;
                 }
