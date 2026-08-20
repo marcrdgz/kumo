@@ -514,6 +514,26 @@ impl Pane {
         self.full_redraw = true;
     }
 
+    pub fn scroll_to_row(&mut self, row: u32) {
+        self.vt.scroll_to_row(row as usize);
+        self.dirty = true;
+        self.full_redraw = true;
+    }
+
+    pub fn scroll_bottom(&mut self) {
+        self.vt.scroll_bottom();
+        self.dirty = true;
+        self.full_redraw = true;
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.vt.total_rows()
+    }
+
+    pub fn search(&self, query: &str) -> Vec<vt::SearchHit> {
+        self.vt.search(query)
+    }
+
     pub fn has_mouse_reporting(&self) -> bool {
         self.vt.mouse_tracking()
     }

@@ -260,6 +260,14 @@ pub struct TerminalScrollbar {
     pub len: u64,
 }
 
+/// One search hit in screen coordinates (0 = top of scrollback).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    pub row: u32,
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
 /// Style color tag.
 pub const STYLE_COLOR_NONE: i32 = 0;
 pub const STYLE_COLOR_PALETTE: i32 = 1;
@@ -1488,6 +1496,82 @@ impl Terminal {
         unsafe {
             ghostty_terminal_scroll_viewport(self.term, behavior);
         }
+    }
+
+    /// Scroll so that `row` (screen coordinate, 0 = top of scrollback) becomes
+    /// the first visible row of the viewport. Clamped by libghostty-vt.
+    pub fn scroll_to_row(&mut self, row: usize) {
+        let behavior = ScrollViewport {
+            tag: SCROLL_VIEWPORT_ROW,
+            value: ScrollViewportValue { row },
+        };
+        unsafe {
+            ghostty_terminal_scroll_viewport(self.term, behavior);
+        }
+    }
+
+    /// Total number of rows in the screen buffer (viewport + scrollback).
+    pub fn total_rows(&self) -> usize {
+        let mut total: usize = 0;
+        unsafe {
+            if !ghostty_terminal_get(self.term, TERMINAL_DATA_TOTAL_ROWS, &mut total as *mut usize as *mut c_void)
+                .is_ok()
+            {
+                return 0;
+            }
+        }
+        total
+    }
+
+    /// Plain text of one screen-buffer row (0 = top of scrollback), trimmed.
+    /// Uses the screen-point selection so it is viewport-independent.
+    pub fn screen_row_text(&self, row: u32) -> String {
+        let cols = self.cols as u32;
+        if cols == 0 {
+            return String::new();
+        }
+        let last = cols.saturating_sub(1) as u16;
+        let Some(sel) = self.build_screen_selection((0, row), (last, row)) else {
+            return String::new();
+        };
+        self.format_selection(&sel)
+    }
+
+    /// Search the entire screen buffer for `query` (plain substring, case-
+    /// insensitive). Returns one hit per occurrence (single-row only; wrapped
+    /// lines are not joined). Hit columns are char offsets in the row's
+    /// trimmed text, so they map 1:1 to viewport columns when the row is
+    /// visible.
+    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let q_lower = query.to_lowercase();
+        let q_len = query.chars().count() as u16;
+        if q_len == 0 {
+            return Vec::new();
+        }
+        let total = self.total_rows();
+        let mut hits = Vec::new();
+        for r in 0..total {
+            let line = self.screen_row_text(r as u32);
+            if line.is_empty() {
+                continue;
+            }
+            let lower = line.to_lowercase();
+            let mut search_from = 0usize;
+            while let Some(byte_off) = lower[search_from..].find(&q_lower) {
+                let abs_byte = search_from + byte_off;
+                let start_col = line[..abs_byte].chars().count() as u16;
+                let end_col = start_col.saturating_add(q_len);
+                hits.push(SearchHit { row: r as u32, start_col, end_col });
+                search_from = abs_byte + q_lower.len();
+                if search_from >= lower.len() {
+                    break;
+                }
+            }
+        }
+        hits
     }
 
     /// True when any mouse tracking mode is active.

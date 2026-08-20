@@ -43,8 +43,8 @@ mod crossterm;
 /// every client draws its own chrome from the semantic layout + per-pane
 /// content, and the chrome actions (rename, worktrees, theme) travel as
 /// commands. v6 introduces tabs: sessions → tabs → panes. v7 adds the custom
-/// theme payload to `DaemonEvent::Theme`.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// theme payload to `DaemonEvent::Theme`. v8 adds copy-mode (scroll + search).
+pub const PROTOCOL_VERSION: u32 = 8;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -280,6 +280,17 @@ pub struct ScrollState {
     pub total: u16,
     /// Rows visible in the viewport.
     pub screen: u16,
+}
+
+/// One search hit in copy-mode: a single-row substring in screen coordinates.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct CopyHit {
+    /// Screen row (0 = top of scrollback).
+    pub row: u32,
+    /// First column of the hit (inclusive).
+    pub start_col: u16,
+    /// One past the last column of the hit (exclusive).
+    pub end_col: u16,
 }
 
 /// One pane's terminal grid, streamed on change. `full` = every row included
@@ -701,6 +712,34 @@ pub enum Command {
         pane_id: u64,
         up: bool,
     },
+    /// Scroll a pane's viewport by an arbitrary delta (copy-mode; positive = down).
+    CopyScroll {
+        pane_id: u64,
+        delta: i32,
+    },
+    /// Scroll a pane's viewport so that `row` (screen coordinate, 0 = top of
+    /// scrollback) becomes the first visible row (copy-mode).
+    CopyScrollTo {
+        pane_id: u64,
+        row: u32,
+    },
+    /// Search the pane's screen+scrollback for `query` (plain substring,
+    /// case-insensitive). Reply: `CopySearchResults`.
+    CopySearch {
+        pane_id: u64,
+        query: String,
+    },
+    /// Install a viewport selection (copy-mode). The daemon highlights it and
+    /// it survives re-renders until cleared.
+    CopySetSelection {
+        pane_id: u64,
+        start: (u16, u16),
+        end: (u16, u16),
+    },
+    /// Clear the pane's active selection (copy-mode leave / selection reset).
+    CopyClearSelection {
+        pane_id: u64,
+    },
     /// Query the startup update notice (reply: `UpdateNotice`).
     UpdateStatus,
     /// Dismiss the startup update banner (persisted daemon-side).
@@ -809,6 +848,12 @@ pub enum DaemonEvent {
     /// Reply to `UpdateStatus`: the startup update notice, if one is active.
     UpdateNotice {
         notice: Option<WireNotice>,
+    },
+    /// Reply to `CopySearch`: hits for `query` in `pane_id` (screen coords).
+    CopySearchResults {
+        pane_id: u64,
+        query: String,
+        hits: Vec<CopyHit>,
     },
 }
 

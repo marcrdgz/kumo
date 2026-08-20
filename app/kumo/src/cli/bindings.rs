@@ -87,6 +87,7 @@ pub(crate) enum Action {
     ToggleSidebar,
     Detach,
     ShowKeybinds,
+    EnterCopyMode,
 }
 
 /// Logical group a binding belongs to, used to organize the showcase.
@@ -215,6 +216,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord_alt(KeyCode::Char('7')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(7) },
     BindingSpec { key: chord_alt(KeyCode::Char('8')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(8) },
     BindingSpec { key: chord_alt(KeyCode::Char('9')), keys: "alt+1-9", desc: "jump to the session at that list position", group: Group::Sessions, action: Action::JumpSession(9) },
+    BindingSpec { key: chord(KeyCode::Char('y')), keys: "y", desc: "enter copy-mode (vi scroll / search / yank)", group: Group::Panes, action: Action::EnterCopyMode },
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
@@ -358,6 +360,7 @@ pub(crate) fn action_id(action: Action) -> &'static str {
         Action::ToggleSidebar => "toggle-sidebar",
         Action::Detach => "detach",
         Action::ShowKeybinds => "show-keybinds",
+        Action::EnterCopyMode => "copy-mode",
     }
 }
 
@@ -411,6 +414,7 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "toggle-sidebar" => Action::ToggleSidebar,
         "detach" => Action::Detach,
         "show-keybinds" => Action::ShowKeybinds,
+        "copy-mode" | "enter-copy-mode" => Action::EnterCopyMode,
         _ => return None,
     })
 }
@@ -441,6 +445,7 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::ToggleSidebar => "toggle the sidebar",
         Action::Detach => "detach (daemon keeps running)",
         Action::ShowKeybinds => "show all keybindings",
+        Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
     }
 }
 
@@ -453,7 +458,7 @@ pub(crate) fn action_group(action: Action) -> Group {
         | Action::Focus(_)
         | Action::Resize(_) => Group::Layout,
         Action::SplitAi | Action::ClosePane | Action::CyclePane | Action::SwapPanes
-        | Action::RotateLayout | Action::ShowPaneNumbers => Group::Panes,
+        | Action::RotateLayout | Action::ShowPaneNumbers | Action::EnterCopyMode => Group::Panes,
         Action::NewTab | Action::CloseTab | Action::RenameTab | Action::NextTab | Action::PrevTab | Action::JumpTab(_) => Group::Tabs,
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
         | Action::JumpSession(_) => Group::Sessions,

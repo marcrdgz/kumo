@@ -560,6 +560,47 @@ impl App {
         }
     }
 
+    /// Scroll a pane's viewport by an arbitrary delta (copy-mode).
+    pub(crate) fn copy_scroll(&mut self, pane_id: u64, delta: i32) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.scroll(delta);
+        }
+    }
+
+    /// Scroll a pane so that `row` (screen coordinate) is at the top.
+    pub(crate) fn copy_scroll_to(&mut self, pane_id: u64, row: u32) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.scroll_to_row(row);
+        }
+    }
+
+    pub(crate) fn copy_scroll_bottom(&mut self, pane_id: u64) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.scroll_bottom();
+        }
+    }
+
+    pub(crate) fn copy_search(&self, pane_id: u64, query: &str) -> Vec<kumo_protocol::CopyHit> {
+        let Some(pane) = self.panes.get(&pane_id) else { return Vec::new(); };
+        pane.search(query)
+            .into_iter()
+            .map(|h| kumo_protocol::CopyHit { row: h.row, start_col: h.start_col, end_col: h.end_col })
+            .collect()
+    }
+
+    pub(crate) fn copy_set_selection(&mut self, pane_id: u64, start: (u16, u16), end: (u16, u16)) -> bool {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            return pane.set_selection(start, end);
+        }
+        false
+    }
+
+    pub(crate) fn copy_clear_selection(&mut self, pane_id: u64) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.clear_selection();
+        }
+    }
+
     /// The active startup update notice, if any.
     pub(crate) fn update_status(&self) -> Option<WireNotice> {
         self.update_notice.as_ref().map(|n| WireNotice {

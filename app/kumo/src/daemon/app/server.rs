@@ -317,6 +317,22 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 Command::PaneScroll { pane_id, up } => {
                     app.scroll_pane(pane_id, up);
                 }
+                Command::CopyScroll { pane_id, delta } => {
+                    app.copy_scroll(pane_id, delta);
+                }
+                Command::CopyScrollTo { pane_id, row } => {
+                    app.copy_scroll_to(pane_id, row);
+                }
+                Command::CopySearch { pane_id, query } => {
+                    let hits = app.copy_search(pane_id, &query);
+                    let _ = send_to(&mut clients, id, &DaemonEvent::CopySearchResults { pane_id, query, hits });
+                }
+                Command::CopySetSelection { pane_id, start, end } => {
+                    app.copy_set_selection(pane_id, start, end);
+                }
+                Command::CopyClearSelection { pane_id } => {
+                    app.copy_clear_selection(pane_id);
+                }
                 Command::UpdateStatus => {
                     let notice = app.update_status();
                     let _ = send_to(&mut clients, id, &DaemonEvent::UpdateNotice { notice });
