@@ -26,12 +26,14 @@ use kumo_protocol::{
 use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
+use crate::cli::status_bar::{self, SlotContext};
+use kumo_core::config::{StatusBarConfig, StatusWidget};
 
 /// Width of the left sidebar (its last column is the separator).
 const SIDEBAR_WIDTH: u16 = 25;
 /// Height of the tab bar (row 0, above panes).
 const TAB_H: u16 = 1;
-/// Height of the status bar (last row).
+/// Height of the status bar (last row) — dynamic via `View::status_h()`.
 const STATUS_H: u16 = 1;
 /// How long the `leader+q` pane-number overlay stays up without a keypress.
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -345,6 +347,11 @@ pub struct View {
     pending_wheel: HashMap<u64, Vec<u8>>,
     dirty: bool,
     detach_requested: bool,
+    status_bar: StatusBarConfig,
+    hostname: String,
+    clock_str: String,
+    clock_next: Instant,
+    is_ssh: bool,
 }
 
 fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, selected: Option<Sel>, link_mods: bool, theme: &OwnedTheme) {
@@ -443,6 +450,15 @@ impl View {
             None => bindings::LEADER,
         };
         let keymap = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+        let status_bar = kumo_core::config::status_bar();
+        let hostname = status_bar::cached_hostname();
+        let is_ssh = status_bar::is_ssh_session();
+        let clock_str = status_bar::format_clock(&status_bar.widgets.clock.format);
+        // Next minute boundary — refresh once per minute; we compute remaining secs
+        // to the next minute so the first tick is aligned, not 60s from startup.
+        let now_secs = chrono::Local::now().timestamp() % 60;
+        let rem = (60 - now_secs).max(1) as u64;
+        let clock_next = Instant::now() + Duration::from_secs(rem);
         let mut view = View {
             out,
             cols: cols.max(2),
@@ -482,9 +498,22 @@ impl View {
             plus_rect: None,
             dirty: true,
             detach_requested: false,
+            status_bar,
+            hostname,
+            clock_str,
+            clock_next,
+            is_ssh,
         };
         let _ = view.send(&Command::SubscribeLayout);
         view
+    }
+
+    fn status_h(&self) -> u16 {
+        if self.status_bar.enabled { STATUS_H } else { 0 }
+    }
+
+    fn status_bar_contains(&self, w: StatusWidget) -> bool {
+        self.status_bar.left.contains(&w) || self.status_bar.center.contains(&w) || self.status_bar.right.contains(&w)
     }
 
     pub fn dirty(&self) -> bool {
@@ -494,8 +523,16 @@ impl View {
     /// Whether a transient overlay (pane numbers, toast, notice) is currently
     /// up, so the loop keeps re-rendering until it expires — the client-side
     /// equivalent of the daemon's forced frame.
-    pub fn has_transient(&self) -> bool {
+    pub fn has_transient(&mut self) -> bool {
         let now = Instant::now();
+        // Clock tick: repaint once per minute when the clock widget is visible.
+        if self.status_bar.enabled && self.status_bar_contains(StatusWidget::Clock) && now >= self.clock_next {
+            self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
+            let rem = (60 - (chrono::Local::now().timestamp() % 60)).max(1) as u64;
+            self.clock_next = now + Duration::from_secs(rem);
+            self.mark_dirty();
+            return true;
+        }
         if self.pane_numbers.is_some() {
             return true;
         }
@@ -598,6 +635,18 @@ impl View {
             DaemonEvent::ConfigReloaded { notice } => {
                 self.notice = Some((notice, Instant::now()));
                 self.ensure_sidebar_tab_visible();
+                // Status bar is client-local but reloaded from the same config.
+                let new_bar = kumo_core::config::status_bar();
+                let enabled_changed = new_bar.enabled != self.status_bar.enabled;
+                self.status_bar = new_bar;
+                self.hostname = status_bar::cached_hostname();
+                self.is_ssh = status_bar::is_ssh_session();
+                self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
+                let rem = (60 - (chrono::Local::now().timestamp() % 60)).max(1) as u64;
+                self.clock_next = Instant::now() + Duration::from_secs(rem);
+                if enabled_changed {
+                    self.recompute_geometry();
+                }
                 self.mark_dirty();
             }
             _ => {}
@@ -652,7 +701,7 @@ impl View {
         } else {
             0
         };
-        Rect::new(x, TAB_H, self.cols.saturating_sub(x), self.rows.saturating_sub(STATUS_H + TAB_H))
+        Rect::new(x, TAB_H, self.cols.saturating_sub(x), self.rows.saturating_sub(self.status_h() + TAB_H))
     }
 
     /// Lay the active tab's tree out over the pane area (wire tree → the
@@ -2234,8 +2283,8 @@ impl View {
     // Sidebar hit-testing
     // ------------------------------------------------------------------
 
-    const fn sidebar_footer_y(&self) -> u16 {
-        self.rows.saturating_sub(2)
+    fn sidebar_footer_y(&self) -> u16 {
+        self.rows.saturating_sub(self.status_h() + 1)
     }
 
     fn content_region_h(&self) -> u16 {
@@ -2460,6 +2509,9 @@ impl View {
     }
 
     fn menu_btn_rect(&self) -> Option<Rect> {
+        if self.status_h() == 0 || !self.status_bar_contains(StatusWidget::Menu) {
+            return None;
+        }
         let bw = MENU_BTN.chars().count() as u16;
         let x = self.menu_btn_x();
         (self.cols >= x + bw).then(|| Rect::new(x, self.rows.saturating_sub(1), bw, 1))
@@ -2470,6 +2522,9 @@ impl View {
     }
 
     fn menu_dropdown_rect(&self) -> Option<Rect> {
+        if self.status_h() == 0 {
+            return None;
+        }
         let width = MENU_ITEMS.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = MENU_ITEMS.len() as u16 + 2;
         if self.cols < width || self.rows < height + 1 {
@@ -2845,7 +2900,7 @@ impl View {
     fn render_sidebar(&self, f: &mut Frame, size: Rect) {
         let w = SIDEBAR_WIDTH.min(size.width);
         let theme = self.current_theme();
-        let area = Rect::new(0, 0, w, size.height.saturating_sub(1));
+        let area = Rect::new(0, 0, w, size.height.saturating_sub(self.status_h()));
         fill(f, area, RColor::Reset);
         let bstyle = kumo_core::config::sidebar_borders().style;
         let sep_hidden = bstyle == kumo_core::config::BorderStyle::Hidden;
@@ -3044,74 +3099,185 @@ impl View {
     }
 
     fn render_status(&self, f: &mut Frame) {
+        if self.status_h() == 0 {
+            return;
+        }
         let theme = self.current_theme();
         let area = Rect::new(0, self.rows.saturating_sub(1), self.cols, 1);
         fill(f, area, RColor::Reset);
-        let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
-        let mode_style = if self.mode == Mode::Leader {
-            Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(RColor::Black).bg(theme.accent)
-        };
-        let chip = format!(" {} ", mode);
-        let chip_w = chip.chars().count() as u16;
-        f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(chip, mode_style)])), Rect::new(0, area.y, chip_w, 1));
 
-        let btn_x = self.menu_btn_x();
-        let btn_style = if self.menu.open {
-            Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD)
-        };
-        let btn_w = MENU_BTN.chars().count() as u16;
-        text(f, btn_x, area.y, MENU_BTN, btn_style, btn_w);
-
+        // Build widget contexts: all status widgets are client-side, derived from Layout.
         let session = self.active_session();
-        let n = session.map(pane_count).unwrap_or(0);
-        let t = session.map(|s| s.tabs.len()).unwrap_or(0);
-        let mut spans: Vec<ratatui::text::Span> = vec![
-            ratatui::text::Span::raw(" "),
-            ratatui::text::Span::styled(session.map(|s| s.name.clone()).unwrap_or_default(), Style::default().fg(theme.fg).bg(RColor::Reset)),
-            ratatui::text::Span::styled(format!(" · {t} tabs · {n} panes"), Style::default().fg(theme.panel_muted).bg(RColor::Reset)),
-        ];
-        let zoomed = self.active_tab().map(|tab| tab.zoom).unwrap_or(false);
-        if zoomed {
-            spans.push(ratatui::text::Span::styled(" · zoomed", Style::default().fg(theme.secondary).bg(RColor::Reset)));
-        }
-        if !self.sidebar_open {
-            spans.push(ratatui::text::Span::styled(" · sidebar hidden", Style::default().fg(theme.panel_muted).bg(RColor::Reset)));
-        }
-        if let Some((msg, t)) = &self.notice {
-            if t.elapsed() < TOAST_TIMEOUT {
-                spans.push(ratatui::text::Span::styled(format!(" ⚠ {msg} "), Style::default().fg(theme.secondary).bg(RColor::Reset)));
-            }
-        }
-        let start = btn_x + btn_w;
-        let left_w = spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>().min(area.width.saturating_sub(start));
-        if left_w > 0 {
-            f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans)), Rect::new(start, area.y, left_w, 1));
-        }
+        let ctx = SlotContext {
+            cfg: &self.status_bar,
+            session,
+            theme: &theme,
+            hostname: &self.hostname,
+            clock_str: &self.clock_str,
+            is_ssh: self.is_ssh,
+            is_leader: self.mode == Mode::Leader,
+            menu_open: self.menu.open,
+            sidebar_open: self.sidebar_open,
+        };
 
-        if self.mode == Mode::Leader {
+        // Snapshot slots so we can iteratively drop low-priority widgets on overflow.
+        let mut left_cfg = self.status_bar.left.clone();
+        let mut center_cfg = self.status_bar.center.clone();
+        let mut right_cfg = self.status_bar.right.clone();
+
+        // Helper to measure a slot.
+        let measure = |slot: &[StatusWidget]| -> u16 {
+            let spans = status_bar::slot_spans(slot, &ctx);
+            status_bar::spans_width(&spans)
+        };
+
+        // Priority of widgets to drop first when the bar overflows (least important first).
+        // Mode/Menu are never dropped (they host the leader chip and the menu button).
+        let drop_priority: &[StatusWidget] = &[
+            StatusWidget::Hostname,
+            StatusWidget::Clock,
+            StatusWidget::Branch,
+            StatusWidget::AgentStatus,
+            StatusWidget::Session,
+        ];
+
+        // Reserve width for the right-aligned transient (leader hint or copied toast)
+        // so it stays readable on a narrow terminal; it overlays the bar.
+        let transient_w: u16 = if self.mode == Mode::Leader {
             let hint = bindings::leader_hint(&self.keymap);
-            let avail = area.width.saturating_sub(start.saturating_add(left_w));
-            if avail > 0 {
-                let hint: String = hint.chars().take(avail as usize).collect();
-                let hint_w = hint.chars().count() as u16;
-                let x = area.width.saturating_sub(hint_w);
-                let hint_style = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
-                f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(hint, hint_style)])), Rect::new(x, area.y, hint_w, 1));
-            }
+            hint.chars().count() as u16
         } else if let Some((msg, t)) = &self.status_msg {
             if t.elapsed() < TOAST_TIMEOUT {
-                let avail = area.width.saturating_sub(start.saturating_add(left_w));
-                if avail > 0 {
-                    let msg: String = msg.chars().take(avail as usize).collect();
-                    let msg_w = msg.chars().count() as u16;
-                    let x = area.width.saturating_sub(msg_w);
-                    let msg_style = Style::default().fg(RColor::White).bg(theme.accent).add_modifier(Modifier::BOLD);
-                    f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(msg, msg_style)])), Rect::new(x, area.y, msg_w, 1));
+                msg.chars().count() as u16
+            } else { 0 }
+        } else { 0 };
+
+        // Overflow loop: drop lowest-priority widget present until everything fits
+        // or only Mode/Menu remain.
+        loop {
+            let left_w = measure(&left_cfg);
+            let center_w = measure(&center_cfg);
+            let right_w = measure(&right_cfg);
+            let total = left_w + center_w + right_w + transient_w;
+            // Gaps: 1 col between left|center and center|right when both sides non-empty
+            let gaps = (if center_w > 0 && left_w > 0 { 1 } else { 0 }) + (if right_w > 0 && (center_w > 0 || left_w > 0) { 1 } else { 0 });
+            if total + gaps <= area.width {
+                break;
+            }
+            // Find the lowest-priority widget that is still present and removable.
+            let mut removed = false;
+            for &w in drop_priority {
+                if right_cfg.contains(&w) {
+                    right_cfg.retain(|&x| x != w);
+                    removed = true;
+                    break;
                 }
+                if center_cfg.contains(&w) {
+                    center_cfg.retain(|&x| x != w);
+                    removed = true;
+                    break;
+                }
+                if left_cfg.contains(&w) {
+                    // Never drop the last Session if it's the only left content beyond Mode/Menu,
+                    // but allow dropping when overflow is severe.
+                    if left_cfg.len() == 1 && left_cfg[0] == w && matches!(w, StatusWidget::Session) && left_cfg.len() == 1 {
+                        // keep at least one indicator; fall through to truncation below
+                        continue;
+                    }
+                    left_cfg.retain(|&x| x != w);
+                    removed = true;
+                    break;
+                }
+            }
+            if !removed {
+                break;
+            }
+        }
+
+        let mut left_spans = status_bar::slot_spans(&left_cfg, &ctx);
+        let mut center_spans = status_bar::slot_spans(&center_cfg, &ctx);
+        let mut right_spans = status_bar::slot_spans(&right_cfg, &ctx);
+
+        // Notice (⚠) is a left-side transient appended after the session widget,
+        // like the pre-widget bar. Keep it visible even when widgets were dropped.
+        if let Some((msg, t)) = &self.notice {
+            if t.elapsed() < TOAST_TIMEOUT {
+                if !left_spans.is_empty() {
+                    left_spans.push(ratatui::text::Span::styled(" · ", Style::default().fg(theme.panel_muted)));
+                }
+                left_spans.push(ratatui::text::Span::styled(format!("⚠ {msg}"), Style::default().fg(theme.secondary)));
+            }
+        }
+
+        let left_w = status_bar::spans_width(&left_spans);
+        let center_w = status_bar::spans_width(&center_spans);
+        let right_w = status_bar::spans_width(&right_spans);
+
+        // If still too wide after dropping, truncate each slot proportionally.
+        // Right is truncated first (it shares the edge with the transient).
+        let gaps = (if center_w > 0 && left_w > 0 { 1 } else { 0 }) + (if right_w > 0 && (center_w > 0 || left_w > 0) { 1 } else { 0 });
+        let total = left_w + center_w + right_w + transient_w + gaps;
+        if total > area.width {
+            let mut avail = area.width.saturating_sub(transient_w);
+            // Reserve left first, then center, then right gets the remainder.
+            let left_max = left_w.min(avail.saturating_sub(gaps));
+            if status_bar::spans_width(&left_spans) > left_max {
+                left_spans = status_bar::truncate_spans(left_spans, left_max);
+            }
+            avail = avail.saturating_sub(status_bar::spans_width(&left_spans)).saturating_sub(if left_spans.is_empty() {0} else {1});
+            let center_max = center_w.min(avail);
+            if status_bar::spans_width(&center_spans) > center_max {
+                center_spans = status_bar::truncate_spans(center_spans, center_max);
+            }
+            avail = avail.saturating_sub(status_bar::spans_width(&center_spans)).saturating_sub(if center_spans.is_empty() {0} else {1});
+            let right_max = right_w.min(avail);
+            if status_bar::spans_width(&right_spans) > right_max {
+                right_spans = status_bar::truncate_spans(right_spans, right_max);
+            }
+        }
+
+        let left_w = status_bar::spans_width(&left_spans);
+        let center_w = status_bar::spans_width(&center_spans);
+        let right_w = status_bar::spans_width(&right_spans);
+
+        if left_w > 0 {
+            f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(left_spans)), Rect::new(area.x, area.y, left_w.min(area.width), 1));
+        }
+        if center_w > 0 {
+            let x = area.x + (area.width.saturating_sub(center_w)) / 2;
+            // Avoid overlapping left: push right if needed
+            let x = x.max(area.x + left_w + if left_w > 0 { 1 } else { 0 });
+            // Avoid overlapping right
+            let max_w = area.width.saturating_sub(x).saturating_sub(right_w).saturating_sub(if right_w > 0 {1} else {0});
+            let w = center_w.min(max_w);
+            if w > 0 {
+                let spans = status_bar::truncate_spans(center_spans, w);
+                f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans)), Rect::new(x, area.y, w, 1));
+            }
+        }
+        if right_w > 0 {
+            let x = area.x + area.width.saturating_sub(right_w);
+            f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(right_spans)), Rect::new(x, area.y, right_w.min(area.width), 1));
+        }
+
+        // Transient right-aligned overlay: leader hint or copied toast, both right-aligned
+        // and rendered last so they overwrite any right-slot widgets underneath.
+        if self.mode == Mode::Leader {
+            let hint = bindings::leader_hint(&self.keymap);
+            // Available space left of the right slot is already accounted for by
+            // the reserve above; now draw it.
+            let hint_w = hint.chars().count() as u16;
+            let w = hint_w.min(area.width);
+            let x = area.width.saturating_sub(w);
+            let hint_style = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+            f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(hint.chars().take(w as usize).collect::<String>(), hint_style)])), Rect::new(x, area.y, w, 1));
+        } else if let Some((msg, t)) = &self.status_msg {
+            if t.elapsed() < TOAST_TIMEOUT {
+                let msg_w = msg.chars().count() as u16;
+                let w = msg_w.min(area.width);
+                let x = area.width.saturating_sub(w);
+                let msg_style = Style::default().fg(RColor::White).bg(theme.accent).add_modifier(Modifier::BOLD);
+                f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(msg.chars().take(w as usize).collect::<String>(), msg_style)])), Rect::new(x, area.y, w, 1));
             }
         }
     }
@@ -3485,6 +3651,7 @@ fn wire_to_layout(node: &LayoutNode) -> kumo_core::layout::Node {
     }
 }
 
+#[allow(dead_code)]
 fn pane_count(s: &SessionLayout) -> usize {
     s.tabs.iter().map(|t| {
         let mut n = 0;
@@ -3822,6 +3989,11 @@ mod tests {
             plus_rect: None,
             dirty: false,
             detach_requested: false,
+            status_bar: StatusBarConfig::default(),
+            hostname: "testhost".to_string(),
+            clock_str: "12:00".to_string(),
+            clock_next: Instant::now() + Duration::from_secs(60),
+            is_ssh: false,
         }
     }
 
