@@ -46,6 +46,9 @@ const MENU_ITEMS: [&str; 5] = ["config", "settings", "reload", "keybinds", "deta
 /// Size of the session-name popup.
 const SESSION_POPUP_W: u16 = 44;
 const SESSION_POPUP_H: u16 = 7;
+/// Size of the copy-mode search popup (rectangle, black bg, red border).
+const COPY_SEARCH_W: u16 = 50;
+const COPY_SEARCH_H: u16 = 5;
 
 fn tab_width(name: &str) -> u16 {
     let n = name.chars().count() as u16;
@@ -3271,6 +3274,22 @@ impl View {
         ))
     }
 
+    fn copy_search_rect(&self) -> Option<Rect> {
+        // Popup just below tabs with a line gap: tabs at y=0, gap at y=1, popup at y=2
+        // Centered in the panes area (not full screen) so sidebar stays visible.
+        let pa = self.panes_area();
+        if pa.width < COPY_SEARCH_W || pa.height < COPY_SEARCH_H + 1 {
+            return None;
+        }
+        let w = COPY_SEARCH_W.min(pa.width.saturating_sub(2));
+        let h = COPY_SEARCH_H.min(pa.height.saturating_sub(1));
+        let x = pa.x + (pa.width.saturating_sub(w)) / 2;
+        let y = pa.y + 2; // two below tabs line (tabs y=0, gap y=1, popup y=2)
+        // Clamp inside panes area
+        let y = y.min(pa.y + pa.height.saturating_sub(h));
+        Some(Rect::new(x, y, w, h))
+    }
+
     fn name_popup_input_cursor(&self) -> Option<(u16, u16)> {
         let dd = self.name_popup_rect()?;
         let text_w = (dd.width - 4) as usize - 1;
@@ -4437,8 +4456,49 @@ impl View {
             text(f, rect.x + 1, rect.y, &msg, style, rect.width.saturating_sub(2));
             return;
         }
-        // Active search input bar — popup below tabs with a line gap
+        // Active search — rectangle popup (black bg, red border) like rename, below tabs with gap
         let theme = self.current_theme();
+        if let Some(dd) = self.copy_search_rect() {
+            // black bg, red border
+            let border = Style::default().fg(theme.red).bg(RColor::Black);
+            fill(f, dd, RColor::Black);
+            draw_box(f, dd, border);
+            let inner_w = dd.width.saturating_sub(4);
+            // title
+            let title = Style::default().fg(RColor::White).bg(RColor::Black).add_modifier(Modifier::BOLD);
+            let title_text = if cs.search_forward { "search /" } else { "search ?" };
+            text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
+            // field (Black on light input_bg, like rename)
+            let field = Style::default().fg(RColor::Black).bg(theme.input_bg);
+            let field_w = inner_w;
+            for cx in (dd.x + 2)..(dd.x + 2 + field_w) {
+                put(f, cx, dd.y + 2, " ", field);
+            }
+            let mut x = dd.x + 2;
+            let prefix = if cs.search_forward { "/" } else { "?" };
+            put(f, x, dd.y + 2, prefix, field.add_modifier(Modifier::BOLD));
+            x += 1;
+            let input = &cs.search_input;
+            let cursor = cs.search_cursor.min(input.chars().count());
+            let text_w = field_w.saturating_sub(1) as usize;
+            let start = if cursor + 1 > text_w { cursor + 1 - text_w } else { 0 };
+            let mut col = x;
+            for (i, ch) in input.chars().enumerate().skip(start) {
+                if (col - x) as usize >= text_w { break; }
+                let ch_style = if i == cursor { field.add_modifier(Modifier::REVERSED) } else { field };
+                put(f, col, dd.y + 2, &ch.to_string(), ch_style);
+                col += 1;
+            }
+            if cursor == input.chars().count() && col < dd.x + 2 + field_w {
+                put(f, col, dd.y + 2, " ", field.add_modifier(Modifier::REVERSED));
+            }
+            // footer hint (white on black, like context menu)
+            let hint = "enter: search  esc: cancel  n/N: next";
+            let hint_style = Style::default().fg(RColor::White).bg(RColor::Black);
+            text(f, dd.x + 2, dd.y + 3, hint, hint_style, inner_w);
+            return;
+        }
+        // Fallback line bar if terminal too small for rectangle
         let pa = self.panes_area();
         if pa.width == 0 || pa.height == 0 { return; }
         let bar_y = pa.y.saturating_add(1);
@@ -4461,7 +4521,6 @@ impl View {
         if cursor == input.chars().count() && x < rect.right() {
             put(f, x, rect.y, " ", style.add_modifier(Modifier::REVERSED));
         }
-        // hint
         let hint = " enter: search  esc: cancel ";
         let hint_x = rect.right().saturating_sub(hint.len() as u16 + 1);
         if hint_x > x + 1 {
