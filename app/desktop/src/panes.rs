@@ -350,6 +350,9 @@ const DIVIDER_END_GAP: f32 = 10.0;
 /// inset at both ends so it never touches the window edge or a crossing
 /// divider.
 fn paint_dividers(data: &CanvasData, window: &mut Window) {
+    if kumo_core::config::sidebar_borders().style == kumo_core::config::BorderStyle::Hidden {
+        return;
+    }
     let active_id = data.drag_splitter.or(data.hover_splitter);
     for split in &data.splitters {
         let strip = &split.strip;
@@ -415,8 +418,11 @@ fn paint_dividers(data: &CanvasData, window: &mut Window) {
 }
 
 /// A neon hairline around the focused pane's card — the accent tone of the
-/// active theme, rounded to match the chrome.
+/// active theme, rounded to match the chrome. Hidden border style suppresses it.
 fn paint_focus_ring(data: &CanvasData, window: &mut Window) {
+    if kumo_core::config::sidebar_borders().style == kumo_core::config::BorderStyle::Hidden {
+        return;
+    }
     let Some(focus) = data.focused_pid else { return };
     let Some(pane) = data.panes.iter().find(|p| p.pid == focus) else { return };
     let m = pane.m;

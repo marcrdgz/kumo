@@ -68,6 +68,31 @@ enum SidebarTab {
     Agents,
 }
 
+impl SidebarTab {
+    fn label(self) -> &'static str {
+        match self {
+            SidebarTab::Sessions => "sessions",
+            SidebarTab::Agents => "agents",
+        }
+    }
+    fn from_section(s: kumo_core::config::SidebarSection) -> Self {
+        match s {
+            kumo_core::config::SidebarSection::Sessions => SidebarTab::Sessions,
+            kumo_core::config::SidebarSection::Agents => SidebarTab::Agents,
+        }
+    }
+}
+
+fn border_chars(style: kumo_core::config::BorderStyle) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
+    match style {
+        kumo_core::config::BorderStyle::Single => ("┌", "┐", "└", "┘", "─", "│"),
+        kumo_core::config::BorderStyle::Rounded => ("╭", "╮", "╰", "╯", "─", "│"),
+        kumo_core::config::BorderStyle::Double => ("╔", "╗", "╚", "╝", "═", "║"),
+        kumo_core::config::BorderStyle::Heavy => ("┏", "┓", "┗", "┛", "━", "┃"),
+        kumo_core::config::BorderStyle::Hidden => (" ", " ", " ", " ", " ", " "),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum PopupTarget {
     NewSession,
@@ -571,6 +596,7 @@ impl View {
             }
             DaemonEvent::ConfigReloaded { notice } => {
                 self.notice = Some((notice, Instant::now()));
+                self.ensure_sidebar_tab_visible();
                 self.mark_dirty();
             }
             _ => {}
@@ -579,6 +605,7 @@ impl View {
 
     fn on_layout(&mut self, layout: Layout) {
         self.layout = Some(layout);
+        self.ensure_sidebar_tab_visible();
         self.update_tab_rects();
         self.recompute_geometry();
     }
@@ -2214,12 +2241,50 @@ impl View {
         self.sidebar_footer_y().saturating_sub(2)
     }
 
+    fn visible_sidebar_tabs(&self) -> Vec<SidebarTab> {
+        let cfg = kumo_core::config::sidebar();
+        let mut out = Vec::new();
+        for sec in cfg.order.iter().copied() {
+            let tab = SidebarTab::from_section(sec);
+            let visible = match tab {
+                SidebarTab::Sessions => cfg.sections.sessions,
+                SidebarTab::Agents => cfg.sections.agents,
+            };
+            if visible && !out.contains(&tab) {
+                out.push(tab);
+            }
+        }
+        // Fallback if config filtered everything (guard in config, but keep robust).
+        if out.is_empty() {
+            out.push(SidebarTab::Sessions);
+        }
+        out
+    }
+
+    fn ensure_sidebar_tab_visible(&mut self) {
+        let visible = self.visible_sidebar_tabs();
+        if !visible.contains(&self.sidebar_tab) {
+            if let Some(first) = visible.first().copied() {
+                self.sidebar_tab = first;
+            }
+        }
+    }
+
     fn tab_at(&self, x: u16, y: u16) -> Option<SidebarTab> {
         if y != 2 || x >= SIDEBAR_WIDTH {
             return None;
         }
+        let tabs = self.visible_sidebar_tabs();
+        if tabs.is_empty() {
+            return None;
+        }
+        if tabs.len() == 1 {
+            return Some(tabs[0]);
+        }
+        // Ordered left→right: first in cfg.order is left half, second is right half.
         let half = (SIDEBAR_WIDTH / 2).max(4);
-        Some(if x < half { SidebarTab::Sessions } else { SidebarTab::Agents })
+        let idx = if x < half { 0 } else { 1.min(tabs.len() - 1) };
+        Some(tabs[idx])
     }
 
     fn sessions_content(&self) -> Vec<SidebarRow> {
@@ -2266,22 +2331,27 @@ impl View {
         out.into_iter().map(|(_, _, _, row)| row).collect()
     }
 
+    fn effective_sidebar_tab(&self) -> SidebarTab {
+        let visible = self.visible_sidebar_tabs();
+        if visible.contains(&self.sidebar_tab) { self.sidebar_tab } else { visible[0] }
+    }
+
     fn active_tab_items(&self) -> Vec<SidebarRow> {
-        match self.sidebar_tab {
+        match self.effective_sidebar_tab() {
             SidebarTab::Sessions => self.sessions_content(),
             SidebarTab::Agents => self.agents_content(),
         }
     }
 
     fn active_scroll(&self) -> u16 {
-        match self.sidebar_tab {
+        match self.effective_sidebar_tab() {
             SidebarTab::Sessions => self.sidebar_scroll.0,
             SidebarTab::Agents => self.sidebar_scroll.1,
         }
     }
 
     fn set_active_scroll(&mut self, v: u16) {
-        match self.sidebar_tab {
+        match self.effective_sidebar_tab() {
             SidebarTab::Sessions => self.sidebar_scroll.0 = v,
             SidebarTab::Agents => self.sidebar_scroll.1 = v,
         }
@@ -2660,19 +2730,36 @@ impl View {
         } else {
             theme.border_idle
         };
+        let style_cfg = kumo_core::config::sidebar_borders().style;
+        if style_cfg == kumo_core::config::BorderStyle::Hidden {
+            // Hidden: no border, just title chip at top-left inset.
+            let max = rect.width.saturating_sub(2) as usize;
+            let chip = if focused {
+                Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+            } else if blocked {
+                Style::default().fg(RColor::Black).bg(theme.orange).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg).bg(RColor::Reset)
+            };
+            for (i, ch) in title.chars().take(max).enumerate() {
+                put(f, rect.x + 1 + i as u16, rect.y, &ch.to_string(), chip);
+            }
+            return;
+        }
         let border_style = Style::default().fg(border).bg(RColor::Reset);
         let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
-        put(f, x0, y0, "┌", border_style);
-        put(f, x1, y0, "┐", border_style);
-        put(f, x0, y1, "└", border_style);
-        put(f, x1, y1, "┘", border_style);
+        let (tl, tr, bl, br, h, v) = border_chars(style_cfg);
+        put(f, x0, y0, tl, border_style);
+        put(f, x1, y0, tr, border_style);
+        put(f, x0, y1, bl, border_style);
+        put(f, x1, y1, br, border_style);
         for x in (x0 + 1)..x1 {
-            put(f, x, y0, "─", border_style);
-            put(f, x, y1, "─", border_style);
+            put(f, x, y0, h, border_style);
+            put(f, x, y1, h, border_style);
         }
         for y in (y0 + 1)..y1 {
-            put(f, x0, y, "│", border_style);
-            put(f, x1, y, "│", border_style);
+            put(f, x0, y, v, border_style);
+            put(f, x1, y, v, border_style);
         }
         // Title chip.
         let max = rect.width.saturating_sub(2) as usize;
@@ -2759,8 +2846,18 @@ impl View {
         let theme = self.current_theme();
         let area = Rect::new(0, 0, w, size.height.saturating_sub(1));
         fill(f, area, RColor::Reset);
-        for y in area.y..(area.y + area.height) {
-            put(f, area.x + area.width, y, "│", Style::default().fg(theme.panel_sep));
+        let bstyle = kumo_core::config::sidebar_borders().style;
+        let sep_hidden = bstyle == kumo_core::config::BorderStyle::Hidden;
+        if !sep_hidden {
+            let (_, _, _, _, _, v) = border_chars(bstyle);
+            // Sidebar separator follows pane border vertical style (rounded/single -> │)
+            let sep = if bstyle == kumo_core::config::BorderStyle::Double { "║" }
+                      else if bstyle == kumo_core::config::BorderStyle::Heavy { "┃" }
+                      else { "│" };
+            let _ = v; // keep helper unified
+            for y in area.y..(area.y + area.height) {
+                put(f, area.x + area.width, y, sep, Style::default().fg(theme.panel_sep));
+            }
         }
         self.render_tabs(f, area, w);
         for (y, row) in self.sidebar_rows() {
@@ -2903,9 +3000,27 @@ impl View {
     fn render_tabs(&self, f: &mut Frame, area: Rect, w: u16) {
         let theme = self.current_theme();
         let y = area.y + 2;
+        let visible = self.visible_sidebar_tabs();
+        if visible.is_empty() {
+            return;
+        }
+        if visible.len() == 1 {
+            let tab = visible[0];
+            let bg = theme.panel_sep;
+            fill(f, Rect::new(area.x, y, w, 1), bg);
+            let style = Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            let label = tab.label().to_uppercase();
+            let pad = w.saturating_sub(label.chars().count() as u16) / 2;
+            text(f, area.x + pad, y, &label, style, w);
+            return;
+        }
         let half = (w / 2).max(1);
-        let tabs = [("sessions", SidebarTab::Sessions), ("agents", SidebarTab::Agents)];
-        for (i, (label, tab)) in tabs.iter().enumerate() {
+        let bstyle = kumo_core::config::sidebar_borders().style;
+        let sep = if bstyle == kumo_core::config::BorderStyle::Hidden { " " }
+                  else if bstyle == kumo_core::config::BorderStyle::Double { "║" }
+                  else if bstyle == kumo_core::config::BorderStyle::Heavy { "┃" }
+                  else { "│" };
+        for (i, tab) in visible.iter().enumerate().take(2) {
             let x0 = area.x + i as u16 * half;
             let x1 = if i == 0 { x0 + half } else { area.x + w };
             let width = x1.saturating_sub(x0);
@@ -2920,11 +3035,11 @@ impl View {
             } else {
                 Style::default().fg(theme.panel_muted).bg(bg)
             };
-            let label = label.to_uppercase();
+            let label = tab.label().to_uppercase();
             let pad = width.saturating_sub(label.chars().count() as u16) / 2;
             text(f, x0 + pad, y, &label, style, width);
         }
-        put(f, area.x + half, y, "│", Style::default().fg(theme.panel_sep).bg(RColor::Reset));
+        put(f, area.x + half, y, sep, Style::default().fg(theme.panel_sep).bg(RColor::Reset));
     }
 
     fn render_status(&self, f: &mut Frame) {
@@ -3832,8 +3947,8 @@ mod tests {
         // Pill width for "1" is 6 => pill at x=26..31, name at 26
         assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
         assert!(buf.cell((26, 0)).unwrap().style().bg.is_some(), "tab bar should have distinct bg");
-        // Pane border at the top-left of the pane area (below tab bar).
-        assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "┌");
+        // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
+        assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).
         assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
         assert!(buf.cell((28, 1)).unwrap().symbol() == "s" || buf.cell((28, 1)).unwrap().symbol() == " ");

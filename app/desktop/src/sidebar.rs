@@ -39,17 +39,18 @@ impl Render for Sidebar {
             return self.collapsed_rail(cx, &layout, &chrome, width);
         }
 
-        // Same material as the window background (no panel tint) — the
-        // sidebar is delimited by a single hairline, not a boxed surface.
-        div()
+        let bstyle = kumo_core::config::sidebar_borders().style;
+        let hidden = bstyle == kumo_core::config::BorderStyle::Hidden;
+        let mut root = div()
             .w(px(width))
             .h_full()
-            .border_r_1()
-            .border_color(theme::hairline())
             .flex()
             .flex_col()
-            .pt(px(8.0))
-            .child(self.body(cx, layout.as_ref(), &chrome))
+            .pt(px(8.0));
+        if !hidden {
+            root = root.border_r_1().border_color(theme::hairline());
+        }
+        root.child(self.body(cx, layout.as_ref(), &chrome))
     }
 }
 
@@ -57,6 +58,24 @@ impl Sidebar {
     // ------------------------------------------------------------------
     // Body: Sessions & Agents
     // ------------------------------------------------------------------
+
+    fn ordered_sections(&self) -> Vec<kumo_core::config::SidebarSection> {
+        let cfg = kumo_core::config::sidebar();
+        let mut out = Vec::new();
+        for sec in cfg.order.iter().copied() {
+            let visible = match sec {
+                kumo_core::config::SidebarSection::Sessions => cfg.sections.sessions,
+                kumo_core::config::SidebarSection::Agents => cfg.sections.agents,
+            };
+            if visible && !out.contains(&sec) {
+                out.push(sec);
+            }
+        }
+        if out.is_empty() {
+            out.push(kumo_core::config::SidebarSection::Sessions);
+        }
+        out
+    }
 
     fn body(&self, cx: &mut Context<Self>, layout: Option<&Layout>, chrome: &Chrome) -> impl IntoElement {
         let mut scroll = div()
@@ -94,35 +113,38 @@ impl Sidebar {
             );
         }
 
-        // --- SESSIONS ---
-        scroll = scroll.child(self.section_label("SESSIONS", chrome));
-        for s in &layout.sessions {
-            let is_active = layout.active.as_deref() == Some(&s.name);
-            scroll = scroll.child(self.session_row(cx, s, is_active, chrome));
-        }
-        scroll = scroll.child(self.new_session_row(cx, chrome));
-
-        // --- AGENTS (Zero-alloc iteration) ---
-        scroll = scroll.child(self.section_label("AGENTS", chrome));
-        let mut has_agents = false;
-
-        for session in &layout.sessions {
-            for tab in &session.tabs {
-                collect_agents(&tab.root, &mut |pid, agent| {
-                    has_agents = true;
-                    scroll.extend([self.agent_row(cx, &session.name, pid, agent, chrome).into_any_element()]);
-                });
+        for sec in self.ordered_sections() {
+            match sec {
+                kumo_core::config::SidebarSection::Sessions => {
+                    scroll = scroll.child(self.section_label("SESSIONS", chrome));
+                    for s in &layout.sessions {
+                        let is_active = layout.active.as_deref() == Some(&s.name);
+                        scroll = scroll.child(self.session_row(cx, s, is_active, chrome));
+                    }
+                    scroll = scroll.child(self.new_session_row(cx, chrome));
+                }
+                kumo_core::config::SidebarSection::Agents => {
+                    scroll = scroll.child(self.section_label("AGENTS", chrome));
+                    let mut has_agents = false;
+                    for session in &layout.sessions {
+                        for tab in &session.tabs {
+                            collect_agents(&tab.root, &mut |pid, agent| {
+                                has_agents = true;
+                                scroll.extend([self.agent_row(cx, &session.name, pid, agent, chrome).into_any_element()]);
+                            });
+                        }
+                    }
+                    if !has_agents {
+                        scroll = scroll.child(
+                            div()
+                                .p(px(10.0))
+                                .child("no agents running")
+                                .text_size(px(11.5))
+                                .text_color(chrome.muted()),
+                        );
+                    }
+                }
             }
-        }
-
-        if !has_agents {
-            scroll = scroll.child(
-                div()
-                    .p(px(10.0))
-                    .child("no agents running")
-                    .text_size(px(11.5))
-                    .text_color(chrome.muted()),
-            );
         }
 
         scroll
@@ -369,21 +391,20 @@ impl Sidebar {
         chrome: &Chrome,
         width: f32,
     ) -> gpui::Div {
-        let mut rail = div()
-            .w(px(width))
+        let bstyle = kumo_core::config::sidebar_borders().style;
+        let hidden = bstyle == kumo_core::config::BorderStyle::Hidden;
+        let mut inner = div()
+            .w_full()
             .h_full()
-            .child(
-                div()
-                    .w_full()
-                    .h_full()
-                    .border_r_1()
-                    .border_color(theme::hairline())
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .pt(px(12.0))
-                    .gap(px(10.0)),
-            );
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(12.0))
+            .gap(px(10.0));
+        if !hidden {
+            inner = inner.border_r_1().border_color(theme::hairline());
+        }
+        let mut rail = div().w(px(width)).h_full().child(inner);
 
         if let Some(layout) = layout {
             let mut dots: Vec<AnyElement> = Vec::new();

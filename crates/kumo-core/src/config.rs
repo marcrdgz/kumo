@@ -107,9 +107,84 @@ fn legacy_workspace_file() -> Option<PathBuf> {
 // Configuration model
 // ---------------------------------------------------------------------------
 
+/// Sidebar section identifier (sessions / agents).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum SidebarSection {
+    Sessions,
+    Agents,
+}
+
+/// Pane/sidebar border style.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BorderStyle {
+    Single,
+    #[default]
+    Rounded,
+    Double,
+    Heavy,
+    Hidden,
+}
+
+impl BorderStyle {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "single" => Some(Self::Single),
+            "rounded" => Some(Self::Rounded),
+            "double" => Some(Self::Double),
+            "heavy" => Some(Self::Heavy),
+            "hidden" | "none" | "off" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// Which sidebar sections are visible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarSections {
+    pub sessions: bool,
+    pub agents: bool,
+}
+
+impl Default for SidebarSections {
+    fn default() -> Self {
+        Self { sessions: true, agents: true }
+    }
+}
+
+/// Border styling for panes and the sidebar separator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarBorders {
+    pub style: BorderStyle,
+}
+
+impl Default for SidebarBorders {
+    fn default() -> Self {
+        Self { style: BorderStyle::Rounded }
+    }
+}
+
+/// Sidebar configuration (`[sidebar]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarConfig {
+    /// Ordered list of visible sections (subset/permutation of [Sessions, Agents]).
+    pub order: Vec<SidebarSection>,
+    pub sections: SidebarSections,
+    pub borders: SidebarBorders,
+}
+
+impl Default for SidebarConfig {
+    fn default() -> Self {
+        Self {
+            order: vec![SidebarSection::Sessions, SidebarSection::Agents],
+            sections: SidebarSections::default(),
+            borders: SidebarBorders::default(),
+        }
+    }
+}
+
 /// Parsed user configuration. Mirrors the flat `key = value` config file;
 /// future knobs (theme, leader, keymaps, status bar) will extend this struct.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Program + args for the AI pane.
     pub ai_cmd: Option<(String, Vec<String>)>,
@@ -136,6 +211,26 @@ pub struct Config {
     pub theme: Option<String>,
     /// Custom theme defined in `[theme.custom]` (full palette + chrome overrides).
     pub custom_theme: Option<crate::theme::OwnedTheme>,
+    /// Sidebar toggle/order + border styling (`[sidebar]`).
+    pub sidebar: SidebarConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            ai_cmd: None,
+            shell: None,
+            update_check: true,
+            agent_sound: true,
+            leader: None,
+            keymap_bindings: HashMap::new(),
+            new_cwd: NewCwdMode::default(),
+            fixed_cwd: None,
+            theme: None,
+            custom_theme: None,
+            sidebar: SidebarConfig::default(),
+        }
+    }
 }
 
 /// How the session's working directory is chosen (`[terminal] new-cwd`). The
@@ -255,6 +350,61 @@ fn build_custom_theme(raw: CustomThemeRaw) -> Option<crate::theme::OwnedTheme> {
 }
 
 impl Config {
+    fn apply_sidebar(&mut self, raw: SidebarSectionRaw) {
+        // order: Vec<String> -> Vec<SidebarSection>
+        if let Some(order) = raw.order {
+            let mut parsed = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for s in order {
+                let sec = match s.trim().to_ascii_lowercase().as_str() {
+                    "sessions" | "session" => SidebarSection::Sessions,
+                    "agents" | "agent" => SidebarSection::Agents,
+                    other => {
+                        log::warn!("kumo: ignoring unknown sidebar order entry {other:?}");
+                        continue;
+                    }
+                };
+                if seen.insert(sec) {
+                    parsed.push(sec);
+                }
+            }
+            // Fill missing defaults so both sections remain reachable if user
+            // only listed one; preserves toggle ability.
+            for sec in [SidebarSection::Sessions, SidebarSection::Agents] {
+                if !parsed.contains(&sec) {
+                    parsed.push(sec);
+                }
+            }
+            if !parsed.is_empty() {
+                self.sidebar.order = parsed;
+            }
+        }
+        if let Some(sections) = raw.sections {
+            if let Some(v) = sections.sessions {
+                self.sidebar.sections.sessions = v;
+            }
+            if let Some(v) = sections.agents {
+                self.sidebar.sections.agents = v;
+            }
+            // warn if both hidden
+            if !self.sidebar.sections.sessions && !self.sidebar.sections.agents {
+                log::warn!("kumo: [sidebar.sections] both hidden; at least one will be shown");
+                self.sidebar.sections.sessions = true;
+            }
+        }
+        if let Some(borders) = raw.borders {
+            if let Some(s) = borders.style {
+                if let Some(st) = BorderStyle::parse(&s) {
+                    self.sidebar.borders.style = st;
+                } else {
+                    log::warn!("kumo: ignoring invalid sidebar.borders.style {s:?}");
+                }
+            }
+        }
+        // Legacy flat keys for borders style
+        // handled in from_map; toml is canonical.
+    }
+
     /// Normalize the new-cwd policy: a `Fixed` mode needs a valid `fixed-cwd`
     /// directory, else it falls back to `Current` with a warning.
     fn normalize_new_cwd(&mut self) {
@@ -394,8 +544,30 @@ impl Config {
         // Allow bare `[theme.custom]` without a parent `[theme] name` key when parsed as `themes`
         // alias - toml may represent it as `theme` table with custom only; already handled.
         // Also support top-level `[custom]`? Not needed.
+        if let Some(sidebar) = toml.sidebar {
+            self.apply_sidebar(sidebar);
+        }
         self.normalize_new_cwd();
     }
+}
+
+/// Raw TOML for `[sidebar]` — all optional, unknown keys ignored.
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct SidebarSectionRaw {
+    pub order: Option<Vec<String>>,
+    pub sections: Option<SidebarSectionsRaw>,
+    pub borders: Option<SidebarBordersRaw>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct SidebarSectionsRaw {
+    pub sessions: Option<bool>,
+    pub agents: Option<bool>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct SidebarBordersRaw {
+    pub style: Option<String>,
 }
 
 /// The `[keymap]` table: keyboard configuration (leader chord today, bindings
@@ -487,6 +659,8 @@ struct TomlConfig {
     terminal: Option<TerminalSection>,
     #[serde(rename = "theme")]
     theme: Option<ThemeValue>,
+    #[serde(rename = "sidebar")]
+    sidebar: Option<SidebarSectionRaw>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -742,6 +916,27 @@ pub fn all_themes() -> Vec<crate::theme::OwnedTheme> {
 pub fn theme_index() -> usize {
     let cfg = cached_config();
     crate::theme::resolve_theme_idx(cfg.theme.as_deref(), cfg.custom_theme.as_ref())
+}
+
+/// Sidebar configuration (`[sidebar]`). Clone used by clients to read order/
+/// visibility/border style.
+pub fn sidebar() -> SidebarConfig {
+    cached_config().sidebar
+}
+
+/// Sidebar border style.
+pub fn sidebar_borders() -> SidebarBorders {
+    cached_config().sidebar.borders
+}
+
+/// Whether a sidebar section is visible (sessions/agents).
+pub fn sidebar_sections() -> SidebarSections {
+    cached_config().sidebar.sections
+}
+
+/// Ordered sidebar sections permutation.
+pub fn sidebar_order() -> Vec<SidebarSection> {
+    cached_config().sidebar.order
 }
 
 /// Split a command line string into program + args (space separated).
@@ -1498,5 +1693,82 @@ mod tests {
         );
         assert_eq!(theme_name().as_deref(), Some("gruvbox"));
         assert_eq!(theme_index(), 5);
+    }
+
+    #[test]
+    fn sidebar_defaults_to_sessions_agents_and_rounded() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sidebar-default");
+        let home = scratch_dir("home-sidebar-default");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = sidebar();
+        assert_eq!(s.order, vec![SidebarSection::Sessions, SidebarSection::Agents]);
+        assert!(s.sections.sessions && s.sections.agents);
+        assert_eq!(s.borders.style, BorderStyle::Rounded);
+    }
+
+    #[test]
+    fn sidebar_parses_order_and_visibility() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sidebar-order");
+        let home = scratch_dir("home-sidebar-order");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[sidebar]\norder = [\"agents\", \"sessions\"]\n[sidebar.sections]\nsessions = true\nagents = false\n[sidebar.borders]\nstyle = \"hidden\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = sidebar();
+        assert_eq!(s.order, vec![SidebarSection::Agents, SidebarSection::Sessions]);
+        // config normalizes both-hidden to at least sessions visible, but here agents false only
+        assert!(s.sections.sessions);
+        assert!(!s.sections.agents);
+        assert_eq!(s.borders.style, BorderStyle::Hidden);
+    }
+
+    #[test]
+    fn sidebar_invalid_style_falls_back_to_rounded() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sidebar-bad-style");
+        let home = scratch_dir("home-sidebar-bad-style");
+        write(&cfg_dir.join("config.toml"), "[sidebar.borders]\nstyle = \"banana\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(sidebar_borders().style, BorderStyle::Rounded, "invalid style must fallback to rounded");
+    }
+
+    #[test]
+    fn sidebar_order_ignores_unknown_and_dedupes() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sidebar-order-unk");
+        let home = scratch_dir("home-sidebar-order-unk");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[sidebar]\norder = [\"sessions\", \"unknown\", \"sessions\", \"agents\"]\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = sidebar();
+        assert_eq!(s.order, vec![SidebarSection::Sessions, SidebarSection::Agents], "unknown ignored, dupes removed");
+    }
+
+    #[test]
+    fn border_style_parses_all_variants() {
+        assert_eq!(BorderStyle::parse("single"), Some(BorderStyle::Single));
+        assert_eq!(BorderStyle::parse("rounded"), Some(BorderStyle::Rounded));
+        assert_eq!(BorderStyle::parse("double"), Some(BorderStyle::Double));
+        assert_eq!(BorderStyle::parse("heavy"), Some(BorderStyle::Heavy));
+        assert_eq!(BorderStyle::parse("hidden"), Some(BorderStyle::Hidden));
+        assert_eq!(BorderStyle::parse("none"), Some(BorderStyle::Hidden));
+        assert_eq!(BorderStyle::parse("unknown"), None);
     }
 }
