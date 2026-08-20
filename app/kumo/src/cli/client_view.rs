@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::Terminal;
 
 use kumo_core::layout::{self, PaneGeom, TreeGeom};
-use kumo_core::theme::THEMES;
+use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
     AgentStatus, Command, DaemonEvent, Layout, LayoutNode, LinkRange, PaneFrame, ScrollState,
     SessionLayout, SplitDir, WireBranch, WireCell, WireWorktree,
@@ -292,6 +292,7 @@ pub struct View {
     subscribed: HashSet<u64>,
     sent_sizes: HashMap<u64, (u16, u16)>,
     theme_idx: usize,
+    custom_theme: Option<OwnedTheme>,
     sidebar_open: bool,
     sidebar_tab: SidebarTab,
     sidebar_scroll: (u16, u16),
@@ -321,7 +322,7 @@ pub struct View {
     detach_requested: bool,
 }
 
-fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, selected: Option<Sel>, link_mods: bool, theme_idx: usize) {
+fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, selected: Option<Sel>, link_mods: bool, theme: &OwnedTheme) {
     let inner = PaneGeom { pane_id: pid, rect }.inner();
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -378,17 +379,16 @@ fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, sel
     }
     // Scrollbar on the last content column when the pane has scrollback.
     if let Some(scroll) = grid.scroll {
-        render_scrollbar(f, inner, scroll, theme_idx);
+        render_scrollbar(f, inner, scroll, theme);
     }
 }
 
-fn render_scrollbar(f: &mut Frame, inner: Rect, sb: ScrollState, theme_idx: usize) {
+fn render_scrollbar(f: &mut Frame, inner: Rect, sb: ScrollState, theme: &OwnedTheme) {
     let total = sb.total as usize;
     let screen = sb.screen as usize;
     if total <= screen || screen == 0 {
         return;
     }
-    let theme = &THEMES[theme_idx];
     let hist = total - screen;
     let bar_h = inner.height as usize;
     let thumb = ((screen * bar_h) / total).max(1).min(bar_h);
@@ -432,6 +432,7 @@ impl View {
             subscribed: HashSet::new(),
             sent_sizes: HashMap::new(),
             theme_idx: kumo_core::theme::DEFAULT_THEME_IDX,
+            custom_theme: None,
             sidebar_open: true,
             sidebar_tab: SidebarTab::Sessions,
             sidebar_scroll: (0, u16::MAX),
@@ -506,6 +507,25 @@ impl View {
         self.dirty = true;
     }
 
+    fn themes_len(&self) -> usize {
+        THEMES.len() + if self.custom_theme.is_some() { 1 } else { 0 }
+    }
+
+    fn all_themes(&self) -> Vec<OwnedTheme> {
+        theme::all_themes(self.custom_theme.clone())
+    }
+
+    fn current_theme(&self) -> OwnedTheme {
+        self.all_themes()
+            .get(self.theme_idx)
+            .cloned()
+            .unwrap_or_else(|| OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX]))
+    }
+
+    fn theme_at(&self, idx: usize) -> Option<OwnedTheme> {
+        self.all_themes().get(idx).cloned()
+    }
+
     // ------------------------------------------------------------------
     // Daemon events
     // ------------------------------------------------------------------
@@ -514,9 +534,23 @@ impl View {
         match ev {
             DaemonEvent::Layout { layout } => self.on_layout(layout),
             DaemonEvent::PaneFrame { frame } => self.on_pane_frame(frame),
-            DaemonEvent::Theme { idx } => {
-                if idx < THEMES.len() && idx != self.theme_idx {
+            DaemonEvent::Theme { idx, custom } => {
+                let mut dirty = false;
+                if let Some(w) = custom {
+                    let owned = theme::wire_to_owned(w);
+                    if self.custom_theme.as_ref() != Some(&owned) {
+                        self.custom_theme = Some(owned);
+                        dirty = true;
+                    }
+                }
+                let len = self.themes_len();
+                if idx < len && idx != self.theme_idx {
                     self.theme_idx = idx;
+                    dirty = true;
+                } else if dirty && idx == self.theme_idx {
+                    // palette of active custom changed
+                }
+                if dirty {
                     self.mark_dirty();
                 }
             }
@@ -1694,7 +1728,7 @@ impl View {
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if tab == SettingsTab::Appearance {
-                    self.settings.selected = (self.settings.selected + 1).min(THEMES.len() - 1);
+                    self.settings.selected = (self.settings.selected + 1).min(self.themes_len().saturating_sub(1));
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -2490,7 +2524,8 @@ impl View {
             return None;
         }
         let content = self.settings_content_rect()?;
-        THEMES.iter().enumerate().position(|(i, _)| {
+        let len = self.themes_len();
+        (0..len).position(|i| {
             let item = Rect::new(content.x, content.y + 1 + i as u16, content.width, 1);
             item.contains(Position::new(x, y))
         })
@@ -2563,14 +2598,14 @@ impl View {
         let area = f.area();
         let link_mods = self.link_mods;
         let selected = self.sel;
-        let theme_idx = self.theme_idx;
+        let theme = self.current_theme();
         // Pane frames (borders + titles + content).
         for &(pid, rect) in &self.rects {
             let focused = self.active_tab().map(|t| t.focus == pid).unwrap_or(false);
             let title = self.pane_title(pid, focused);
             self.render_pane_frame(f, rect, focused, &title);
             if let Some(grid) = self.grids.get_mut(&pid) {
-                render_pane_content(f, pid, rect, grid, selected, link_mods, theme_idx);
+                render_pane_content(f, pid, rect, grid, selected, link_mods, &theme);
             }
         }
         self.render_tab_bar(f);
@@ -2608,7 +2643,7 @@ impl View {
         if rect.width < 3 || rect.height < 3 {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         // A blocked AI pane glows orange even when it does not have focus.
         let blocked = self.rects.iter().any(|(pid, r)| {
             *r == rect
@@ -2658,7 +2693,7 @@ impl View {
         if started.elapsed() > PANE_NUMBERS_TIMEOUT {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         if self.rects.len() < 2 {
             return;
         }
@@ -2672,7 +2707,7 @@ impl View {
     fn render_tab_bar(&self, f: &mut Frame) {
         let Some(sess) = self.active_session() else { return };
         if sess.tabs.is_empty() { return; }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let area = self.tabs_area();
         // Bar background distinct from terminal
         let bar_bg = theme.panel_sep;
@@ -2721,7 +2756,7 @@ impl View {
 
     fn render_sidebar(&self, f: &mut Frame, size: Rect) {
         let w = SIDEBAR_WIDTH.min(size.width);
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let area = Rect::new(0, 0, w, size.height.saturating_sub(1));
         fill(f, area, RColor::Reset);
         for y in area.y..(area.y + area.height) {
@@ -2857,7 +2892,7 @@ impl View {
         let items = self.active_tab_items();
         if items.len() > region_h as usize {
             let offset = (self.active_scroll() as usize).min(items.len() - region_h as usize);
-            draw_scrollbar(f, scroll_x, 3, region_h, offset, items.len(), theme);
+            draw_scrollbar(f, scroll_x, 3, region_h, offset, items.len(), &theme);
         }
     }
 
@@ -2866,7 +2901,7 @@ impl View {
     }
 
     fn render_tabs(&self, f: &mut Frame, area: Rect, w: u16) {
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let y = area.y + 2;
         let half = (w / 2).max(1);
         let tabs = [("sessions", SidebarTab::Sessions), ("agents", SidebarTab::Agents)];
@@ -2893,7 +2928,7 @@ impl View {
     }
 
     fn render_status(&self, f: &mut Frame) {
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let area = Rect::new(0, self.rows.saturating_sub(1), self.cols, 1);
         fill(f, area, RColor::Reset);
         let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
@@ -2968,7 +3003,7 @@ impl View {
     fn render_update_notice(&self, f: &mut Frame) {
         let Some(rect) = self.update_notice_rect() else { return };
         let Some((line1, line2)) = self.update_notice_lines() else { return };
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
         let border = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         fill(f, rect, theme.panel_sep);
@@ -2994,12 +3029,12 @@ impl View {
         if !self.menu.open {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(dd) = self.menu_dropdown_rect() else { return };
         let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
         draw_box(f, dd, border);
         for (i, item) in MENU_ITEMS.iter().enumerate() {
-            render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.menu.selected, theme);
+            render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.menu.selected, &theme);
         }
     }
 
@@ -3007,12 +3042,12 @@ impl View {
         if !self.ctx_menu.open {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(dd) = self.ctx_menu_rect() else { return };
         let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
         draw_box(f, dd, border);
         for (i, item) in self.ctx_items().iter().enumerate() {
-            render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.ctx_menu.selected, theme);
+            render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.ctx_menu.selected, &theme);
         }
     }
 
@@ -3020,7 +3055,7 @@ impl View {
         if !self.popup.open {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(dd) = self.name_popup_rect() else { return };
         let (x0, y0, _x1, _y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
         let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
@@ -3083,7 +3118,7 @@ impl View {
         if !self.keybind_overlay.open {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(dd) = self.keybind_overlay_rect() else { return };
         let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
         draw_box(f, dd, border);
@@ -3120,7 +3155,7 @@ impl View {
         if !self.settings.open {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(dd) = self.settings_rect() else { return };
         let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
         draw_box(f, dd, border);
@@ -3151,11 +3186,11 @@ impl View {
     }
 
     fn render_settings_appearance(&self, f: &mut Frame, dd: Rect) {
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(content) = self.settings_content_rect() else { return };
         let label = Style::default().fg(theme.secondary).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, content.x, content.y, "theme", label, content.width);
-        for (i, t) in THEMES.iter().enumerate() {
+        for (i, t) in self.all_themes().iter().enumerate() {
             let sel = i == self.settings.selected;
             let active = i == self.theme_idx;
             let y = content.y + 1 + i as u16;
@@ -3174,7 +3209,7 @@ impl View {
                 Style::default().fg(row_fg).bg(bg).add_modifier(Modifier::BOLD)
             };
             put(f, content.x, y, marker, marker_style);
-            text(f, content.x + 2, y, t.name, Style::default().fg(row_fg).bg(bg), content.width.saturating_sub(2));
+            text(f, content.x + 2, y, &t.name, Style::default().fg(row_fg).bg(bg), content.width.saturating_sub(2));
             if active && content.width >= 26 {
                 text(f, content.x + content.width.saturating_sub(8), y, " in use ", Style::default().fg(row_fg).bg(bg), 8);
             }
@@ -3182,7 +3217,7 @@ impl View {
     }
 
     fn render_settings_about(&self, f: &mut Frame, dd: Rect) {
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(content) = self.settings_content_rect() else { return };
         let label = Style::default().fg(theme.secondary).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, content.x, content.y, "kumo", label, content.width);
@@ -3210,7 +3245,7 @@ impl View {
         if !self.worktree_picker.open {
             return;
         }
-        let theme = &THEMES[self.theme_idx];
+        let theme = self.current_theme();
         let Some(dd) = self.worktree_picker_rect() else { return };
         let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
         draw_box(f, dd, border);
@@ -3476,7 +3511,7 @@ fn draw_box(f: &mut Frame, dd: Rect, border: Style) {
     }
 }
 
-fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool, theme: &kumo_core::theme::Theme) {
+fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: bool, theme: &OwnedTheme) {
     let bg = if sel { theme.accent } else { theme.panel_sep };
     for cx in (x0 + 1)..(x0 + 1 + width) {
         put(f, cx, y, " ", Style::default().bg(bg));
@@ -3498,7 +3533,7 @@ fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: 
     text(f, x0 + 3, y, item, label_style, width.saturating_sub(2));
 }
 
-fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usize, total: usize, theme: &kumo_core::theme::Theme) {
+fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usize, total: usize, theme: &OwnedTheme) {
     if total <= region_h as usize || region_h == 0 {
         return;
     }
@@ -3646,6 +3681,7 @@ mod tests {
             subscribed: HashSet::new(),
             sent_sizes: HashMap::new(),
             theme_idx: kumo_core::theme::DEFAULT_THEME_IDX,
+            custom_theme: None,
             sidebar_open: true,
             sidebar_tab: SidebarTab::Sessions,
             sidebar_scroll: (0, u16::MAX),
