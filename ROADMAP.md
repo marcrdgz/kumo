@@ -188,7 +188,7 @@ toggle/order + pane titles/border styling.
   worktrees under a single leader. Adds the intermediate "window" level the
   flat model (sessions → panes) skipped; the layout tree, split keys, and the
   state contract `v1` (0.3.0) are extended here, before the 1.0 schema freeze.
-- **Copy-mode**: vi-style keyboard selection over scrollback + `/` search — the
+- ✅ **Copy-mode**: vi-style keyboard selection over scrollback + `/` search — the
   biggest missing multiplexer feature (the scrollback already exists in ghostty;
   only the selection/search UI is missing).
 - **Sync-input**: type into every pane at once.
