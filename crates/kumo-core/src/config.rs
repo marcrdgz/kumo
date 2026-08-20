@@ -132,6 +132,10 @@ pub struct Config {
     /// Fixed working directory used when `new-cwd = "fixed"`
     /// (`[terminal] fixed-cwd`).
     pub fixed_cwd: Option<PathBuf>,
+    /// Selected theme name (`[theme] name = "dracula"` or `theme = "dracula"` flat).
+    pub theme: Option<String>,
+    /// Custom theme defined in `[theme.custom]` (full palette + chrome overrides).
+    pub custom_theme: Option<crate::theme::OwnedTheme>,
 }
 
 /// How the session's working directory is chosen (`[terminal] new-cwd`). The
@@ -171,6 +175,83 @@ fn parse_new_cwd(v: &str) -> NewCwdMode {
             NewCwdMode::Follow
         }
     }
+}
+
+fn build_custom_theme(raw: CustomThemeRaw) -> Option<crate::theme::OwnedTheme> {
+    // At least one field must be set to consider a custom theme present.
+    let has_any = raw.name.is_some()
+        || raw.palette.is_some()
+        || raw.term_fg.is_some()
+        || raw.term_bg.is_some()
+        || raw.term_cursor.is_some()
+        || raw.fg.is_some()
+        || raw.accent.is_some()
+        || raw.secondary.is_some()
+        || raw.panel_sep.is_some()
+        || raw.panel_muted.is_some()
+        || raw.border_idle.is_some()
+        || raw.green.is_some()
+        || raw.orange.is_some()
+        || raw.red.is_some()
+        || raw.input_bg.is_some();
+    if !has_any {
+        return None;
+    }
+    // Start from the default theme so missing values have sensible fallbacks.
+    let mut base = crate::theme::OwnedTheme::from(crate::theme::THEMES[crate::theme::DEFAULT_THEME_IDX]);
+    if let Some(name) = raw.name {
+        let n = name.trim();
+        if !n.is_empty() {
+            base.name = n.to_string();
+        } else {
+            base.name = "Custom".to_string();
+        }
+    } else {
+        base.name = "Custom".to_string();
+    }
+    if let Some(pal) = raw.palette {
+        for (i, s) in pal.into_iter().enumerate().take(16) {
+            match crate::color::parse_hex(&s) {
+                Some(c) => base.palette[i] = c,
+                None => log::warn!("kumo: ignoring invalid palette[{i}] {s:?}"),
+            }
+        }
+        if base.palette.len() != 16 {
+            // Should never happen; array always 16.
+        }
+    }
+    let set_rgb = |field: &mut crate::color::ColorRgb, raw_val: Option<String>, label: &str| {
+        if let Some(s) = raw_val {
+            if let Some(c) = crate::color::parse_hex(&s) {
+                *field = c;
+            } else {
+                log::warn!("kumo: ignoring invalid {label} {s:?}");
+            }
+        }
+    };
+    let set_rcolor = |field: &mut ratatui::style::Color, raw_val: Option<String>, label: &str| {
+        if let Some(s) = raw_val {
+            if let Some(c) = crate::theme::parse_rcolor(&s) {
+                *field = c;
+            } else {
+                log::warn!("kumo: ignoring invalid {label} {s:?}");
+            }
+        }
+    };
+    set_rgb(&mut base.term_fg, raw.term_fg, "term_fg");
+    set_rgb(&mut base.term_bg, raw.term_bg, "term_bg");
+    set_rgb(&mut base.term_cursor, raw.term_cursor, "term_cursor");
+    set_rcolor(&mut base.fg, raw.fg, "fg");
+    set_rcolor(&mut base.accent, raw.accent, "accent");
+    set_rcolor(&mut base.secondary, raw.secondary, "secondary");
+    set_rcolor(&mut base.panel_sep, raw.panel_sep, "panel_sep");
+    set_rcolor(&mut base.panel_muted, raw.panel_muted, "panel_muted");
+    set_rcolor(&mut base.border_idle, raw.border_idle, "border_idle");
+    set_rcolor(&mut base.green, raw.green, "green");
+    set_rcolor(&mut base.orange, raw.orange, "orange");
+    set_rcolor(&mut base.red, raw.red, "red");
+    set_rcolor(&mut base.input_bg, raw.input_bg, "input_bg");
+    Some(base)
 }
 
 impl Config {
@@ -224,6 +305,12 @@ impl Config {
             let v = unquote(v);
             if !v.is_empty() {
                 cfg.fixed_cwd = Some(PathBuf::from(v));
+            }
+        }
+        if let Some(v) = map.get("theme").or_else(|| map.get("theme.name")) {
+            let v = unquote(v);
+            if !v.is_empty() {
+                cfg.theme = Some(v.to_string());
             }
         }
         cfg.normalize_new_cwd();
@@ -282,6 +369,31 @@ impl Config {
                 self.fixed_cwd = Some(v);
             }
         }
+        // Theme: `theme = "name"` string or `[theme] name = "name"` plus `[theme.custom]`.
+        if let Some(tv) = toml.theme {
+            match tv {
+                ThemeValue::Simple(s) => {
+                    if !s.trim().is_empty() {
+                        self.theme = Some(s);
+                    }
+                }
+                ThemeValue::Table(tbl) => {
+                    if let Some(n) = tbl.name {
+                        if !n.trim().is_empty() {
+                            self.theme = Some(n);
+                        }
+                    }
+                    if let Some(raw) = tbl.custom {
+                        if let Some(owned) = build_custom_theme(raw) {
+                            self.custom_theme = Some(owned);
+                        }
+                    }
+                }
+            }
+        }
+        // Allow bare `[theme.custom]` without a parent `[theme] name` key when parsed as `themes`
+        // alias - toml may represent it as `theme` table with custom only; already handled.
+        // Also support top-level `[custom]`? Not needed.
         self.normalize_new_cwd();
     }
 }
@@ -313,6 +425,47 @@ struct TerminalSection {
     fixed_cwd: Option<PathBuf>,
 }
 
+/// Custom theme values under `[theme.custom]`. Every field is optional and
+/// accepts hex strings like `#rrggbb`, `rrggbb` or `#rgb`. Unknown keys ignored.
+#[derive(Default, serde::Deserialize, Clone, Debug)]
+pub struct CustomThemeRaw {
+    pub name: Option<String>,
+    pub palette: Option<Vec<String>>,
+    #[serde(rename = "term-fg", alias = "term_fg")]
+    pub term_fg: Option<String>,
+    #[serde(rename = "term-bg", alias = "term_bg")]
+    pub term_bg: Option<String>,
+    #[serde(rename = "term-cursor", alias = "term_cursor")]
+    pub term_cursor: Option<String>,
+    pub fg: Option<String>,
+    pub accent: Option<String>,
+    pub secondary: Option<String>,
+    #[serde(rename = "panel-sep", alias = "panel_sep")]
+    pub panel_sep: Option<String>,
+    #[serde(rename = "panel-muted", alias = "panel_muted")]
+    pub panel_muted: Option<String>,
+    #[serde(rename = "border-idle", alias = "border_idle")]
+    pub border_idle: Option<String>,
+    pub green: Option<String>,
+    pub orange: Option<String>,
+    pub red: Option<String>,
+    #[serde(rename = "input-bg", alias = "input_bg")]
+    pub input_bg: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ThemeSection {
+    name: Option<String>,
+    custom: Option<CustomThemeRaw>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ThemeValue {
+    Simple(String),
+    Table(ThemeSection),
+}
+
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
 /// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
 #[derive(Default, serde::Deserialize)]
@@ -332,6 +485,8 @@ struct TomlConfig {
     leader_alias: Option<String>,
     #[serde(rename = "terminal")]
     terminal: Option<TerminalSection>,
+    #[serde(rename = "theme")]
+    theme: Option<ThemeValue>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -563,6 +718,30 @@ pub fn new_cwd() -> NewCwd {
             _ => NewCwd::Current,
         },
     }
+}
+
+/// Selected theme name from `config.toml` (`[theme] name = "..."` or flat `theme = "..."`).
+/// `None` means the built-in default.
+pub fn theme_name() -> Option<String> {
+    cached_config().theme
+}
+
+/// Custom theme defined in `[theme.custom]` if present.
+pub fn custom_theme() -> Option<crate::theme::OwnedTheme> {
+    cached_config().custom_theme
+}
+
+/// All themes including the optional custom theme at the end.
+pub fn all_themes() -> Vec<crate::theme::OwnedTheme> {
+    let cfg = cached_config();
+    crate::theme::all_themes(cfg.custom_theme)
+}
+
+/// Resolve the initial theme index, respecting `theme = "..."` and whether a
+/// custom theme exists.
+pub fn theme_index() -> usize {
+    let cfg = cached_config();
+    crate::theme::resolve_theme_idx(cfg.theme.as_deref(), cfg.custom_theme.as_ref())
 }
 
 /// Split a command line string into program + args (space separated).
@@ -1235,5 +1414,89 @@ mod tests {
             EnvGuard::set("SHELL", "/bin/zsh"),
         );
         assert_eq!(default_shell(), "/bin/bash", "deprecated top-level shell must keep working");
+    }
+
+    #[test]
+    fn theme_name_reads_from_table() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-theme-name");
+        let home = scratch_dir("home-theme-name");
+        write(&cfg_dir.join("config.toml"), "[theme]\nname = \"dracula\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(theme_name().as_deref(), Some("dracula"));
+        assert_eq!(theme_index(), 6, "dracula should be index 6");
+    }
+
+    #[test]
+    fn theme_name_case_insensitive() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-theme-case");
+        let home = scratch_dir("home-theme-case");
+        write(&cfg_dir.join("config.toml"), "[theme]\nname = \"Tokyo Night\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(theme_index(), 7);
+    }
+
+    #[test]
+    fn custom_theme_parses_palette_and_chrome() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-custom");
+        let home = scratch_dir("home-custom");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[theme]\nname = \"custom\"\n[theme.custom]\nname = \"MyCustom\"\npalette = [\"#ff0000\", \"#00ff00\", \"#0000ff\"]\naccent = \"#123456\"\nterm_bg = \"#111111\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let ct = custom_theme().expect("custom theme should be parsed");
+        assert_eq!(ct.name, "MyCustom");
+        assert_eq!(ct.palette[0], crate::color::ColorRgb::new(0xff, 0x00, 0x00));
+        assert_eq!(ct.palette[1], crate::color::ColorRgb::new(0x00, 0xff, 0x00));
+        assert_eq!(ct.accent, ratatui::style::Color::Rgb(0x12, 0x34, 0x56));
+        assert_eq!(ct.term_bg, crate::color::ColorRgb::new(0x11, 0x11, 0x11));
+        assert_eq!(theme_name().as_deref(), Some("custom"));
+        // custom is at THEMES.len() == 8
+        assert_eq!(theme_index(), crate::theme::THEMES.len());
+        assert_eq!(all_themes().len(), crate::theme::THEMES.len() + 1);
+    }
+
+    #[test]
+    fn custom_theme_invalid_hex_is_warned_and_ignored() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-custom-bad");
+        let home = scratch_dir("home-custom-bad");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[theme.custom]\naccent = \"not-a-color\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let ct = custom_theme().expect("even with bad accent, custom should exist (fallback)");
+        // accent should remain default (spider-verse accent #ff2a5f)
+        assert_eq!(ct.accent, ratatui::style::Color::Rgb(0xff, 0x2a, 0x5f));
+    }
+
+    #[test]
+    fn theme_flat_key_parses() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-theme-flat");
+        let home = scratch_dir("home-theme-flat");
+        write(&cfg_dir.join("config"), "theme = gruvbox\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(theme_name().as_deref(), Some("gruvbox"));
+        assert_eq!(theme_index(), 5);
     }
 }

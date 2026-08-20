@@ -6,7 +6,7 @@
 
 use ratatui::style::Color as RColor;
 
-use crate::color::ColorRgb;
+use crate::color::{ColorRgb, parse_hex};
 
 /// A complete color scheme: ANSI palette + terminal defaults + chrome colors.
 #[derive(Clone, Copy)]
@@ -37,9 +37,76 @@ pub struct Theme {
     pub input_bg: RColor,
 }
 
-/// All selectable themes, in Settings-popup order. The first entry is the
-/// original kumo scheme; the rest are the Spider-Verse family.
-pub const THEMES: [Theme; 5] = [
+/// Owned variant of `Theme` used for custom themes defined in `config.toml`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedTheme {
+    pub name: String,
+    pub palette: [ColorRgb; 16],
+    pub term_fg: ColorRgb,
+    pub term_bg: ColorRgb,
+    pub term_cursor: ColorRgb,
+    pub fg: RColor,
+    pub accent: RColor,
+    pub secondary: RColor,
+    pub panel_sep: RColor,
+    pub panel_muted: RColor,
+    pub border_idle: RColor,
+    pub green: RColor,
+    pub orange: RColor,
+    pub red: RColor,
+    pub input_bg: RColor,
+}
+
+impl From<Theme> for OwnedTheme {
+    fn from(t: Theme) -> Self {
+        Self {
+            name: t.name.to_string(),
+            palette: t.palette,
+            term_fg: t.term_fg,
+            term_bg: t.term_bg,
+            term_cursor: t.term_cursor,
+            fg: t.fg,
+            accent: t.accent,
+            secondary: t.secondary,
+            panel_sep: t.panel_sep,
+            panel_muted: t.panel_muted,
+            border_idle: t.border_idle,
+            green: t.green,
+            orange: t.orange,
+            red: t.red,
+            input_bg: t.input_bg,
+        }
+    }
+}
+
+impl OwnedTheme {
+    /// Convert to a `Theme` with a leaked name. Leaks the string once per custom
+    /// theme — negligible for the daemon's lifetime and keeps the existing
+    /// `Theme`-based FFI unchanged.
+    pub fn as_static(&self) -> Theme {
+        Theme {
+            name: Box::leak(self.name.clone().into_boxed_str()),
+            palette: self.palette,
+            term_fg: self.term_fg,
+            term_bg: self.term_bg,
+            term_cursor: self.term_cursor,
+            fg: self.fg,
+            accent: self.accent,
+            secondary: self.secondary,
+            panel_sep: self.panel_sep,
+            panel_muted: self.panel_muted,
+            border_idle: self.border_idle,
+            green: self.green,
+            orange: self.orange,
+            red: self.red,
+            input_bg: self.input_bg,
+        }
+    }
+}
+
+/// All selectable built-in themes, in Settings-popup order. Custom (if defined
+/// in `~/.config/kumo/config.toml`) appears last as an extra entry.
+pub const THEMES: [Theme; 8] = [
     Theme {
         name: "Catppuccin Mocha",
         palette: [
@@ -210,6 +277,108 @@ pub const THEMES: [Theme; 5] = [
         red: RColor::Rgb(0xe5, 0x48, 0x4d),
         input_bg: RColor::Rgb(0xf8, 0xf9, 0xfa),
     },
+    Theme {
+        name: "Gruvbox Dark",
+        palette: [
+            ColorRgb::new(0x28, 0x28, 0x28), // Black      (bg)
+            ColorRgb::new(0xcc, 0x24, 0x1d), // Red
+            ColorRgb::new(0x98, 0x97, 0x1a), // Green
+            ColorRgb::new(0xd7, 0x99, 0x21), // Yellow
+            ColorRgb::new(0x45, 0x85, 0x88), // Blue
+            ColorRgb::new(0xb1, 0x62, 0x86), // Magenta
+            ColorRgb::new(0x68, 0x9d, 0x6a), // Cyan
+            ColorRgb::new(0xa8, 0x99, 0x84), // White
+            ColorRgb::new(0x92, 0x83, 0x74), // BrightBlack
+            ColorRgb::new(0xfb, 0x49, 0x34), // BrightRed
+            ColorRgb::new(0xb8, 0xbb, 0x26), // BrightGreen
+            ColorRgb::new(0xfa, 0xbd, 0x2f), // BrightYellow
+            ColorRgb::new(0x83, 0xa5, 0x98), // BrightBlue
+            ColorRgb::new(0xd3, 0x86, 0x9b), // BrightMagenta
+            ColorRgb::new(0x8e, 0xc0, 0x7c), // BrightCyan
+            ColorRgb::new(0xeb, 0xdb, 0xb2), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0xeb, 0xdb, 0xb2),
+        term_bg: ColorRgb::new(0x28, 0x28, 0x28),
+        term_cursor: ColorRgb::new(0xfe, 0x80, 0x19),
+        fg: RColor::Rgb(0xeb, 0xdb, 0xb2),
+        accent: RColor::Rgb(0xfe, 0x80, 0x19),
+        secondary: RColor::Rgb(0x8e, 0xc0, 0x7c),
+        panel_sep: RColor::Rgb(0x3c, 0x38, 0x36),
+        panel_muted: RColor::Rgb(0x92, 0x83, 0x74),
+        border_idle: RColor::Rgb(0x92, 0x83, 0x74),
+        green: RColor::Rgb(0xb8, 0xbb, 0x26),
+        orange: RColor::Rgb(0xfe, 0x80, 0x19),
+        red: RColor::Rgb(0xfb, 0x49, 0x34),
+        input_bg: RColor::Rgb(0xeb, 0xdb, 0xb2),
+    },
+    Theme {
+        name: "Dracula",
+        palette: [
+            ColorRgb::new(0x21, 0x22, 0x2c), // Black
+            ColorRgb::new(0xff, 0x55, 0x55), // Red
+            ColorRgb::new(0x50, 0xfa, 0x7b), // Green
+            ColorRgb::new(0xf1, 0xfa, 0x8c), // Yellow
+            ColorRgb::new(0xbd, 0x93, 0xf9), // Blue
+            ColorRgb::new(0xff, 0x79, 0xc6), // Magenta
+            ColorRgb::new(0x8b, 0xe9, 0xfd), // Cyan
+            ColorRgb::new(0xf8, 0xf8, 0xf2), // White
+            ColorRgb::new(0x62, 0x72, 0xa4), // BrightBlack
+            ColorRgb::new(0xff, 0x6e, 0x67), // BrightRed
+            ColorRgb::new(0x5a, 0xf7, 0x8e), // BrightGreen
+            ColorRgb::new(0xf4, 0xf9, 0x9d), // BrightYellow
+            ColorRgb::new(0xca, 0xa9, 0xfa), // BrightBlue
+            ColorRgb::new(0xff, 0x92, 0xd0), // BrightMagenta
+            ColorRgb::new(0x9a, 0xed, 0xfe), // BrightCyan
+            ColorRgb::new(0xff, 0xff, 0xff), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0xf8, 0xf8, 0xf2),
+        term_bg: ColorRgb::new(0x28, 0x2a, 0x36),
+        term_cursor: ColorRgb::new(0xbd, 0x93, 0xf9),
+        fg: RColor::Rgb(0xf8, 0xf8, 0xf2),
+        accent: RColor::Rgb(0xbd, 0x93, 0xf9),
+        secondary: RColor::Rgb(0xff, 0x79, 0xc6),
+        panel_sep: RColor::Rgb(0x21, 0x22, 0x2c),
+        panel_muted: RColor::Rgb(0x62, 0x72, 0xa4),
+        border_idle: RColor::Rgb(0x62, 0x72, 0xa4),
+        green: RColor::Rgb(0x50, 0xfa, 0x7b),
+        orange: RColor::Rgb(0xff, 0xb8, 0x6c),
+        red: RColor::Rgb(0xff, 0x55, 0x55),
+        input_bg: RColor::Rgb(0xf8, 0xf8, 0xf2),
+    },
+    Theme {
+        name: "Tokyo Night",
+        palette: [
+            ColorRgb::new(0x41, 0x48, 0x68), // Black
+            ColorRgb::new(0xf7, 0x76, 0x8e), // Red
+            ColorRgb::new(0x9e, 0xce, 0x6a), // Green
+            ColorRgb::new(0xe0, 0xaf, 0x68), // Yellow
+            ColorRgb::new(0x7a, 0xa2, 0xf7), // Blue
+            ColorRgb::new(0xbb, 0x9a, 0xf7), // Magenta
+            ColorRgb::new(0x7d, 0xcf, 0xff), // Cyan
+            ColorRgb::new(0xc0, 0xca, 0xf5), // White
+            ColorRgb::new(0x41, 0x48, 0x68), // BrightBlack (same as dark, historical)
+            ColorRgb::new(0xf7, 0x76, 0x8e), // BrightRed
+            ColorRgb::new(0x9e, 0xce, 0x6a), // BrightGreen
+            ColorRgb::new(0xe0, 0xaf, 0x68), // BrightYellow
+            ColorRgb::new(0x7a, 0xa2, 0xf7), // BrightBlue
+            ColorRgb::new(0xbb, 0x9a, 0xf7), // BrightMagenta
+            ColorRgb::new(0x7d, 0xcf, 0xff), // BrightCyan
+            ColorRgb::new(0xc0, 0xca, 0xf5), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0xc0, 0xca, 0xf5),
+        term_bg: ColorRgb::new(0x24, 0x28, 0x3b),
+        term_cursor: ColorRgb::new(0x7a, 0xa2, 0xf7),
+        fg: RColor::Rgb(0xc0, 0xca, 0xf5),
+        accent: RColor::Rgb(0x7a, 0xa2, 0xf7),
+        secondary: RColor::Rgb(0xbb, 0x9a, 0xf7),
+        panel_sep: RColor::Rgb(0x16, 0x1a, 0x2e),
+        panel_muted: RColor::Rgb(0x56, 0x5f, 0x89),
+        border_idle: RColor::Rgb(0x56, 0x5f, 0x89),
+        green: RColor::Rgb(0x9e, 0xce, 0x6a),
+        orange: RColor::Rgb(0xe0, 0xaf, 0x68),
+        red: RColor::Rgb(0xf7, 0x76, 0x8e),
+        input_bg: RColor::Rgb(0xc0, 0xca, 0xf5),
+    },
 ];
 
 /// Index of the theme applied on a fresh start.
@@ -226,5 +395,133 @@ pub fn chrome_hex(color: RColor, theme: &Theme) -> Option<u32> {
             .get(i as usize)
             .map(|c| ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32),
         _ => None,
+    }
+}
+
+pub fn chrome_hex_owned(color: RColor, theme: &OwnedTheme) -> Option<u32> {
+    match color {
+        RColor::Rgb(r, g, b) => Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32),
+        RColor::Indexed(i) => theme
+            .palette
+            .get(i as usize)
+            .map(|c| ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32),
+        _ => None,
+    }
+}
+
+/// Parse a hex string into an `RColor::Rgb`. Accepts `#rrggbb` / `rrggbb` / `#rgb`.
+pub fn parse_rcolor(s: &str) -> Option<RColor> {
+    parse_hex(s).map(|c| RColor::Rgb(c.r, c.g, c.b))
+}
+
+/// Normalize a theme name for lookup: lowercase, trim, hyphens/spaces equivalent.
+pub fn normalize_name(s: &str) -> String {
+    s.trim().to_ascii_lowercase().replace(' ', "-").replace('_', "-")
+}
+
+/// Find the index of a built-in theme by name (case-insensitive, hyphen/space tolerant).
+/// Supports short aliases: "gruvbox" matches "Gruvbox Dark", "catppuccin" matches
+/// "Catppuccin Mocha", etc. via prefix matching.
+pub fn builtin_index_by_name(name: &str) -> Option<usize> {
+    let needle = normalize_name(name);
+    // Exact match first
+    if let Some(idx) = THEMES.iter().position(|t| normalize_name(t.name) == needle) {
+        return Some(idx);
+    }
+    // Prefix / alias match: "gruvbox" -> "gruvbox-dark", "tokyo" -> "tokyo-night"
+    THEMES.iter().position(|t| {
+        let n = normalize_name(t.name);
+        n.starts_with(&needle) || needle.starts_with(&n)
+    })
+}
+
+/// Build the full list of `OwnedTheme`s including the optional custom theme at the end.
+pub fn all_themes(custom: Option<OwnedTheme>) -> Vec<OwnedTheme> {
+    let mut v: Vec<OwnedTheme> = THEMES.iter().copied().map(OwnedTheme::from).collect();
+    if let Some(c) = custom {
+        v.push(c);
+    }
+    v
+}
+
+/// Resolve the initial theme index from config. `selected` is the `theme = "..."` value.
+/// Returns the fallback `DEFAULT_THEME_IDX` when the name is unknown.
+pub fn resolve_theme_idx(selected: Option<&str>, custom: Option<&OwnedTheme>) -> usize {
+    if let Some(name) = selected {
+        // "custom" (any case) selects the dynamic slot when present.
+        if normalize_name(name) == "custom" {
+            if custom.is_some() {
+                return THEMES.len();
+            }
+            return DEFAULT_THEME_IDX;
+        }
+        if let Some(idx) = builtin_index_by_name(name) {
+            return idx;
+        }
+        // numeric idx as string ("0", "3")
+        if let Ok(n) = name.trim().parse::<usize>() {
+            if n < THEMES.len() {
+                return n;
+            }
+        }
+        log::warn!("kumo: unknown theme {name:?}; using default");
+    }
+    DEFAULT_THEME_IDX
+}
+
+fn rcolor_to_triplet(c: RColor, palette: &[ColorRgb; 16]) -> [u8; 3] {
+    match c {
+        RColor::Rgb(r, g, b) => [r, g, b],
+        RColor::Indexed(i) => palette
+            .get(i as usize)
+            .map(|cc| [cc.r, cc.g, cc.b])
+            .unwrap_or([0, 0, 0]),
+        _ => [0, 0, 0],
+    }
+}
+fn triplet_to_rcolor(t: [u8; 3]) -> RColor {
+    RColor::Rgb(t[0], t[1], t[2])
+}
+
+/// Convert an `OwnedTheme` to the wire representation.
+pub fn owned_to_wire(t: &OwnedTheme) -> kumo_protocol::WireTheme {
+    kumo_protocol::WireTheme {
+        name: t.name.clone(),
+        palette: t.palette.map(|c| [c.r, c.g, c.b]),
+        term_fg: [t.term_fg.r, t.term_fg.g, t.term_fg.b],
+        term_bg: [t.term_bg.r, t.term_bg.g, t.term_bg.b],
+        term_cursor: [t.term_cursor.r, t.term_cursor.g, t.term_cursor.b],
+        fg: rcolor_to_triplet(t.fg, &t.palette),
+        accent: rcolor_to_triplet(t.accent, &t.palette),
+        secondary: rcolor_to_triplet(t.secondary, &t.palette),
+        panel_sep: rcolor_to_triplet(t.panel_sep, &t.palette),
+        panel_muted: rcolor_to_triplet(t.panel_muted, &t.palette),
+        border_idle: rcolor_to_triplet(t.border_idle, &t.palette),
+        green: rcolor_to_triplet(t.green, &t.palette),
+        orange: rcolor_to_triplet(t.orange, &t.palette),
+        red: rcolor_to_triplet(t.red, &t.palette),
+        input_bg: rcolor_to_triplet(t.input_bg, &t.palette),
+    }
+}
+
+/// Convert a `WireTheme` back to an `OwnedTheme`.
+pub fn wire_to_owned(w: kumo_protocol::WireTheme) -> OwnedTheme {
+    let palette: [ColorRgb; 16] = w.palette.map(|t| ColorRgb::new(t[0], t[1], t[2]));
+    OwnedTheme {
+        name: w.name,
+        palette,
+        term_fg: ColorRgb::new(w.term_fg[0], w.term_fg[1], w.term_fg[2]),
+        term_bg: ColorRgb::new(w.term_bg[0], w.term_bg[1], w.term_bg[2]),
+        term_cursor: ColorRgb::new(w.term_cursor[0], w.term_cursor[1], w.term_cursor[2]),
+        fg: triplet_to_rcolor(w.fg),
+        accent: triplet_to_rcolor(w.accent),
+        secondary: triplet_to_rcolor(w.secondary),
+        panel_sep: triplet_to_rcolor(w.panel_sep),
+        panel_muted: triplet_to_rcolor(w.panel_muted),
+        border_idle: triplet_to_rcolor(w.border_idle),
+        green: triplet_to_rcolor(w.green),
+        orange: triplet_to_rcolor(w.orange),
+        red: triplet_to_rcolor(w.red),
+        input_bg: triplet_to_rcolor(w.input_bg),
     }
 }
