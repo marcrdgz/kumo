@@ -3866,15 +3866,35 @@ impl View {
             StatusWidget::Session,
         ];
 
-        // Reserve width for the right-aligned transient (leader hint or copied toast)
+        // Reserve width for the right-aligned transient (leader hint / copied toast / copy-mode hint)
         // so it stays readable on a narrow terminal; it overlays the bar.
+        let copy_hint: Option<String> = if self.mode == Mode::Copy {
+            if let Some(cs) = self.copy.as_ref() {
+                if cs.search_active { None } else {
+                    Some(if cs.hits.is_empty() {
+                        if let Some(q) = cs.search_query.as_ref() {
+                            format!(" COPY {} (no matches) · q:quit ", q)
+                        } else {
+                            " COPY h/j/k/l · 0/$ · g/G · v/V · y · /? · n/N · q ".to_string()
+                        }
+                    } else {
+                        let idx = cs.hit_idx.map(|i| i+1).unwrap_or(0);
+                        format!(" COPY {} [{}/{}] · n/N · q ", cs.search_query.as_deref().unwrap_or(""), idx, cs.hits.len())
+                    })
+                }
+            } else { Some(" COPY ".to_string()) }
+        } else { None };
         let transient_w: u16 = if self.mode == Mode::Leader {
             let hint = bindings::leader_hint(&self.keymap);
             hint.chars().count() as u16
         } else if let Some((msg, t)) = &self.status_msg {
             if t.elapsed() < TOAST_TIMEOUT {
                 msg.chars().count() as u16
+            } else if let Some(h) = &copy_hint {
+                h.chars().count() as u16
             } else { 0 }
+        } else if let Some(h) = &copy_hint {
+            h.chars().count() as u16
         } else { 0 };
 
         // Overflow loop: drop lowest-priority widget present until everything fits
@@ -3985,12 +4005,10 @@ impl View {
             f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(right_spans)), Rect::new(x, area.y, right_w.min(area.width), 1));
         }
 
-        // Transient right-aligned overlay: leader hint or copied toast, both right-aligned
-        // and rendered last so they overwrite any right-slot widgets underneath.
+        // Transient right-aligned overlay: leader hint / copied toast / copy-mode hint
+        // rendered last so they overwrite right-slot widgets. Priority: leader > toast > copy.
         if self.mode == Mode::Leader {
             let hint = bindings::leader_hint(&self.keymap);
-            // Available space left of the right slot is already accounted for by
-            // the reserve above; now draw it.
             let hint_w = hint.chars().count() as u16;
             let w = hint_w.min(area.width);
             let x = area.width.saturating_sub(w);
@@ -4003,7 +4021,17 @@ impl View {
                 let x = area.width.saturating_sub(w);
                 let msg_style = Style::default().fg(RColor::White).bg(theme.accent).add_modifier(Modifier::BOLD);
                 f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(msg.chars().take(w as usize).collect::<String>(), msg_style)])), Rect::new(x, area.y, w, 1));
+            } else if let Some(h) = &copy_hint {
+                let w = (h.chars().count() as u16).min(area.width);
+                let x = area.width.saturating_sub(w);
+                let s = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(h.chars().take(w as usize).collect::<String>(), s)])), Rect::new(x, area.y, w, 1));
             }
+        } else if let Some(h) = &copy_hint {
+            let w = (h.chars().count() as u16).min(area.width);
+            let x = area.width.saturating_sub(w);
+            let s = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+            f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(h.chars().take(w as usize).collect::<String>(), s)])), Rect::new(x, area.y, w, 1));
         }
     }
 
@@ -4434,26 +4462,7 @@ impl View {
     fn render_copy_search_bar(&self, f: &mut Frame) {
         let Some(cs) = self.copy.as_ref() else { return; };
         if !cs.search_active {
-            // When not searching but have a query, show hint in status-like bar?
-            // Render a small hint line at bottom if in copy mode
-            if self.mode != Mode::Copy { return; }
-            let theme = self.current_theme();
-            let pa = self.panes_area();
-            if pa.width == 0 || pa.height == 0 { return; }
-            // Popup just below tabs with a line gap: tabs at y=0, gap at y=1 (pane border), popup at y=2
-            let bar_y = pa.y.saturating_add(1);
-            if bar_y >= pa.y + pa.height { return; }
-            let rect = Rect::new(pa.x, bar_y, pa.width, 1);
-            let msg = if cs.hits.is_empty() {
-                if cs.search_query.is_some() { format!(" copy: {} (no matches) — /:? search n/N next q: quit v: select y: yank", cs.search_query.as_deref().unwrap_or("")) }
-                else { " copy: h/j/k/l move 0/$ g/G top/bottom v/V select y yank / ? search n/N next q: quit ".to_string() }
-            } else {
-                let idx = cs.hit_idx.map(|i| i+1).unwrap_or(0);
-                format!(" copy: {} [{}/{}] n/N next q: quit ", cs.search_query.as_deref().unwrap_or(""), idx, cs.hits.len())
-            };
-            let style = Style::default().fg(RColor::Black).bg(theme.secondary);
-            fill(f, rect, theme.secondary);
-            text(f, rect.x + 1, rect.y, &msg, style, rect.width.saturating_sub(2));
+            // Hint moved to status bar right side (like "copied" toast) — nothing to draw here.
             return;
         }
         // Active search — rectangle popup (black bg, red border) like rename, below tabs with gap
