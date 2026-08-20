@@ -1278,6 +1278,7 @@ impl View {
             }
             Action::ShowKeybinds => self.open_keybind_overlay(),
             Action::EnterCopyMode => self.enter_copy_mode(),
+            Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
         }
         self.mark_dirty();
         Ok(())
@@ -1326,6 +1327,19 @@ impl View {
         });
         self.mode = Mode::Copy;
         self.mark_dirty();
+    }
+
+    fn enter_copy_mode_with_search(&mut self, forward: bool) {
+        self.enter_copy_mode();
+        if self.mode == Mode::Copy {
+            if let Some(cs) = self.copy.as_mut() {
+                cs.search_active = true;
+                cs.search_input.clear();
+                cs.search_cursor = 0;
+                cs.search_forward = forward;
+            }
+            self.mark_dirty();
+        }
     }
 
     fn find_layout_pane(node: &LayoutNode, pid: u64) -> Option<kumo_protocol::LayoutPane> {
