@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crate::daemon::agents::AgentStatus;
 use crate::daemon::pty::{Pty, PtySpec};
-use kumo_core::theme::Theme;
+use kumo_core::theme::{OwnedTheme, Theme};
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
@@ -192,7 +192,7 @@ impl Pane {
         rows: u16,
         is_ai: bool,
         events_tx: Sender<PtyEvent>,
-        theme: &Theme,
+        theme: &OwnedTheme,
     ) -> Result<Pane> {
         let pty = Pty::spawn(&PtySpec {
             shell: shell.clone(),
@@ -213,6 +213,24 @@ impl Pane {
             events_tx,
             theme,
         )
+    }
+
+    /// Spawn with a built-in `Theme` static (for tests). Delegates to `spawn` via conversion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_theme(
+        session_id: u64,
+        id: u64,
+        shell: String,
+        program: Option<(String, Vec<String>)>,
+        cwd: Option<PathBuf>,
+        cols: u16,
+        rows: u16,
+        is_ai: bool,
+        events_tx: Sender<PtyEvent>,
+        theme: &Theme,
+    ) -> Result<Pane> {
+        let owned = OwnedTheme::from(*theme);
+        Self::spawn(session_id, id, shell, program, cwd, cols, rows, is_ai, events_tx, &owned)
     }
 
     /// Adopt a PTY master inherited across a daemon restart (`kumo update`):
@@ -238,7 +256,7 @@ impl Pane {
         mouse_tracking: bool,
         snapshot: Option<Vec<u8>>,
         events_tx: Sender<PtyEvent>,
-        theme: &Theme,
+        theme: &OwnedTheme,
     ) -> Result<Pane> {
         // Try snapshot first: decode the terminal before creating the PTY so we
         // can fallback to a blank terminal without losing the PTY fd.
@@ -296,7 +314,7 @@ impl Pane {
         rows: u16,
         pty: Pty,
         events_tx: Sender<PtyEvent>,
-        theme: &Theme,
+        theme: &OwnedTheme,
     ) -> Result<Pane> {
         let vt = vt::Terminal::new(
             cols.max(1),
@@ -320,7 +338,7 @@ impl Pane {
         pty: Pty,
         snapshot: Vec<u8>,
         events_tx: Sender<PtyEvent>,
-        theme: &Theme,
+        theme: &OwnedTheme,
     ) -> Result<Pane> {
         let vt = vt::Terminal::from_snapshot(
             &snapshot,
@@ -383,6 +401,12 @@ impl Pane {
     /// Recolor the terminal emulator for a newly selected theme. Forces a full
     /// redraw so the new background/palette reach the next render.
     pub fn apply_theme(&mut self, theme: &Theme) {
+        self.vt.apply_theme(&theme.palette, theme.term_fg, theme.term_bg, theme.term_cursor);
+        self.dirty = true;
+        self.full_redraw = true;
+    }
+
+    pub fn apply_theme_owned(&mut self, theme: &OwnedTheme) {
         self.vt.apply_theme(&theme.palette, theme.term_fg, theme.term_bg, theme.term_cursor);
         self.dirty = true;
         self.full_redraw = true;
@@ -1076,8 +1100,8 @@ mod tests {
         assert_eq!(vt::codepoint_width('a'), 1);
     }
 
-    fn test_theme() -> &'static Theme {
-        &kumo_core::theme::THEMES[kumo_core::theme::DEFAULT_THEME_IDX]
+    fn test_theme() -> kumo_core::theme::OwnedTheme {
+        kumo_core::theme::OwnedTheme::from(kumo_core::theme::THEMES[kumo_core::theme::DEFAULT_THEME_IDX])
     }
 
     fn test_pane(is_ai: bool) -> Pane {
@@ -1095,7 +1119,7 @@ mod tests {
             40,
             is_ai,
             tx,
-            test_theme(),
+            &test_theme(),
         )
         .unwrap()
     }
@@ -1781,7 +1805,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, test_theme()).unwrap();
+        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, &test_theme()).unwrap();
         pane.write(format!("cd {}\n", dir.display()).as_bytes());
         std::thread::sleep(Duration::from_millis(600));
         // macOS /var and /tmp resolve to /private; compare canonical paths.
@@ -1804,7 +1828,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             std::fs::create_dir_all(d).unwrap();
         }
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, test_theme()).unwrap();
+        let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, &test_theme()).unwrap();
         pane.write(format!("cd {}\nsleep 3 &\ncd {}\n", bg.display(), cwd_dir.display()).as_bytes());
         std::thread::sleep(Duration::from_millis(900));
         let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -1865,7 +1889,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             true,
             None,
             tx,
-            test_theme(),
+            &test_theme(),
         )
         .unwrap();
         assert!(
@@ -1899,7 +1923,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             false,
             None,
             tx,
-            test_theme(),
+            &test_theme(),
         )
         .unwrap();
         assert!(!resumed.has_mouse_reporting(), "mouse tracking must stay off");
@@ -1994,7 +2018,7 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
             false,
             None,
             tx,
-            test_theme(),
+            &test_theme(),
         )
         .unwrap();
 

@@ -180,7 +180,14 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                     // Push the active theme so the client can draw its chrome
                     // before the first layout arrives.
-                    let _ = send_to(&mut clients, id, &DaemonEvent::Theme { idx: app.theme_idx });
+                    let _ = send_to(
+                        &mut clients,
+                        id,
+                        &DaemonEvent::Theme {
+                            idx: app.theme_idx,
+                            custom: app.active_wire_theme(),
+                        },
+                    );
                     let notice = app.update_status();
                     let _ = send_to(&mut clients, id, &DaemonEvent::UpdateNotice { notice });
                 }
@@ -191,12 +198,23 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     kill = true;
                 }
                 Command::ReloadConfig => {
+                    let prev_idx = app.theme_idx;
+                    let prev_theme = app.theme.clone();
                     app.reload_config();
                     let _ = send_to(
                         &mut clients,
                         id,
                         &DaemonEvent::ConfigReloaded { notice: "config reloaded".to_string() },
                     );
+                    if app.theme_idx != prev_idx || app.theme.name != prev_theme.name || app.theme.palette != prev_theme.palette {
+                        let custom = app.active_wire_theme();
+                        for client in clients.values_mut() {
+                            let _ = client.tx.try_send(DaemonEvent::Theme {
+                                idx: app.theme_idx,
+                                custom: custom.clone(),
+                            });
+                        }
+                    }
                 }
                 Command::Restart => {
                     // `kumo update` swapped the binary on disk: restart this
@@ -281,8 +299,12 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let reply = app.set_theme(idx).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                     // Broadcast the new chrome colors so every client re-colors.
+                    let custom = app.active_wire_theme();
                     for client in clients.values_mut() {
-                        let _ = client.tx.try_send(DaemonEvent::Theme { idx: app.theme_idx });
+                        let _ = client.tx.try_send(DaemonEvent::Theme {
+                            idx: app.theme_idx,
+                            custom: custom.clone(),
+                        });
                     }
                 }
                 Command::OpenConfig { session } => {
@@ -795,7 +817,7 @@ mod tests {
         }
         let theme = loop {
             match next_event(&mut stream, Duration::from_secs(10), "Theme") {
-                DaemonEvent::Theme { idx } => break idx,
+                DaemonEvent::Theme { idx, .. } => break idx,
                 _ => continue,
             }
         };

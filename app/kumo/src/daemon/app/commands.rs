@@ -503,18 +503,21 @@ impl App {
     }
 
     /// Apply theme `idx` daemon-side: re-color every pane's terminal emulator
-    /// with the new ANSI palette and record it as the active theme.
+    /// with the new ANSI palette and record it as the active theme. Supports
+    /// the built-ins plus an optional `[theme.custom]` entry at the end.
     pub(crate) fn set_theme(&mut self, idx: usize) -> Result<String> {
-        if idx >= kumo_core::theme::THEMES.len() {
+        let all = kumo_core::theme::all_themes(kumo_core::config::custom_theme());
+        if idx >= all.len() {
             return Ok(format!("no such theme #{idx}"));
         }
-        let theme = kumo_core::theme::THEMES[idx];
+        let theme = all[idx].clone();
         for pane in self.panes.values_mut() {
-            pane.apply_theme(&theme);
+            pane.apply_theme_owned(&theme);
         }
+        let name = theme.name.clone();
         self.theme = theme;
         self.theme_idx = idx;
-        Ok(format!("theme: {}", theme.name))
+        Ok(format!("theme: {}", name))
     }
 
     /// MENU `config`: open the config file in an editor pane inside the named

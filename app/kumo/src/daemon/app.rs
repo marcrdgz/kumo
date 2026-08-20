@@ -7,7 +7,7 @@ use anyhow::Result;
 use ratatui::buffer::Buffer;
 
 use kumo_core::layout::{LayoutTree, SplitDir};
-use kumo_core::theme::{Theme, THEMES};
+use kumo_core::theme::{OwnedTheme, THEMES};
 use kumo_core::Launch;
 use crate::daemon::agents::AgentStatus;
 use crate::daemon::pane::{Pane, PtyEvent};
@@ -119,8 +119,8 @@ pub struct App {
     /// resizes each pane's PTY + emulator to this. Default 80x24.
     pane_sizes: HashMap<u64, (u16, u16)>,
     quit: bool,
-    /// Active theme + its index in `THEMES`; switching applies it to all panes.
-    theme: Theme,
+    /// Active theme + its index in the full theme list (built-ins + optional custom).
+    theme: OwnedTheme,
     theme_idx: usize,
     /// Startup update banner (top-right), when a newer release exists.
     update_notice: Option<kumo_core::update::UpdateNotice>,
@@ -195,8 +195,17 @@ impl App {
             pane_cache: HashMap::new(),
             pane_sizes: HashMap::new(),
             quit: false,
-            theme: THEMES[kumo_core::theme::DEFAULT_THEME_IDX],
-            theme_idx: kumo_core::theme::DEFAULT_THEME_IDX,
+            theme: {
+                let custom = kumo_core::config::custom_theme();
+                let idx = kumo_core::config::theme_index();
+                let all = kumo_core::theme::all_themes(custom.clone());
+                let idx = idx.min(all.len().saturating_sub(1));
+                all[idx].clone()
+            },
+            theme_idx: {
+                let custom = kumo_core::config::custom_theme();
+                kumo_core::config::theme_index().min(kumo_core::theme::all_themes(custom).len().saturating_sub(1))
+            },
             update_notice: None,
             update_rx,
             branch_rx,
@@ -652,6 +661,8 @@ impl App {
     /// `shell` and `ai-cmd` are cached at startup, so they refresh here;
     /// `new-cwd` and `agent-sound` are read live from the config on each use.
     /// Applies to panes spawned from now on — existing panes keep their PTY.
+    /// For themes, the selection (`[theme] name`) and custom palette
+    /// (`[theme.custom]`) are live-reloaded: all existing panes are re-colored.
     pub(super) fn reload_config(&mut self) {
         kumo_core::config::invalidate_cache();
         let shell = kumo_core::config::default_shell();
@@ -659,6 +670,38 @@ impl App {
         let ai_prog = kumo_core::config::resolve_program(&ai_prog);
         self.shell = shell;
         self.ai = (ai_prog, ai_args);
+        // Theme live-reload.
+        let custom = kumo_core::config::custom_theme();
+        let all = kumo_core::theme::all_themes(custom.clone());
+        let idx = kumo_core::config::theme_index().min(all.len().saturating_sub(1));
+        if idx < all.len() {
+            let new_theme = all[idx].clone();
+            if idx != self.theme_idx || new_theme != self.theme {
+                for pane in self.panes.values_mut() {
+                    pane.apply_theme_owned(&new_theme);
+                }
+                self.theme = new_theme;
+                self.theme_idx = idx;
+            }
+        }
+    }
+
+    pub(super) fn current_themes(&self) -> Vec<OwnedTheme> {
+        kumo_core::theme::all_themes(kumo_core::config::custom_theme())
+    }
+
+    pub(super) fn active_wire_theme(&self) -> Option<kumo_protocol::WireTheme> {
+        // Always advertise the custom theme when it exists, so clients can show
+        // the "Custom" entry in the picker even when a built-in is active.
+        // When Custom is active we send the live active theme; otherwise we send
+        // the stored custom definition.
+        if let Some(custom) = kumo_core::config::custom_theme() {
+            Some(kumo_core::theme::owned_to_wire(&custom))
+        } else if self.theme_idx == kumo_core::theme::THEMES.len() {
+            Some(kumo_core::theme::owned_to_wire(&self.theme))
+        } else {
+            None
+        }
     }
 
     fn next_session_id(&mut self) -> u64 {
