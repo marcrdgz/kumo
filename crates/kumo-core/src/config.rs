@@ -182,6 +182,182 @@ impl Default for SidebarConfig {
     }
 }
 
+/// Status bar widget identifier.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum StatusWidget {
+    Mode,
+    Menu,
+    Session,
+    Branch,
+    AgentStatus,
+    Hostname,
+    Clock,
+}
+
+impl StatusWidget {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mode" => Some(Self::Mode),
+            "menu" => Some(Self::Menu),
+            "session" => Some(Self::Session),
+            "branch" => Some(Self::Branch),
+            "agent" | "agents" | "agent_status" | "agent-status" => Some(Self::AgentStatus),
+            "hostname" | "host" => Some(Self::Hostname),
+            "clock" | "time" => Some(Self::Clock),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mode => "mode",
+            Self::Menu => "menu",
+            Self::Session => "session",
+            Self::Branch => "branch",
+            Self::AgentStatus => "agent_status",
+            Self::Hostname => "hostname",
+            Self::Clock => "clock",
+        }
+    }
+}
+
+/// Clock widget options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClockWidgetConfig {
+    /// `strftime`-like format, default `"%H:%M"` (minute granularity).
+    pub format: String,
+}
+
+impl Default for ClockWidgetConfig {
+    fn default() -> Self {
+        Self { format: "%H:%M".to_string() }
+    }
+}
+
+/// Branch widget options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchWidgetConfig {
+    pub show_ahead_behind: bool,
+    pub max_len: usize,
+}
+
+impl Default for BranchWidgetConfig {
+    fn default() -> Self {
+        Self { show_ahead_behind: true, max_len: 20 }
+    }
+}
+
+/// Agent widget display style.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AgentWidgetStyle {
+    /// `"◉1 blocked · ●2 working"` (default).
+    #[default]
+    Counts,
+    Dots,
+    List,
+}
+
+impl AgentWidgetStyle {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "counts" | "count" => Some(Self::Counts),
+            "dots" | "dot" => Some(Self::Dots),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
+/// Agent widget options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentWidgetConfig {
+    pub style: AgentWidgetStyle,
+    pub only_blocked: bool,
+}
+
+impl Default for AgentWidgetConfig {
+    fn default() -> Self {
+        Self { style: AgentWidgetStyle::Counts, only_blocked: false }
+    }
+}
+
+/// Hostname widget options.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HostnameStyle {
+    #[default]
+    Short,
+    Fqdn,
+}
+
+impl HostnameStyle {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "short" => Some(Self::Short),
+            "fqdn" | "full" => Some(Self::Fqdn),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostnameWidgetConfig {
+    pub style: HostnameStyle,
+    pub show_user: bool,
+    pub only_ssh: bool,
+}
+
+impl Default for HostnameWidgetConfig {
+    fn default() -> Self {
+        Self { style: HostnameStyle::Short, show_user: false, only_ssh: false }
+    }
+}
+
+/// Session widget options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionWidgetConfig {
+    pub show_tabs: bool,
+    pub show_panes: bool,
+    pub show_zoom: bool,
+}
+
+impl Default for SessionWidgetConfig {
+    fn default() -> Self {
+        Self { show_tabs: true, show_panes: true, show_zoom: true }
+    }
+}
+
+/// Per-widget option bag for the status bar.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct StatusBarWidgets {
+    pub clock: ClockWidgetConfig,
+    pub branch: BranchWidgetConfig,
+    pub agent: AgentWidgetConfig,
+    pub hostname: HostnameWidgetConfig,
+    pub session: SessionWidgetConfig,
+}
+
+/// Status bar configuration (`[status_bar]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusBarConfig {
+    pub enabled: bool,
+    pub left: Vec<StatusWidget>,
+    pub center: Vec<StatusWidget>,
+    pub right: Vec<StatusWidget>,
+    pub widgets: StatusBarWidgets,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            left: vec![StatusWidget::Mode, StatusWidget::Menu, StatusWidget::Session],
+            center: vec![StatusWidget::Branch],
+            right: vec![StatusWidget::AgentStatus, StatusWidget::Clock],
+            widgets: StatusBarWidgets::default(),
+        }
+    }
+}
+
 /// Parsed user configuration. Mirrors the flat `key = value` config file;
 /// future knobs (theme, leader, keymaps, status bar) will extend this struct.
 #[derive(Clone)]
@@ -213,6 +389,8 @@ pub struct Config {
     pub custom_theme: Option<crate::theme::OwnedTheme>,
     /// Sidebar toggle/order + border styling (`[sidebar]`).
     pub sidebar: SidebarConfig,
+    /// Status bar widget layout (`[status_bar]`).
+    pub status_bar: StatusBarConfig,
 }
 
 impl Default for Config {
@@ -229,6 +407,7 @@ impl Default for Config {
             theme: None,
             custom_theme: None,
             sidebar: SidebarConfig::default(),
+            status_bar: StatusBarConfig::default(),
         }
     }
 }
@@ -405,6 +584,101 @@ impl Config {
         // handled in from_map; toml is canonical.
     }
 
+    fn apply_status_bar(&mut self, raw: StatusBarRaw) {
+        if let Some(v) = raw.enabled {
+            self.status_bar.enabled = v;
+        }
+        // left / center / right: Vec<String> -> Vec<StatusWidget>
+        let parse_widgets = |vals: Vec<String>| -> Vec<StatusWidget> {
+            let mut out = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for s in vals {
+                if let Some(w) = StatusWidget::parse(&s) {
+                    if seen.insert(w) {
+                        out.push(w);
+                    }
+                } else {
+                    log::warn!("kumo: ignoring unknown status_bar widget {s:?}");
+                }
+            }
+            out
+        };
+        if let Some(vals) = raw.left {
+            self.status_bar.left = parse_widgets(vals);
+        }
+        if let Some(vals) = raw.center {
+            self.status_bar.center = parse_widgets(vals);
+        }
+        if let Some(vals) = raw.right {
+            self.status_bar.right = parse_widgets(vals);
+        }
+        if let Some(widgets) = raw.widgets {
+            if let Some(clock) = widgets.clock {
+                if let Some(fmt) = clock.format {
+                    if !fmt.trim().is_empty() {
+                        self.status_bar.widgets.clock.format = fmt;
+                    }
+                }
+            }
+            if let Some(branch) = widgets.branch {
+                if let Some(v) = branch.show_ahead_behind {
+                    self.status_bar.widgets.branch.show_ahead_behind = v;
+                }
+                if let Some(v) = branch.max_len {
+                    if v > 0 {
+                        self.status_bar.widgets.branch.max_len = v as usize;
+                    }
+                }
+            }
+            if let Some(agent) = widgets.agent {
+                if let Some(s) = agent.style {
+                    if let Some(st) = AgentWidgetStyle::parse(&s) {
+                        self.status_bar.widgets.agent.style = st;
+                    } else {
+                        log::warn!("kumo: ignoring invalid status_bar.widgets.agent.style {s:?}");
+                    }
+                }
+                if let Some(v) = agent.only_blocked {
+                    self.status_bar.widgets.agent.only_blocked = v;
+                }
+            }
+            if let Some(host) = widgets.hostname {
+                if let Some(s) = host.style {
+                    if let Some(st) = HostnameStyle::parse(&s) {
+                        self.status_bar.widgets.hostname.style = st;
+                    } else {
+                        log::warn!("kumo: ignoring invalid status_bar.widgets.hostname.style {s:?}");
+                    }
+                }
+                if let Some(v) = host.show_user {
+                    self.status_bar.widgets.hostname.show_user = v;
+                }
+                if let Some(v) = host.only_ssh {
+                    self.status_bar.widgets.hostname.only_ssh = v;
+                }
+            }
+            if let Some(sess) = widgets.session {
+                if let Some(v) = sess.show_tabs {
+                    self.status_bar.widgets.session.show_tabs = v;
+                }
+                if let Some(v) = sess.show_panes {
+                    self.status_bar.widgets.session.show_panes = v;
+                }
+                if let Some(v) = sess.show_zoom {
+                    self.status_bar.widgets.session.show_zoom = v;
+                }
+            }
+        }
+        if self.status_bar.enabled
+            && self.status_bar.left.is_empty()
+            && self.status_bar.center.is_empty()
+            && self.status_bar.right.is_empty()
+        {
+            log::warn!("kumo: [status_bar] all slots empty; using default session widget");
+            self.status_bar.left = vec![StatusWidget::Session];
+        }
+    }
+
     /// Normalize the new-cwd policy: a `Fixed` mode needs a valid `fixed-cwd`
     /// directory, else it falls back to `Current` with a warning.
     fn normalize_new_cwd(&mut self) {
@@ -548,6 +822,9 @@ impl Config {
         if let Some(sidebar) = toml.sidebar {
             self.apply_sidebar(sidebar);
         }
+        if let Some(status_bar) = toml.status_bar {
+            self.apply_status_bar(status_bar);
+        }
         self.normalize_new_cwd();
     }
 }
@@ -569,6 +846,56 @@ pub struct SidebarSectionsRaw {
 #[derive(Default, serde::Deserialize, Debug)]
 pub struct SidebarBordersRaw {
     pub style: Option<String>,
+}
+
+/// Raw TOML for `[status_bar]` — all optional, unknown keys ignored.
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct StatusBarRaw {
+    pub enabled: Option<bool>,
+    pub left: Option<Vec<String>>,
+    pub center: Option<Vec<String>>,
+    pub right: Option<Vec<String>>,
+    pub widgets: Option<StatusBarWidgetsRaw>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct StatusBarWidgetsRaw {
+    pub clock: Option<ClockRaw>,
+    pub branch: Option<BranchRaw>,
+    pub agent: Option<AgentRaw>,
+    pub hostname: Option<HostnameRaw>,
+    pub session: Option<SessionRaw>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct ClockRaw {
+    pub format: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct BranchRaw {
+    pub show_ahead_behind: Option<bool>,
+    pub max_len: Option<u64>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct AgentRaw {
+    pub style: Option<String>,
+    pub only_blocked: Option<bool>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct HostnameRaw {
+    pub style: Option<String>,
+    pub show_user: Option<bool>,
+    pub only_ssh: Option<bool>,
+}
+
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct SessionRaw {
+    pub show_tabs: Option<bool>,
+    pub show_panes: Option<bool>,
+    pub show_zoom: Option<bool>,
 }
 
 /// The `[keymap]` table: keyboard configuration (leader chord today, bindings
@@ -662,6 +989,8 @@ struct TomlConfig {
     theme: Option<ThemeValue>,
     #[serde(rename = "sidebar")]
     sidebar: Option<SidebarSectionRaw>,
+    #[serde(rename = "status_bar", alias = "status-bar")]
+    status_bar: Option<StatusBarRaw>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -940,6 +1269,16 @@ pub fn sidebar_sections() -> SidebarSections {
 /// Ordered sidebar sections permutation.
 pub fn sidebar_order() -> Vec<SidebarSection> {
     cached_config().sidebar.order
+}
+
+/// Status bar configuration (`[status_bar]`).
+pub fn status_bar() -> StatusBarConfig {
+    cached_config().status_bar
+}
+
+/// Whether the status bar is enabled.
+pub fn status_bar_enabled() -> bool {
+    cached_config().status_bar.enabled
 }
 
 /// Split a command line string into program + args (space separated).
@@ -1773,5 +2112,103 @@ mod tests {
         assert_eq!(BorderStyle::parse("hidden"), Some(BorderStyle::Hidden));
         assert_eq!(BorderStyle::parse("none"), Some(BorderStyle::Hidden));
         assert_eq!(BorderStyle::parse("unknown"), None);
+    }
+
+    #[test]
+    fn status_bar_defaults() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-status-default");
+        let home = scratch_dir("home-status-default");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = status_bar();
+        assert!(s.enabled);
+        assert_eq!(s.left, vec![StatusWidget::Mode, StatusWidget::Menu, StatusWidget::Session]);
+        assert_eq!(s.center, vec![StatusWidget::Branch]);
+        assert_eq!(s.right, vec![StatusWidget::AgentStatus, StatusWidget::Clock]);
+        assert_eq!(s.widgets.clock.format, "%H:%M");
+        assert!(s.widgets.branch.show_ahead_behind);
+        assert_eq!(s.widgets.branch.max_len, 20);
+        assert_eq!(s.widgets.agent.style, AgentWidgetStyle::Counts);
+    }
+
+    #[test]
+    fn status_bar_parses_layout_and_opts() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-status-layout");
+        let home = scratch_dir("home-status-layout");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[status_bar]\nenabled = false\nleft = [\"session\", \"branch\"]\ncenter = [\"clock\"]\nright = [\"hostname\", \"agent_status\"]\n[status_bar.widgets.clock]\nformat = \"%H:%M:%S\"\n[status_bar.widgets.branch]\nshow_ahead_behind = false\nmax_len = 10\n[status_bar.widgets.agent]\nstyle = \"dots\"\nonly_blocked = true\n[status_bar.widgets.hostname]\nstyle = \"fqdn\"\nshow_user = true\nonly_ssh = true\n[status_bar.widgets.session]\nshow_tabs = false\nshow_panes = false\nshow_zoom = false\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = status_bar();
+        assert!(!s.enabled);
+        assert_eq!(s.left, vec![StatusWidget::Session, StatusWidget::Branch]);
+        assert_eq!(s.center, vec![StatusWidget::Clock]);
+        assert_eq!(s.right, vec![StatusWidget::Hostname, StatusWidget::AgentStatus]);
+        assert_eq!(s.widgets.clock.format, "%H:%M:%S");
+        assert!(!s.widgets.branch.show_ahead_behind);
+        assert_eq!(s.widgets.branch.max_len, 10);
+        assert_eq!(s.widgets.agent.style, AgentWidgetStyle::Dots);
+        assert!(s.widgets.agent.only_blocked);
+        assert_eq!(s.widgets.hostname.style, HostnameStyle::Fqdn);
+        assert!(s.widgets.hostname.show_user);
+        assert!(s.widgets.hostname.only_ssh);
+        assert!(!s.widgets.session.show_tabs);
+        assert!(!s.widgets.session.show_panes);
+        assert!(!s.widgets.session.show_zoom);
+    }
+
+    #[test]
+    fn status_bar_ignores_unknown_widgets_and_dedupes() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-status-unk");
+        let home = scratch_dir("home-status-unk");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[status_bar]\nleft = [\"session\", \"unknown\", \"session\", \"branch\"]\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = status_bar();
+        assert_eq!(s.left, vec![StatusWidget::Session, StatusWidget::Branch], "unknown ignored, dupes removed");
+        // right stays default when not set
+        assert_eq!(s.right, vec![StatusWidget::AgentStatus, StatusWidget::Clock]);
+    }
+
+    #[test]
+    fn status_bar_alias_with_dash_parses() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-status-dash");
+        let home = scratch_dir("home-status-dash");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[status-bar]\nleft = [\"clock\"]\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let s = status_bar();
+        assert_eq!(s.left, vec![StatusWidget::Clock]);
+    }
+
+    #[test]
+    fn status_widget_parse_variants() {
+        assert_eq!(StatusWidget::parse("mode"), Some(StatusWidget::Mode));
+        assert_eq!(StatusWidget::parse("MENU"), Some(StatusWidget::Menu));
+        assert_eq!(StatusWidget::parse("agent_status"), Some(StatusWidget::AgentStatus));
+        assert_eq!(StatusWidget::parse("agent-status"), Some(StatusWidget::AgentStatus));
+        assert_eq!(StatusWidget::parse("host"), Some(StatusWidget::Hostname));
+        assert_eq!(StatusWidget::parse("time"), Some(StatusWidget::Clock));
+        assert_eq!(StatusWidget::parse("unknown"), None);
     }
 }
