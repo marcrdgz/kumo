@@ -1,4 +1,3 @@
-//! Claude Code (`claude`) lifecycle detection, mirroring herdr's bundled
 //! `claude.toml` manifest.
 //!
 //! Unlike opencode, Claude renders its live state outside the main transcript:
@@ -25,26 +24,38 @@ pub(crate) fn blocked(snap: &Snapshot) -> bool {
     // action (a select list also needs a navigation hint).
     if contains_ci(&snap.form, "esc to cancel")
         && (contains_ci(&snap.form, "enter to confirm")
-            || (contains_ci(&snap.form, "enter to select") && NAV_HINTS.iter().any(|m| contains_ci(&snap.form, m))))
+            || (contains_ci(&snap.form, "enter to select")
+                && NAV_HINTS.iter().any(|m| contains_ci(&snap.form, m))))
     {
         return true;
     }
     // Dynamic workflow confirmation.
-    if contains_ci(&snap.form, "run a dynamic workflow?") && contains_ci(&snap.form, "esc to cancel") {
+    if contains_ci(&snap.form, "run a dynamic workflow?")
+        && contains_ci(&snap.form, "esc to cancel")
+    {
         return true;
     }
     // Bash command approval: "do you want to proceed?" with command chrome and
     // a yes/no option line.
     if contains_ci(&snap.screen, "do you want to proceed?")
-        && ["bash command", "bash(", "contains expansion", "tab to amend", "ctrl+e to explain"]
-            .iter()
-            .any(|m| contains_ci(&snap.screen, m))
+        && [
+            "bash command",
+            "bash(",
+            "contains expansion",
+            "tab to amend",
+            "ctrl+e to explain",
+        ]
+        .iter()
+        .any(|m| contains_ci(&snap.screen, m))
         && snap.screen.lines().any(yes_no_line)
     {
         return true;
     }
     // Generic permission with numbered yes/no options rendered in the form.
-    if contains_ci(&snap.form, "do you want to proceed?") && contains_ci(&snap.form, "esc to cancel") && snap.form.lines().any(yes_no_line) {
+    if contains_ci(&snap.form, "do you want to proceed?")
+        && contains_ci(&snap.form, "esc to cancel")
+        && snap.form.lines().any(yes_no_line)
+    {
         return true;
     }
     // Standalone approval markers (legacy / connection / bash-approval hints).
@@ -89,7 +100,8 @@ pub(crate) fn working(snap: &Snapshot) -> bool {
     }
     // The working prompt box pins `· esc to interrupt ·` only while a task
     // runs; at idle it shows `? for shortcuts · ← for agents` instead.
-    if contains_ci(&snap.form, "esc to interrupt") || contains_ci(&snap.footer, "esc to interrupt") {
+    if contains_ci(&snap.form, "esc to interrupt") || contains_ci(&snap.footer, "esc to interrupt")
+    {
         return true;
     }
     if dingbat_spinner_in(&snap.form) || dingbat_spinner_in(&snap.footer) {
@@ -120,15 +132,18 @@ fn btw_overlay(screen: &str) -> bool {
         .rev()
         .take(5)
         .collect();
-    let has_btw = tail
-        .iter()
-        .any(|l| l.trim_start().starts_with("/btw") && l.trim_start()[4..].chars().next().is_none_or(char::is_whitespace));
+    let has_btw = tail.iter().any(|l| {
+        l.trim_start().starts_with("/btw")
+            && l.trim_start()[4..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+    });
     let has_close = tail.iter().any(|l| ends_with_ci(l, "esc to close"));
     has_btw && has_close
 }
 
 /// Whether `line` is a Claude yes/no option like `1. yes` / `2. no` (a bare
-/// `yes` also qualifies for the bash approval prompt). Mirrors herdr's
 /// `claude.toml` line regexes.
 fn yes_no_line(line: &str) -> bool {
     let mut t = line.trim_start();
@@ -188,13 +203,19 @@ mod tests {
 
     #[test]
     fn blocked_on_live_form() {
-        let s = snap("─────\nRun a dynamic workflow?\n  enter to confirm\n  esc to cancel\n", "");
+        let s = snap(
+            "─────\nRun a dynamic workflow?\n  enter to confirm\n  esc to cancel\n",
+            "",
+        );
         assert!(blocked(&s));
     }
 
     #[test]
     fn blocked_on_bash_approval() {
-        let s = snap("Do you want to proceed?\n  bash(rm -rf build)\n  1. yes\n  2. no\n  esc to cancel\n", "");
+        let s = snap(
+            "Do you want to proceed?\n  bash(rm -rf build)\n  1. yes\n  2. no\n  esc to cancel\n",
+            "",
+        );
         assert!(blocked(&s));
     }
 
@@ -288,7 +309,9 @@ mod tests {
 
     #[test]
     fn yes_no_line_rejects_non_options() {
-        for line in ["", "1. maybe", "5. yes", "no", "proceed?", "2.5. yes", "yes/no"] {
+        for line in [
+            "", "1. maybe", "5. yes", "no", "proceed?", "2.5. yes", "yes/no",
+        ] {
             assert!(!yes_no_line(line), "should reject {line:?}");
         }
     }

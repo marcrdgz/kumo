@@ -197,11 +197,21 @@ pub const POINT_TAG_VIEWPORT: i32 = 1;
 pub const POINT_TAG_SCREEN: i32 = 2;
 
 fn viewport_point(x: u16, y: u32) -> Point {
-    Point { tag: POINT_TAG_VIEWPORT, value: PointValue { coordinate: PointCoordinate { x, y } } }
+    Point {
+        tag: POINT_TAG_VIEWPORT,
+        value: PointValue {
+            coordinate: PointCoordinate { x, y },
+        },
+    }
 }
 
 fn screen_point(x: u16, y: u32) -> Point {
-    Point { tag: POINT_TAG_SCREEN, value: PointValue { coordinate: PointCoordinate { x, y } } }
+    Point {
+        tag: POINT_TAG_SCREEN,
+        value: PointValue {
+            coordinate: PointCoordinate { x, y },
+        },
+    }
 }
 
 /// A resolved reference to a terminal cell position.
@@ -284,7 +294,9 @@ pub union StyleColorValue {
 #[allow(clippy::non_canonical_clone_impl)]
 impl Clone for StyleColorValue {
     fn clone(&self) -> Self {
-        StyleColorValue { _padding: unsafe { self._padding } }
+        StyleColorValue {
+            _padding: unsafe { self._padding },
+        }
     }
 }
 
@@ -322,9 +334,18 @@ impl Style {
     fn new() -> Self {
         Style {
             size: size_of::<Style>(),
-            fg_color: StyleColor { tag: STYLE_COLOR_NONE, value: StyleColorValue { _padding: 0 } },
-            bg_color: StyleColor { tag: STYLE_COLOR_NONE, value: StyleColorValue { _padding: 0 } },
-            underline_color: StyleColor { tag: STYLE_COLOR_NONE, value: StyleColorValue { _padding: 0 } },
+            fg_color: StyleColor {
+                tag: STYLE_COLOR_NONE,
+                value: StyleColorValue { _padding: 0 },
+            },
+            bg_color: StyleColor {
+                tag: STYLE_COLOR_NONE,
+                value: StyleColorValue { _padding: 0 },
+            },
+            underline_color: StyleColor {
+                tag: STYLE_COLOR_NONE,
+                value: StyleColorValue { _padding: 0 },
+            },
             bold: false,
             italic: false,
             faint: false,
@@ -517,10 +538,7 @@ unsafe extern "C" {
         out_written: *mut usize,
     ) -> Result;
 
-    fn ghostty_render_state_new(
-        allocator: *const c_void,
-        state: *mut RenderStateHandle,
-    ) -> Result;
+    fn ghostty_render_state_new(allocator: *const c_void, state: *mut RenderStateHandle) -> Result;
     fn ghostty_render_state_free(state: RenderStateHandle);
     fn ghostty_render_state_update(state: RenderStateHandle, terminal: TerminalHandle) -> Result;
     fn ghostty_render_state_get(state: RenderStateHandle, data: i32, out: *mut c_void) -> Result;
@@ -531,7 +549,11 @@ unsafe extern "C" {
         values: *mut *mut c_void,
         out_written: *mut usize,
     ) -> Result;
-    fn ghostty_render_state_set(state: RenderStateHandle, option: i32, value: *const c_void) -> Result;
+    fn ghostty_render_state_set(
+        state: RenderStateHandle,
+        option: i32,
+        value: *const c_void,
+    ) -> Result;
     fn ghostty_render_state_clean(state: RenderStateHandle) -> Result;
     fn ghostty_render_state_row_iterator_new(
         allocator: *const c_void,
@@ -700,8 +722,17 @@ unsafe extern "C" fn pwd_changed_cb(term: TerminalHandle, userdata: *mut c_void)
         return;
     }
     let cell = userdata as *mut CbCell;
-    let mut slice = StringSlice { ptr: ptr::null(), len: 0 };
-    if ghostty_terminal_get(term, TERMINAL_DATA_PWD, &mut slice as *mut StringSlice as *mut c_void).is_ok() {
+    let mut slice = StringSlice {
+        ptr: ptr::null(),
+        len: 0,
+    };
+    if ghostty_terminal_get(
+        term,
+        TERMINAL_DATA_PWD,
+        &mut slice as *mut StringSlice as *mut c_void,
+    )
+    .is_ok()
+    {
         (*cell).pwd = if slice.ptr.is_null() {
             Vec::new()
         } else {
@@ -719,9 +750,24 @@ unsafe extern "C" fn size_cb(
     if out_size.is_null() {
         return false;
     }
-    let mut size = SizeReportSize { rows: 0, columns: 0, cell_width: 0, cell_height: 0 };
-    if ghostty_terminal_get(term, TERMINAL_DATA_COLS, &mut size.columns as *mut u16 as *mut c_void).is_ok()
-        && ghostty_terminal_get(term, TERMINAL_DATA_ROWS, &mut size.rows as *mut u16 as *mut c_void).is_ok()
+    let mut size = SizeReportSize {
+        rows: 0,
+        columns: 0,
+        cell_width: 0,
+        cell_height: 0,
+    };
+    if ghostty_terminal_get(
+        term,
+        TERMINAL_DATA_COLS,
+        &mut size.columns as *mut u16 as *mut c_void,
+    )
+    .is_ok()
+        && ghostty_terminal_get(
+            term,
+            TERMINAL_DATA_ROWS,
+            &mut size.rows as *mut u16 as *mut c_void,
+        )
+        .is_ok()
     {
         *out_size = size;
         true
@@ -746,7 +792,10 @@ unsafe extern "C" fn color_scheme_cb(
 /// ENQ callback: no response.
 unsafe extern "C" fn enquiry_cb(_term: TerminalHandle, _userdata: *mut c_void) -> StringSlice {
     static EMPTY: &[u8] = b"";
-    StringSlice { ptr: EMPTY.as_ptr(), len: 0 }
+    StringSlice {
+        ptr: EMPTY.as_ptr(),
+        len: 0,
+    }
 }
 
 /// Bell callback: increment the bell counter so the daemon can trigger alerts.
@@ -925,17 +974,39 @@ pub struct Terminal {
 /// Build a full 256-entry palette from the ghostty default and override the
 /// ANSI 0-15 entries with the theme colors, then install foreground,
 /// background, cursor, and palette on `term`.
-fn set_terminal_colors(term: TerminalHandle, palette: &[ColorRgb; 16], fg: ColorRgb, bg: ColorRgb, cursor: ColorRgb) {
+fn set_terminal_colors(
+    term: TerminalHandle,
+    palette: &[ColorRgb; 16],
+    fg: ColorRgb,
+    bg: ColorRgb,
+    cursor: ColorRgb,
+) {
     let mut full_palette = [ColorRgb::new(0, 0, 0); 256];
     unsafe {
         ghostty_color_palette_default(full_palette.as_mut_ptr());
     }
     full_palette[..16].copy_from_slice(palette);
     unsafe {
-        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_FOREGROUND, &fg as *const _ as *const c_void);
-        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void);
-        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_CURSOR, &cursor as *const _ as *const c_void);
-        ghostty_terminal_set(term, TERMINAL_OPT_COLOR_PALETTE, full_palette.as_ptr() as *const c_void);
+        ghostty_terminal_set(
+            term,
+            TERMINAL_OPT_COLOR_FOREGROUND,
+            &fg as *const _ as *const c_void,
+        );
+        ghostty_terminal_set(
+            term,
+            TERMINAL_OPT_COLOR_BACKGROUND,
+            &bg as *const _ as *const c_void,
+        );
+        ghostty_terminal_set(
+            term,
+            TERMINAL_OPT_COLOR_CURSOR,
+            &cursor as *const _ as *const c_void,
+        );
+        ghostty_terminal_set(
+            term,
+            TERMINAL_OPT_COLOR_PALETTE,
+            full_palette.as_ptr() as *const c_void,
+        );
     }
 }
 
@@ -968,7 +1039,9 @@ impl Terminal {
         unsafe {
             if !ghostty_render_state_new(ptr::null(), &mut render).is_ok() || render.is_null() {
                 ghostty_terminal_free(term);
-                return Err(anyhow::anyhow!("libghostty-vt: failed to create render state"));
+                return Err(anyhow::anyhow!(
+                    "libghostty-vt: failed to create render state"
+                ));
             }
         }
 
@@ -999,12 +1072,24 @@ impl Terminal {
         unsafe {
             ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_PWD_CHANGED, pwd_changed_cb as *const c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_PWD_CHANGED,
+                pwd_changed_cb as *const c_void,
+            );
             ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_COLOR_SCHEME,
+                color_scheme_cb as *const c_void,
+            );
             ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const c_void);
             ghostty_terminal_set(term, TERMINAL_OPT_BELL, bell_cb as *const c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_CLIPBOARD_WRITE, clipboard_write_cb as *const c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_CLIPBOARD_WRITE,
+                clipboard_write_cb as *const c_void,
+            );
         }
 
         // Enable grapheme cluster mode (DEC private mode 2027) so multi-codepoint
@@ -1015,7 +1100,11 @@ impl Terminal {
             value: true,
         };
         unsafe {
-            ghostty_terminal_set(term, TERMINAL_OPT_MODE, &mode_config as *const TerminalModeConfig as *const c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_MODE,
+                &mode_config as *const TerminalModeConfig as *const c_void,
+            );
         }
 
         Ok(Terminal {
@@ -1039,7 +1128,9 @@ impl Terminal {
     pub fn snapshot_encode(&self) -> Option<Vec<u8>> {
         let mut ptr: *mut u8 = std::ptr::null_mut();
         let mut len: usize = 0;
-        let res = unsafe { ghostty_snapshot_encode_alloc(self.term, std::ptr::null(), &mut ptr, &mut len) };
+        let res = unsafe {
+            ghostty_snapshot_encode_alloc(self.term, std::ptr::null(), &mut ptr, &mut len)
+        };
         if !res.is_ok() || ptr.is_null() {
             return None;
         }
@@ -1062,10 +1153,17 @@ impl Terminal {
     ) -> anyhow::Result<Terminal> {
         let mut decoder: SnapshotDecoderHandle = std::ptr::null_mut();
         let res = unsafe {
-            ghostty_snapshot_decoder_new_buf(std::ptr::null(), &mut decoder, bytes.as_ptr(), bytes.len())
+            ghostty_snapshot_decoder_new_buf(
+                std::ptr::null(),
+                &mut decoder,
+                bytes.as_ptr(),
+                bytes.len(),
+            )
         };
         if !res.is_ok() || decoder.is_null() {
-            return Err(anyhow::anyhow!("libghostty-vt: failed to create snapshot decoder"));
+            return Err(anyhow::anyhow!(
+                "libghostty-vt: failed to create snapshot decoder"
+            ));
         }
         let mut term: TerminalHandle = std::ptr::null_mut();
         let res = unsafe { ghostty_snapshot_decoder_decode(decoder, &mut term) };
@@ -1076,9 +1174,12 @@ impl Terminal {
 
         let mut render: RenderStateHandle = std::ptr::null_mut();
         unsafe {
-            if !ghostty_render_state_new(std::ptr::null(), &mut render).is_ok() || render.is_null() {
+            if !ghostty_render_state_new(std::ptr::null(), &mut render).is_ok() || render.is_null()
+            {
                 ghostty_terminal_free(term);
-                return Err(anyhow::anyhow!("libghostty-vt: failed to create render state for snapshot"));
+                return Err(anyhow::anyhow!(
+                    "libghostty-vt: failed to create render state for snapshot"
+                ));
             }
         }
 
@@ -1103,21 +1204,49 @@ impl Terminal {
         });
         let userdata = (&*cell) as *const CbCell as *mut std::ffi::c_void;
         unsafe {
-            ghostty_terminal_set(term, TERMINAL_OPT_USERDATA, userdata as *const std::ffi::c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const std::ffi::c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_PWD_CHANGED, pwd_changed_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_USERDATA,
+                userdata as *const std::ffi::c_void,
+            );
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_WRITE_PTY,
+                write_pty_cb as *const std::ffi::c_void,
+            );
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_PWD_CHANGED,
+                pwd_changed_cb as *const std::ffi::c_void,
+            );
             ghostty_terminal_set(term, TERMINAL_OPT_SIZE, size_cb as *const std::ffi::c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_COLOR_SCHEME, color_scheme_cb as *const std::ffi::c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_ENQUIRY, enquiry_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_COLOR_SCHEME,
+                color_scheme_cb as *const std::ffi::c_void,
+            );
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_ENQUIRY,
+                enquiry_cb as *const std::ffi::c_void,
+            );
             ghostty_terminal_set(term, TERMINAL_OPT_BELL, bell_cb as *const std::ffi::c_void);
-            ghostty_terminal_set(term, TERMINAL_OPT_CLIPBOARD_WRITE, clipboard_write_cb as *const std::ffi::c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_CLIPBOARD_WRITE,
+                clipboard_write_cb as *const std::ffi::c_void,
+            );
         }
         let mode_config = TerminalModeConfig {
             mode: MODE_GRAPHEME_CLUSTER,
             value: true,
         };
         unsafe {
-            ghostty_terminal_set(term, TERMINAL_OPT_MODE, &mode_config as *const TerminalModeConfig as *const std::ffi::c_void);
+            ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_MODE,
+                &mode_config as *const TerminalModeConfig as *const std::ffi::c_void,
+            );
         }
 
         // Pull initial rows/cols from the decoded terminal so the wrapper stays
@@ -1126,8 +1255,16 @@ impl Terminal {
             let mut out_rows: u16 = 24;
             let mut out_cols: u16 = 80;
             unsafe {
-                let _ = ghostty_terminal_get(term, TERMINAL_DATA_ROWS, &mut out_rows as *mut u16 as *mut std::ffi::c_void);
-                let _ = ghostty_terminal_get(term, TERMINAL_DATA_COLS, &mut out_cols as *mut u16 as *mut std::ffi::c_void);
+                let _ = ghostty_terminal_get(
+                    term,
+                    TERMINAL_DATA_ROWS,
+                    &mut out_rows as *mut u16 as *mut std::ffi::c_void,
+                );
+                let _ = ghostty_terminal_get(
+                    term,
+                    TERMINAL_DATA_COLS,
+                    &mut out_cols as *mut u16 as *mut std::ffi::c_void,
+                );
                 if out_cols == 0 || out_rows == 0 {
                     out_cols = 80;
                     out_rows = 24;
@@ -1153,7 +1290,13 @@ impl Terminal {
     /// Swap the terminal's default colors and ANSI palette to `theme`. Called
     /// on every pane when the active theme changes; the next `refresh` picks
     /// up the new defaults.
-    pub fn apply_theme(&mut self, palette: &[ColorRgb; 16], fg: ColorRgb, bg: ColorRgb, cursor: ColorRgb) {
+    pub fn apply_theme(
+        &mut self,
+        palette: &[ColorRgb; 16],
+        fg: ColorRgb,
+        bg: ColorRgb,
+        cursor: ColorRgb,
+    ) {
         set_terminal_colors(self.term, palette, fg, bg, cursor);
         self.default_fg = fg;
         self.default_bg = bg;
@@ -1219,12 +1362,31 @@ impl Terminal {
     /// state, so the selection survives subsequent output/scroll.
     /// Build a linear selection between two viewport coordinates (inclusive).
     fn build_selection(&self, start: (u16, u16), end: (u16, u16)) -> Option<Selection> {
-        let mut start_ref =
-            GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
-        let mut end_ref = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        let mut start_ref = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+        let mut end_ref = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
         unsafe {
-            if !ghostty_terminal_grid_ref(self.term, viewport_point(start.0, start.1 as u32), &mut start_ref).is_ok()
-                || !ghostty_terminal_grid_ref(self.term, viewport_point(end.0, end.1 as u32), &mut end_ref).is_ok()
+            if !ghostty_terminal_grid_ref(
+                self.term,
+                viewport_point(start.0, start.1 as u32),
+                &mut start_ref,
+            )
+            .is_ok()
+                || !ghostty_terminal_grid_ref(
+                    self.term,
+                    viewport_point(end.0, end.1 as u32),
+                    &mut end_ref,
+                )
+                .is_ok()
             {
                 return None;
             }
@@ -1246,8 +1408,12 @@ impl Terminal {
             return false;
         };
         unsafe {
-            ghostty_terminal_set(self.term, TERMINAL_OPT_SELECTION, &selection as *const Selection as *const c_void)
-                .is_ok()
+            ghostty_terminal_set(
+                self.term,
+                TERMINAL_OPT_SELECTION,
+                &selection as *const Selection as *const c_void,
+            )
+            .is_ok()
         }
     }
 
@@ -1263,20 +1429,27 @@ impl Terminal {
     /// coordinate system, so this resolves correctly even when scrolled into
     /// scrollback.
     pub fn hyperlink_at(&self, x: u16, y: u16) -> Option<String> {
-        let mut ref_ = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+        let mut ref_ = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
         unsafe {
-            if !ghostty_terminal_grid_ref(self.term, viewport_point(x, y as u32), &mut ref_).is_ok() {
+            if !ghostty_terminal_grid_ref(self.term, viewport_point(x, y as u32), &mut ref_).is_ok()
+            {
                 return None;
             }
             let mut written = 0usize;
-            let res =
-                ghostty_grid_ref_hyperlink_uri(&ref_, ptr::null_mut(), 0, &mut written);
+            let res = ghostty_grid_ref_hyperlink_uri(&ref_, ptr::null_mut(), 0, &mut written);
             if res != Result::OutOfSpace || written == 0 {
                 return None;
             }
             let mut buf = vec![0u8; written];
             let mut filled = 0usize;
-            if !ghostty_grid_ref_hyperlink_uri(&ref_, buf.as_mut_ptr(), buf.len(), &mut filled).is_ok() {
+            if !ghostty_grid_ref_hyperlink_uri(&ref_, buf.as_mut_ptr(), buf.len(), &mut filled)
+                .is_ok()
+            {
                 return None;
             }
             buf.truncate(filled.min(buf.len()));
@@ -1311,7 +1484,11 @@ impl Terminal {
         let target = x as usize;
         // Cell column -> byte offset (URLs are ASCII so the mapping is exact;
         // a wide char earlier on the row would skew it, an accepted edge case).
-        let byte_at = line.char_indices().nth(target).map(|(b, _)| b).unwrap_or(line.len());
+        let byte_at = line
+            .char_indices()
+            .nth(target)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
         find_urls(&line)
             .iter()
             .find(|(s, e, _)| *s <= byte_at && byte_at < *e)
@@ -1337,12 +1514,15 @@ impl Terminal {
     /// buffer (including scrollback), independent of the viewport scroll
     /// position. Used for agent-state detection so scrolling the viewport
     /// never changes the detected state. Reads via the selection formatter on
-    /// screen-buffer coordinates, mirroring herdr's recent-text snapshot.
     pub fn bottom_text(&self, lines: usize) -> String {
         let mut total: usize = 0;
         unsafe {
-            if !ghostty_terminal_get(self.term, TERMINAL_DATA_TOTAL_ROWS, &mut total as *mut usize as *mut c_void)
-                .is_ok()
+            if !ghostty_terminal_get(
+                self.term,
+                TERMINAL_DATA_TOTAL_ROWS,
+                &mut total as *mut usize as *mut c_void,
+            )
+            .is_ok()
                 || total == 0
             {
                 return String::new();
@@ -1350,13 +1530,21 @@ impl Terminal {
         }
         let mut cols: usize = 0;
         unsafe {
-            if !ghostty_terminal_get(self.term, TERMINAL_DATA_COLS, &mut cols as *mut usize as *mut c_void).is_ok() {
+            if !ghostty_terminal_get(
+                self.term,
+                TERMINAL_DATA_COLS,
+                &mut cols as *mut usize as *mut c_void,
+            )
+            .is_ok()
+            {
                 return String::new();
             }
         }
         let start = total.saturating_sub(lines);
-        let Some(selection) = self.build_screen_selection((0, start as u32), (cols.saturating_sub(1) as u16, (total - 1) as u32))
-        else {
+        let Some(selection) = self.build_screen_selection(
+            (0, start as u32),
+            (cols.saturating_sub(1) as u16, (total - 1) as u32),
+        ) else {
             return String::new();
         };
         self.format_selection(&selection)
@@ -1366,10 +1554,17 @@ impl Terminal {
     /// spinner status). Empty when no title has been set. The C string is
     /// borrowed and invalidated by the next `write`, so it's copied here.
     pub fn title(&self) -> String {
-        let mut t = StringSlice { ptr: ptr::null(), len: 0 };
+        let mut t = StringSlice {
+            ptr: ptr::null(),
+            len: 0,
+        };
         unsafe {
-            if !ghostty_terminal_get(self.term, TERMINAL_DATA_TITLE, &mut t as *mut StringSlice as *mut c_void)
-                .is_ok()
+            if !ghostty_terminal_get(
+                self.term,
+                TERMINAL_DATA_TITLE,
+                &mut t as *mut StringSlice as *mut c_void,
+            )
+            .is_ok()
             {
                 return String::new();
             }
@@ -1382,17 +1577,24 @@ impl Terminal {
 
     /// Build a linear selection between two screen-buffer coordinates
     /// (inclusive), independent of the viewport scroll position.
-    fn build_screen_selection(
-        &self,
-        start: (u16, u32),
-        end: (u16, u32),
-    ) -> Option<Selection> {
-        let mut start_ref =
-            GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
-        let mut end_ref = GridRef { size: size_of::<GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };
+    fn build_screen_selection(&self, start: (u16, u32), end: (u16, u32)) -> Option<Selection> {
+        let mut start_ref = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+        let mut end_ref = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
         unsafe {
-            if !ghostty_terminal_grid_ref(self.term, screen_point(start.0, start.1), &mut start_ref).is_ok()
-                || !ghostty_terminal_grid_ref(self.term, screen_point(end.0, end.1), &mut end_ref).is_ok()
+            if !ghostty_terminal_grid_ref(self.term, screen_point(start.0, start.1), &mut start_ref)
+                .is_ok()
+                || !ghostty_terminal_grid_ref(self.term, screen_point(end.0, end.1), &mut end_ref)
+                    .is_ok()
             {
                 return None;
             }
@@ -1424,15 +1626,26 @@ impl Terminal {
         };
         unsafe {
             let mut written = 0usize;
-            let res =
-                ghostty_terminal_selection_format_buf(self.term, options, ptr::null_mut(), 0, &mut written);
+            let res = ghostty_terminal_selection_format_buf(
+                self.term,
+                options,
+                ptr::null_mut(),
+                0,
+                &mut written,
+            );
             if res != Result::OutOfSpace || written == 0 {
                 return String::new();
             }
             let mut buf = vec![0u8; written];
             let mut filled = 0usize;
-            if !ghostty_terminal_selection_format_buf(self.term, options, buf.as_mut_ptr(), buf.len(), &mut filled)
-                .is_ok()
+            if !ghostty_terminal_selection_format_buf(
+                self.term,
+                options,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut filled,
+            )
+            .is_ok()
             {
                 return String::new();
             }
@@ -1480,7 +1693,9 @@ impl Terminal {
     pub fn scroll(&mut self, delta: i32) {
         let behavior = ScrollViewport {
             tag: SCROLL_VIEWPORT_DELTA,
-            value: ScrollViewportValue { delta: delta as isize },
+            value: ScrollViewportValue {
+                delta: delta as isize,
+            },
         };
         unsafe {
             ghostty_terminal_scroll_viewport(self.term, behavior);
@@ -1514,8 +1729,12 @@ impl Terminal {
     pub fn total_rows(&self) -> usize {
         let mut total: usize = 0;
         unsafe {
-            if !ghostty_terminal_get(self.term, TERMINAL_DATA_TOTAL_ROWS, &mut total as *mut usize as *mut c_void)
-                .is_ok()
+            if !ghostty_terminal_get(
+                self.term,
+                TERMINAL_DATA_TOTAL_ROWS,
+                &mut total as *mut usize as *mut c_void,
+            )
+            .is_ok()
             {
                 return 0;
             }
@@ -1564,7 +1783,11 @@ impl Terminal {
                 let abs_byte = search_from + byte_off;
                 let start_col = line[..abs_byte].chars().count() as u16;
                 let end_col = start_col.saturating_add(q_len);
-                hits.push(SearchHit { row: r as u32, start_col, end_col });
+                hits.push(SearchHit {
+                    row: r as u32,
+                    start_col,
+                    end_col,
+                });
                 search_from = abs_byte + q_lower.len();
                 if search_from >= lower.len() {
                     break;
@@ -1578,7 +1801,11 @@ impl Terminal {
     pub fn mouse_tracking(&self) -> bool {
         let mut out: bool = false;
         unsafe {
-            ghostty_terminal_get(self.term, TERMINAL_DATA_MOUSE_TRACKING, &mut out as *mut bool as *mut c_void);
+            ghostty_terminal_get(
+                self.term,
+                TERMINAL_DATA_MOUSE_TRACKING,
+                &mut out as *mut bool as *mut c_void,
+            );
         }
         out
     }
@@ -1587,7 +1814,11 @@ impl Terminal {
     pub fn mode_get(&self, mode: u16) -> bool {
         let mut config = TerminalModeConfig { mode, value: false };
         unsafe {
-            ghostty_terminal_get(self.term, TERMINAL_DATA_MODE, &mut config as *mut TerminalModeConfig as *mut c_void);
+            ghostty_terminal_get(
+                self.term,
+                TERMINAL_DATA_MODE,
+                &mut config as *mut TerminalModeConfig as *mut c_void,
+            );
         }
         config.value
     }
@@ -1599,7 +1830,14 @@ impl Terminal {
     /// full-screen app) would take over.
     pub fn mode_set(&self, mode: u16, value: bool) -> bool {
         let config = TerminalModeConfig { mode, value };
-        unsafe { ghostty_terminal_set(self.term, TERMINAL_DATA_MODE, &config as *const TerminalModeConfig as *const c_void).is_ok() }
+        unsafe {
+            ghostty_terminal_set(
+                self.term,
+                TERMINAL_DATA_MODE,
+                &config as *const TerminalModeConfig as *const c_void,
+            )
+            .is_ok()
+        }
     }
 
     /// Refresh render state, viewport cursor, default colors, and scrollbar
@@ -1615,7 +1853,11 @@ impl Terminal {
         let mut bg = self.default_bg;
         let mut scrollbar = TerminalScrollbar::default();
 
-        let keys = [TERMINAL_DATA_COLOR_FOREGROUND, TERMINAL_DATA_COLOR_BACKGROUND, TERMINAL_DATA_SCROLLBAR];
+        let keys = [
+            TERMINAL_DATA_COLOR_FOREGROUND,
+            TERMINAL_DATA_COLOR_BACKGROUND,
+            TERMINAL_DATA_SCROLLBAR,
+        ];
         let mut values: [*mut c_void; 3] = [
             &mut fg as *mut ColorRgb as *mut c_void,
             &mut bg as *mut ColorRgb as *mut c_void,
@@ -1623,7 +1865,13 @@ impl Terminal {
         ];
         let mut written: usize = 0;
         unsafe {
-            ghostty_terminal_get_multi(self.term, keys.len(), keys.as_ptr(), values.as_mut_ptr(), &mut written);
+            ghostty_terminal_get_multi(
+                self.term,
+                keys.len(),
+                keys.as_ptr(),
+                values.as_mut_ptr(),
+                &mut written,
+            );
         }
         self.default_fg = fg;
         self.default_bg = bg;
@@ -1631,7 +1879,11 @@ impl Terminal {
 
         let mut cursor_data = RenderStateCursor::new();
         unsafe {
-            ghostty_render_state_get(self.render, RENDER_STATE_DATA_CURSOR, &mut cursor_data as *mut RenderStateCursor as *mut c_void);
+            ghostty_render_state_get(
+                self.render,
+                RENDER_STATE_DATA_CURSOR,
+                &mut cursor_data as *mut RenderStateCursor as *mut c_void,
+            );
         }
         self.cursor = if cursor_data.viewport_has_value {
             Some((cursor_data.viewport_x, cursor_data.viewport_y))
@@ -1645,7 +1897,11 @@ impl Terminal {
     pub fn render_dirty_level(&self) -> i32 {
         let mut d: i32 = 0;
         unsafe {
-            ghostty_render_state_get(self.render, RENDER_STATE_DATA_DIRTY, &mut d as *mut i32 as *mut c_void);
+            ghostty_render_state_get(
+                self.render,
+                RENDER_STATE_DATA_DIRTY,
+                &mut d as *mut i32 as *mut c_void,
+            );
         }
         d
     }
@@ -1661,11 +1917,19 @@ impl Terminal {
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
                 return out;
             }
-            ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
+            ghostty_render_state_get(
+                self.render,
+                RENDER_DATA_ROW_ITERATOR,
+                &mut iter as *mut RowIteratorHandle as *mut c_void,
+            );
             let mut row = 0usize;
             while ghostty_render_state_row_iterator_next(iter) {
                 let mut d: bool = false;
-                ghostty_render_state_row_get(iter, ROW_DATA_DIRTY, &mut d as *mut bool as *mut c_void);
+                ghostty_render_state_row_get(
+                    iter,
+                    ROW_DATA_DIRTY,
+                    &mut d as *mut bool as *mut c_void,
+                );
                 if d {
                     out.push(row);
                 }
@@ -1692,13 +1956,21 @@ impl Terminal {
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
                 return;
             }
-            ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
+            ghostty_render_state_get(
+                self.render,
+                RENDER_DATA_ROW_ITERATOR,
+                &mut iter as *mut RowIteratorHandle as *mut c_void,
+            );
             let clear: bool = false;
             let mut row = 0usize;
             let mut rows_iter = rows.iter().peekable();
             while ghostty_render_state_row_iterator_next(iter) {
                 if rows_iter.peek() == Some(&&row) {
-                    ghostty_render_state_row_set(iter, ROW_OPTION_DIRTY, &clear as *const bool as *const c_void);
+                    ghostty_render_state_row_set(
+                        iter,
+                        ROW_OPTION_DIRTY,
+                        &clear as *const bool as *const c_void,
+                    );
                     rows_iter.next();
                 }
                 row += 1;
@@ -1707,7 +1979,11 @@ impl Terminal {
         }
         let clean: i32 = DIRTY_FALSE;
         unsafe {
-            ghostty_render_state_set(self.render, RENDER_STATE_OPTION_DIRTY, &clean as *const i32 as *const c_void);
+            ghostty_render_state_set(
+                self.render,
+                RENDER_STATE_OPTION_DIRTY,
+                &clean as *const i32 as *const c_void,
+            );
         }
     }
 
@@ -1770,7 +2046,11 @@ impl Terminal {
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
                 return;
             }
-            ghostty_render_state_get(self.render, RENDER_DATA_ROW_ITERATOR, &mut iter as *mut RowIteratorHandle as *mut c_void);
+            ghostty_render_state_get(
+                self.render,
+                RENDER_DATA_ROW_ITERATOR,
+                &mut iter as *mut RowIteratorHandle as *mut c_void,
+            );
             let mut cells: RowCellsHandle = ptr::null_mut();
             if !ghostty_render_state_row_cells_new(ptr::null(), &mut cells).is_ok() {
                 ghostty_render_state_row_iterator_free(iter);
@@ -1807,14 +2087,22 @@ impl Terminal {
                 if batch_ok && written >= 3 {
                     cells = cells_handle;
                 } else if !batch_ok {
-                    ghostty_render_state_row_get(iter, ROW_DATA_DIRTY, &mut row_dirty as *mut bool as *mut c_void);
+                    ghostty_render_state_row_get(
+                        iter,
+                        ROW_DATA_DIRTY,
+                        &mut row_dirty as *mut bool as *mut c_void,
+                    );
                     let sel_res = ghostty_render_state_row_get(
                         iter,
                         ROW_DATA_SELECTION,
                         &mut row_sel as *mut RenderStateRowSelection as *mut c_void,
                     );
                     let sel_ok_fallback = sel_res.is_ok();
-                    ghostty_render_state_row_get(iter, ROW_DATA_CELLS, &mut cells as *mut RowCellsHandle as *mut c_void);
+                    ghostty_render_state_row_get(
+                        iter,
+                        ROW_DATA_CELLS,
+                        &mut cells as *mut RowCellsHandle as *mut c_void,
+                    );
                     let mut col_idx: usize = 0;
                     while ghostty_render_state_row_cells_next(cells) {
                         if let Some(rc) = self.read_cell(cells) {
@@ -1853,16 +2141,26 @@ impl Terminal {
             // Read the cell's grapheme cluster with a reusable scratch buffer,
             // growing it only when a cell holds more text than fits (so the
             // common single-codepoint case needs one FFI call, not two).
-            let mut out = Buffer { ptr: self.scratch.as_mut_ptr(), cap: self.scratch.len(), len: 0 };
-            let mut res =
-                ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut out as *mut Buffer as *mut c_void);
+            let mut out = Buffer {
+                ptr: self.scratch.as_mut_ptr(),
+                cap: self.scratch.len(),
+                len: 0,
+            };
+            let mut res = ghostty_render_state_row_cells_get(
+                cells,
+                ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                &mut out as *mut Buffer as *mut c_void,
+            );
             if res == Result::OutOfSpace {
                 self.scratch.resize(out.len, 0);
                 out.ptr = self.scratch.as_mut_ptr();
                 out.cap = self.scratch.len();
                 out.len = 0;
-                res =
-                    ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut out as *mut Buffer as *mut c_void);
+                res = ghostty_render_state_row_cells_get(
+                    cells,
+                    ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                    &mut out as *mut Buffer as *mut c_void,
+                );
             }
             let has_text = res.is_ok() && out.len > 0;
             // Borrow directly from scratch to avoid per-cell String allocation.
@@ -1888,21 +2186,39 @@ impl Terminal {
                 .is_ok()
                 {
                     let mut hl: bool = false;
-                    if ghostty_cell_get(raw, CELL_DATA_HAS_HYPERLINK, &mut hl as *mut bool as *mut c_void).is_ok() {
+                    if ghostty_cell_get(
+                        raw,
+                        CELL_DATA_HAS_HYPERLINK,
+                        &mut hl as *mut bool as *mut c_void,
+                    )
+                    .is_ok()
+                    {
                         hyperlink = hl;
                     }
                 }
             }
 
             let mut style = Style::new();
-            ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_STYLE, &mut style as *mut Style as *mut c_void);
+            ghostty_render_state_row_cells_get(
+                cells,
+                ROW_CELLS_DATA_STYLE,
+                &mut style as *mut Style as *mut c_void,
+            );
             let has_fg = style.fg_color.tag != STYLE_COLOR_NONE;
             let has_bg = style.bg_color.tag != STYLE_COLOR_NONE;
 
             let mut fg = self.default_fg;
             let mut bg = self.default_bg;
-            let _ = ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_FG_COLOR, &mut fg as *mut ColorRgb as *mut c_void);
-            let _ = ghostty_render_state_row_cells_get(cells, ROW_CELLS_DATA_BG_COLOR, &mut bg as *mut ColorRgb as *mut c_void);
+            let _ = ghostty_render_state_row_cells_get(
+                cells,
+                ROW_CELLS_DATA_FG_COLOR,
+                &mut fg as *mut ColorRgb as *mut c_void,
+            );
+            let _ = ghostty_render_state_row_cells_get(
+                cells,
+                ROW_CELLS_DATA_BG_COLOR,
+                &mut bg as *mut ColorRgb as *mut c_void,
+            );
 
             // Skip fully blank cells with no explicit background; the renderer
             // fills those with the terminal's default background.
@@ -1976,7 +2292,10 @@ mod tests {
         t.refresh();
         let cells = collect(&mut t);
         let texts: Vec<&str> = cells.iter().map(|(_, _, s)| s.as_str()).collect();
-        assert_eq!(texts, vec!["r", "e", "d", "b", "o", "l", "d", "p", "l", "a", "i", "n"]);
+        assert_eq!(
+            texts,
+            vec!["r", "e", "d", "b", "o", "l", "d", "p", "l", "a", "i", "n"]
+        );
     }
 
     #[test]
@@ -1984,10 +2303,16 @@ mod tests {
         let mut t = new_term(10, 4, 100);
         assert_eq!(t.pwd(), None, "no pwd before any OSC 7");
         t.write(b"\x1b]7;file:///tmp/example\x07");
-        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/tmp/example").as_path()));
+        assert_eq!(
+            t.pwd().as_deref(),
+            Some(PathBuf::from("/tmp/example").as_path())
+        );
         // A bare OSC 9 path also counts.
         t.write(b"\x1b]9;9;/tmp/osc9\x1b\\");
-        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/tmp/osc9").as_path()));
+        assert_eq!(
+            t.pwd().as_deref(),
+            Some(PathBuf::from("/tmp/osc9").as_path())
+        );
         // Clearing the pwd (empty OSC 7) yields None again.
         t.write(b"\x1b]7;\x07");
         assert_eq!(t.pwd(), None);
@@ -1997,7 +2322,10 @@ mod tests {
     fn pwd_decodes_localhost_and_percent_encoding() {
         let mut t = new_term(10, 4, 100);
         t.write(b"\x1b]7;file://localhost/Users/my%20dir/proj\x07");
-        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/my dir/proj").as_path()));
+        assert_eq!(
+            t.pwd().as_deref(),
+            Some(PathBuf::from("/Users/my dir/proj").as_path())
+        );
     }
 
     #[test]
@@ -2006,7 +2334,10 @@ mod tests {
         // `file://My-Mac.local/Users/x`, not `localhost`.
         let mut t = new_term(10, 4, 100);
         t.write(b"\x1b]7;file://My-Mac.local/Users/marc/proj\x07");
-        assert_eq!(t.pwd().as_deref(), Some(PathBuf::from("/Users/marc/proj").as_path()));
+        assert_eq!(
+            t.pwd().as_deref(),
+            Some(PathBuf::from("/Users/marc/proj").as_path())
+        );
     }
 
     #[test]
@@ -2023,8 +2354,14 @@ mod tests {
         assert!(!before.is_empty(), "before should have cells");
         let snap = t.snapshot_encode().expect("snapshot encode should succeed");
         assert!(!snap.is_empty(), "snapshot should not be empty");
-        let mut t2 = Terminal::from_snapshot(&snap, &palette(), ColorRgb::new(0, 0, 0), ColorRgb::new(0, 0, 0), ColorRgb::new(255, 255, 255))
-            .expect("snapshot decode should succeed");
+        let mut t2 = Terminal::from_snapshot(
+            &snap,
+            &palette(),
+            ColorRgb::new(0, 0, 0),
+            ColorRgb::new(0, 0, 0),
+            ColorRgb::new(255, 255, 255),
+        )
+        .expect("snapshot decode should succeed");
         t2.refresh();
         let mut after = Vec::new();
         t2.for_each_cell(|r, c, rc, _, _| {
@@ -2032,7 +2369,10 @@ mod tests {
                 after.push((r, c, rc.text.to_string()));
             }
         });
-        assert_eq!(before, after, "visible screen should survive snapshot roundtrip: before={before:?} after={after:?}");
+        assert_eq!(
+            before, after,
+            "visible screen should survive snapshot roundtrip: before={before:?} after={after:?}"
+        );
         // Also check that we can still write after restore without panic.
         t2.write(b"new line after restore\n");
         t2.refresh();
@@ -2067,11 +2407,11 @@ mod tests {
         t.set_write_sink(sink);
         t.write(b"\x1b[c"); // DA1
         let s = String::from_utf8_lossy(&buf.buf);
+        assert!(!s.is_empty(), "no response to DA query");
         assert!(
-            !s.is_empty(),
-            "no response to DA query"
+            s.starts_with("\x1b[?"),
+            "expected CSI ? response, got {s:?}"
         );
-        assert!(s.starts_with("\x1b[?"), "expected CSI ? response, got {s:?}");
     }
 
     #[test]
@@ -2091,7 +2431,10 @@ mod tests {
         t.write(b"top\nmid\nbottom\n\nexit shell mode");
         t.refresh();
         let before = t.bottom_text(5);
-        assert!(before.contains("exit shell mode"), "expected tail text, got {before:?}");
+        assert!(
+            before.contains("exit shell mode"),
+            "expected tail text, got {before:?}"
+        );
         // Scrolling the viewport must not change what bottom_text reads.
         t.scroll(-3);
         t.refresh();
@@ -2104,7 +2447,10 @@ mod tests {
         let mut t = new_term(20, 5, 100);
         t.write(b"hello world\nsecond line");
         t.refresh();
-        assert!(t.set_selection((0, 0), (4, 0)), "set_selection should succeed");
+        assert!(
+            t.set_selection((0, 0), (4, 0)),
+            "set_selection should succeed"
+        );
         t.refresh();
         let mut selected = Vec::new();
         t.for_each_cell(|r, c, rc, s, _row_dirty| {
@@ -2171,7 +2517,10 @@ mod tests {
         // One column before the URL (on the dashes) is not a link.
         assert_eq!(t.link_at(col - 1, 0), None);
         // The second row holds the network URL.
-        assert_eq!(t.link_at(19, 1).as_deref(), Some("http://192.168.1.134:3000"));
+        assert_eq!(
+            t.link_at(19, 1).as_deref(),
+            Some("http://192.168.1.134:3000")
+        );
     }
 
     #[test]
@@ -2183,4 +2532,3 @@ mod tests {
         assert!(find_urls("localhost:3000 and time: 3:00").is_empty());
     }
 }
-

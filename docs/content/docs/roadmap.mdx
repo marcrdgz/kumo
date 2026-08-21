@@ -29,22 +29,27 @@ the finish line for the configurable, persistent kumo.
 
 ## Next up
 
-- **0.6.0 — Copy-mode, search & pane plumbing**: user-editable theme engine,
-  config hot-reload watcher, customizable status-bar widgets, tabs (windows)
-  per session, vi-style copy-mode with `/` search, sync-input, pipe-pane,
-  full screen+scrollback restore after update, control CLI / scripting.
+- **0.6.0 — Copy-mode, search & pane plumbing** 🚧 In progress: user-editable theme engine,
+  customizable status-bar widgets, tabs (windows) per session, vi-style copy-mode
+  with `/` search, control CLI (`kumo session|tab|pane|agent`, `send-keys`), and
+  full screen+scrollback restore have landed (see `ROADMAP.md`); remaining are
+  the config file-watcher hot-reload, sync-input, pipe-pane.
 - **0.7.0 — Agent breadth & AI polish**: lifecycle detection for `codex`,
   `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; OSC 133 command-traceback
   context sharing.
-- **0.8.0 — Stability**: signal hardening, stable CI, complete config docs,
-  published benchmarks; Windows experimental.
-- **1.0.0 — Full customization + solid persistence**: frozen TOML schema v1,
-  stable keymap and theme system, crash-safe persistence, proven release
-  pipeline.
+- **0.8.0 — Stability**: signal hardening, stable CI, complete config docs +
+  `kumo doctor` diagnostics (duplicate keymaps, invalid TOML), state-migration
+  and `kill -9` crash-safety harness, published benchmarks with concrete targets
+  (attach latency, memory/pane, keystroke→render); Windows experimental.
+- **0.9.0 — QoL & plugins (RC)**:`kumo-plugin.toml` plugins (actions/event hooks/overlay panes/link handlers/startup+build, `KUMO_BIN_PATH` + full CLI as API, `kumo plugin install owner/repo` + `kumo-plugin` topic marketplace), command palette, system notifications, tmux control-mode compat, asciinema export, and optional `[terminal] scrollback-limit` — QoL only, not a 1.0 gate.
+- **1.0.0 — Full customization + solid persistence**: frozen TOML schema v1
+  (every state bump ships a migration test), stable keymap and theme system,
+  crash-safe persistence, proven release pipeline (0.9.0 is the RC).
 
 ## After 1.0
 
-A deliberately **thin** plugin system, Windows parity, semantic session
-timeline (time-travel scrollback), kumo as an MCP server so any agent can
-drive it, a multi-agent supervisor, session migration across machines,
-declarative workspaces, and tmate-style session sharing.
+With the plugin system shipped in 0.9.0, After 1.0 extends it — plus
+Windows parity, semantic session timeline (time-travel scrollback), kumo as
+an MCP server so any agent can drive it, a multi-agent supervisor, session
+migration across machines, declarative workspaces, and tmate-style session
+sharing.

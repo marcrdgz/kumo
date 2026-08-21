@@ -13,11 +13,11 @@ persistent kumo.
 
 **1.0.0 = full customization + solid persistence.** Gate criteria:
 
-1. Config schema **v1 frozen and documented** (with migrations if it changes).
-2. Keymap stable — renaming bindings never breaks user configs.
-3. Persistence and detach **without state loss** (crash-safe).
+1. Config schema **v1 frozen and documented** (with migrations if it changes; every state bump ships a round-trip migration test — see `app/kumo/src/daemon/state.rs: v1→v2`).
+2. Keymap stable — renaming bindings never breaks user configs; duplicate chords are detected and warned instead of silently shadowing.
+3. Persistence and detach **without state loss** (crash-safe: atomic `tmp+rename` writes in `state.rs: save`, tolerant load on corrupt/unknown version, `kill -9` restore verified).
 4. Theme system stable.
-5. Release pipeline proven (stable + nightly), `cargo clippy`/`test` green in CI.
+5. Release pipeline proven (stable + nightly), `cargo clippy`/`test` green in CI, with published benchmarks (attach latency, memory/pane, keystroke→render — the `4 ms` daemon / `8 ms` client budget from `v0.5.2`).
 
 ---
 
@@ -69,8 +69,8 @@ persistent kumo.
   so a blocked agent is noticeable from outside the TUI.
 - ✅ **Update without losing the web** (final phase): `kumo update` swaps the
   binary and the daemon restarts **inheriting the live terminals** — running
-  agents survive the update (screens come back fresh; a full screen+scrollback
-  restore is deferred — see 0.6.0). The daemon execs the new binary in place
+  agents survive the update (screen + scrollback now restored via inline
+  snapshot — see 0.6.0 / `v0.5.4`). The daemon execs the new binary in place
   (`daemon --resume`),
   adopting each pane's PTY master descriptor from a transient resume file;
   attached terminals auto-reconnect over the fresh socket.
@@ -127,13 +127,7 @@ persistent kumo.
 - ✅ **MENU `config`** opens the config file in an editor pane (split) inside
   the session — `$VISUAL` → `$EDITOR` → `vi`, preferring `config.toml`.
 
-**Deferred from 0.4.0**: full screen+scrollback restore after update/restart
-(only processes and layout survive today; the lossy ANSI replay becomes
-lossless with 0.6.0's copy-mode/scrollback work), OSC 133 semantic prompts
-(only 0.7.0's command traceback consumes them), the **OSC 7 snippet installer**
-(follow-workspace works without it; it only adds remote-ssh coverage — 0.7.0),
-status-bar layout (lands whole with 0.6.0's widgets), and the control CLI /
-scripting (`kumo send-keys`, `kumo split`, … — now 0.6.0).
+**Deferred from 0.4.0**: ~~full screen+scrollback restore after update/restart~~ landed in `v0.5.4` (inline snapshot; see 0.6.0), ~~control CLI / scripting~~ landed in 0.6.0 (`kumo session|tab|pane|agent`, `pane send-keys`/`split`); remaining deferred are OSC 133 semantic prompts (only 0.7.0's command traceback consumes them), the **OSC 7 snippet installer** (follow-workspace works without it; it only adds remote-ssh coverage — 0.7.0), and status-bar layout (lands whole with 0.6.0's widgets).
 
 ## 🎨 0.5.0 — Theme & chrome
 
@@ -168,6 +162,8 @@ toggle/order + pane titles/border styling.
 
 ## 🔍 0.6.0 — Copy-mode, search & pane plumbing
 
+> 🚧 **In progress** — theme engine, status-bar widgets, sidebar polish, tabs, and copy-mode have landed; scrollback restore and control CLI followed in `v0.5.4` / `v0.5.2`. Remaining: file-watcher hot-reload, sync-input, pipe-pane.
+
 - ✅ **Theme engine** (deferred from 0.5.0): user-editable theme values on top
   of the 0.5.0 picker — full palette customization in `config.toml` (schemes,
   accents, status dots, borders) instead of the built-in constants.
@@ -193,13 +189,9 @@ toggle/order + pane titles/border styling.
   only the selection/search UI is missing).
 - **Sync-input**: type into every pane at once.
 - **Pipe-pane / logging**: capture a pane's output to a file.
-- **Full screen+scrollback restore after update/restart**: today only the
-  processes and layout survive `kumo update` (the re-encode-as-ANSI replay is
-  lossy); this makes the screen + scrollback come back exactly, sharing the
-  same scrollback machinery as copy-mode.
-- **Control CLI / scripting** (`kumo send-keys`, `kumo split`, …): client
-  commands over the daemon socket, driven by the same keymap tables (deferred
-  from 0.4.0).
+- ✅ **Full screen+scrollback restore after update/restart**: the daemon now
+  carries inline ghostty snapshots (`SavedPane.snapshot` in `app/kumo/src/daemon/state.rs:126`, `vt.rs: snapshot_encode`/`from_snapshot`, `pane.rs: finish_from_snapshot`) so `kumo update` and `daemon --resume` restore screen + scrollback exactly. Shipped in `v0.5.4` ("Preserve scrollback across restart via inline snapshot"); the earlier lossy ANSI-replay fallback is retired.
+- ✅ **Control CLI / scripting** (`kumo session|tab|pane|agent`, `kumo pane send-keys`/`split`/`close`/`focus`, `kumo reload`): client commands over the daemon socket, driven by the same keymap tables (deferred from 0.4.0; `app/kumo/src/cli/cli.rs`, `app/kumo/src/daemon/app/server.rs:409`).
 
 ## 🤖 0.7.0 — Agent breadth & AI polish
 
@@ -212,10 +204,29 @@ toggle/order + pane titles/border styling.
 
 ## 🛡️ 0.8.0 — Stability
 
-- Hardening of `SIGCHLD`/`SIGWINCH`, stable macOS + Linux CI, complete config
-  docs, deprecation of legacy `~/.kumo`, published performance benchmark.
+- Hardening of `SIGCHLD`/`SIGWINCH`, stable macOS + Linux CI (`cargo clippy`/`test` green), complete config docs, deprecation of legacy `~/.kumo`.
+- **Config diagnostics**: `kumo doctor` / `kumo config check` validates `config.toml` (TOML syntax, unknown keys, invalid leader/chords, duplicate bindings, bad `fixed-cwd`) and surfaces the "ignored after warning" cases that are silent today.
+- **Keymap conflict detection**: duplicate chords across bindings warn and the last-wins rule is documented; covered by the diagnostics above and the 1.0 keymap-stability gate.
+- **State migration tests**: every state-schema bump ships a round-trip save/load test (`app/kumo/src/daemon/state.rs: save_load_roundtrip`, `v1_migrates_to_single_tab`) and the tolerant load still fails closed to a fresh start on unknown/corrupt versions.
+- **Crash-safety harness**: `kill -9` the daemon mid-write / mid-`state.json` `tmp+rename` and verify exact restore; exercises the atomic write (`state.rs: save`) and the tolerant load path. fsync policy documented.
+- **Published performance benchmark** with concrete targets: attach latency, memory per pane (idle + scrollback), and keystroke→render (the `4 ms` daemon / `8 ms` client budget from `v0.5.2`); tracked in CI so regressions are visible.
 - Windows is **experimental** here; full parity is a post-1.0 (1.x) item so it
   never blocks 1.0.
+
+## ✨ 0.9.0 — QoL & plugins (RC)
+
+Tightens the last gaps before the 1.0 freeze — **not a gate**, just polish so
+1.0 feels complete. Scope stays small so 0.9.0 remains a release candidate.
+
+- **Plugin system** (pulled forward from 1.x): `kumo-plugin.toml` manifests, shareable workflow packages — a directory with a manifest the host validates, then launches its argv commands. The plugin owns language + deps + state (bash/js/lua/rust/binary, whatever `argv` can run); kumo owns the host surface: installation, manifest validation, keybindings, panes, events, invocation context, and socket access. No separate SDK or heavy WASM runtime — the **entire `kumo` CLI is the plugin API** (`KUMO_BIN_PATH`, plus the socket), so anything you can run as `kumo ...` a plugin can run. Keeps the featherweight story while being fully expressive — the same reason we called it "thin" before (vs. zellij's runtime).
+  - Manifest: `id`/`name`/`version`/`min_kumo_version` + `[[actions]]`, `[[events]]` hooks, `[[panes]]` (overlay), `[[link_handlers]]` (modified-click URL routing), `[[startup]]` one-shot hooks, `[[build]]` commands, `[[keys.command]]` (`type = "plugin_action"`), `platforms` gating — validated on `plugin install`/`link`.
+  - Distribution: `kumo plugin install owner/repo[/subdir]` (GitHub shorthand via `git`, preview + confirmation in interactive terminals, `--yes`/`--ref` for CI), `kumo plugin link /path/to/plugin` for local dev, `kumo plugin list`/`action list`/`pane open`/`log list`, marketplace auto-indexed from the `kumo-plugin` GitHub topic — no submission form.
+  - Runtime: host injects `KUMO_PLUGIN_CONTEXT_JSON` (`invocation_source`, `clicked_url`, `link_handler_id`, …) and `KUMO_BIN_PATH`; plugins call back over the CLI or raw socket. Trust model: plugins run as your user — install from sources you trust and skim the manifest + commands first.
+- **Command palette / fuzzy switcher** over sessions, actions (including plugin actions), and keybinds.
+- **System notifications** (macOS / notify-send) for blocked agents — today only an audible chime.
+- **tmux control-mode compatibility** so existing tooling (neovim, scripts) keeps working.
+- **Asciinema export**: record a pane's session to a file / stream.
+- **Configurable scrollback limit** (`[terminal] scrollback-limit` / `scrollback-limit-lines`): expose ghostty's cap (`vt.rs: Terminal::new(max_scrollback)`, today hard-coded `10_000` in `app/kumo/src/daemon/pane.rs:323`) as optional `config.toml` keys. QoL only — **not** a 1.0 gate; the default stays `10_000` and the v1 schema can add it compatibly later. See also `vendor/libghostty-vt/src/config/Config.zig: scrollback-limit-bytes`.
 
 ## 🎉 1.0.0
 
@@ -223,16 +234,14 @@ Full customization + solid persistence, meeting the gate criteria above — the
 **TOML** config schema is the frozen v1, macOS + Linux are first-class, Windows
 stays experimental. The layout model — **sessions → tabs → panes**, tabs
 landing in 0.6.0 — gets documented as an explicit design decision, so it never
-resurfaces as a perpetual issue.
+resurfaces as a perpetual issue. `0.9.0` is the RC that proves the plugin + QoL surface is shippable before freezing.
 
 ---
 
 ## 🧩 After 1.0 (1.x)
 
-Planned: a **thin** plugin system so the community can add custom commands,
-widgets, and integrations without forking kumo — deliberately kept out of the
-1.0.0 scope, and deliberately light (widgets, commands, hooks) to keep the
-featherweight story instead of a heavy runtime (à la zellij).
+With the plugin system shipped in `0.9.0`, After 1.0 extends it rather
+than introducing it — plus the bigger bets below.
 
 **Windows parity** — the gate moved out of 0.8.0: full parity, stable
 cross-platform CI, and a Windows release build.
@@ -261,14 +270,7 @@ Beyond that, the differentiating bets:
 - **Deeper AI**: with OSC 133 boundaries + the git-branch from follow-workspace,
   the AI pane auto-attaches "last failing command + diff" with zero user action.
 
-Quality-of-life ideas that round out the editor feel:
-
-- **Command palette / fuzzy switcher** over sessions, actions, and keybinds.
-- **System notifications** (macOS / notify-send) for blocked agents — today
-  only an audible chime.
-- **tmux control-mode compatibility** so existing tooling (neovim, scripts)
-  keeps working.
-- **Asciinema export**: record a pane's session to a file / stream.
+Quality-of-life ideas that round out the editor feel (most now targeted for `0.9.0` — see above) — any leftovers stay as 1.x polish.
 
 ---
 

@@ -8,7 +8,6 @@
 //!
 //! `detect` dispatches across every implemented agent: a blocked signal wins
 //! over working, and idle is the fallback when no marker matches. The rules
-//! mirror herdr's per-agent detection manifests (`~/.config/herdr` /
 //! `agent-detection/<agent>.toml`), where the same split between blocked,
 //! working, and idle fallback applies.
 
@@ -135,7 +134,6 @@ pub fn detect(snap: &Snapshot) -> AgentStatus {
 
 /// Text of `screen` below its last horizontal rule (a run of box-drawing
 /// dashes), where Claude Code renders the live prompt and approval forms.
-/// Mirrors herdr's `after_last_horizontal_rule` region.
 fn after_last_rule(screen: &str) -> String {
     let mut start = 0usize;
     for (i, line) in screen.lines().enumerate() {
@@ -149,7 +147,9 @@ fn after_last_rule(screen: &str) -> String {
 /// True when a line is a horizontal rule: at least three box-drawing dashes.
 fn is_hrule(line: &str) -> bool {
     let t = line.trim();
-    t.chars().count() >= 3 && t.chars().all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2014}'))
+    t.chars().count() >= 3
+        && t.chars()
+            .all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2014}'))
 }
 
 #[cfg(test)]
@@ -169,7 +169,11 @@ mod tests {
     #[test]
     fn blocked_wins_over_working_markers() {
         // A working footer hint alongside an approval dialog must read Blocked.
-        let s = snap("△ Permission required\nAllow once\nAllow always\nesc interrupt", "esc interrupt", "");
+        let s = snap(
+            "△ Permission required\nAllow once\nAllow always\nesc interrupt",
+            "esc interrupt",
+            "",
+        );
         assert_eq!(detect(&s), AgentStatus::Blocked);
     }
 
@@ -190,7 +194,10 @@ mod tests {
     #[test]
     fn after_last_rule_returns_prompt_region() {
         let screen = "transcript line\n───────\nDo you want to proceed?\n  1. yes\n  2. no\n  esc to cancel\n";
-        assert_eq!(after_last_rule(screen), "Do you want to proceed?\n  1. yes\n  2. no\n  esc to cancel");
+        assert_eq!(
+            after_last_rule(screen),
+            "Do you want to proceed?\n  1. yes\n  2. no\n  esc to cancel"
+        );
     }
 
     #[test]
