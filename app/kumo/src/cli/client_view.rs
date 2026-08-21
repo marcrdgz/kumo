@@ -4350,8 +4350,20 @@ impl View {
             };
             put(f, content.x, y, marker, marker_style);
             text(f, content.x + 2, y, &t.name, Style::default().fg(row_fg).bg(bg), content.width.saturating_sub(2));
-            if active && content.width >= 26 {
-                text(f, content.x + content.width.saturating_sub(8), y, " in use ", Style::default().fg(row_fg).bg(bg), 8);
+            // Right-aligned swatch strip: six ANSI colors from the theme's own
+            // palette, so rows can be told apart at a glance.
+            const SWATCHES: [usize; 6] = [1, 2, 3, 4, 5, 6];
+            if content.width as usize >= SWATCHES.len() + 18 {
+                let sx = content.x + content.width - SWATCHES.len() as u16;
+                for (j, ci) in SWATCHES.iter().enumerate() {
+                    let c = t.palette[*ci];
+                    put(f, sx + j as u16, y, " ", Style::default().bg(RColor::Rgb(c.r, c.g, c.b)));
+                }
+            }
+            // "in use" tag sits left of the swatches when both fit.
+            if active && content.width as usize >= SWATCHES.len() + 18 + 8 {
+                let ix = content.x + content.width - SWATCHES.len() as u16 - 7;
+                text(f, ix, y, "in use", Style::default().fg(theme.panel_muted).bg(bg), 6);
             }
         }
     }
