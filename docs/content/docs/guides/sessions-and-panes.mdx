@@ -1,0 +1,58 @@
+---
+title: Sessions & Panes
+description: Splits, focus, resize, zoom, swap, rotate, and pane numbers.
+icon: 🧩
+---
+
+Kumo manages panes as a **binary split tree**: every split divides a pane into
+two, vertically or horizontally. Sessions are independent webs of panes, and
+the sidebar's SESSIONS tab lists them all.
+
+## Pane operations
+
+All operations live behind the leader key (<kbd>Ctrl+B</kbd> by default):
+
+| Keys | Action |
+| --- | --- |
+| <kbd>leader+v</kbd> | Split the focused pane vertically |
+| <kbd>leader+-</kbd> | Split the focused pane horizontally |
+| <kbd>leader+h/j/k/l</kbd> | Move focus left/down/up/right |
+| <kbd>leader+Tab</kbd> | Cycle focus between panes |
+| <kbd>leader+H/J/K/L</kbd> | Resize the focused pane |
+| <kbd>leader+z</kbd> | Zoom the focused pane |
+| <kbd>leader+s</kbd> | Swap the focused pane with its sibling |
+| <kbd>leader+o</kbd> | Rotate the pane layout |
+| <kbd>leader+q</kbd> | Show pane numbers — press a number to jump |
+| <kbd>leader+x</kbd> | Close the focused pane |
+
+## Mouse gestures
+
+Mouse gestures are positional hit-testing, not key sequences — they are
+deliberately **not** remappable:
+
+- 🖐️ **Drag** selects text (copied on release) — works even in apps with
+  mouse reporting.
+- 👆 **Click** is forwarded to the app when it owns the mouse.
+- 🎚️ **Scroll** is forwarded to reporting apps; otherwise it scrolls the
+  pane's scrollback.
+- ↔️ **Drag a splitter** to resize.
+- 🧭 The **MENU button** (right of the mode chip in the status bar) opens a
+  dropdown with `keybinds` (the same showcase as <kbd>leader+?</kbd>) and
+  `exit`.
+
+## Sessions
+
+| Keys | Action |
+| --- | --- |
+| <kbd>leader+c</kbd> | Create a new session (name it in the popup) |
+| <kbd>leader+n</kbd> / <kbd>leader+p</kbd> | Next / previous session |
+| <kbd>leader+1…9</kbd> | Jump to the session at that sidebar position |
+| <kbd>leader+b</kbd> | Toggle the sidebar |
+
+From the sessions list you can also create and open **git worktrees**
+directly.
+
+<Callout type="info" title="Tabs are coming">
+  Tabs (windows) per session — one session holding several named pane trees —
+  land in the 0.6.0 release. See the [roadmap](/docs/roadmap).
+</Callout>

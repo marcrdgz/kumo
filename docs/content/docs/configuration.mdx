@@ -1,0 +1,80 @@
+---
+title: Configuration
+description: The config.toml reference — keymaps, shells, agents, and file locations.
+icon: ⚙️
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Kumo reads a single config file at `~/.config/kumo/config.toml`. The old flat
+`key = value` file at `~/.config/kumo/config` (and the legacy `~/.kumo`)
+still reads as a fallback, but `config.toml` wins when both exist.
+
+```toml
+# ~/.config/kumo/config.toml
+[keymap]
+leader = "ctrl+b"
+
+# Leader bindings are remappable: override a stock key or add a new one.
+[keymap.bindings]
+s = "split-vertical"   # now leader+s splits vertically
+x = "close-pane"
+
+ai-cmd = "claude --model sonnet"
+shell  = "/bin/zsh"
+update-check = true
+```
+
+## Reference
+
+<TypeTable
+  type={{
+    'keymap.leader': {
+      description:
+        'Leader chord that enters leader mode (`ctrl+b`, `ctrl+space`, `f12`, …). A top-level `leader` also reads as a deprecated alias.',
+      default: '`ctrl+b`',
+    },
+    'keymap.bindings': {
+      description:
+        'Overrides/additions to the leader bindings: `chord = "action-id"` (e.g. `s = "split-vertical"`). Invalid chords/actions are ignored with a warning.',
+      default: 'stock keymap',
+    },
+    'ai-cmd': {
+      description:
+        'AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat.',
+      default: '`opencode`',
+    },
+    shell: {
+      description: 'Login shell used to spawn panes.',
+      default: '`$SHELL` → `/bin/zsh`',
+    },
+    'update-check': {
+      description:
+        'Whether the startup update check runs (also `KUMO_NO_UPDATE=1`).',
+      default: '`true`',
+    },
+    'agent-sound': {
+      description:
+        'Whether blocked/finished agent transitions play an audible alert (also `KUMO_NO_SOUND=1`).',
+      default: '`true`',
+    },
+  }}
+/>
+
+## File locations
+
+Overrides follow the usual conventions:
+
+| Location | Path / override |
+| --- | --- |
+| Config | `~/.config/kumo/config.toml` — override with `KUMO_CONFIG_DIR` or `XDG_CONFIG_HOME` |
+| Runtime state | `~/.local/state/kumo/` — override with `KUMO_STATE_DIR` or `XDG_STATE_HOME` |
+| IPC socket | `$XDG_RUNTIME_DIR/kumo` |
+
+## Live reload
+
+`kumo reload` (or MENU → `reload`) re-reads the config and applies `shell`,
+`ai-cmd`, `leader`, and `keymap.bindings` live to panes spawned from then on.
+`new-cwd` and `agent-sound` apply instantly. MENU → `config` opens the config
+file in an editor pane inside the session (`$VISUAL` → `$EDITOR` → `vi`).

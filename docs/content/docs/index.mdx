@@ -1,0 +1,53 @@
+---
+title: Introduction
+description: Kumo is a terminal multiplexer that weaves your AI agents together into a single web.
+icon: 🕷️
+---
+
+import { Card, Cards } from 'fumadocs-ui/components/card';
+
+**Kumo** (蜘蛛 — *spider* in Japanese) is a terminal multiplexer that weaves
+your AI agents together into a single **web** 🕸️. Every pane is a live
+terminal, every AI CLI you run (`opencode`, `claude`, `codex`, …) is a thread
+in that web, and the sidebar keeps you aware of what each agent is doing at a
+glance — because a spider always knows what's happening in its web.
+
+It is built in **Rust** with a single TUI frontend on **ratatui**, real
+terminal emulation from **libghostty-vt** (Ghostty's headless terminal core),
+and **portable-pty** for PTY management.
+
+And it's featherweight 🪶: while you work, kumo itself idles at **~0.7% CPU
+and ~6 MB of memory** — the real cost is whatever you run *inside* its panes,
+not the multiplexer.
+
+## Features
+
+- 🖥️ **Real terminal emulation** — each pane is a genuine VT/xterm emulator
+  (vendored Ghostty). Shells, TUIs, and full-screen apps behave exactly like
+  in a native terminal: cursor, colors, scrollback, the works.
+- 🧩 **Split panes & sessions** — binary split tree (vertical/horizontal),
+  mouse-drag resizing, zoom, multiple independent sessions, tab cycling.
+- 🤖 **AI CLI panes** — spawn a dedicated pane running your AI CLI with one
+  keystroke, or run any agent in a shell pane: kumo auto-detects the process
+  and weaves it into the sidebar.
+- 🟢🟠⚪ **Agent status at a glance** — each agent shows a status dot:
+  green = working, orange = blocked (waiting for approval), gray = idle.
+  Detected from the live terminal buffer, so it stays accurate while you
+  scroll.
+- 🔔 **Audible alerts** — a distinct chime when an agent blocks or finishes;
+  blocked agents float to the top of the AGENTS list and their pane glows
+  orange, even without focus.
+- 📋 **Native text selection** — drag to select in any pane, even inside apps
+  that own the mouse (opencode's TUI, vim, less).
+- 🐣 **Plain-tty identity** — panes present as a plain `xterm-256color` (no
+  mouse capabilities advertised), so apps don't hijack the mouse and
+  selection always works.
+- 📂 **Workspace-aware** — kumo opens in the directory you launch it from;
+  every new pane/session starts there.
+
+<Cards>
+  <Card title="Installation" href="/docs/getting-started/installation" description="CLI installer, desktop app, nightly channel." />
+  <Card title="Quickstart" href="/docs/getting-started/quickstart" description="Your first session, splits, and AI pane." />
+  <Card title="Configuration" href="/docs/configuration" description="config.toml reference: leader keys, shells, agents." />
+  <Card title="Roadmap" href="/docs/roadmap" description="Where kumo is heading — full customization by 1.0." />
+</Cards>

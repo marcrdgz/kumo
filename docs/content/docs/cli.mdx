@@ -1,0 +1,31 @@
+---
+title: CLI Reference
+description: Every kumo command — attach, new, ls, kill, daemon, update.
+icon: 🛠️
+---
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `kumo` | Attach to the daemon (starts it if needed); restores the last session if present |
+| `kumo attach` | Force-attach to the running daemon |
+| `kumo new [WORKSPACE]` | Start a fresh session in the daemon (never attaches); uses the client's cwd when no workspace is given |
+| `kumo [WORKSPACE]` | Fresh-start alias for back-compat |
+| `kumo ls` | List the daemon's sessions (`*` = active), including each AI agent's status |
+| `kumo kill` | Stop the daemon (kills its panes) |
+| `kumo reload` | Re-read the config and apply it live |
+| `kumo daemon [WORKSPACE]` | Run the headless daemon in the foreground |
+| `kumo update` | Update to the latest stable release |
+| `kumo update --nightly` | Update to the latest nightly build |
+| `kumo update --check` | Report availability (exit 0 = up to date, 1 = update available) |
+| `kumo --version` | Print the version and channel (stable / nightly / dev) |
+
+## Examples
+
+```sh
+kumo new ~/proyecto        # fresh session in ~/proyecto
+kumo daemon ~/proyecto     # headless daemon in the foreground
+```
+
+During development: `cargo run -p kumo` or `make run`.

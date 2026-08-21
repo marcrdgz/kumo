@@ -2019,8 +2019,8 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
         let ct = custom_theme().expect("even with bad accent, custom should exist (fallback)");
-        // accent should remain default (spider-verse accent #ff2a5f)
-        assert_eq!(ct.accent, ratatui::style::Color::Rgb(0xff, 0x2a, 0x5f));
+        // accent should remain default (spider-verse accent #ef3945)
+        assert_eq!(ct.accent, ratatui::style::Color::Rgb(0xef, 0x39, 0x45));
     }
 
     #[test]
