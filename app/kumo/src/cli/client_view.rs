@@ -4148,21 +4148,8 @@ impl View {
         let Some(rect) = self.update_notice_rect() else { return };
         let Some((line1, line2)) = self.update_notice_lines() else { return };
         let theme = self.current_theme();
-        let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
-        let border = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        fill(f, rect, theme.panel_sep);
-        put(f, x0, y0, "┌", border);
-        put(f, x1, y0, "┐", border);
-        put(f, x0, y1, "└", border);
-        put(f, x1, y1, "┘", border);
-        for x in (x0 + 1)..x1 {
-            put(f, x, y0, "─", border);
-            put(f, x, y1, "─", border);
-        }
-        for y in (y0 + 1)..y1 {
-            put(f, x0, y, "│", border);
-            put(f, x1, y, "│", border);
-        }
+        draw_modal(f, rect, &theme);
+        let (x0, y0) = (rect.x, rect.y);
         put(f, x0 + 2, y0 + 1, "✕", Style::default().fg(theme.red).bg(theme.panel_sep).add_modifier(Modifier::BOLD));
         let inner_w = rect.width.saturating_sub(2);
         text(f, x0 + 5, y0 + 1, &line1, Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w.saturating_sub(6));
@@ -4175,8 +4162,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.menu_dropdown_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme);
         for (i, item) in MENU_ITEMS.iter().enumerate() {
             render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.menu.selected, &theme);
         }
@@ -4188,8 +4174,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.ctx_menu_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme);
         for (i, item) in self.ctx_items().iter().enumerate() {
             render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.ctx_menu.selected, &theme);
         }
@@ -4202,8 +4187,7 @@ impl View {
         let theme = self.current_theme();
         let Some(dd) = self.name_popup_rect() else { return };
         let (x0, y0, _x1, _y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         let title_text = match self.popup.target {
             Some(PopupTarget::RenamePane(_)) => "rename pane",
@@ -4264,8 +4248,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.keybind_overlay_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme);
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "keybindings", title, inner_w);
@@ -4301,8 +4284,8 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.settings_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme);
+        let sep_style = Style::default().fg(theme.accent).bg(theme.panel_sep);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "settings", title, dd.width.saturating_sub(4));
         let Some(tabs) = self.settings_tabs_rect() else { return };
@@ -4319,7 +4302,7 @@ impl View {
         }
         let sep_x = tabs.x + tabs.width;
         for y in tabs.y..dd.bottom() {
-            put(f, sep_x, y, "│", border);
+            put(f, sep_x, y, "│", sep_style);
         }
         match SETTINGS_TABS.get(self.settings.tab).copied().unwrap_or(SettingsTab::Appearance) {
             SettingsTab::Appearance => self.render_settings_appearance(f, dd),
@@ -4403,8 +4386,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.worktree_picker_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme);
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         let count = self.worktree_picker.items.len();
@@ -4592,7 +4574,19 @@ impl View {
             // black bg, red border
             let border = Style::default().fg(theme.red).bg(RColor::Black);
             fill(f, dd, RColor::Black);
-            draw_box(f, dd, border);
+            let (bx0, by0, bx1, by1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+            put(f, bx0, by0, "┌", border);
+            put(f, bx1, by0, "┐", border);
+            put(f, bx0, by1, "└", border);
+            put(f, bx1, by1, "┘", border);
+            for x in (bx0 + 1)..bx1 {
+                put(f, x, by0, "─", border);
+                put(f, x, by1, "─", border);
+            }
+            for y in (by0 + 1)..by1 {
+                put(f, bx0, y, "│", border);
+                put(f, bx1, y, "│", border);
+            }
             let inner_w = dd.width.saturating_sub(4);
             // title
             let title = Style::default().fg(RColor::White).bg(RColor::Black).add_modifier(Modifier::BOLD);
@@ -4839,13 +4833,17 @@ fn short_workspace(ws: &std::path::Path) -> String {
     }
 }
 
-fn draw_box(f: &mut Frame, dd: Rect, border: Style) {
-    fill(f, dd, border.bg.unwrap_or(RColor::Reset));
+/// Shared modal chrome: panel fill, rounded accent border, and a one-cell
+/// drop shadow along the bottom/right edges (clamped to the screen). Every
+/// overlay renders through this so popups read as one design system.
+fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme) {
+    fill(f, dd, theme.panel_sep);
+    let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
     let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
-    put(f, x0, y0, "┌", border);
-    put(f, x1, y0, "┐", border);
-    put(f, x0, y1, "└", border);
-    put(f, x1, y1, "┘", border);
+    put(f, x0, y0, "╭", border);
+    put(f, x1, y0, "╮", border);
+    put(f, x0, y1, "╰", border);
+    put(f, x1, y1, "╯", border);
     for x in (x0 + 1)..x1 {
         put(f, x, y0, "─", border);
         put(f, x, y1, "─", border);
@@ -4853,6 +4851,21 @@ fn draw_box(f: &mut Frame, dd: Rect, border: Style) {
     for y in (y0 + 1)..y1 {
         put(f, x0, y, "│", border);
         put(f, x1, y, "│", border);
+    }
+    let shadow_bg = dim_toward(theme.panel_sep, ColorRgb::new(0, 0, 0), &theme.palette, 2, 5);
+    let shadow = Style::default().bg(shadow_bg);
+    let scr = f.area();
+    if dd.right() < scr.width {
+        let y_end = dd.bottom().min(scr.height.saturating_sub(1));
+        for y in (dd.y + 1)..=y_end {
+            put(f, dd.right(), y, " ", shadow);
+        }
+    }
+    if dd.bottom() < scr.height {
+        let x_end = dd.right().min(scr.width.saturating_sub(1));
+        for x in (dd.x + 1)..=x_end {
+            put(f, x, dd.bottom(), " ", shadow);
+        }
     }
 }
 
