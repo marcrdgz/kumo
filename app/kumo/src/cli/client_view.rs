@@ -16,6 +16,7 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::Frame;
 use ratatui::Terminal;
 
+use kumo_core::color::ColorRgb;
 use kumo_core::layout::{self, PaneGeom, TreeGeom};
 use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
@@ -59,6 +60,21 @@ fn lighten(c: RColor, amt: u8) -> RColor {
         RColor::Rgb(r, g, b) => RColor::Rgb(r.saturating_add(amt), g.saturating_add(amt), b.saturating_add(amt)),
         _ => c,
     }
+}
+
+/// Blend an RGB color toward `bg` by `num/den` (indexed colors resolve through
+/// the theme palette first). Used to make idle chrome recede next to accents.
+fn dim_toward(c: RColor, bg: ColorRgb, palette: &[ColorRgb; 16], num: u32, den: u32) -> RColor {
+    let (r, g, b) = match c {
+        RColor::Rgb(r, g, b) => (r, g, b),
+        RColor::Indexed(i) => match palette.get(i as usize) {
+            Some(cc) => (cc.r, cc.g, cc.b),
+            None => return c,
+        },
+        _ => return c,
+    };
+    let mix = |cv: u8, bv: u8| -> u8 { ((cv as u32 * (den - num) + bv as u32 * num) / den).min(255) as u8 };
+    RColor::Rgb(mix(r, bg.r), mix(g, bg.g), mix(b, bg.b))
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -3509,7 +3525,9 @@ impl View {
         } else if focused {
             theme.accent
         } else {
-            theme.border_idle
+            // Idle borders recede toward the terminal background so the
+            // focused pane's accent border is the clear bright edge.
+            dim_toward(theme.border_idle, theme.term_bg, &theme.palette, 1, 2)
         };
         let style_cfg = kumo_core::config::sidebar_borders().style;
         if style_cfg == kumo_core::config::BorderStyle::Hidden {
