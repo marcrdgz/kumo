@@ -40,6 +40,8 @@ const STATUS_H: u16 = 1;
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// How long transient status-bar messages stay up.
 const TOAST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Right-aligned badge drawn on a zoomed pane's top border.
+const ZOOM_BADGE: &str = " ⤢ zoom ";
 /// Label of the MENU button in the status bar.
 const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
@@ -3462,7 +3464,7 @@ impl View {
         // Pane frames (borders + titles + content).
         for &(pid, rect) in &self.rects {
             let focused = self.active_tab().map(|t| t.focus == pid).unwrap_or(false);
-            let title = self.pane_title(pid, focused);
+            let title = self.pane_title(pid, focused, rect);
             self.render_pane_frame(f, rect, focused, &title);
             if let Some(grid) = self.grids.get_mut(&pid) {
                 render_pane_content(f, pid, rect, grid, selected, link_mods, &theme);
@@ -3497,13 +3499,17 @@ impl View {
             .unwrap_or_else(|| " pane ".to_string())
     }
 
-    fn pane_title(&self, pid: u64, focused: bool) -> String {
+    fn pane_title(&self, pid: u64, focused: bool, rect: Rect) -> String {
         let base = self.pane_label(pid);
         if focused && self.session_zoom() {
-            format!("{base}(zoom) ")
-        } else {
-            base
+            // The right-aligned badge marks zoom; only fall back to a title
+            // suffix when the pane is too narrow to fit both.
+            let badge_w = ZOOM_BADGE.chars().count() as u16;
+            if rect.width < base.chars().count() as u16 + badge_w + 2 {
+                return format!("{base}(zoom) ");
+            }
         }
+        base
     }
 
     fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, title: &str) {
@@ -3543,6 +3549,16 @@ impl View {
             for (i, ch) in title.chars().take(max).enumerate() {
                 put(f, rect.x + 1 + i as u16, rect.y, &ch.to_string(), chip);
             }
+            if focused && self.session_zoom() {
+                let badge_w = ZOOM_BADGE.chars().count() as u16;
+                if rect.width >= title.chars().count() as u16 + badge_w + 2 {
+                    let bx = rect.right() - badge_w;
+                    let bstyle = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                    for (i, ch) in ZOOM_BADGE.chars().enumerate() {
+                        put(f, bx + i as u16, rect.y, &ch.to_string(), bstyle);
+                    }
+                }
+            }
             return;
         }
         let border_style = Style::default().fg(border).bg(RColor::Reset);
@@ -3571,6 +3587,17 @@ impl View {
         };
         for (i, ch) in title.chars().take(max).enumerate() {
             put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
+        }
+        // Zoom badge, right-aligned on the top border row.
+        if focused && self.session_zoom() {
+            let badge_w = ZOOM_BADGE.chars().count() as u16;
+            if rect.width >= title.chars().count() as u16 + badge_w + 2 {
+                let bx = x1 + 1 - badge_w;
+                let bstyle = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                for (i, ch) in ZOOM_BADGE.chars().enumerate() {
+                    put(f, bx + i as u16, y0, &ch.to_string(), bstyle);
+                }
+            }
         }
     }
 
