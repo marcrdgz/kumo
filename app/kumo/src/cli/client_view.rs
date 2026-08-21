@@ -1119,7 +1119,9 @@ impl View {
         }
         for (idx, pill, close) in &self.tab_rects {
             if pill.contains(Position::new(x, y)) {
-                let is_close = close.contains(Position::new(x, y)) && self.tab_hover == Some(*idx);
+                // The close cell is always drawn, so it is clickable without a
+                // prior hover.
+                let is_close = close.contains(Position::new(x, y));
                 return Some((*idx, is_close));
             }
         }
@@ -3702,9 +3704,11 @@ impl View {
             if is_hover {
                 let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
-            } else if !active {
-                // keep last cell as subtle close hint placeholder (dim)
-                put(f, close.x, close.y, " ", base_style);
+            } else {
+                // Persistent ghost close hint: always visible (clickable without
+                // a prior hover), brightening to red on hover.
+                let ghost = lighten(pill_bg, if active { 26 } else { 16 });
+                put(f, close.x, close.y, "x", Style::default().fg(ghost).bg(pill_bg));
             }
         }
         // Plus button
