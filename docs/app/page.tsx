@@ -28,7 +28,7 @@ export default function HomePage() {
         />
         <div className="relative mt-20 mb-6 flex flex-col items-center">
           <h1 className="spider-gradient-text mb-1 mt-6 text-5xl font-bold tracking-tight sm:text-6xl">
-            Kumo
+            kumo
           </h1>
           <p className="text-md font-medium text-fd-muted-foreground">
             蜘蛛 — <span className="italic">spider</span> in Japanese.
