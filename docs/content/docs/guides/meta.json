@@ -1,0 +1,11 @@
+{
+  "title": "Guides",
+  "defaultOpen": true,
+  "pages": [
+    "sessions-and-panes",
+    "keybindings",
+    "agents",
+    "detach-and-reattach",
+    "themes"
+  ]
+}

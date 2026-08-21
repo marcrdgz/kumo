@@ -1,6 +1,15 @@
 # --- Rust ---
 /target/
 
+# --- Docs site (docs/) ---
+docs/node_modules/
+docs/.next/
+docs/out/
+docs/.source/
+docs/next-env.d.ts
+docs/*.tsbuildinfo
+docs/server.log
+
 # --- C/C++ & Native Libraries Cache ---
 *.o
 *.a

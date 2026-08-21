@@ -1,0 +1,51 @@
+@import 'fumadocs-ui/css/lib/default-colors.css';
+
+/*
+ * Spider-Verse palette for kumo docs.
+ * Miles red + electric cyan + Gwen magenta on comic-night black,
+ * with a warm "comic paper" light mode.
+ */
+
+@theme {
+  --color-fd-background: hsl(40 33% 98%);
+  --color-fd-foreground: hsl(240 14% 10%);
+  --color-fd-muted: hsl(40 20% 93%);
+  --color-fd-muted-foreground: hsl(240 6% 40%);
+  --color-fd-popover: hsl(40 25% 97%);
+  --color-fd-popover-foreground: hsl(240 14% 10%);
+  --color-fd-card: hsl(40 25% 96%);
+  --color-fd-card-foreground: hsl(240 14% 10%);
+  --color-fd-border: hsla(240 10% 20% / 0.14);
+  --color-fd-primary: hsl(356 78% 47%);
+  --color-fd-primary-foreground: hsl(0 0% 100%);
+  --color-fd-secondary: hsl(40 18% 91%);
+  --color-fd-secondary-foreground: hsl(240 14% 10%);
+  --color-fd-accent: hsl(326 65% 93%);
+  --color-fd-accent-foreground: hsl(326 70% 26%);
+  --color-fd-ring: hsl(197 90% 42%);
+  --color-fd-overlay: hsla(240 30% 8% / 0.35);
+}
+
+.dark {
+  --color-fd-background: hsl(240 27% 7%);
+  --color-fd-foreground: hsl(240 20% 94%);
+  --color-fd-muted: hsl(240 22% 12%);
+  --color-fd-muted-foreground: hsl(240 12% 68%);
+  --color-fd-popover: hsl(240 24% 9%);
+  --color-fd-popover-foreground: hsl(240 20% 94%);
+  --color-fd-card: hsl(240 22% 11%);
+  --color-fd-card-foreground: hsl(240 20% 94%);
+  --color-fd-border: hsla(240 30% 75% / 0.14);
+  --color-fd-primary: hsl(356 85% 58%);
+  --color-fd-primary-foreground: hsl(0 0% 100%);
+  --color-fd-secondary: hsl(240 22% 15%);
+  --color-fd-secondary-foreground: hsl(240 20% 94%);
+  --color-fd-accent: hsl(322 45% 17%);
+  --color-fd-accent-foreground: hsl(326 90% 88%);
+  --color-fd-ring: hsl(197 100% 52%);
+  --color-fd-overlay: hsla(240 40% 3% / 0.6);
+}
+
+::selection {
+  background: hsl(326 90% 60% / 0.35);
+}

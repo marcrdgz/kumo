@@ -144,36 +144,36 @@ pub const THEMES: [Theme; 8] = [
     Theme {
         name: "Spider-Verse",
         palette: [
-            ColorRgb::new(0x0d, 0x0e, 0x15), // Black      (bg night)
-            ColorRgb::new(0xff, 0x2a, 0x5f), // Red        (neon carmine)
-            ColorRgb::new(0x2e, 0xe0, 0x6b), // Green      (neon green)
-            ColorRgb::new(0xff, 0xd1, 0x66), // Yellow     (amber)
-            ColorRgb::new(0x4a, 0x7b, 0xff), // Blue       (electric blue)
-            ColorRgb::new(0xc7, 0x7d, 0xff), // Magenta    (neon purple)
-            ColorRgb::new(0x00, 0xf0, 0xff), // Cyan       (cyber cyan)
-            ColorRgb::new(0xe2, 0xe8, 0xf0), // White      (ash white)
-            ColorRgb::new(0x16, 0x19, 0x23), // BrightBlack (surface)
-            ColorRgb::new(0xff, 0x6b, 0x8a), // BrightRed
+            ColorRgb::new(0x16, 0x16, 0x22), // Black       (card surface)
+            ColorRgb::new(0xef, 0x39, 0x45), // Red         (spider red)
+            ColorRgb::new(0x2e, 0xe0, 0x6b), // Green       (neon green)
+            ColorRgb::new(0xff, 0xd1, 0x66), // Yellow      (amber)
+            ColorRgb::new(0x4a, 0x7b, 0xff), // Blue        (electric blue)
+            ColorRgb::new(0xf5, 0x47, 0xaa), // Magenta     (Gwen magenta)
+            ColorRgb::new(0x0a, 0xba, 0xff), // Cyan        (electric cyan)
+            ColorRgb::new(0xed, 0xed, 0xf3), // White       (comic ink highlight)
+            ColorRgb::new(0x28, 0x28, 0x40), // BrightBlack (surface ramp)
+            ColorRgb::new(0xf3, 0x68, 0x71), // BrightRed
             ColorRgb::new(0x5b, 0xf0, 0xa0), // BrightGreen
             ColorRgb::new(0xff, 0xe0, 0x8a), // BrightYellow
             ColorRgb::new(0x7e, 0xa6, 0xff), // BrightBlue
-            ColorRgb::new(0xd9, 0xaf, 0xff), // BrightMagenta
-            ColorRgb::new(0x7d, 0xf6, 0xff), // BrightCyan
+            ColorRgb::new(0xf8, 0x77, 0xc0), // BrightMagenta
+            ColorRgb::new(0x3d, 0xc8, 0xff), // BrightCyan
             ColorRgb::new(0xff, 0xff, 0xff), // BrightWhite
         ],
-        term_fg: ColorRgb::new(0xe2, 0xe8, 0xf0),
-        term_bg: ColorRgb::new(0x0d, 0x0e, 0x15),
-        term_cursor: ColorRgb::new(0x00, 0xf0, 0xff),
-        fg: RColor::Rgb(0xe2, 0xe8, 0xf0),
-        accent: RColor::Rgb(0xff, 0x2a, 0x5f),
-        secondary: RColor::Rgb(0x00, 0xf0, 0xff),
-        panel_sep: RColor::Rgb(0x16, 0x19, 0x23),
-        panel_muted: RColor::Rgb(0x8a, 0x94, 0xad),
-        border_idle: RColor::Rgb(0x8a, 0x94, 0xad),
+        term_fg: ColorRgb::new(0xed, 0xed, 0xf3),
+        term_bg: ColorRgb::new(0x0d, 0x0d, 0x17),
+        term_cursor: ColorRgb::new(0x0a, 0xba, 0xff),
+        fg: RColor::Rgb(0xed, 0xed, 0xf3),
+        accent: RColor::Rgb(0xef, 0x39, 0x45),
+        secondary: RColor::Rgb(0x0a, 0xba, 0xff),
+        panel_sep: RColor::Rgb(0x16, 0x16, 0x22),
+        panel_muted: RColor::Rgb(0xa4, 0xa4, 0xb7),
+        border_idle: RColor::Rgb(0xa4, 0xa4, 0xb7),
         green: RColor::Rgb(0x2e, 0xe0, 0x6b),
         orange: RColor::Rgb(0xff, 0xb8, 0x4d),
-        red: RColor::Rgb(0xff, 0x2a, 0x5f),
-        input_bg: RColor::Rgb(0xe2, 0xe8, 0xf0),
+        red: RColor::Rgb(0xef, 0x39, 0x45),
+        input_bg: RColor::Rgb(0xed, 0xed, 0xf3),
     },
     Theme {
         name: "Cyber Spider",

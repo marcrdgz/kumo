@@ -1,4 +1,4 @@
-.PHONY: all build test run install clean
+.PHONY: all build test run install clean docs docs-build
 
 # Xcode 26.5+ SDKs dropped the arm64-macos slice from libSystem.tbd, so zig
 # 0.15 (libghostty-vt's pinned toolchain) resolves zero symbols from it and
@@ -25,6 +25,13 @@ run:
 
 install:
 	cargo install --path app/kumo --locked
+
+docs:
+	npm run dev --prefix docs
+
+docs-build:
+	npm ci --prefix docs
+	DOCS_BASE_PATH=/kumo npm run build --prefix docs
 
 clean:
 	cargo clean

@@ -1,0 +1,67 @@
+---
+title: Keybindings
+description: The leader key, every stock binding, and how to remap them.
+icon: ⌨️
+---
+
+All leader bindings are configurable — override a stock key or add a new one
+in `[keymap.bindings]` with `"chord" = "action-id"` (see
+[Configuration](/docs/configuration)). The `action-id` column below is exactly
+what goes on the right-hand side.
+
+## Stock bindings
+
+| Key | Action id (`[keymap.bindings]`) | Action |
+| --- | --- | --- |
+| <kbd>Ctrl+B</kbd> | `leader` | Leader key (shows all bindings in the status bar) |
+| <kbd>v</kbd> | `split-vertical` | Split the focused pane vertically |
+| <kbd>-</kbd> | `split-horizontal` | Split the focused pane horizontally |
+| <kbd>a</kbd> | `split-ai` | Spawn an AI CLI pane (vertical split) |
+| <kbd>z</kbd> | `zoom` | Zoom the focused pane |
+| <kbd>h</kbd> | `focus-left` | Move focus left |
+| <kbd>j</kbd> | `focus-down` | Move focus down |
+| <kbd>k</kbd> | `focus-up` | Move focus up |
+| <kbd>l</kbd> | `focus-right` | Move focus right |
+| <kbd>H</kbd> | `resize-left` | Resize the focused pane left |
+| <kbd>J</kbd> | `resize-down` | Resize the focused pane down |
+| <kbd>K</kbd> | `resize-up` | Resize the focused pane up |
+| <kbd>L</kbd> | `resize-right` | Resize the focused pane right |
+| <kbd>Tab</kbd> | `cycle-pane` | Cycle focus between panes |
+| <kbd>s</kbd> | `swap-panes` | Swap the focused pane with its sibling |
+| <kbd>o</kbd> | `rotate-layout` | Rotate the pane layout |
+| <kbd>q</kbd> | `show-pane-numbers` | Show pane numbers — press a number to jump |
+| <kbd>c</kbd> | `new-session` | Create a new session |
+| <kbd>x</kbd> | `close-pane` | Close the focused pane |
+| <kbd>n</kbd> / <kbd>p</kbd> | `next-session` / `prev-session` | Cycle sessions |
+| <kbd>1</kbd>–<kbd>9</kbd> | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position |
+| <kbd>b</kbd> | `toggle-sidebar` | Toggle the sidebar |
+| <kbd>d</kbd> | `detach` | Detach (daemon keeps running) |
+| <kbd>?</kbd> | `show-keybinds` | Keybind showcase — every leader binding at a glance |
+| <kbd>Esc</kbd> | — | Exit leader mode |
+
+## Remapping
+
+```toml
+[keymap]
+leader = "ctrl+b"
+
+# Override a stock key or add a new one.
+[keymap.bindings]
+s = "split-vertical"   # now leader+s splits vertically
+x = "close-pane"
+```
+
+Invalid chords/actions are ignored with a warning. The dispatch table feeds
+the leader-mode status-bar hint and the <kbd>leader+?</kbd> showcase from the
+same source, so they never drift.
+
+## Not remappable
+
+- <kbd>Esc</kbd> and the leader chord itself.
+- Per-mode keymaps for **popups** (menu / context-menu / popup navigation) —
+  like tmux, only command bindings are remappable.
+- **Mouse gestures** (drag-select, splitter resize, context menu) — they are
+  positional hit-testing, not key sequences.
+
+Press <kbd>leader+?</kbd> at any time for the live showcase of your current
+bindings.

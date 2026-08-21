@@ -1,0 +1,69 @@
+---
+title: Quickstart
+description: From zero to a woven web of terminals and AI agents in two minutes.
+icon: 🚀
+---
+
+import { Card, Cards } from 'fumadocs-ui/components/card';
+
+## Launch
+
+```sh
+kumo
+```
+
+`kumo` attaches to the last session if one exists (else starts fresh) and
+starts the daemon behind it if needed. Every new pane opens in the directory
+you launched from.
+
+## Meet the leader key
+
+Press <kbd>Ctrl+B</kbd>, then a command key. The status bar shows the
+available bindings while you are in leader mode, and <kbd>leader+?</kbd>
+opens the full keybind showcase at any time.
+
+## Split panes
+
+- <kbd>leader+v</kbd> — split vertically
+- <kbd>leader+-</kbd> — split horizontally
+- <kbd>leader+h/j/k/l</kbd> — move focus between panes
+- <kbd>leader+z</kbd> — zoom the focused pane
+
+Resize with <kbd>leader+H/J/K/L</kbd>, or just drag a splitter with the mouse.
+
+## Spawn an AI agent
+
+<kbd>leader+a</kbd> opens a dedicated pane running your AI CLI (default
+`opencode`, configurable via `ai-cmd`). You can also just run `opencode`,
+`claude`, or `codex` inside any shell pane — kumo auto-detects the agent
+process and weaves it into the sidebar's **AGENTS** tab with a live status
+dot: 🟢 working, 🟠 blocked (waiting for your approval), ⚪ idle. When an
+agent blocks or finishes, kumo chimes so you notice without watching.
+
+## Sessions
+
+- <kbd>leader+c</kbd> — create a named session
+- <kbd>leader+n</kbd> / <kbd>leader+p</kbd> — cycle sessions
+- <kbd>leader+1…9</kbd> — jump to the session at that sidebar position
+
+## Detach and come back
+
+<kbd>leader+d</kbd> detaches this terminal; the daemon keeps running in the
+background owning your panes and agents. Re-attach from any terminal:
+
+```sh
+kumo        # attach to the daemon (starts it if needed)
+kumo ls     # list sessions (* = active)
+```
+
+<Cards>
+  <Card title="Keybindings" href="/docs/guides/keybindings">
+    Every leader binding, and how to remap them in `config.toml`.
+  </Card>
+  <Card title="AI Agents" href="/docs/guides/agents">
+    Status detection, alerts, and per-agent lifecycle support.
+  </Card>
+  <Card title="Configuration" href="/docs/configuration">
+    Leader keys, shells, AI commands, and more.
+  </Card>
+</Cards>

@@ -1,0 +1,50 @@
+---
+title: Roadmap
+description: Where kumo is heading — every aspect configurable by you, by 1.0.
+icon: 🗺️
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The long-term goal is that **every aspect of kumo is configurable by you**:
+colors, keybindings, the leader key, the layout of the status bar and
+sidebar, the AI panes, and more. Every `0.x.0` is a feature release; 1.0.0 is
+the finish line for the configurable, persistent kumo.
+
+<Callout type="info" title="Current stable: v0.5.x">
+  See [CHANGELOG](https://github.com/marcrdgz/kumo/blob/main/CHANGELOG.md) for
+  the full release history, and
+  [ROADMAP.md](https://github.com/marcrdgz/kumo/blob/main/ROADMAP.md) for the
+  detailed plan.
+</Callout>
+
+## Released
+
+| Version | Theme | Highlights |
+| --- | --- | --- |
+| 0.2.0 | Polish & hygiene | CLI help output, context menu, per-agent lifecycle split + `claude` support, `leader+?` keybind showcase |
+| 0.3.0 | Daemon core | Daemon owning PTYs, tmux-style CLI (`attach`/`new`/`ls`/`kill`), detach, dirty-row cell-patch streaming, socket security, agents server-side, update without losing the web |
+| 0.4.0 | Config & keymaps | TOML config, custom leader keys, data-driven remappable bindings, keyboard resize/swap/rotate, `[terminal]` section with follow-workspace cwd, live reload |
+| 0.5.0 | Theme & chrome | Theme picker (Catppuccin-style schemes), sidebar SESSIONS/AGENTS tabs, git worktrees, clickable links, selection & copy feedback |
+
+## Next up
+
+- **0.6.0 — Copy-mode, search & pane plumbing**: user-editable theme engine,
+  config hot-reload watcher, customizable status-bar widgets, tabs (windows)
+  per session, vi-style copy-mode with `/` search, sync-input, pipe-pane,
+  full screen+scrollback restore after update, control CLI / scripting.
+- **0.7.0 — Agent breadth & AI polish**: lifecycle detection for `codex`,
+  `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; OSC 133 command-traceback
+  context sharing.
+- **0.8.0 — Stability**: signal hardening, stable CI, complete config docs,
+  published benchmarks; Windows experimental.
+- **1.0.0 — Full customization + solid persistence**: frozen TOML schema v1,
+  stable keymap and theme system, crash-safe persistence, proven release
+  pipeline.
+
+## After 1.0
+
+A deliberately **thin** plugin system, Windows parity, semantic session
+timeline (time-travel scrollback), kumo as an MCP server so any agent can
+drive it, a multi-agent supervisor, session migration across machines,
+declarative workspaces, and tmate-style session sharing.

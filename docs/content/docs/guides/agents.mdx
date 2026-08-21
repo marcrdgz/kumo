@@ -1,0 +1,51 @@
+---
+title: AI Agents
+description: AI CLI panes, status detection, and audible alerts.
+icon: 🤖
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Kumo auto-detects any AI CLI running inside a pane and lists it in the
+sidebar's AGENTS tab with its workspace and CLI name.
+
+## Spawning an agent
+
+<kbd>leader+a</kbd> spawns a dedicated AI pane running your configured CLI
+(`ai-cmd`, default `opencode`). Or just run `opencode`, `claude`, `codex`, …
+inside any shell pane — kumo detects the process automatically.
+
+## Status at a glance
+
+Each agent shows a status dot, detected from the live terminal buffer (not
+just the viewport), so it stays accurate even while you scroll:
+
+- 🟢 **Green** — working
+- 🟠 **Orange** — blocked, waiting for your approval
+- ⚪ **Gray** — idle
+
+When an agent **blocks** or **finishes**, kumo plays an audible alert (a
+distinct chime per event). Blocked agents float to the top of the AGENTS list
+with a filled `◉` dot and a `· blocked` hint, and their pane glows orange even
+without focus. Tune with `agent-sound = false`.
+
+## Lifecycle detection
+
+**Process** detection (name + workspace) works for every agent below;
+**lifecycle** detection (working / blocked / idle) is per-agent:
+
+### Fully implemented
+
+- `opencode` — permission dialogs, question prompt, prompt-footer signals
+- `claude` — approval forms, permission prompts, OSC-title spinner
+
+### Auto-listed, status always idle
+
+- `codex` · `gemini` · `qwen` · `aider` · `cody` · `swe` · `coco`
+
+<Callout title="Agents live in the daemon">
+  Lifecycle detection, status, and audible alerts run server-side, so they are
+  visible in the sidebar of any attached terminal — and `kumo ls` surfaces
+  each agent's status from outside the TUI, so a blocked agent is noticeable
+  even when you are not attached.
+</Callout>

@@ -1,0 +1,36 @@
+---
+title: Detach & Re-attach
+description: The daemon model — leave, come back, and update without losing your panes.
+icon: 🔁
+---
+
+<kbd>leader+d</kbd> (or MENU → `detach`) detaches **this terminal**; the
+daemon keeps running in the background, owning your panes, their processes,
+and their agents. Re-attach from any terminal with `kumo` or `kumo attach`,
+and everything is exactly where you left it.
+
+## How it works
+
+- The daemon owns the PTYs and the terminal emulators; attached terminals are
+  light renderers that draw cell patches and forward input.
+- Rendering streams **dirty-row cell patches**, so re-attach is exact and
+  several terminals can watch the same session at once.
+- The daemon **auto-stops** when the last session closes — no lingering
+  background process.
+- `kumo new` always starts a fresh session; it never attaches to an existing
+  one.
+
+## Security
+
+The IPC socket lives in `$XDG_RUNTIME_DIR/kumo` with owner-only permissions
+(`0o600`), and every accepted connection is checked to belong to the same
+user (`SO_PEERCRED` on Linux, `getpeereid()` on macOS/BSD) — a different
+user's client is rejected, fail closed.
+
+## Updating without losing the web
+
+`kumo update` swaps the binary and the daemon restarts **in place**
+(`daemon --resume`), inheriting the live terminals from a transient resume
+file — running agents survive the update, and attached terminals auto-reconnect
+over the fresh socket. Screens come back fresh; a full screen+scrollback
+restore is planned for 0.6.0 (see the [roadmap](/docs/roadmap)).

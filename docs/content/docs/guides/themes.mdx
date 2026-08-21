@@ -1,0 +1,23 @@
+---
+title: Themes
+description: The built-in theme picker, and what the theme engine adds next.
+icon: 🎨
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Kumo ships a **theme picker**: a settings popup with tabs listing
+Catppuccin-style schemes with light/dark variants, per-scheme backgrounds,
+status-dot colors, and borders. Named colors (like `mauve`, `navy`) used by
+the chrome and the sidebar git-branch flow through each scheme's secondary
+accent instead of hardcoded constants.
+
+Open it from the MENU button in the status bar.
+
+<Callout type="info" title="Theme engine is coming">
+  Today the schemes are picked, not user-editable. The 0.6.0 release adds the
+  full **theme engine**: user-editable palette values in `config.toml`
+  (schemes, accents, status dots, borders) plus a config hot-reload file
+  watcher, so themes become instantly tweakable without a restart. See the
+  [roadmap](/docs/roadmap).
+</Callout>
