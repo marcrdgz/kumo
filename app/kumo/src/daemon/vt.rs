@@ -1702,17 +1702,6 @@ impl Terminal {
         }
     }
 
-    /// Scroll the viewport back to the active area.
-    pub fn scroll_bottom(&mut self) {
-        let behavior = ScrollViewport {
-            tag: SCROLL_VIEWPORT_BOTTOM,
-            value: ScrollViewportValue { _padding: [0; 2] },
-        };
-        unsafe {
-            ghostty_terminal_scroll_viewport(self.term, behavior);
-        }
-    }
-
     /// Scroll so that `row` (screen coordinate, 0 = top of scrollback) becomes
     /// the first visible row of the viewport. Clamped by libghostty-vt.
     pub fn scroll_to_row(&mut self, row: usize) {

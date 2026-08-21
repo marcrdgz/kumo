@@ -1861,8 +1861,7 @@ impl View {
                 let cells = cells.unwrap();
                 let c0 = if r == start.1 { start.0 as usize } else { 0 };
                 let c1 = if r == end.1 { end.0 as usize } else { cells.len().saturating_sub(1) };
-                for c in c0..=c1.min(cells.len().saturating_sub(1)) {
-                    let cell = &cells[c];
+                for cell in cells.iter().take(c1.min(cells.len().saturating_sub(1)) + 1).skip(c0) {
                     if cell.cell_width == 0 { continue; }
                     out.push_str(&cell.text);
                 }
@@ -4605,7 +4604,7 @@ impl View {
             let input = &cs.search_input;
             let cursor = cs.search_cursor.min(input.chars().count());
             let text_w = field_w.saturating_sub(1) as usize;
-            let start = if cursor + 1 > text_w { cursor + 1 - text_w } else { 0 };
+            let start = (cursor + 1).saturating_sub(text_w);
             let mut col = x;
             for (i, ch) in input.chars().enumerate().skip(start) {
                 if (col - x) as usize >= text_w { break; }
