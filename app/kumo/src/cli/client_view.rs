@@ -40,6 +40,10 @@ const STATUS_H: u16 = 1;
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// How long transient status-bar messages stay up.
 const TOAST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Braille spinner frames cycled while an agent is `Working`.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Interval between spinner frames (~8 fps).
+const SPINNER_PERIOD: Duration = Duration::from_millis(120);
 /// Right-aligned badge drawn on a zoomed pane's top border.
 const ZOOM_BADGE: &str = " ⤢ zoom ";
 /// Label of the MENU button in the status bar.
@@ -391,6 +395,30 @@ pub struct View {
     clock_str: String,
     clock_next: Instant,
     is_ssh: bool,
+    /// Current frame of the agent-activity spinner.
+    spinner_frame: usize,
+    /// When to advance the spinner next (kept ~8 fps, not per loop tick).
+    spinner_next: Instant,
+}
+
+/// Whether a layout subtree contains an agent whose status is `Working`.
+fn node_has_working(node: Option<&LayoutNode>) -> bool {
+    let Some(root) = node else { return false };
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match n {
+            LayoutNode::Pane(p) => {
+                if p.agent.as_ref().map(|a| a.status == AgentStatus::Working).unwrap_or(false) {
+                    return true;
+                }
+            }
+            LayoutNode::Split { a, b, .. } => {
+                stack.push(a);
+                stack.push(b);
+            }
+        }
+    }
+    false
 }
 
 fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, selected: Option<Sel>, link_mods: bool, theme: &OwnedTheme) {
@@ -543,6 +571,8 @@ impl View {
             clock_str,
             clock_next,
             is_ssh,
+            spinner_frame: 0,
+            spinner_next: Instant::now(),
         };
         let _ = view.send(&Command::SubscribeLayout);
         view
@@ -574,6 +604,14 @@ impl View {
             return true;
         }
         if self.pane_numbers.is_some() {
+            return true;
+        }
+        // Spinner: advance ~8 fps while any agent is working so the frame keeps
+        // repainting; between ticks the loop idles as usual.
+        if self.any_agent_working() && now >= self.spinner_next {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.spinner_next = now + SPINNER_PERIOD;
+            self.mark_dirty();
             return true;
         }
         if self.status_msg.as_ref().map(|(_, t)| now.duration_since(*t) < TOAST_TIMEOUT).unwrap_or(false) {
@@ -771,6 +809,18 @@ impl View {
 
     fn session_zoom(&self) -> bool {
         self.active_tab().map(|t| t.zoom).unwrap_or(false)
+    }
+
+    /// Whether any pane across all sessions hosts an agent currently `Working`.
+    fn any_agent_working(&self) -> bool {
+        self.layout
+            .as_ref()
+            .map(|l| l.sessions.iter().any(|s| s.tabs.iter().any(|t| node_has_working(t.root.as_deref()))))
+            .unwrap_or(false)
+    }
+
+    fn spinner_char(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
     }
 
     fn panes_area(&self) -> Rect {
@@ -3779,14 +3829,23 @@ impl View {
                         AgentStatus::Blocked => theme.orange,
                         AgentStatus::Idle => theme.panel_muted,
                     };
-                    let dot = if *status == AgentStatus::Blocked { "◉" } else { "●" };
+                    let dot = match status {
+                        AgentStatus::Blocked => "◉",
+                        AgentStatus::Working => self.spinner_char(),
+                        AgentStatus::Idle => "●",
+                    };
                     let name_style = if *status == AgentStatus::Blocked {
                         Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(status_color).bg(bg)
                     };
                     if !is_dir {
-                        put(f, x + 2, y, dot, Style::default().fg(status_color).bg(bg));
+                        let dot_style = if *status == AgentStatus::Idle {
+                            Style::default().fg(status_color).bg(bg)
+                        } else {
+                            Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
+                        };
+                        put(f, x + 2, y, dot, dot_style);
                     }
                     if is_dir {
                         let path_color = if focused { theme.fg } else { theme.panel_muted };
@@ -3888,6 +3947,7 @@ impl View {
             is_leader: self.mode == Mode::Leader,
             menu_open: self.menu.open,
             sidebar_open: self.sidebar_open,
+            spinner: self.spinner_char(),
         };
 
         // Snapshot slots so we can iteratively drop low-priority widgets on overflow.
@@ -4981,6 +5041,8 @@ mod tests {
             clock_str: "12:00".to_string(),
             clock_next: Instant::now() + Duration::from_secs(60),
             is_ssh: false,
+            spinner_frame: 0,
+            spinner_next: Instant::now(),
         }
     }
 
