@@ -13,6 +13,13 @@ still reads as a fallback, but `config.toml` wins when both exist.
 
 ```toml
 # ~/.config/kumo/config.toml
+
+ai-cmd = "claude --model sonnet"
+update-check = true
+
+[terminal]
+shell = "/bin/zsh"
+
 [keymap]
 leader = "ctrl+b"
 
@@ -21,14 +28,17 @@ leader = "ctrl+b"
 s = "split-vertical"   # now leader+s splits vertically
 x = "close-pane"
 
-ai-cmd = "claude --model sonnet"
-shell  = "/bin/zsh"
-update-check = true
-
 [notifications]
 position = "top-right"  # top-left | bottom-right | bottom-left | center | off
 sound = true            # audible chime on blocked/finished transitions
 ```
+
+## Config builder
+
+<ConfigBuilder />
+
+The generator writes only what differs from the defaults, in canonical form.
+Paste the result into `~/.config/kumo/config.toml` and run `kumo reload`.
 
 ## Reference
 
@@ -50,7 +60,8 @@ sound = true            # audible chime on blocked/finished transitions
       default: '`opencode`',
     },
     shell: {
-      description: 'Login shell used to spawn panes.',
+      description:
+        'Login shell used to spawn panes. Canonical home is `[terminal] shell`; a top-level `shell` also reads as a deprecated alias.',
       default: '`$SHELL` → `/bin/zsh`',
     },
     'update-check': {
