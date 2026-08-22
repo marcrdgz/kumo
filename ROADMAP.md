@@ -122,7 +122,8 @@ persistent kumo.
   emit OSC 7 is deferred to 0.7.0 (with the command traceback work).
 - ✅ **Config reload**: `kumo reload` (CLI) and the MENU `reload` item re-read
   the config and apply `shell`, `ai-cmd`, `leader`, and `keymap.bindings` live
-  to panes spawned from then on. `new-cwd` and `agent-sound` apply instantly
+  to panes spawned from then on. `new-cwd` and the `[notifications]` knobs
+  (`position`, `sound`) apply instantly
   (read live on use). The auto-reload **file watcher** stays in 0.6.0.
 - ✅ **MENU `config`** opens the config file in an editor pane (split) inside
   the session — `$VISUAL` → `$EDITOR` → `vi`, preferring `config.toml`.
@@ -194,11 +195,15 @@ toggle/order + pane titles/border styling.
   the daemon pushes a `DaemonEvent::Toast` (`kumo-protocol`)
   from the same server-side detection + rate-limit site as the chime
   (`app/kumo/src/daemon/app/tasks.rs`; both channels share one per-pane
-  cooldown), config-gated under `[notifications]` — **off by default**, opt in
-  with `enabled = true` (per-channel `blocked` / `finished`,
-  `KUMO_NO_NOTIFY=1`), read live by `kumo reload`. Each viewer draws the
-  toasts bottom-right above the status bar (stacked, ~5 s lifetime,
-  click-to-focus the agent's pane) — `app/kumo/src/cli/client_view.rs`.
+  cooldown), configured under `[notifications]` — **on by default**;
+  `position = "off"` (or `KUMO_NO_NOTIFY=1`) silences toasts, per-channel
+  `blocked` / `finished` pick which transitions notify, `sound = false` (or
+  the deprecated top-level `agent-sound`, or `KUMO_NO_SOUND=1`) mutes the
+  chime; all read live by `kumo reload`. Each viewer draws the
+  toasts anchored by `[notifications] position` — `top-right` (default),
+  `top-left`, `bottom-right`, `bottom-left`, `center`, or `never`/`off`
+  (stacked, ~5 s lifetime, click-to-focus the agent's pane) —
+  `app/kumo/src/cli/client_view.rs`.
 - **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
   prompt out to every AI pane in the tab/session over the existing `send-keys`
   wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI

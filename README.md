@@ -31,11 +31,13 @@ not the multiplexer.
   (waiting for approval), **gray** = idle. Detected from the live terminal
   buffer (not the viewport), so it stays accurate even while you scroll.
   Lifecycle detection is per-agent — see [Agents](#agents). ⚡
-- 🔔 **Audible alerts** — when an agent **blocks** (waiting for approval) or
-  **finishes**, kumo plays a sound so you notice without watching: a distinct
-  chime for each event. Blocked agents float to the top of the AGENTS list
-  (with a filled `◉` dot and `· blocked` hint) and their pane glows orange,
-  even without focus. Tune with `agent-sound = false`. 🎵
+- 🔔 **Agent notifications** — when an agent **blocks** (waiting for approval)
+  or **finishes**, kumo raises a transient toast in every attached viewer
+  (click to jump to the pane) and plays a distinct chime per event. Blocked
+  agents float to the top of the AGENTS list (with a filled `◉` dot and
+  `· blocked` hint) and their pane glows orange, even without focus. Tune the
+  corner with `[notifications] position`, mute with `[notifications] sound =
+  false`. 🔔
 - 📋 **Native text selection** — drag to select in any pane, even inside apps
   that own the mouse (opencode's TUI, vim, less). Clicks still reach the app,
   and the highlight hugs the text like a normal terminal. ✂️
@@ -126,7 +128,9 @@ Supported keys:
 | `ai-cmd` | AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat. | `opencode` |
 | `shell` | Login shell used to spawn panes. | `$SHELL` → `/bin/zsh` |
 | `update-check` | Whether the startup update check runs (also `KUMO_NO_UPDATE=1`). | `true` |
-| `agent-sound` | Whether blocked/finished agent transitions play an audible alert (also `KUMO_NO_SOUND=1`). | `true` |
+| `notifications.position` | Where agent toasts anchor: `top-right`, `top-left`, `bottom-right`, `bottom-left`, `center`; `off`/`never` silences toasts (also `KUMO_NO_NOTIFY=1`). | `top-right` |
+| `notifications.blocked` / `notifications.finished` | Toast when an agent blocks / finishes (`idle`, `done` are aliases of `finished`). | `true` |
+| `notifications.sound` | Whether blocked/finished agent transitions play an audible chime (`alert-sound` also works; also `KUMO_NO_SOUND=1`). A top-level `agent-sound` reads as a deprecated alias. | `true` |
 
 Overrides for the config/state **locations** (not keys) follow the usual
 conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,

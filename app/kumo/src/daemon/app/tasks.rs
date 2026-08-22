@@ -224,10 +224,12 @@ impl App {
                         alert::play(kind);
                     }
                     let notif = kumo_core::config::agent_notifications();
-                    if notif.enabled && match kind {
-                        AlertKind::Blocked => notif.blocked,
-                        AlertKind::Finished => notif.finished,
-                    } {
+                    if notif.toasts_enabled()
+                        && match kind {
+                            AlertKind::Blocked => notif.blocked,
+                            AlertKind::Finished => notif.finished,
+                        }
+                    {
                         to_notify.push((pid, kind));
                     }
                 }

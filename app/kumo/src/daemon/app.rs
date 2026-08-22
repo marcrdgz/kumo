@@ -671,8 +671,8 @@ impl App {
 
     /// Re-apply the config to live state (`kumo reload` / client MENU `reload`).
     /// `shell` and `ai-cmd` are cached at startup, so they refresh here;
-    /// `new-cwd`, `agent-sound`, and `[notifications]` are read live from the
-    /// config on each use.
+    /// `new-cwd` and the `[notifications]` knobs (position / sound /
+    /// channels) are read live from the config on each use.
     /// Applies to panes spawned from now on — existing panes keep their PTY.
     /// For themes, the selection (`[theme] name`) and custom palette
     /// (`[theme.custom]`) are live-reloaded: all existing panes are re-colored.

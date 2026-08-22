@@ -24,6 +24,10 @@ x = "close-pane"
 ai-cmd = "claude --model sonnet"
 shell  = "/bin/zsh"
 update-check = true
+
+[notifications]
+position = "top-right"  # top-left | bottom-right | bottom-left | center | off
+sound = true            # audible chime on blocked/finished transitions
 ```
 
 ## Reference
@@ -54,9 +58,28 @@ update-check = true
         'Whether the startup update check runs (also `KUMO_NO_UPDATE=1`).',
       default: '`true`',
     },
-    'agent-sound': {
+    'notifications.position': {
       description:
-        'Whether blocked/finished agent transitions play an audible alert (also `KUMO_NO_SOUND=1`).',
+        'Where agent toasts anchor in attached viewers: `top-right`, `top-left`, `bottom-right`, `bottom-left`, or `center`. `off` (also `never`) silences toasts entirely — the chime is unaffected (also `KUMO_NO_NOTIFY=1`).',
+      default: '`top-right`',
+    },
+    'notifications.blocked': {
+      description: 'Toast when a working agent becomes blocked.',
+      default: '`true`',
+    },
+    'notifications.finished': {
+      description: 'Toast when a working agent finishes / goes idle (`idle` and `done` are aliases).',
+      default: '`true`',
+    },
+    'notifications.sound': {
+      description:
+        'Whether blocked/finished agent transitions play an audible chime (`alert-sound`/`alert_sound` also work; also `KUMO_NO_SOUND=1`).',
+      default: '`true`',
+    },
+    'agent-sound': {
+      type: 'deprecated',
+      description:
+        'Deprecated top-level alias of `[notifications] sound`. The `[notifications]` key wins when both are set.',
       default: '`true`',
     },
   }}
@@ -76,5 +99,6 @@ Overrides follow the usual conventions:
 
 `kumo reload` (or MENU → `reload`) re-reads the config and applies `shell`,
 `ai-cmd`, `leader`, and `keymap.bindings` live to panes spawned from then on.
-`new-cwd` and `agent-sound` apply instantly. MENU → `config` opens the config
+`new-cwd`, `[notifications] position`, and `[notifications] sound` apply
+instantly. MENU → `config` opens the config
 file in an editor pane inside the session (`$VISUAL` → `$EDITOR` → `vi`).

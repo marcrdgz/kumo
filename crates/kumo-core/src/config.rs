@@ -336,27 +336,74 @@ pub struct StatusBarWidgets {
     pub session: SessionWidgetConfig,
 }
 
+/// Where an attached viewer draws its agent-lifecycle toast stack
+/// (`[notifications] position`). Defaults to `TopRight`; `Off` is the kill
+/// switch — no toasts are raised at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToastPosition {
+    /// Top-right corner, below the tab bar (default).
+    #[default]
+    TopRight,
+    /// Top-left corner, below the tab bar.
+    TopLeft,
+    /// Bottom-right corner, above the status bar.
+    BottomRight,
+    /// Bottom-left corner, above the status bar.
+    BottomLeft,
+    /// Horizontally + vertically centered as a group.
+    Center,
+    /// Never raise toasts (`never`/`off`). The audible chime is unaffected.
+    Off,
+}
+
+impl ToastPosition {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "top-right" | "top_right" | "topright" | "tr" => Some(Self::TopRight),
+            "top-left" | "top_left" | "topleft" | "tl" => Some(Self::TopLeft),
+            "bottom-right" | "bottom_right" | "bottomright" | "br" => Some(Self::BottomRight),
+            "bottom-left" | "bottom_left" | "bottomleft" | "bl" => Some(Self::BottomLeft),
+            "center" | "centre" | "middle" => Some(Self::Center),
+            "never" | "off" | "none" | "disabled" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
 /// Agent-notification policy for lifecycle transitions (`[notifications]`).
-/// **Off by default** — users opt in with `enabled = true`; the per-channel
-/// switches then pick which transitions notify. The channel is a transient
-/// **corner toast** in every attached kumo viewer (no OS-level popups; the
-/// audible chime still covers detached sessions). `KUMO_NO_NOTIFY=1`
-/// disables the toasts. The sibling knob for sound is the flat/TOML
-/// `agent-sound` key.
+/// The channel is a transient **toast** in every attached kumo viewer (no
+/// OS-level popups; the audible chime still covers detached sessions).
+/// Toasts are on by default at the top-right corner; `[notifications]
+/// position = "off"` silences them (`KUMO_NO_NOTIFY=1` does the same). The
+/// chime is gated separately by `sound` / `KUMO_NO_SOUND=1`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotificationsConfig {
-    /// Master switch: raise agent notifications (corner toasts) at all.
-    /// Defaults to **false**; set `[notifications] enabled = true` to opt in.
-    pub enabled: bool,
     /// Notify when a working agent becomes blocked (default: true).
     pub blocked: bool,
     /// Notify when a working agent finishes / goes idle (default: true).
     pub finished: bool,
+    /// Where the viewer anchors the toast stack; `Off` disables toasts
+    /// entirely (default: top-right).
+    pub position: ToastPosition,
+    /// Whether transitions play the audible chime (default: true).
+    pub sound: bool,
+}
+
+impl NotificationsConfig {
+    /// Whether toasts should be raised at all (`position != Off`).
+    pub fn toasts_enabled(&self) -> bool {
+        self.position != ToastPosition::Off
+    }
 }
 
 impl Default for NotificationsConfig {
     fn default() -> Self {
-        Self { enabled: false, blocked: true, finished: true }
+        Self {
+            blocked: true,
+            finished: true,
+            position: ToastPosition::default(),
+            sound: true,
+        }
     }
 }
 
@@ -392,9 +439,6 @@ pub struct Config {
     pub shell: Option<String>,
     /// Whether the startup update check runs (default: true).
     pub update_check: bool,
-    /// Whether agent lifecycle transitions (blocked / finished) play a sound
-    /// (default: true).
-    pub agent_sound: bool,
     /// The leader chord, e.g. `ctrl+b` or `ctrl+space`. `None` means the
     /// built-in default (Ctrl+B).
     pub leader: Option<String>,
@@ -426,7 +470,6 @@ impl Default for Config {
             ai_cmd: None,
             shell: None,
             update_check: true,
-            agent_sound: true,
             leader: None,
             keymap_bindings: HashMap::new(),
             new_cwd: NewCwdMode::default(),
@@ -737,7 +780,7 @@ impl Config {
             .get("update-check")
             .map(|v| !matches!(unquote(v).trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off" | "never"))
             .unwrap_or(true);
-        cfg.agent_sound = map
+        cfg.notifications.sound = map
             .get("agent-sound")
             .map(|v| !matches!(unquote(v).trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
             .unwrap_or(true);
@@ -793,8 +836,10 @@ impl Config {
         if let Some(v) = toml.update_check {
             self.update_check = v;
         }
+        // `[notifications] sound` is canonical; a top-level `agent-sound` is
+        // accepted as a deprecated alias, but the section wins.
         if let Some(v) = toml.agent_sound {
-            self.agent_sound = v;
+            self.notifications.sound = v;
         }
         // The leader lives in the `[keymap]` table; a top-level `leader` is
         // accepted as a deprecated alias, but the table wins.
@@ -854,14 +899,21 @@ impl Config {
             self.apply_status_bar(status_bar);
         }
         if let Some(notif) = toml.notifications {
-            if let Some(v) = notif.enabled {
-                self.notifications.enabled = v;
-            }
             if let Some(v) = notif.blocked {
                 self.notifications.blocked = v;
             }
             if let Some(v) = notif.finished {
                 self.notifications.finished = v;
+            }
+            if let Some(v) = notif.position {
+                if let Some(pos) = ToastPosition::parse(&v) {
+                    self.notifications.position = pos;
+                } else {
+                    log::warn!("kumo: ignoring invalid notifications.position {v:?}");
+                }
+            }
+            if let Some(v) = notif.sound {
+                self.notifications.sound = v;
             }
         }
         self.normalize_new_cwd();
@@ -938,13 +990,20 @@ pub struct SessionRaw {
 }
 
 /// Raw TOML for `[notifications]` — all optional, unknown keys ignored. The
-/// finished channel accepts `idle`/`done` as aliases.
+/// finished channel accepts `idle`/`done` as aliases; the chime accepts
+/// `alert-sound`/`alert_sound` spellings.
 #[derive(Default, serde::Deserialize, Debug)]
 pub struct NotificationsRaw {
-    pub enabled: Option<bool>,
     pub blocked: Option<bool>,
     #[serde(alias = "idle", alias = "done")]
     pub finished: Option<bool>,
+    /// Toast anchor corner: `top-right` (default), `top-left`,
+    /// `bottom-right`, `bottom-left`, `center`, or `off`.
+    pub position: Option<String>,
+    /// Whether transitions play the audible chime (default: true). Canonical
+    /// home of the deprecated top-level `agent-sound` key.
+    #[serde(alias = "alert-sound", alias = "alert_sound")]
+    pub sound: Option<bool>,
 }
 
 /// The `[keymap]` table: keyboard configuration (leader chord today, bindings
@@ -1240,24 +1299,31 @@ pub fn update_check_enabled() -> bool {
     cached_config().update_check
 }
 
-/// Whether agent lifecycle transitions play an audible alert. Disabled by
-/// `agent-sound = false` in the config file or by setting `KUMO_NO_SOUND=1`.
+/// Agent-notification policy for lifecycle transitions (`[notifications]`).
+/// Toasts silenced entirely by setting `[notifications] position = "off"` or
+/// `KUMO_NO_NOTIFY=1`. Read live on every use, so `kumo reload` applies
+/// changes without a restart.
+pub fn agent_notifications() -> NotificationsConfig {
+    if std::env::var("KUMO_NO_NOTIFY").is_ok() {
+        return NotificationsConfig { position: ToastPosition::Off, ..Default::default() };
+    }
+    cached_config().notifications
+}
+
+/// Whether agent lifecycle transitions play an audible chime. Disabled by
+/// `[notifications] sound = false`, the deprecated top-level
+/// `agent-sound = false`, or by setting `KUMO_NO_SOUND=1`.
 pub fn agent_sound_enabled() -> bool {
     if std::env::var("KUMO_NO_SOUND").is_ok() {
         return false;
     }
-    cached_config().agent_sound
+    cached_config().notifications.sound
 }
 
-/// Desktop-notification policy for agent lifecycle transitions
-/// (`[notifications]`, off by default — opt in with `enabled = true`).
-/// Disabled entirely by setting `KUMO_NO_NOTIFY=1`. Read live on every use,
-/// so `kumo reload` applies changes without a restart.
-pub fn agent_notifications() -> NotificationsConfig {
-    if std::env::var("KUMO_NO_NOTIFY").is_ok() {
-        return NotificationsConfig { enabled: false, ..Default::default() };
-    }
-    cached_config().notifications
+/// Where attached viewers anchor the agent-lifecycle toast stack
+/// (`[notifications] position`, top-right by default).
+pub fn toast_position() -> ToastPosition {
+    cached_config().notifications.position
 }
 
 /// The leader chord from the config (`leader = "ctrl+b"`), if set. `None`
@@ -1637,9 +1703,48 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
             EnvGuard::unset("KUMO_NO_SOUND"),
         );
-        assert!(agent_sound_enabled(), "agent-sound should default to on");
+        assert!(agent_sound_enabled(), "the chime should default to on");
         write(&cfg_dir.join("config"), "agent-sound = false\n");
-        assert!(!agent_sound_enabled(), "agent-sound = false must disable alerts");
+        assert!(
+            !agent_sound_enabled(),
+            "flat agent-sound = false must disable the chime (deprecated alias)"
+        );
+    }
+
+    #[test]
+    fn notifications_sound_parses_and_section_wins_over_deprecated_alias() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-notify-sound");
+        let home = scratch_dir("home-notify-sound");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::unset("KUMO_NO_SOUND"),
+        );
+        write(&cfg_dir.join("config.toml"), "[notifications]\nsound = false\n");
+        assert!(!agent_sound_enabled(), "[notifications] sound must gate the chime");
+
+        // The alert-sound spellings are aliases of `sound`.
+        write(&cfg_dir.join("config.toml"), "[notifications]\nalert_sound = false\n");
+        assert!(!agent_sound_enabled(), "alert_sound is an alias of sound");
+        write(&cfg_dir.join("config.toml"), "[notifications]\nalert-sound = false\n");
+        assert!(!agent_sound_enabled(), "alert-sound is an alias of sound");
+
+        // Precedence: deprecated top-level `agent-sound` loses to the section.
+        write(
+            &cfg_dir.join("config.toml"),
+            "agent-sound = false\n\n[notifications]\nsound = true\n",
+        );
+        assert!(
+            agent_sound_enabled(),
+            "[notifications] sound must win over the deprecated top-level alias"
+        );
+
+        // Without a section value the top-level alias still applies.
+        write(&cfg_dir.join("config.toml"), "agent-sound = false\n");
+        assert!(!agent_sound_enabled());
+        write(&cfg_dir.join("config.toml"), "");
+        assert!(agent_sound_enabled(), "back to default with an empty config");
     }
 
     #[test]
@@ -1656,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn notifications_off_until_enabled_in_config() {
+    fn notifications_toasts_on_by_default_and_off_via_position() {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-notify");
         let home = scratch_dir("home-notify");
@@ -1666,20 +1771,33 @@ mod tests {
             EnvGuard::unset("KUMO_NO_NOTIFY"),
         );
         let cfg = agent_notifications();
-        assert!(!cfg.enabled, "notifications must default off; opting in is manual");
+        assert!(cfg.toasts_enabled(), "toasts default on at the top-right corner");
+        assert_eq!(cfg.position, ToastPosition::TopRight);
         assert!(cfg.blocked && cfg.finished, "channel switches default on");
 
-        write(&cfg_dir.join("config.toml"), "[notifications]\nenabled = true\n");
-        assert!(agent_notifications().enabled, "enabled = true must opt in");
-
-        write(
-            &cfg_dir.join("config.toml"),
-            "[notifications]\nenabled = true\nblocked = false\nidle = false\n",
-        );
+        write(&cfg_dir.join("config.toml"), "[notifications]\nposition = \"off\"\n");
         let cfg = agent_notifications();
-        assert!(cfg.enabled);
+        assert!(!cfg.toasts_enabled(), "position = \"off\" must silence toasts");
+        assert!(cfg.sound, "the chime is independent of position");
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nposition = \"never\"\nblocked = false\nidle = false\n");
+        let cfg = agent_notifications();
+        assert!(!cfg.toasts_enabled(), "never is an alias of off");
         assert!(!cfg.blocked, "blocked channel must be disableable");
         assert!(!cfg.finished, "the idle alias must feed finished");
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nposition = \"bottom-left\"\n");
+        assert!(
+            agent_notifications().toasts_enabled(),
+            "any real position re-enables toasts"
+        );
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nenabled = true\n");
+        assert_eq!(
+            agent_notifications().position,
+            ToastPosition::TopRight,
+            "`enabled` no longer exists; unknown keys are ignored"
+        );
     }
 
     #[test]
@@ -1692,7 +1810,10 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
             EnvGuard::set("KUMO_NO_NOTIFY", "1"),
         );
-        assert!(!agent_notifications().enabled, "KUMO_NO_NOTIFY must disable notifications");
+        assert!(
+            !agent_notifications().toasts_enabled(),
+            "KUMO_NO_NOTIFY must disable toasts"
+        );
     }
 
     #[test]
@@ -2214,6 +2335,53 @@ mod tests {
         assert_eq!(BorderStyle::parse("hidden"), Some(BorderStyle::Hidden));
         assert_eq!(BorderStyle::parse("none"), Some(BorderStyle::Hidden));
         assert_eq!(BorderStyle::parse("unknown"), None);
+    }
+
+    #[test]
+    fn toast_position_parses_all_variants() {
+        assert_eq!(ToastPosition::parse("top-right"), Some(ToastPosition::TopRight));
+        assert_eq!(ToastPosition::parse("Top_Right"), Some(ToastPosition::TopRight));
+        assert_eq!(ToastPosition::parse("top-left"), Some(ToastPosition::TopLeft));
+        assert_eq!(ToastPosition::parse("bottom-right"), Some(ToastPosition::BottomRight));
+        assert_eq!(ToastPosition::parse("BOTTOMLEFT"), Some(ToastPosition::BottomLeft));
+        assert_eq!(ToastPosition::parse(" centre "), Some(ToastPosition::Center));
+        assert_eq!(ToastPosition::parse("centre"), Some(ToastPosition::Center));
+        assert_eq!(ToastPosition::parse("never"), Some(ToastPosition::Off));
+        assert_eq!(ToastPosition::parse("off"), Some(ToastPosition::Off));
+        assert_eq!(ToastPosition::parse("none"), Some(ToastPosition::Off));
+        assert_eq!(ToastPosition::parse("disabled"), Some(ToastPosition::Off));
+        assert_eq!(ToastPosition::parse("banana"), None);
+        assert_eq!(ToastPosition::default(), ToastPosition::TopRight);
+    }
+
+    #[test]
+    fn notifications_position_defaults_top_right_and_parses_from_toml() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-notify-position");
+        let home = scratch_dir("home-notify-position");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::unset("KUMO_NO_NOTIFY"),
+        );
+        assert_eq!(
+            agent_notifications().position,
+            ToastPosition::TopRight,
+            "toasts default to the top-right corner"
+        );
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nposition = \"bottom-left\"\n");
+        assert_eq!(agent_notifications().position, ToastPosition::BottomLeft);
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nposition = \"centre\"\n");
+        assert_eq!(agent_notifications().position, ToastPosition::Center);
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nposition = \"banana\"\n");
+        assert_eq!(
+            agent_notifications().position,
+            ToastPosition::TopRight,
+            "invalid position must fall back to top-right"
+        );
     }
 
     #[test]

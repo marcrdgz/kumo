@@ -1,6 +1,6 @@
 ---
 title: AI Agents
-description: AI CLI panes, status detection, and audible alerts.
+description: AI CLI panes, status detection, toasts, and audible alerts.
 icon: 🤖
 ---
 
@@ -24,10 +24,19 @@ just the viewport), so it stays accurate even while you scroll:
 - 🟠 **Orange** — blocked, waiting for your approval
 - ⚪ **Gray** — idle
 
-When an agent **blocks** or **finishes**, kumo plays an audible alert (a
-distinct chime per event). Blocked agents float to the top of the AGENTS list
-with a filled `◉` dot and a `· blocked` hint, and their pane glows orange even
-without focus. Tune with `agent-sound = false`.
+When an agent **blocks** or **finishes**, kumo raises a transient **toast** in
+the corner of every attached viewer (click it to jump to the agent's pane)
+and plays an audible chime — a distinct sound per event. Blocked agents also
+float to the top of the AGENTS list with a filled `◉` dot and a `· blocked`
+hint, and their pane glows orange even without focus.
+
+```toml
+[notifications]
+position = "top-right"  # top-left | bottom-right | bottom-left | center | off
+sound = true            # audible chime on blocked/finished transitions
+blocked = true          # toast when an agent blocks
+finished = true         # toast when an agent finishes / goes idle
+```
 
 ## Lifecycle detection
 

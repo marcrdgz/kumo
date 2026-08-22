@@ -28,7 +28,7 @@ use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
 use crate::cli::status_bar::{self, SlotContext};
-use kumo_core::config::{StatusBarConfig, StatusWidget};
+use kumo_core::config::{StatusBarConfig, StatusWidget, ToastPosition};
 
 /// Width of the left sidebar (its last column is the separator).
 const SIDEBAR_WIDTH: u16 = 25;
@@ -396,8 +396,11 @@ pub struct View {
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
-    /// Agent-lifecycle corner toasts (bottom-right), newest last.
+    /// Agent-lifecycle toasts, newest last (stacking order depends on the
+    /// configured anchor corner).
     agent_toasts: Vec<AgentToast>,
+    /// Where the toast stack is anchored (`[notifications] position`).
+    toast_pos: ToastPosition,
     update_notice: Option<(String, String)>,
     link_mods: bool,
     drag: Option<SplitDrag>,
@@ -538,6 +541,7 @@ impl View {
         };
         let keymap = bindings::build_keymap(&kumo_core::config::keymap_bindings());
         let status_bar = kumo_core::config::status_bar();
+        let toast_pos = kumo_core::config::toast_position();
         let hostname = status_bar::cached_hostname();
         let is_ssh = status_bar::is_ssh_session();
         let clock_str = status_bar::format_clock(&status_bar.widgets.clock.format);
@@ -574,6 +578,7 @@ impl View {
             status_msg: None,
             notice: None,
             agent_toasts: Vec::new(),
+            toast_pos,
             update_notice: None,
             link_mods: false,
             drag: None,
@@ -729,6 +734,9 @@ impl View {
                 self.mark_dirty();
             }
             DaemonEvent::Toast { pane_id, kind, title, body } => {
+                if self.toast_pos == ToastPosition::Off {
+                    return;
+                }
                 self.agent_toasts.push(AgentToast { pane_id, kind, title, body, born: Instant::now() });
                 if self.agent_toasts.len() > MAX_AGENT_TOASTS {
                     self.agent_toasts.remove(0);
@@ -753,6 +761,7 @@ impl View {
                 let new_bar = kumo_core::config::status_bar();
                 let enabled_changed = new_bar.enabled != self.status_bar.enabled;
                 self.status_bar = new_bar;
+                self.toast_pos = kumo_core::config::toast_position();
                 self.hostname = status_bar::cached_hostname();
                 self.is_ssh = status_bar::is_ssh_session();
                 self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
@@ -3421,27 +3430,57 @@ impl View {
         Some(Rect::new(x, y, w, h))
     }
 
-    /// Screen rects of the visible corner toasts as `(toast index, rect)`
-    /// pairs: right-aligned above the status bar, newest at the bottom, older
-    /// ones stacked upward. Toasts that no longer fit below the screen top
-    /// are skipped; the pairs stay aligned with `agent_toasts` indexes.
+    /// Screen rects of the visible agent toasts as `(toast index, rect)`
+    /// pairs, anchored per `[notifications] position` (`self.toast_pos`):
+    /// corners hug the tab bar or status bar with a one-row gap, `Center`
+    /// floats the whole stack mid-screen. The newest toast hugs the anchor
+    /// edge, older ones stack inward until the opposite chrome cuts the
+    /// stack off; the pairs stay aligned with `agent_toasts` indexes.
     fn agent_toast_rects(&self) -> Vec<(usize, Rect)> {
         const GAP: u16 = 1;
         let mut rects = Vec::new();
-        if self.agent_toasts.is_empty() || self.cols < AGENT_TOAST_W + 1 {
+        let n = self.agent_toasts.len();
+        if n == 0 || self.toast_pos == ToastPosition::Off || self.cols < AGENT_TOAST_W + 2 {
             return rects;
         }
-        let x = self.cols.saturating_sub(AGENT_TOAST_W + 1);
-        let n = self.agent_toasts.len();
-        // Newest first (it sits directly above the status bar); older ones
-        // stack a gap higher until the screen top cuts the stack off.
+        // Vertical band between the chrome: first row below the tab bar and
+        // last row above the status bar.
+        let floor = self.shadow_floor();
+        let top_edge = TAB_H + 1;
+        let last_free = floor.saturating_sub(1);
+        if self.toast_pos == ToastPosition::Center {
+            let x = (self.cols - AGENT_TOAST_W) / 2;
+            let total = n as u16 * AGENT_TOAST_H + (n as u16 - 1) * GAP;
+            let band = last_free.saturating_sub(top_edge) + 1;
+            let y0 = if total >= band { top_edge } else { top_edge + (band - total) / 2 };
+            for i in 0..n {
+                let y = y0 + i as u16 * (AGENT_TOAST_H + GAP);
+                if y + AGENT_TOAST_H > last_free + 1 {
+                    break;
+                }
+                rects.push((i, Rect::new(x, y, AGENT_TOAST_W, AGENT_TOAST_H)));
+            }
+            return rects;
+        }
+        let right = matches!(self.toast_pos, ToastPosition::TopRight | ToastPosition::BottomRight);
+        let from_top = matches!(self.toast_pos, ToastPosition::TopLeft | ToastPosition::TopRight);
+        let x = if right { self.cols - AGENT_TOAST_W - 1 } else { 1 };
         for i in (0..n).rev() {
             let consumed = (n - 1 - i) as u16 * (AGENT_TOAST_H + GAP);
-            let bottom = self.shadow_floor().saturating_sub(1 + consumed);
-            if bottom < AGENT_TOAST_H {
-                break;
-            }
-            rects.push((i, Rect::new(x, bottom - AGENT_TOAST_H, AGENT_TOAST_W, AGENT_TOAST_H)));
+            let y = if from_top {
+                let y = top_edge + consumed;
+                if y + AGENT_TOAST_H > last_free + 1 {
+                    break;
+                }
+                y
+            } else {
+                let bottom = floor.saturating_sub(1 + consumed);
+                if bottom < AGENT_TOAST_H {
+                    break;
+                }
+                bottom - AGENT_TOAST_H
+            };
+            rects.push((i, Rect::new(x, y, AGENT_TOAST_W, AGENT_TOAST_H)));
         }
         rects.reverse();
         rects
@@ -4256,7 +4295,8 @@ impl View {
         text(f, x0 + 5, y0 + 2, &line2, Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w.saturating_sub(5));
     }
 
-    /// Agent-lifecycle corner toasts (bottom-right above the status bar):
+    /// Agent-lifecycle toasts (anchored per `[notifications] position`,
+    /// top-right by default):
     /// transient `blocked` / `finished` announcements pushed by the daemon.
     /// Click one to focus the agent's pane; they expire on their own.
     fn render_agent_toasts(&self, f: &mut Frame) {
@@ -5206,6 +5246,7 @@ mod tests {
             status_msg: None,
             notice: None,
             agent_toasts: Vec::new(),
+            toast_pos: ToastPosition::default(),
             update_notice: None,
             link_mods: false,
             drag: None,
@@ -5537,7 +5578,7 @@ mod tests {
         }
     }
 
-    /// A toast event lands in the corner stack, keeps the loop repainting via
+    /// A toast event lands in the toast stack, keeps the loop repainting via
     /// `has_transient`, and stops once its lifetime elapses.
     #[test]
     fn agent_toast_pushes_keeps_transient_and_expires() {
@@ -5562,10 +5603,11 @@ mod tests {
         assert!(view.agent_toasts.is_empty(), "expired toasts are dropped at render time");
     }
 
-    /// Toasts stack bottom-up above the status bar (newest at the bottom) and
-    /// the stack caps at `MAX_AGENT_TOASTS`, dropping the oldest.
+    /// Toasts stack downward from the tab bar in the default top-right anchor
+    /// (newest at the top) and the stack caps at `MAX_AGENT_TOASTS`, dropping
+    /// the oldest.
     #[test]
-    fn agent_toasts_stack_upward_and_cap() {
+    fn agent_toasts_stack_downward_and_cap() {
         let mut view = test_view();
         for i in 0..(MAX_AGENT_TOASTS + 2) {
             view.on_event(DaemonEvent::Toast {
@@ -5579,19 +5621,83 @@ mod tests {
         assert_eq!(view.agent_toasts[0].pane_id, 2, "the two oldest were dropped");
         let rects = view.agent_toast_rects();
         assert_eq!(rects.len(), MAX_AGENT_TOASTS);
-        // Each rect pair carries its toast index; the oldest toast sits
-        // highest, the newest directly above the status bar.
+        // Each rect pair carries its toast index; the newest hugs the anchor
+        // edge, the older ones sit below it.
         let expected: Vec<String> = view.agent_toasts.iter().map(|t| format!("agent {}", t.pane_id)).collect();
         for (i, _) in &rects {
             assert_eq!(&view.agent_toasts[*i].title, &expected[*i], "rect aligns with its toast");
         }
+        let right_x = view.cols - AGENT_TOAST_W - 1;
         for pair in rects.windows(2) {
-            assert!(pair[0].1.y + AGENT_TOAST_H <= pair[1].1.y, "older toast sits above the newer one");
-            assert_eq!(pair[0].1.x, pair[1].1.x, "toasts stay right-aligned");
+            assert!(pair[1].1.y + AGENT_TOAST_H <= pair[0].1.y, "newer toast sits above the older one");
+            assert_eq!(pair[0].1.x, right_x, "toasts stay right-aligned");
+            assert_eq!(pair[1].1.x, right_x, "toasts stay right-aligned");
         }
-        // The newest bottom row sits directly above the status bar.
+        // The newest top row sits directly below the tab bar.
+        let last = rects.last().unwrap();
+        assert_eq!(last.1.y, TAB_H + 1);
+        // The whole stack stays clear of the status bar.
+        for (_, r) in &rects {
+            assert!(r.y + r.height < view.shadow_floor(), "toasts must not cover the status bar");
+        }
+    }
+
+    /// The `[notifications] position` setting moves the stack: corners mirror,
+    /// `center` floats mid-screen, and `off` drops events before they queue.
+    #[test]
+    fn agent_toast_positions_follow_config() {
+        let mut push = |view: &mut View, pane_id: u64| {
+            view.on_event(DaemonEvent::Toast {
+                pane_id,
+                kind: ToastKind::Finished,
+                title: format!("agent {pane_id}"),
+                body: String::new(),
+            });
+        };
+        // Bottom-left mirrors the default: left-aligned, newest just above
+        // the status bar.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::BottomLeft;
+        push(&mut view, 0);
+        push(&mut view, 1);
+        let rects = view.agent_toast_rects();
+        assert_eq!(rects.len(), 2);
+        for (_, r) in &rects {
+            assert_eq!(r.x, 1, "bottom-left toasts are left-aligned");
+        }
+        assert!(rects[0].1.y + AGENT_TOAST_H <= rects[1].1.y, "older toast stacks above the newer one");
         let last = rects.last().unwrap();
         assert_eq!(last.1.y + AGENT_TOAST_H, view.shadow_floor() - 1);
+
+        // Top-left anchors below the tab bar like the default corner.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::TopLeft;
+        push(&mut view, 3);
+        let rect = view.agent_toast_rects()[0].1;
+        assert_eq!(rect.x, 1);
+        assert_eq!(rect.y, TAB_H + 1);
+
+        // Center floats the stack mid-screen.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::Center;
+        push(&mut view, 4);
+        push(&mut view, 5);
+        let rects = view.agent_toast_rects();
+        assert_eq!(rects.len(), 2);
+        let total_h = 2 * AGENT_TOAST_H + 1;
+        let band = view.shadow_floor() - 1 - (TAB_H + 1) + 1;
+        let y0 = TAB_H + 1 + (band - total_h) / 2;
+        assert_eq!(rects[0].1.y, y0, "the stack is vertically centered");
+        assert_eq!(rects[1].1.y, y0 + AGENT_TOAST_H + 1);
+        assert_eq!(rects[0].1.x, (view.cols - AGENT_TOAST_W) / 2, "the stack is horizontally centered");
+
+        // `off` never queues a toast event.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::Off;
+        push(&mut view, 9);
+        assert!(view.agent_toasts.is_empty(), "position off must drop toast events");
+        assert!(view.agent_toast_rects().is_empty());
+        assert!(!view.has_transient());
     }
 
     /// Clicking a corner toast dismisses it and focuses the agent's pane;
