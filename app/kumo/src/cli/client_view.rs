@@ -16,6 +16,7 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::Frame;
 use ratatui::Terminal;
 
+use kumo_core::color::ColorRgb;
 use kumo_core::layout::{self, PaneGeom, TreeGeom};
 use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
@@ -39,6 +40,12 @@ const STATUS_H: u16 = 1;
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// How long transient status-bar messages stay up.
 const TOAST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Braille spinner frames cycled while an agent is `Working`.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Interval between spinner frames (~8 fps).
+const SPINNER_PERIOD: Duration = Duration::from_millis(120);
+/// Right-aligned badge drawn on a zoomed pane's top border.
+const ZOOM_BADGE: &str = " ⤢ zoom ";
 /// Label of the MENU button in the status bar.
 const MENU_BTN: &str = " MENU ";
 /// Items shown in the status-bar menu dropdown.
@@ -59,6 +66,21 @@ fn lighten(c: RColor, amt: u8) -> RColor {
         RColor::Rgb(r, g, b) => RColor::Rgb(r.saturating_add(amt), g.saturating_add(amt), b.saturating_add(amt)),
         _ => c,
     }
+}
+
+/// Blend an RGB color toward `bg` by `num/den` (indexed colors resolve through
+/// the theme palette first). Used to make idle chrome recede next to accents.
+fn dim_toward(c: RColor, bg: ColorRgb, palette: &[ColorRgb; 16], num: u32, den: u32) -> RColor {
+    let (r, g, b) = match c {
+        RColor::Rgb(r, g, b) => (r, g, b),
+        RColor::Indexed(i) => match palette.get(i as usize) {
+            Some(cc) => (cc.r, cc.g, cc.b),
+            None => return c,
+        },
+        _ => return c,
+    };
+    let mix = |cv: u8, bv: u8| -> u8 { ((cv as u32 * (den - num) + bv as u32 * num) / den).min(255) as u8 };
+    RColor::Rgb(mix(r, bg.r), mix(g, bg.g), mix(b, bg.b))
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -373,6 +395,30 @@ pub struct View {
     clock_str: String,
     clock_next: Instant,
     is_ssh: bool,
+    /// Current frame of the agent-activity spinner.
+    spinner_frame: usize,
+    /// When to advance the spinner next (kept ~8 fps, not per loop tick).
+    spinner_next: Instant,
+}
+
+/// Whether a layout subtree contains an agent whose status is `Working`.
+fn node_has_working(node: Option<&LayoutNode>) -> bool {
+    let Some(root) = node else { return false };
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match n {
+            LayoutNode::Pane(p) => {
+                if p.agent.as_ref().map(|a| a.status == AgentStatus::Working).unwrap_or(false) {
+                    return true;
+                }
+            }
+            LayoutNode::Split { a, b, .. } => {
+                stack.push(a);
+                stack.push(b);
+            }
+        }
+    }
+    false
 }
 
 fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, selected: Option<Sel>, link_mods: bool, theme: &OwnedTheme) {
@@ -525,6 +571,8 @@ impl View {
             clock_str,
             clock_next,
             is_ssh,
+            spinner_frame: 0,
+            spinner_next: Instant::now(),
         };
         let _ = view.send(&Command::SubscribeLayout);
         view
@@ -532,6 +580,12 @@ impl View {
 
     fn status_h(&self) -> u16 {
         if self.status_bar.enabled { STATUS_H } else { 0 }
+    }
+
+    /// First row of the bottom chrome (status bar). Overlay shadows stop
+    /// above it so popups never repaint chrome.
+    fn shadow_floor(&self) -> u16 {
+        self.rows.saturating_sub(self.status_h())
     }
 
     fn status_bar_contains(&self, w: StatusWidget) -> bool {
@@ -556,6 +610,14 @@ impl View {
             return true;
         }
         if self.pane_numbers.is_some() {
+            return true;
+        }
+        // Spinner: advance ~8 fps while any agent is working so the frame keeps
+        // repainting; between ticks the loop idles as usual.
+        if self.any_agent_working() && now >= self.spinner_next {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.spinner_next = now + SPINNER_PERIOD;
+            self.mark_dirty();
             return true;
         }
         if self.status_msg.as_ref().map(|(_, t)| now.duration_since(*t) < TOAST_TIMEOUT).unwrap_or(false) {
@@ -753,6 +815,18 @@ impl View {
 
     fn session_zoom(&self) -> bool {
         self.active_tab().map(|t| t.zoom).unwrap_or(false)
+    }
+
+    /// Whether any pane across all sessions hosts an agent currently `Working`.
+    fn any_agent_working(&self) -> bool {
+        self.layout
+            .as_ref()
+            .map(|l| l.sessions.iter().any(|s| s.tabs.iter().any(|t| node_has_working(t.root.as_deref()))))
+            .unwrap_or(false)
+    }
+
+    fn spinner_char(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
     }
 
     fn panes_area(&self) -> Rect {
@@ -1051,7 +1125,9 @@ impl View {
         }
         for (idx, pill, close) in &self.tab_rects {
             if pill.contains(Position::new(x, y)) {
-                let is_close = close.contains(Position::new(x, y)) && self.tab_hover == Some(*idx);
+                // The close cell is always drawn, so it is clickable without a
+                // prior hover.
+                let is_close = close.contains(Position::new(x, y));
                 return Some((*idx, is_close));
             }
         }
@@ -1791,8 +1867,7 @@ impl View {
                 let cells = cells.unwrap();
                 let c0 = if r == start.1 { start.0 as usize } else { 0 };
                 let c1 = if r == end.1 { end.0 as usize } else { cells.len().saturating_sub(1) };
-                for c in c0..=c1.min(cells.len().saturating_sub(1)) {
-                    let cell = &cells[c];
+                for cell in cells.iter().take(c1.min(cells.len().saturating_sub(1)) + 1).skip(c0) {
                     if cell.cell_width == 0 { continue; }
                     out.push_str(&cell.text);
                 }
@@ -3192,8 +3267,10 @@ impl View {
     // ------------------------------------------------------------------
 
     fn menu_btn_x(&self) -> u16 {
+        // Mirrors status_bar::slot_spans for [Mode, Menu, ..]: the mode chip
+        // (" NORMAL " / " LEADER ") followed by the " · " group separator.
         let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
-        format!(" {} ", mode).chars().count() as u16 + 1
+        format!(" {} ", mode).chars().count() as u16 + " · ".chars().count() as u16
     }
 
     fn menu_btn_rect(&self) -> Option<Rect> {
@@ -3215,12 +3292,14 @@ impl View {
         }
         let width = MENU_ITEMS.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = MENU_ITEMS.len() as u16 + 2;
-        if self.cols < width || self.rows < height + 1 {
+        let floor = self.shadow_floor();
+        if self.cols < width || floor < height {
             return None;
         }
         let btn_w = MENU_BTN.chars().count() as u16;
         let x = (self.menu_btn_x() + btn_w).saturating_sub(width).min(self.cols.saturating_sub(width));
-        let y = self.rows.saturating_sub(1).saturating_sub(height);
+        // Flush above the status bar, never covering it.
+        let y = floor.saturating_sub(height);
         Some(Rect::new(x, y, width, height))
     }
 
@@ -3239,13 +3318,15 @@ impl View {
         let items = self.ctx_items();
         let width = items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = items.len() as u16 + 2;
-        if self.cols < width || self.rows < height {
+        // The menu body must stay above the bottom chrome (status bar).
+        let floor = self.shadow_floor();
+        if self.cols < width || floor < height {
             return None;
         }
         let px = self.ctx_menu.x;
         let py = self.ctx_menu.y;
         let x = if px.saturating_add(1) + width <= self.cols { px + 1 } else { px.saturating_sub(width) };
-        let y = if py + 1 + height <= self.rows { py + 1 } else { py.saturating_sub(height) };
+        let y = if py.saturating_add(1) + height <= floor { py + 1 } else { py.saturating_sub(height) };
         Some(Rect::new(x, y, width, height))
     }
 
@@ -3446,7 +3527,7 @@ impl View {
         // Pane frames (borders + titles + content).
         for &(pid, rect) in &self.rects {
             let focused = self.active_tab().map(|t| t.focus == pid).unwrap_or(false);
-            let title = self.pane_title(pid, focused);
+            let title = self.pane_title(pid, focused, rect);
             self.render_pane_frame(f, rect, focused, &title);
             if let Some(grid) = self.grids.get_mut(&pid) {
                 render_pane_content(f, pid, rect, grid, selected, link_mods, &theme);
@@ -3481,13 +3562,17 @@ impl View {
             .unwrap_or_else(|| " pane ".to_string())
     }
 
-    fn pane_title(&self, pid: u64, focused: bool) -> String {
+    fn pane_title(&self, pid: u64, focused: bool, rect: Rect) -> String {
         let base = self.pane_label(pid);
         if focused && self.session_zoom() {
-            format!("{base}(zoom) ")
-        } else {
-            base
+            // The right-aligned badge marks zoom; only fall back to a title
+            // suffix when the pane is too narrow to fit both.
+            let badge_w = ZOOM_BADGE.chars().count() as u16;
+            if rect.width < base.chars().count() as u16 + badge_w + 2 {
+                return format!("{base}(zoom) ");
+            }
         }
+        base
     }
 
     fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, title: &str) {
@@ -3509,7 +3594,9 @@ impl View {
         } else if focused {
             theme.accent
         } else {
-            theme.border_idle
+            // Idle borders recede toward the terminal background so the
+            // focused pane's accent border is the clear bright edge.
+            dim_toward(theme.border_idle, theme.term_bg, &theme.palette, 1, 2)
         };
         let style_cfg = kumo_core::config::sidebar_borders().style;
         if style_cfg == kumo_core::config::BorderStyle::Hidden {
@@ -3524,6 +3611,16 @@ impl View {
             };
             for (i, ch) in title.chars().take(max).enumerate() {
                 put(f, rect.x + 1 + i as u16, rect.y, &ch.to_string(), chip);
+            }
+            if focused && self.session_zoom() {
+                let badge_w = ZOOM_BADGE.chars().count() as u16;
+                if rect.width >= title.chars().count() as u16 + badge_w + 2 {
+                    let bx = rect.right() - badge_w;
+                    let bstyle = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                    for (i, ch) in ZOOM_BADGE.chars().enumerate() {
+                        put(f, bx + i as u16, rect.y, &ch.to_string(), bstyle);
+                    }
+                }
             }
             return;
         }
@@ -3553,6 +3650,17 @@ impl View {
         };
         for (i, ch) in title.chars().take(max).enumerate() {
             put(f, x0 + 1 + i as u16, y0, &ch.to_string(), chip);
+        }
+        // Zoom badge, right-aligned on the top border row.
+        if focused && self.session_zoom() {
+            let badge_w = ZOOM_BADGE.chars().count() as u16;
+            if rect.width >= title.chars().count() as u16 + badge_w + 2 {
+                let bx = x1 + 1 - badge_w;
+                let bstyle = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                for (i, ch) in ZOOM_BADGE.chars().enumerate() {
+                    put(f, bx + i as u16, y0, &ch.to_string(), bstyle);
+                }
+            }
         }
     }
 
@@ -3607,9 +3715,11 @@ impl View {
             if is_hover {
                 let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
-            } else if !active {
-                // keep last cell as subtle close hint placeholder (dim)
-                put(f, close.x, close.y, " ", base_style);
+            } else {
+                // Persistent ghost close hint: always visible (clickable without
+                // a prior hover), brightening to red on hover.
+                let ghost = lighten(pill_bg, if active { 26 } else { 16 });
+                put(f, close.x, close.y, "x", Style::default().fg(ghost).bg(pill_bg));
             }
         }
         // Plus button
@@ -3734,14 +3844,23 @@ impl View {
                         AgentStatus::Blocked => theme.orange,
                         AgentStatus::Idle => theme.panel_muted,
                     };
-                    let dot = if *status == AgentStatus::Blocked { "◉" } else { "●" };
+                    let dot = match status {
+                        AgentStatus::Blocked => "◉",
+                        AgentStatus::Working => self.spinner_char(),
+                        AgentStatus::Idle => "●",
+                    };
                     let name_style = if *status == AgentStatus::Blocked {
                         Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(status_color).bg(bg)
                     };
                     if !is_dir {
-                        put(f, x + 2, y, dot, Style::default().fg(status_color).bg(bg));
+                        let dot_style = if *status == AgentStatus::Idle {
+                            Style::default().fg(status_color).bg(bg)
+                        } else {
+                            Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
+                        };
+                        put(f, x + 2, y, dot, dot_style);
                     }
                     if is_dir {
                         let path_color = if focused { theme.fg } else { theme.panel_muted };
@@ -3843,6 +3962,7 @@ impl View {
             is_leader: self.mode == Mode::Leader,
             menu_open: self.menu.open,
             sidebar_open: self.sidebar_open,
+            spinner: self.spinner_char(),
         };
 
         // Snapshot slots so we can iteratively drop low-priority widgets on overflow.
@@ -4039,21 +4159,8 @@ impl View {
         let Some(rect) = self.update_notice_rect() else { return };
         let Some((line1, line2)) = self.update_notice_lines() else { return };
         let theme = self.current_theme();
-        let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right() - 1, rect.bottom() - 1);
-        let border = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        fill(f, rect, theme.panel_sep);
-        put(f, x0, y0, "┌", border);
-        put(f, x1, y0, "┐", border);
-        put(f, x0, y1, "└", border);
-        put(f, x1, y1, "┘", border);
-        for x in (x0 + 1)..x1 {
-            put(f, x, y0, "─", border);
-            put(f, x, y1, "─", border);
-        }
-        for y in (y0 + 1)..y1 {
-            put(f, x0, y, "│", border);
-            put(f, x1, y, "│", border);
-        }
+        draw_modal(f, rect, &theme, self.shadow_floor());
+        let (x0, y0) = (rect.x, rect.y);
         put(f, x0 + 2, y0 + 1, "✕", Style::default().fg(theme.red).bg(theme.panel_sep).add_modifier(Modifier::BOLD));
         let inner_w = rect.width.saturating_sub(2);
         text(f, x0 + 5, y0 + 1, &line1, Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w.saturating_sub(6));
@@ -4066,8 +4173,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.menu_dropdown_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         for (i, item) in MENU_ITEMS.iter().enumerate() {
             render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.menu.selected, &theme);
         }
@@ -4079,8 +4185,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.ctx_menu_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         for (i, item) in self.ctx_items().iter().enumerate() {
             render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.ctx_menu.selected, &theme);
         }
@@ -4093,8 +4198,7 @@ impl View {
         let theme = self.current_theme();
         let Some(dd) = self.name_popup_rect() else { return };
         let (x0, y0, _x1, _y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         let title_text = match self.popup.target {
             Some(PopupTarget::RenamePane(_)) => "rename pane",
@@ -4155,8 +4259,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.keybind_overlay_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "keybindings", title, inner_w);
@@ -4192,8 +4295,8 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.settings_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let sep_style = Style::default().fg(theme.accent).bg(theme.panel_sep);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "settings", title, dd.width.saturating_sub(4));
         let Some(tabs) = self.settings_tabs_rect() else { return };
@@ -4210,7 +4313,7 @@ impl View {
         }
         let sep_x = tabs.x + tabs.width;
         for y in tabs.y..dd.bottom() {
-            put(f, sep_x, y, "│", border);
+            put(f, sep_x, y, "│", sep_style);
         }
         match SETTINGS_TABS.get(self.settings.tab).copied().unwrap_or(SettingsTab::Appearance) {
             SettingsTab::Appearance => self.render_settings_appearance(f, dd),
@@ -4245,8 +4348,20 @@ impl View {
             };
             put(f, content.x, y, marker, marker_style);
             text(f, content.x + 2, y, &t.name, Style::default().fg(row_fg).bg(bg), content.width.saturating_sub(2));
-            if active && content.width >= 26 {
-                text(f, content.x + content.width.saturating_sub(8), y, " in use ", Style::default().fg(row_fg).bg(bg), 8);
+            // Right-aligned swatch strip: six ANSI colors from the theme's own
+            // palette, so rows can be told apart at a glance.
+            const SWATCHES: [usize; 6] = [1, 2, 3, 4, 5, 6];
+            if content.width as usize >= SWATCHES.len() + 18 {
+                let sx = content.x + content.width - SWATCHES.len() as u16;
+                for (j, ci) in SWATCHES.iter().enumerate() {
+                    let c = t.palette[*ci];
+                    put(f, sx + j as u16, y, " ", Style::default().bg(RColor::Rgb(c.r, c.g, c.b)));
+                }
+            }
+            // "in use" tag sits left of the swatches when both fit.
+            if active && content.width as usize >= SWATCHES.len() + 18 + 8 {
+                let ix = content.x + content.width - SWATCHES.len() as u16 - 7;
+                text(f, ix, y, "in use", Style::default().fg(theme.panel_muted).bg(bg), 6);
             }
         }
     }
@@ -4282,8 +4397,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.worktree_picker_rect() else { return };
-        let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
-        draw_box(f, dd, border);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         let count = self.worktree_picker.items.len();
@@ -4471,7 +4585,19 @@ impl View {
             // black bg, red border
             let border = Style::default().fg(theme.red).bg(RColor::Black);
             fill(f, dd, RColor::Black);
-            draw_box(f, dd, border);
+            let (bx0, by0, bx1, by1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
+            put(f, bx0, by0, "┌", border);
+            put(f, bx1, by0, "┐", border);
+            put(f, bx0, by1, "└", border);
+            put(f, bx1, by1, "┘", border);
+            for x in (bx0 + 1)..bx1 {
+                put(f, x, by0, "─", border);
+                put(f, x, by1, "─", border);
+            }
+            for y in (by0 + 1)..by1 {
+                put(f, bx0, y, "│", border);
+                put(f, bx1, y, "│", border);
+            }
             let inner_w = dd.width.saturating_sub(4);
             // title
             let title = Style::default().fg(RColor::White).bg(RColor::Black).add_modifier(Modifier::BOLD);
@@ -4490,7 +4616,7 @@ impl View {
             let input = &cs.search_input;
             let cursor = cs.search_cursor.min(input.chars().count());
             let text_w = field_w.saturating_sub(1) as usize;
-            let start = if cursor + 1 > text_w { cursor + 1 - text_w } else { 0 };
+            let start = (cursor + 1).saturating_sub(text_w);
             let mut col = x;
             for (i, ch) in input.chars().enumerate().skip(start) {
                 if (col - x) as usize >= text_w { break; }
@@ -4718,13 +4844,20 @@ fn short_workspace(ws: &std::path::Path) -> String {
     }
 }
 
-fn draw_box(f: &mut Frame, dd: Rect, border: Style) {
-    fill(f, dd, border.bg.unwrap_or(RColor::Reset));
+/// Shared modal chrome: panel fill, rounded accent border, and a one-cell
+/// drop shadow along the bottom/right edges (clamped to the screen). Every
+/// overlay renders through this so popups read as one design system.
+///
+/// `floor` is the first row of bottom chrome (the status bar): shadow strips
+/// stop above it so a popup anchored to the bar never repaints it.
+fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme, floor: u16) {
+    fill(f, dd, theme.panel_sep);
+    let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
     let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
-    put(f, x0, y0, "┌", border);
-    put(f, x1, y0, "┐", border);
-    put(f, x0, y1, "└", border);
-    put(f, x1, y1, "┘", border);
+    put(f, x0, y0, "╭", border);
+    put(f, x1, y0, "╮", border);
+    put(f, x0, y1, "╰", border);
+    put(f, x1, y1, "╯", border);
     for x in (x0 + 1)..x1 {
         put(f, x, y0, "─", border);
         put(f, x, y1, "─", border);
@@ -4732,6 +4865,20 @@ fn draw_box(f: &mut Frame, dd: Rect, border: Style) {
     for y in (y0 + 1)..y1 {
         put(f, x0, y, "│", border);
         put(f, x1, y, "│", border);
+    }
+    let shadow_bg = dim_toward(theme.panel_sep, ColorRgb::new(0, 0, 0), &theme.palette, 2, 5);
+    let scr = f.area();
+    // Last row shadows may occupy: screen bottom, but never chrome.
+    let max_row = scr.height.saturating_sub(1).min(floor.saturating_sub(1));
+    if dd.right() < scr.width && max_row > dd.y {
+        let y_end = dd.bottom().min(max_row);
+        fill(f, Rect::new(dd.right(), dd.y + 1, 1, y_end - dd.y), shadow_bg);
+    }
+    if dd.bottom() <= max_row {
+        let x_end = dd.right().min(scr.width.saturating_sub(1));
+        if x_end > dd.x {
+            fill(f, Rect::new(dd.x + 1, dd.bottom(), x_end - dd.x, 1), shadow_bg);
+        }
     }
 }
 
@@ -4936,6 +5083,8 @@ mod tests {
             clock_str: "12:00".to_string(),
             clock_next: Instant::now() + Duration::from_secs(60),
             is_ssh: false,
+            spinner_frame: 0,
+            spinner_next: Instant::now(),
         }
     }
 
@@ -4952,16 +5101,16 @@ mod tests {
         view.menu.open = true;
         view.menu.selected = 0;
         // The dropdown sits above the MENU button; item i lives at row 17+i
-        // (cols 80, rows 24, mode NORMAL -> MENU at x 9).
-        view.on_mouse(mouse_moved(4, 18)).unwrap();
+        // (cols 80, rows 24, mode NORMAL -> dropdown anchored at x 5).
+        view.on_mouse(mouse_moved(8, 18)).unwrap();
         assert_eq!(view.menu.selected, 1, "hover item 2 selects it");
         assert!(view.dirty(), "hover must trigger a repaint");
         view.dirty = false;
         // Hovering the same item again is a no-op (no repaint churn).
-        view.on_mouse(mouse_moved(4, 18)).unwrap();
+        view.on_mouse(mouse_moved(8, 18)).unwrap();
         assert!(!view.dirty(), "unchanged hover must not repaint");
         // Hovering item 4 updates selection + repaints.
-        view.on_mouse(mouse_moved(4, 20)).unwrap();
+        view.on_mouse(mouse_moved(8, 20)).unwrap();
         assert_eq!(view.menu.selected, 3);
         assert!(view.dirty());
     }
@@ -5256,5 +5405,94 @@ mod tests {
     #[test]
     fn fit_branch_name_truncates() {
         assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/lo…");
+    }
+
+    fn one_pane_layout() -> Layout {
+        Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        }
+    }
+
+    /// The status-bar dropdown opens flush above the bar; its drop shadow must
+    /// stop at the chrome floor instead of repainting the status row (which
+    /// used to wipe out the MENU button).
+    #[test]
+    fn menu_shadow_never_paints_over_status_bar() {
+        let mut view = test_view();
+        view.menu.open = true;
+        let theme = view.current_theme();
+        let shadow_bg = dim_toward(theme.panel_sep, ColorRgb::new(0, 0, 0), &theme.palette, 2, 5);
+        let dd = view.menu_dropdown_rect().expect("dropdown fits at 80x24");
+        assert_eq!(dd.bottom(), 23, "dropdown sits flush above the status row");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        // The MENU button on the status row is intact under the dropdown
+        // (button starts after the mode chip + " · " separator).
+        let btn: String = (11..17).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
+        assert_eq!(btn, " MENU ", "shadow must not repaint the status row");
+
+        // Vertical strip hugs the modal side but stops above the floor.
+        assert_eq!(buf.cell((dd.right(), dd.bottom() - 1)).unwrap().bg, shadow_bg, "shadow beside the modal");
+        assert_ne!(buf.cell((dd.right(), dd.bottom())).unwrap().bg, shadow_bg, "no shadow on the status row");
+    }
+
+    /// A mouse selection stamps REVERSED onto pane cells; popups painted over
+    /// that region must come out clean (panel bg, no stale modifiers) instead
+    /// of inheriting the highlighted colors underneath.
+    #[test]
+    fn ctx_menu_clears_selection_highlight_underneath() {
+        let mut g = grid();
+        g.cols = 30;
+        g.rows = 10;
+        g.cells = (0..10).map(|_| (0..30).map(|_| cell("a", 1)).collect()).collect();
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        view.grids.insert(1, g);
+        view.recompute_geometry();
+        // Select a band inside the pane that crosses where the ctx menu opens.
+        view.sel = Some(Sel { pane_id: 1, start: (5, 5), end: (25, 6) });
+        view.ctx_menu = CtxMenu { open: true, x: 30, y: 5, selected: 1, target: CtxTarget::Pane(1) };
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        // Control: the selection does render outside the menu.
+        assert!(buf.cell((inner.x + 25, inner.y + 5)).unwrap().modifier.contains(Modifier::REVERSED));
+
+        let dd = view.ctx_menu_rect().unwrap();
+        for y in dd.y..dd.bottom() {
+            for x in dd.x..dd.right() {
+                let c = buf.cell((x, y)).unwrap();
+                assert!(!c.modifier.contains(Modifier::REVERSED), "stale REVERSED inside menu at {x},{y}");
+            }
+        }
+        // Unselected item rows carry the panel surface, not the selection bg.
+        let theme = view.current_theme();
+        assert_eq!(buf.cell((dd.x + 3, dd.y + 3)).unwrap().bg, theme.panel_sep);
     }
 }

@@ -574,12 +574,6 @@ impl App {
         }
     }
 
-    pub(crate) fn copy_scroll_bottom(&mut self, pane_id: u64) {
-        if let Some(pane) = self.panes.get_mut(&pane_id) {
-            pane.scroll_bottom();
-        }
-    }
-
     pub(crate) fn copy_search(&self, pane_id: u64, query: &str) -> Vec<kumo_protocol::CopyHit> {
         let Some(pane) = self.panes.get(&pane_id) else { return Vec::new(); };
         pane.search(query)

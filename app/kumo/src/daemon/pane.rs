@@ -520,16 +520,6 @@ impl Pane {
         self.full_redraw = true;
     }
 
-    pub fn scroll_bottom(&mut self) {
-        self.vt.scroll_bottom();
-        self.dirty = true;
-        self.full_redraw = true;
-    }
-
-    pub fn total_rows(&self) -> usize {
-        self.vt.total_rows()
-    }
-
     pub fn search(&self, query: &str) -> Vec<vt::SearchHit> {
         self.vt.search(query)
     }

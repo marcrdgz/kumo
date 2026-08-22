@@ -2,7 +2,6 @@
 //!
 //! opencode signals its state on screen: permission dialogs and a question
 //! prompt when blocked, and a prompt footer ("esc interrupt", spinner,
-//! progress bar) pinned to the bottom rows while working. Mirrors herdr's
 //! bundled `opencode.toml` manifest.
 
 use super::{contains_ci, Snapshot};
@@ -12,7 +11,6 @@ use super::{contains_ci, Snapshot};
 /// Only markers tied to a real on-screen dialog qualify. Generic prompts
 /// ("proceed?", "(y/n)", "would you like to", ...) are deliberately excluded:
 /// they also match conversation transcript text, falsely flagging an idle
-/// agent as blocked. Mirrors herdr's opencode manifest (state = "blocked").
 const BLOCKED_MARKERS: &[&str] = &[
     // opencode permission dialog ("△ Permission required" header + buttons).
     "permission required",
@@ -44,13 +42,14 @@ const WORKING_MARKERS: &[&str] = &[
 ];
 
 /// True when opencode's question dialog is on screen: its footer pairs
-/// "esc dismiss" with an enter action and a navigation hint. Mirrors herdr's
 /// opencode manifest rule (state = "blocked").
 fn question_dialog_visible(snap: &Snapshot) -> bool {
     if !contains_ci(&snap.screen, "esc dismiss") {
         return false;
     }
-    let enter = QUESTION_DIALOG_ENTER.iter().any(|m| contains_ci(&snap.screen, m));
+    let enter = QUESTION_DIALOG_ENTER
+        .iter()
+        .any(|m| contains_ci(&snap.screen, m));
     let nav = QUESTION_DIALOG_NAV.iter().any(|m| snap.screen.contains(m));
     enter && nav
 }
@@ -88,13 +87,19 @@ mod tests {
 
     #[test]
     fn blocked_on_permission_dialog() {
-        let s = snap("△ Permission required\nAllow once\nAllow always\nReject", "");
+        let s = snap(
+            "△ Permission required\nAllow once\nAllow always\nReject",
+            "",
+        );
         assert!(blocked(&s));
     }
 
     #[test]
     fn blocked_on_question_dialog() {
-        let s = snap("\u{21c6} tab   \u{2191}\u{2193} select\nenter submit   esc dismiss\n", "");
+        let s = snap(
+            "\u{21c6} tab   \u{2191}\u{2193} select\nenter submit   esc dismiss\n",
+            "",
+        );
         assert!(blocked(&s));
     }
 
@@ -118,13 +123,19 @@ mod tests {
 
     #[test]
     fn not_working_when_interrupt_hint_is_older_transcript_not_footer() {
-        let s = snap("previous turn output - esc interrupt\nAsk anything... \"\"", "Ask anything... \"\"");
+        let s = snap(
+            "previous turn output - esc interrupt\nAsk anything... \"\"",
+            "Ask anything... \"\"",
+        );
         assert!(!working(&s));
     }
 
     #[test]
     fn working_when_knight_rider_bar_in_footer() {
-        let s = snap("\n\n\n\u{25a0}\u{25a0}\u{25a0}\u{25a0}running...", "\u{25a0}\u{25a0}\u{25a0}\u{25a0}running...");
+        let s = snap(
+            "\n\n\n\u{25a0}\u{25a0}\u{25a0}\u{25a0}running...",
+            "\u{25a0}\u{25a0}\u{25a0}\u{25a0}running...",
+        );
         assert!(working(&s));
     }
 

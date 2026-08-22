@@ -191,6 +191,7 @@ pub fn agent_spans(
     session: Option<&SessionLayout>,
     cfg: &AgentWidgetConfig,
     theme: &OwnedTheme,
+    spinner: &str,
 ) -> Option<Vec<Span<'static>>> {
     let (blocked, working, idle) = agent_counts(session);
     let total = blocked + working + idle;
@@ -211,7 +212,7 @@ pub fn agent_spans(
             }
             if !cfg.only_blocked && working > 0 {
                 segs.push(vec![
-                    Span::styled("●", Style::default().fg(theme.green)),
+                    Span::styled(spinner.to_string(), Style::default().fg(theme.green).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{working}"), Style::default().fg(theme.green)),
                 ]);
             }
@@ -247,7 +248,7 @@ pub fn agent_spans(
         AgentWidgetStyle::Dots => {
             let mut s = String::new();
             s.extend(std::iter::repeat_n('◉', blocked));
-            s.extend(std::iter::repeat_n('●', working));
+            s.extend(std::iter::repeat_n(spinner.chars().next().unwrap_or('●'), working));
             s.extend(std::iter::repeat_n('○', if cfg.only_blocked { 0 } else { idle }));
             if s.is_empty() {
                 return None;
@@ -429,7 +430,7 @@ pub fn slot_spans(
             StatusWidget::Menu => Some(menu_spans(ctx.menu_open, ctx.theme)),
             StatusWidget::Session => session_spans(ctx.session, &ctx.cfg.widgets.session, ctx.sidebar_open, ctx.theme),
             StatusWidget::Branch => branch_spans(ctx.session.and_then(|s| s.branch.as_ref()), &ctx.cfg.widgets.branch, ctx.theme),
-            StatusWidget::AgentStatus => agent_spans(ctx.session, &ctx.cfg.widgets.agent, ctx.theme),
+            StatusWidget::AgentStatus => agent_spans(ctx.session, &ctx.cfg.widgets.agent, ctx.theme, ctx.spinner),
             StatusWidget::Hostname => {
                 if ctx.hostname.is_empty() {
                     None
@@ -462,16 +463,66 @@ pub struct SlotContext<'a> {
     pub is_leader: bool,
     pub menu_open: bool,
     pub sidebar_open: bool,
+    /// Current braille spinner frame, shown while agents are `Working`.
+    pub spinner: &'a str,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kumo_core::config::{StatusBarConfig, StatusWidget};
+    use kumo_core::config::{AgentWidgetConfig, AgentWidgetStyle, StatusBarConfig, StatusWidget};
+    use kumo_protocol::{AgentInfo, AgentStatus, LayoutNode, LayoutPane, TabLayout};
     use kumo_protocol::WireBranch;
 
     fn theme() -> OwnedTheme {
         OwnedTheme::from(kumo_core::theme::THEMES[kumo_core::theme::DEFAULT_THEME_IDX])
+    }
+
+    fn session_with_agent(status: AgentStatus) -> SessionLayout {
+        SessionLayout {
+            name: "s".into(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            active_tab: 0,
+            tabs: vec![TabLayout {
+                id: 1,
+                name: "t".into(),
+                focus: 7,
+                zoom: false,
+                root: Some(Box::new(LayoutNode::Pane(LayoutPane {
+                    id: 7,
+                    title: "AI CLI".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: true,
+                    agent: Some(AgentInfo { name: "opencode".into(), status, cpu: 0.0, mem_kb: 0 }),
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+            branch: None,
+            focus: 7,
+            zoom: false,
+            root: None,
+        }
+    }
+
+    #[test]
+    fn agent_spans_shows_spinner_while_working() {
+        let cfg = AgentWidgetConfig { style: AgentWidgetStyle::Counts, ..Default::default() };
+        let s = session_with_agent(AgentStatus::Working);
+        let spans = agent_spans(Some(&s), &cfg, &theme(), "⠋").unwrap();
+        let text: String = spans.iter().map(|x| x.content.as_ref()).collect();
+        assert!(text.contains("⠋"), "spinner frame expected in: {text}");
+        assert!(text.contains('1'));
+    }
+
+    #[test]
+    fn agent_spans_static_dot_when_idle() {
+        let cfg = AgentWidgetConfig { style: AgentWidgetStyle::Counts, ..Default::default() };
+        let s = session_with_agent(AgentStatus::Idle);
+        let spans = agent_spans(Some(&s), &cfg, &theme(), "⠋").unwrap();
+        let text: String = spans.iter().map(|x| x.content.as_ref()).collect();
+        assert!(text.contains('○'), "idle dot expected in: {text}");
+        assert!(!text.contains('⠋'), "no spinner when idle: {text}");
     }
 
     #[test]
@@ -526,6 +577,7 @@ mod tests {
             is_leader: false,
             menu_open: false,
             sidebar_open: true,
+            spinner: "●",
         };
         let spans = slot_spans(&cfg.left, &ctx);
         assert!(spans.is_empty(), "branch with no session should hide");

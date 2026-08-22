@@ -21,6 +21,10 @@ pub fn text(f: &mut Frame, x: u16, y: u16, s: &str, style: Style, max_width: u16
     }
 }
 
+/// Paint a solid background over `area`. Each cell is fully reset first:
+/// ratatui's `set_style` only patches the given attributes, so leftover
+/// foregrounds and modifiers (e.g. the REVERSED stamp of a mouse selection)
+/// would otherwise bleed through overlays drawn on top.
 pub fn fill(f: &mut Frame, area: Rect, color: RColor) {
     for y in area.y..(area.y + area.height) {
         for x in area.x..(area.x + area.width) {
@@ -29,7 +33,8 @@ pub fn fill(f: &mut Frame, area: Rect, color: RColor) {
                 continue;
             }
             let c = f.buffer_mut().cell_mut((x, y)).unwrap();
-            c.set_symbol(" ").set_style(Style::default().bg(color));
+            c.reset();
+            c.set_symbol(" ").set_bg(color);
         }
     }
 }
