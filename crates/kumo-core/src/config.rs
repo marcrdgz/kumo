@@ -337,11 +337,13 @@ pub struct StatusBarWidgets {
 }
 
 /// Desktop-notification policy for agent lifecycle transitions
-/// (`[notifications]`). Every channel defaults to on; `enabled` is the master
-/// switch. The sibling knob for sound is the flat/TOML `agent-sound` key.
+/// (`[notifications]`). **Off by default** — users opt in with
+/// `enabled = true`; the per-channel switches then pick which transitions
+/// notify. The sibling knob for sound is the flat/TOML `agent-sound` key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotificationsConfig {
-    /// Master switch: raise desktop notifications at all (default: true).
+    /// Master switch: raise desktop notifications at all. Defaults to
+    /// **false**; set `[notifications] enabled = true` to opt in.
     pub enabled: bool,
     /// Notify when a working agent becomes blocked (default: true).
     pub blocked: bool,
@@ -351,7 +353,7 @@ pub struct NotificationsConfig {
 
 impl Default for NotificationsConfig {
     fn default() -> Self {
-        Self { enabled: true, blocked: true, finished: true }
+        Self { enabled: false, blocked: true, finished: true }
     }
 }
 
@@ -1245,9 +1247,9 @@ pub fn agent_sound_enabled() -> bool {
 }
 
 /// Desktop-notification policy for agent lifecycle transitions
-/// (`[notifications]`, every channel on by default). Disabled entirely by
-/// setting `KUMO_NO_NOTIFY=1`. Read live on every use, so `kumo reload`
-/// applies changes without a restart.
+/// (`[notifications]`, off by default — opt in with `enabled = true`).
+/// Disabled entirely by setting `KUMO_NO_NOTIFY=1`. Read live on every use,
+/// so `kumo reload` applies changes without a restart.
 pub fn agent_notifications() -> NotificationsConfig {
     if std::env::var("KUMO_NO_NOTIFY").is_ok() {
         return NotificationsConfig { enabled: false, ..Default::default() };
@@ -1651,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn notifications_default_on_and_parse_toml_section() {
+    fn notifications_off_until_enabled_in_config() {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let cfg_dir = scratch_dir("cfg-notify");
         let home = scratch_dir("home-notify");
@@ -1661,7 +1663,11 @@ mod tests {
             EnvGuard::unset("KUMO_NO_NOTIFY"),
         );
         let cfg = agent_notifications();
-        assert!(cfg.enabled && cfg.blocked && cfg.finished, "all channels default on");
+        assert!(!cfg.enabled, "notifications must default off; opting in is manual");
+        assert!(cfg.blocked && cfg.finished, "channel switches default on");
+
+        write(&cfg_dir.join("config.toml"), "[notifications]\nenabled = true\n");
+        assert!(agent_notifications().enabled, "enabled = true must opt in");
 
         write(
             &cfg_dir.join("config.toml"),
@@ -1671,9 +1677,6 @@ mod tests {
         assert!(cfg.enabled);
         assert!(!cfg.blocked, "blocked channel must be disableable");
         assert!(!cfg.finished, "the idle alias must feed finished");
-
-        write(&cfg_dir.join("config.toml"), "[notifications]\nenabled = false\n");
-        assert!(!agent_notifications().enabled, "master switch must disable everything");
     }
 
     #[test]

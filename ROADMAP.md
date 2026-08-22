@@ -192,8 +192,9 @@ toggle/order + pane titles/border styling.
   Notification Center / Linux `notify-send` — alongside the audible chime.
   Fired from the same server-side detection + rate-limit site as the chime
   (`app/kumo/src/daemon/app/tasks.rs`; both channels share one per-pane
-  cooldown), config-gated under `[notifications]` (`enabled` / `blocked` /
-  `finished`, `KUMO_NO_NOTIFY=1`), read live by `kumo reload`.
+  cooldown), config-gated under `[notifications]` — **off by default**, opt in
+  with `enabled = true` (per-channel `blocked` / `finished`,
+  `KUMO_NO_NOTIFY=1`), read live by `kumo reload`.
 - **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
   prompt out to every AI pane in the tab/session over the existing `send-keys`
   wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI
