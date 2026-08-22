@@ -878,7 +878,7 @@ impl View {
     }
 
     /// Lay the active tab's tree out over the pane area (wire tree → the
-    /// crate's geometry, which reserves a 1-cell separator per split).
+    /// crate's geometry, which tiles panes flush and yields exact totals).
     fn active_geom(&self) -> TreeGeom {
         let mut geom = TreeGeom::default();
         let area = self.panes_area();

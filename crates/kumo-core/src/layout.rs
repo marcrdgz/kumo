@@ -327,19 +327,31 @@ pub fn compute_geometry(n: &Node, area: Rect, out: &mut TreeGeom) {
     match n {
         Node::Pane { id } => out.panes.push(PaneGeom { pane_id: *id, rect: area }),
         Node::Split { id, dir, ratio, a, b } => {
+            // Panes tile the area flush: no reserved separator cell, so the
+            // child widths/heights always sum to the full container and every
+            // line is consumed on resize. The splitter's draggable seam covers
+            // the two adjacent border columns/rows of the children.
             let (ra, rb, sep) = match dir {
                 SplitDir::V => {
-                    let wa = ((area.width as f32) * ratio).round().max(1.0).min((area.width - 1) as f32) as u16;
-                    let sep = Rect::new(area.x + wa, area.y, 1, area.height);
+                    let wa = ((area.width as f32) * ratio)
+                        .round()
+                        .max(1.0)
+                        .min((area.width.saturating_sub(1)) as f32) as u16;
+                    let wb = area.width.saturating_sub(wa);
+                    let sep = Rect::new(area.x + wa.saturating_sub(1), area.y, 2, area.height);
                     let ra = Rect::new(area.x, area.y, wa, area.height);
-                    let rb = Rect::new(area.x + wa + 1, area.y, area.width - wa - 1, area.height);
+                    let rb = Rect::new(area.x + wa, area.y, wb, area.height);
                     (ra, rb, sep)
                 }
                 SplitDir::H => {
-                    let ha = ((area.height as f32) * ratio).round().max(1.0).min((area.height - 1) as f32) as u16;
-                    let sep = Rect::new(area.x, area.y + ha, area.width, 1);
+                    let ha = ((area.height as f32) * ratio)
+                        .round()
+                        .max(1.0)
+                        .min((area.height.saturating_sub(1)) as f32) as u16;
+                    let hb = area.height.saturating_sub(ha);
+                    let sep = Rect::new(area.x, area.y + ha.saturating_sub(1), area.width, 2);
                     let ra = Rect::new(area.x, area.y, area.width, ha);
-                    let rb = Rect::new(area.x, area.y + ha + 1, area.width, area.height - ha - 1);
+                    let rb = Rect::new(area.x, area.y + ha, area.width, hb);
                     (ra, rb, sep)
                 }
             };
@@ -514,5 +526,68 @@ mod tests {
         // A new split must not collide with the restored split id (1).
         assert!(restored.split(1, 99, SplitDir::V));
         assert!(restored.contains(99));
+    }
+
+    fn rect_of(g: &TreeGeom, id: u64) -> Rect {
+        g.panes.iter().find(|p| p.pane_id == id).map(|p| p.rect).unwrap()
+    }
+
+    #[test]
+    fn geometry_tiles_flush_without_gap() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        tree.split(1, 3, SplitDir::H);
+        let root = tree.root.clone().unwrap();
+        let mut g = TreeGeom::default();
+        compute_geometry(&root, Rect::new(0, 0, 20, 10), &mut g);
+        // Every split consumes the full area: no reserved separator cell.
+        assert_eq!(rect_of(&g, 1).width + rect_of(&g, 2).width, 20);
+        assert_eq!(rect_of(&g, 1).height + rect_of(&g, 3).height, 10);
+        assert_eq!(rect_of(&g, 2).height, 10);
+        // Adjacent panes touch: child B starts exactly at child A's edge.
+        assert_eq!(rect_of(&g, 2).x, rect_of(&g, 1).x + rect_of(&g, 1).width);
+        assert_eq!(rect_of(&g, 3).y, rect_of(&g, 1).y + rect_of(&g, 1).height);
+        // The draggable seam covers the two adjacent border cells.
+        let vs = g.splitters.iter().find(|s| s.dir == SplitDir::V).unwrap();
+        assert_eq!(vs.rect, Rect::new(9, 0, 2, 10));
+        let hs = g.splitters.iter().find(|s| s.dir == SplitDir::H).unwrap();
+        assert_eq!(hs.rect, Rect::new(0, 4, 10, 2));
+    }
+
+    #[test]
+    fn geometry_odd_size_sums_to_container() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        let root = tree.root.clone().unwrap();
+        let mut g = TreeGeom::default();
+        compute_geometry(&root, Rect::new(3, 5, 21, 7), &mut g);
+        assert_eq!(rect_of(&g, 1).width + rect_of(&g, 2).width, 21);
+        assert_eq!(rect_of(&g, 1).height, 7);
+        assert_eq!(rect_of(&g, 2).height, 7);
+        assert_eq!(rect_of(&g, 2).x, rect_of(&g, 1).x + rect_of(&g, 1).width);
+        // Seam sits between the two panes' borders, within the container.
+        let vs = g.splitters.first().unwrap();
+        assert!(vs.rect.x >= 3 && vs.rect.right() <= 24);
+    }
+
+    #[test]
+    fn nested_geometry_keeps_row_and_column_totals() {
+        let mut tree = LayoutTree::new(1);
+        tree.split(1, 2, SplitDir::V);
+        tree.split(2, 3, SplitDir::V);
+        tree.split(3, 4, SplitDir::H);
+        let root = tree.root.clone().unwrap();
+        let mut g = TreeGeom::default();
+        compute_geometry(&root, Rect::new(0, 0, 37, 19), &mut g);
+        // Panes sit side by side and bottom one sits under pane 3.
+        let p1 = rect_of(&g, 1);
+        let p2 = rect_of(&g, 2);
+        let p3 = rect_of(&g, 3);
+        let p4 = rect_of(&g, 4);
+        assert_eq!(p1.width + p2.width + p3.width, 37);
+        assert_eq!(p3.height + p4.height, 19);
+        assert_eq!(p2.x, p1.x + p1.width);
+        assert_eq!(p3.x, p2.x + p2.width);
+        assert_eq!(p4.y, p3.y + p3.height);
     }
 }
