@@ -430,6 +430,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             app.on_pty_event(ev);
         }
         while let Ok(notice) = app.update_rx.try_recv() {
+            app.update_check_pending = false;
             app.update_notice = notice;
             let notice = app.update_status();
             for client in clients.values_mut() {

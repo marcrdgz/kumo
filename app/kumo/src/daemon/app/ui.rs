@@ -24,6 +24,7 @@ impl App {
         self.refresh_workspace_follow();
         self.refresh_ai_cli();
         self.refresh_agent_statuses();
+        self.check_updates();
 
         let mut changed = Vec::new();
         let ids: Vec<u64> = self.panes.keys().copied().collect();

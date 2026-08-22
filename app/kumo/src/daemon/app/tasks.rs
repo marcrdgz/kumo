@@ -18,6 +18,10 @@ const STATUS_REFRESH: Duration = Duration::from_millis(500);
 /// Minimum gap between audible alerts for the same pane, so a status that
 /// flickers between Working and Blocked does not repeat the sound.
 const ALERT_COOLDOWN: Duration = Duration::from_secs(3);
+/// How often a running daemon re-checks for a newer release and pushes an
+/// update notice to attached clients. Network hits are still gated by the
+/// cache TTLs in `kumo_core::update` (24h stable / 6h nightly).
+const UPDATE_REFRESH: Duration = Duration::from_secs(6 * 3600);
 
 impl App {
     /// Refresh cached git branches for all session workspaces (every
@@ -172,6 +176,29 @@ impl App {
                 });
         }
     }
+    /// Re-check for a newer release at most every `UPDATE_REFRESH` so a
+    /// long-running daemon surfaces the update banner without a restart. The
+    /// background thread reuses `poll_update_notice` (respects the update-check
+    /// config and the dismissed-notice cache, so a checked-out release never
+    /// nags again); the server loop broadcasts the result to every client.
+    pub(super) fn check_updates(&mut self) {
+        if !kumo_core::config::update_check_enabled() {
+            return;
+        }
+        if self.last_update_check.elapsed() < UPDATE_REFRESH || self.update_check_pending {
+            return;
+        }
+        self.last_update_check = Instant::now();
+        self.update_check_pending = true;
+        let tx = self.update_tx.clone();
+        let _ = std::thread::Builder::new()
+            .name("kumo-update-check".into())
+            .spawn(move || {
+                let notice = kumo_core::update::poll_update_notice();
+                let _ = tx.send(notice);
+            });
+    }
+
     /// Recomputed agent status from the terminal buffer at most every
     /// `STATUS_REFRESH`, independent of pane dirty state. `render_dirty` only
     /// refreshes the status when the pane produces output or scrolls, so a

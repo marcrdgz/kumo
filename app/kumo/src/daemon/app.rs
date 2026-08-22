@@ -129,6 +129,13 @@ pub struct App {
     update_notice: Option<kumo_core::update::UpdateNotice>,
     /// Receives the background update check result.
     update_rx: mpsc::Receiver<Option<kumo_core::update::UpdateNotice>>,
+    /// Sender for periodic background update checks (the startup thread uses a
+    /// clone; `check_updates` re-spawns after `UPDATE_REFRESH`).
+    update_tx: mpsc::Sender<Option<kumo_core::update::UpdateNotice>>,
+    /// When the last update check was spawned (throttles periodic re-checks).
+    last_update_check: Instant,
+    /// Whether a background update check is currently in flight.
+    update_check_pending: bool,
     /// Receives background git branch results (workspace -> branch info).
     branch_rx: mpsc::Receiver<(PathBuf, Option<BranchInfo>)>,
     /// Sender for background git branch jobs.
@@ -177,11 +184,12 @@ impl App {
         let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
         let (ai_tx, ai_rx) = mpsc::channel::<AiScanResult>();
         let (toast_tx, toast_rx) = mpsc::channel::<AgentToast>();
+        let startup_update_tx = update_tx.clone();
         let _ = std::thread::Builder::new()
             .name("kumo-update-check".into())
             .spawn(move || {
                 let notice = kumo_core::update::poll_update_notice();
-                let _ = update_tx.send(notice);
+                let _ = startup_update_tx.send(notice);
             });
         let mut app = App {
             sessions: Vec::new(),
@@ -218,6 +226,9 @@ impl App {
             },
             update_notice: None,
             update_rx,
+            update_tx,
+            last_update_check: Instant::now(),
+            update_check_pending: false,
             branch_rx,
             branch_tx,
             pending_branch_lookups: HashMap::new(),
