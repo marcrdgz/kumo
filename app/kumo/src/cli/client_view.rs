@@ -21,7 +21,7 @@ use kumo_core::layout::{self, PaneGeom, TreeGeom};
 use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
     AgentStatus, Command, CopyHit, DaemonEvent, Layout, LayoutNode, LinkRange, PaneFrame, ScrollState,
-    SessionLayout, SplitDir, WireBranch, WireCell, WireWorktree,
+    SessionLayout, SplitDir, ToastKind, WireBranch, WireCell, WireWorktree,
 };
 
 use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
@@ -40,6 +40,14 @@ const STATUS_H: u16 = 1;
 const PANE_NUMBERS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// How long transient status-bar messages stay up.
 const TOAST_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long an agent-lifecycle corner toast stays up.
+const AGENT_TOAST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Height of an agent-lifecycle corner toast (border + title + body + border).
+const AGENT_TOAST_H: u16 = 4;
+/// Maximum corner toasts stacked at once (oldest dropped first).
+const MAX_AGENT_TOASTS: usize = 3;
+/// Width of an agent-lifecycle corner toast.
+const AGENT_TOAST_W: u16 = 34;
 /// Braille spinner frames cycled while an agent is `Working`.
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Interval between spinner frames (~8 fps).
@@ -218,6 +226,16 @@ struct WorktreePicker {
     error: Option<String>,
 }
 
+/// One agent-lifecycle corner toast pushed by the daemon (blocked / finished).
+#[derive(Clone)]
+struct AgentToast {
+    pane_id: u64,
+    kind: ToastKind,
+    title: String,
+    body: String,
+    born: Instant,
+}
+
 /// One pane's client-side grid, rebuilt from `PaneFrame`s.
 #[derive(Clone)]
 struct Grid {
@@ -378,6 +396,8 @@ pub struct View {
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
+    /// Agent-lifecycle corner toasts (bottom-right), newest last.
+    agent_toasts: Vec<AgentToast>,
     update_notice: Option<(String, String)>,
     link_mods: bool,
     drag: Option<SplitDrag>,
@@ -553,6 +573,7 @@ impl View {
             pane_numbers: None,
             status_msg: None,
             notice: None,
+            agent_toasts: Vec::new(),
             update_notice: None,
             link_mods: false,
             drag: None,
@@ -626,9 +647,11 @@ impl View {
         if self.notice.as_ref().map(|(_, t)| now.duration_since(*t) < TOAST_TIMEOUT).unwrap_or(false) {
             return true;
         }
+        if self.agent_toasts.iter().any(|t| now.duration_since(t.born) < AGENT_TOAST_TIMEOUT) {
+            return true;
+        }
         false
     }
-
     pub fn detach_requested(&self) -> bool {
         self.detach_requested
     }
@@ -703,6 +726,13 @@ impl View {
             }
             DaemonEvent::UpdateNotice { notice } => {
                 self.update_notice = notice.map(|n| (n.key, n.display));
+                self.mark_dirty();
+            }
+            DaemonEvent::Toast { pane_id, kind, title, body } => {
+                self.agent_toasts.push(AgentToast { pane_id, kind, title, body, born: Instant::now() });
+                if self.agent_toasts.len() > MAX_AGENT_TOASTS {
+                    self.agent_toasts.remove(0);
+                }
                 self.mark_dirty();
             }
             DaemonEvent::Worktrees { items } => {
@@ -2726,6 +2756,26 @@ impl View {
                     }
                     self.ctx_menu.open = false;
                 }
+                // A corner toast click focuses the agent's pane and dismisses
+                // the toast (checked after the modals above so an open popup
+                // keeps priority over transient chrome).
+                if let Some(i) = self.agent_toast_at(x, y) {
+                    let t = self.agent_toasts.remove(i);
+                    if let Some(session) = self
+                        .layout
+                        .as_ref()
+                        .and_then(|l| {
+                            l.sessions
+                                .iter()
+                                .find(|s| s.tabs.iter().any(|tab| Self::find_layout_pane_in_tab(tab, t.pane_id).is_some()))
+                                .map(|s| s.name.clone())
+                        })
+                    {
+                        let _ = self.send(&Command::PaneFocus { session, pane_id: t.pane_id });
+                    }
+                    self.mark_dirty();
+                    return Ok(());
+                }
                 if self.menu_btn_at(x, y) {
                     self.menu.open = !self.menu.open;
                     self.menu.selected = 0;
@@ -3371,6 +3421,43 @@ impl View {
         Some(Rect::new(x, y, w, h))
     }
 
+    /// Screen rects of the visible corner toasts as `(toast index, rect)`
+    /// pairs: right-aligned above the status bar, newest at the bottom, older
+    /// ones stacked upward. Toasts that no longer fit below the screen top
+    /// are skipped; the pairs stay aligned with `agent_toasts` indexes.
+    fn agent_toast_rects(&self) -> Vec<(usize, Rect)> {
+        const GAP: u16 = 1;
+        let mut rects = Vec::new();
+        if self.agent_toasts.is_empty() || self.cols < AGENT_TOAST_W + 1 {
+            return rects;
+        }
+        let x = self.cols.saturating_sub(AGENT_TOAST_W + 1);
+        let n = self.agent_toasts.len();
+        // Newest first (it sits directly above the status bar); older ones
+        // stack a gap higher until the screen top cuts the stack off.
+        for i in (0..n).rev() {
+            let consumed = (n - 1 - i) as u16 * (AGENT_TOAST_H + GAP);
+            let bottom = self.shadow_floor().saturating_sub(1 + consumed);
+            if bottom < AGENT_TOAST_H {
+                break;
+            }
+            rects.push((i, Rect::new(x, bottom - AGENT_TOAST_H, AGENT_TOAST_W, AGENT_TOAST_H)));
+        }
+        rects.reverse();
+        rects
+    }
+
+    /// Which toast (index into `agent_toasts`) covers `(x, y)`, if any.
+    fn agent_toast_at(&self, x: u16, y: u16) -> Option<usize> {
+        if self.agent_toasts.is_empty() {
+            return None;
+        }
+        self.agent_toast_rects()
+            .into_iter()
+            .find(|(_, r)| r.contains(Position::new(x, y)))
+            .map(|(i, _)| i)
+    }
+
     fn name_popup_input_cursor(&self) -> Option<(u16, u16)> {
         let dd = self.name_popup_rect()?;
         let text_w = (dd.width - 4) as usize - 1;
@@ -3507,6 +3594,7 @@ impl View {
                 self.notice = None;
             }
         }
+        self.agent_toasts.retain(|t| now.duration_since(t.born) < AGENT_TOAST_TIMEOUT);
     }
 
     /// Redraw the whole frame into `terminal`. Uses ratatui's diffing, so the
@@ -3545,6 +3633,7 @@ impl View {
             self.render_sidebar(f, area);
         }
         self.render_status(f);
+        self.render_agent_toasts(f);
         self.render_copy_search_bar(f);
         self.render_menu(f);
         self.render_ctx_menu(f);
@@ -4165,6 +4254,37 @@ impl View {
         let inner_w = rect.width.saturating_sub(2);
         text(f, x0 + 5, y0 + 1, &line1, Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w.saturating_sub(6));
         text(f, x0 + 5, y0 + 2, &line2, Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w.saturating_sub(5));
+    }
+
+    /// Agent-lifecycle corner toasts (bottom-right above the status bar):
+    /// transient `blocked` / `finished` announcements pushed by the daemon.
+    /// Click one to focus the agent's pane; they expire on their own.
+    fn render_agent_toasts(&self, f: &mut Frame) {
+        if self.agent_toasts.is_empty() {
+            return;
+        }
+        let theme = self.current_theme();
+        for (i, rect) in self.agent_toast_rects() {
+            let t = &self.agent_toasts[i];
+            let accent = match t.kind {
+                ToastKind::Blocked => theme.orange,
+                ToastKind::Finished => theme.green,
+            };
+            draw_modal(f, rect, &theme, self.shadow_floor());
+            // Re-color the modal's border with the kind accent so a blocked
+            // toast reads as attention and a finished one as success.
+            paint_border(f, rect, accent, theme.panel_sep);
+            let glyph_style = Style::default().fg(accent).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+            let glyph = match t.kind {
+                ToastKind::Blocked => "●",
+                ToastKind::Finished => "✓",
+            };
+            put(f, rect.x + 2, rect.y + 1, glyph, glyph_style);
+            let title_w = rect.width.saturating_sub(5);
+            text(f, rect.x + 4, rect.y + 1, &t.title, glyph_style, title_w);
+            let body_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+            text(f, rect.x + 2, rect.y + 2, &t.body, body_style, rect.width.saturating_sub(4));
+        }
     }
 
     fn render_menu(&self, f: &mut Frame) {
@@ -4850,8 +4970,7 @@ fn short_workspace(ws: &std::path::Path) -> String {
 ///
 /// `floor` is the first row of bottom chrome (the status bar): shadow strips
 /// stop above it so a popup anchored to the bar never repaints it.
-fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme, floor: u16) {
-    fill(f, dd, theme.panel_sep);
+fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme, floor: u16) {    fill(f, dd, theme.panel_sep);
     let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
     let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
     put(f, x0, y0, "╭", border);
@@ -4879,6 +4998,27 @@ fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme, floor: u16) {
         if x_end > dd.x {
             fill(f, Rect::new(dd.x + 1, dd.bottom(), x_end - dd.x, 1), shadow_bg);
         }
+    }
+}
+
+/// Overpaint a modal's border with `color` (same rounded frame draw_modal
+/// draws, in an accent color). Used by corner toasts so the kind reads at a
+/// glance without changing the shared modal look.
+fn paint_border(f: &mut Frame, dd: Rect, color: RColor, bg: RColor) {
+    let border = Style::default().fg(color).bg(bg);
+    let Some(x1) = dd.right().checked_sub(1) else { return };
+    let Some(y1) = dd.bottom().checked_sub(1) else { return };
+    put(f, dd.x, dd.y, "╭", border);
+    put(f, x1, dd.y, "╮", border);
+    put(f, dd.x, y1, "╰", border);
+    put(f, x1, y1, "╯", border);
+    for x in (dd.x + 1)..x1 {
+        put(f, x, dd.y, "─", border);
+        put(f, x, y1, "─", border);
+    }
+    for y in (dd.y + 1)..y1 {
+        put(f, dd.x, y, "│", border);
+        put(f, x1, y, "│", border);
     }
 }
 
@@ -5065,6 +5205,7 @@ mod tests {
             pane_numbers: None,
             status_msg: None,
             notice: None,
+            agent_toasts: Vec::new(),
             update_notice: None,
             link_mods: false,
             drag: None,
@@ -5384,12 +5525,106 @@ mod tests {
             ];
             view.pane_numbers = Some(Instant::now());
             view.update_notice = Some(("key".into(), "nightly".into()));
+            view.agent_toasts = vec![
+                AgentToast { pane_id: 2, kind: ToastKind::Blocked, title: "opencode is blocked".into(), body: "/tmp".into(), born: Instant::now() },
+                AgentToast { pane_id: 1, kind: ToastKind::Finished, title: "claude finished".into(), body: String::new(), born: Instant::now() },
+            ];
             view.sel = Some(Sel { pane_id: 1, start: (0, 0), end: (1, 0) });
             view.link_mods = true;
             let backend = ratatui::backend::TestBackend::new(w, h);
             let mut term = ratatui::Terminal::new(backend).unwrap();
             term.draw(|f| view.draw(f)).unwrap();
         }
+    }
+
+    /// A toast event lands in the corner stack, keeps the loop repainting via
+    /// `has_transient`, and stops once its lifetime elapses.
+    #[test]
+    fn agent_toast_pushes_keeps_transient_and_expires() {
+        let mut view = test_view();
+        assert!(view.agent_toast_rects().is_empty());
+        assert!(!view.has_transient());
+        view.on_event(DaemonEvent::Toast {
+            pane_id: 7,
+            kind: ToastKind::Blocked,
+            title: "claude is blocked".into(),
+            body: "~/dev/kumo".into(),
+        });
+        assert_eq!(view.agent_toasts.len(), 1);
+        assert!(view.agent_toasts[0].pane_id == 7 && view.agent_toasts[0].kind == ToastKind::Blocked);
+        assert!(!view.agent_toast_rects().is_empty(), "visible toasts have screen rects");
+        assert!(view.has_transient(), "a live toast keeps the render loop hot");
+        // Past the lifetime the toast no longer drives repaints; the next
+        // render's `expire_timers` drops it.
+        view.agent_toasts[0].born -= AGENT_TOAST_TIMEOUT + Duration::from_millis(1);
+        assert!(!view.has_transient());
+        view.expire_timers();
+        assert!(view.agent_toasts.is_empty(), "expired toasts are dropped at render time");
+    }
+
+    /// Toasts stack bottom-up above the status bar (newest at the bottom) and
+    /// the stack caps at `MAX_AGENT_TOASTS`, dropping the oldest.
+    #[test]
+    fn agent_toasts_stack_upward_and_cap() {
+        let mut view = test_view();
+        for i in 0..(MAX_AGENT_TOASTS + 2) {
+            view.on_event(DaemonEvent::Toast {
+                pane_id: i as u64,
+                kind: ToastKind::Finished,
+                title: format!("agent {i}"),
+                body: String::new(),
+            });
+        }
+        assert_eq!(view.agent_toasts.len(), MAX_AGENT_TOASTS, "oldest toasts dropped");
+        assert_eq!(view.agent_toasts[0].pane_id, 2, "the two oldest were dropped");
+        let rects = view.agent_toast_rects();
+        assert_eq!(rects.len(), MAX_AGENT_TOASTS);
+        // Each rect pair carries its toast index; the oldest toast sits
+        // highest, the newest directly above the status bar.
+        let expected: Vec<String> = view.agent_toasts.iter().map(|t| format!("agent {}", t.pane_id)).collect();
+        for (i, _) in &rects {
+            assert_eq!(&view.agent_toasts[*i].title, &expected[*i], "rect aligns with its toast");
+        }
+        for pair in rects.windows(2) {
+            assert!(pair[0].1.y + AGENT_TOAST_H <= pair[1].1.y, "older toast sits above the newer one");
+            assert_eq!(pair[0].1.x, pair[1].1.x, "toasts stay right-aligned");
+        }
+        // The newest bottom row sits directly above the status bar.
+        let last = rects.last().unwrap();
+        assert_eq!(last.1.y + AGENT_TOAST_H, view.shadow_floor() - 1);
+    }
+
+    /// Clicking a corner toast dismisses it and focuses the agent's pane;
+    /// clicks elsewhere leave it alone.
+    #[test]
+    fn agent_toast_click_focuses_and_dismisses() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        view.on_event(DaemonEvent::Toast {
+            pane_id: 1,
+            kind: ToastKind::Blocked,
+            title: "claude is blocked".into(),
+            body: "~/dev/kumo".into(),
+        });
+        let rect = view.agent_toast_rects()[0].1;
+        // Click outside: no effect.
+        view.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(view.agent_toasts.len(), 1, "a click off the toast leaves it up");
+        // Click inside: dismiss + focus the pane.
+        view.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: rect.x + 3,
+            row: rect.y + 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert!(view.agent_toasts.is_empty(), "clicking a toast dismisses it");
     }
 
     #[test]

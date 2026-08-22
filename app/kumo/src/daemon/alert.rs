@@ -7,6 +7,28 @@ pub enum AlertKind {
     Blocked,
 }
 
+/// An agent lifecycle notification raised by the daemon: broadcast to every
+/// attached viewer as a transient corner toast.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentToast {
+    /// The kumo pane id of the agent pane, for click-to-focus on clients.
+    pub(crate) pane_id: u64,
+    pub(crate) kind: AlertKind,
+    /// Short headline, e.g. `claude is blocked`.
+    pub(crate) title: String,
+    /// Location line (the owning session's workspace path); may be empty.
+    pub(crate) body: String,
+}
+
+impl From<AlertKind> for kumo_protocol::ToastKind {
+    fn from(kind: AlertKind) -> Self {
+        match kind {
+            AlertKind::Blocked => kumo_protocol::ToastKind::Blocked,
+            AlertKind::Finished => kumo_protocol::ToastKind::Finished,
+        }
+    }
+}
+
 /// Play an audible alert without blocking the frame loop.
 ///
 /// Uses the platform's sound player when available (afplay on macOS, paplay

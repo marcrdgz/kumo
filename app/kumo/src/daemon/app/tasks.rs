@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::daemon::alert::{self, AlertKind};
+use crate::daemon::alert::{self, AgentToast, AlertKind};
 use crate::daemon::agents::AgentStatus;
 
 use super::App;
@@ -179,11 +179,10 @@ impl App {
     /// Working status forever.
     ///
     /// Also raises an alert on the transitions the user cares about (Working
-    /// -> Blocked, Working -> Idle) — the audible chime and, when enabled, a
-    /// desktop notification — brings blocked agents into view by scrolling
-    /// the AGENTS section to its top, and keeps the sidebar's blocked-first
-    /// ordering consistent. Both channels share one cooldown per pane so a
-    /// status flickering between Working and Blocked does not repeat.
+    /// -> Blocked, Working -> Idle) — the audible chime and, when enabled,
+    /// a transient corner toast in every attached viewer. The chime and the
+    /// toast share one cooldown per pane so a status flickering between
+    /// Working and Blocked does not repeat.
     pub(super) fn refresh_agent_statuses(&mut self) {
         if self.last_status_refresh.elapsed() < STATUS_REFRESH {
             return;
@@ -194,8 +193,7 @@ impl App {
         let mut status_changed = false;
         // Transitions that passed the cooldown this tick; notifications are
         // raised after the loop because they need `&self` lookups.
-        let mut to_notify = Vec::new();
-        for (&pid, pane) in self.panes.iter_mut() {
+        let mut to_notify = Vec::new();        for (&pid, pane) in self.panes.iter_mut() {
             if !pane.is_ai_cli() {
                 continue;
             }
@@ -243,7 +241,10 @@ impl App {
                 .and_then(|p| p.detected_ai_name.clone())
                 .unwrap_or_default();
             let context = self.pane_workspace(pid);
-            crate::daemon::notify::send(kind, &agent, &context);
+            let (title, body) = toast_message(kind, &agent, &context);
+            // The server loop turns this into a corner toast in every attached
+            // viewer. No OS notification: toasts are the notification channel.
+            let _ = self.toast_tx.send(AgentToast { pane_id: pid, kind, title, body });
         }
         if status_changed {
             self.bump_layout_version();
@@ -251,7 +252,7 @@ impl App {
     }
 
     /// The workspace path of the session owning `pid`, used as the location
-    /// line of a desktop notification. Empty when no session owns it.
+    /// line of a corner toast. Empty when no session owns it.
     fn pane_workspace(&self, pid: u64) -> String {
         self.sessions
             .iter()
@@ -357,6 +358,29 @@ fn should_alert(old: AgentStatus, new: AgentStatus) -> Option<AlertKind> {
     }
 }
 
+/// The toast's `(title, body)` for a transition. The title leads with the
+/// agent name; the body carries the workspace when known and falls back to a
+/// plain description of the event.
+fn toast_message(kind: AlertKind, agent: &str, context: &str) -> (String, String) {
+    let agent = match agent.trim() {
+        "" => "Agent",
+        other => other,
+    };
+    let title = match kind {
+        AlertKind::Blocked => format!("{agent} is blocked"),
+        AlertKind::Finished => format!("{agent} finished"),
+    };
+    let fallback = match kind {
+        AlertKind::Blocked => "Waiting for your approval",
+        AlertKind::Finished => "Task complete",
+    };
+    let body = match context.trim() {
+        "" => fallback.to_string(),
+        other => other.to_string(),
+    };
+    (title, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +460,33 @@ mod tests {
         assert_eq!(should_alert(AgentStatus::Blocked, AgentStatus::Idle), None);
         assert_eq!(should_alert(AgentStatus::Idle, AgentStatus::Idle), None);
         assert_eq!(should_alert(AgentStatus::Working, AgentStatus::Working), None);
+    }
+
+    #[test]
+    fn toast_titles_lead_with_agent_name() {
+        let (title, _) = toast_message(AlertKind::Blocked, "claude", "/work");
+        assert_eq!(title, "claude is blocked");
+        let (title, _) = toast_message(AlertKind::Finished, "opencode", "/work");
+        assert_eq!(title, "opencode finished");
+    }
+
+    #[test]
+    fn toast_blank_agent_becomes_generic() {
+        let (title, _) = toast_message(AlertKind::Blocked, "", "/work");
+        assert_eq!(title, "Agent is blocked");
+    }
+
+    #[test]
+    fn toast_body_prefers_workspace_over_fallback() {
+        let (_, body) = toast_message(AlertKind::Blocked, "claude", "~/dev/kumo");
+        assert_eq!(body, "~/dev/kumo");
+    }
+
+    #[test]
+    fn toast_empty_context_falls_back_to_event_text() {
+        let (_, blocked_body) = toast_message(AlertKind::Blocked, "claude", "");
+        assert_eq!(blocked_body, "Waiting for your approval");
+        let (_, finished_body) = toast_message(AlertKind::Finished, "claude", "  ");
+        assert_eq!(finished_body, "Task complete");
     }
 }

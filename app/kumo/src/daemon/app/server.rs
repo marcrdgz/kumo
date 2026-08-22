@@ -436,6 +436,23 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: notice.clone() });
             }
         }
+        // Agent lifecycle notifications: a corner toast for every attached
+        // viewer. No OS notification channel anymore — transient toasts are
+        // the (gentler) replacement; the audible chime still covers detached
+        // sessions.
+        while let Ok(toast) = app.toast_rx.try_recv() {
+            let ev = DaemonEvent::Toast {
+                pane_id: toast.pane_id,
+                kind: toast.kind.into(),
+                title: toast.title.clone(),
+                body: toast.body.clone(),
+            };
+            for client in clients.values_mut() {
+                if client.welcomed {
+                    let _ = client.send_msg(ev.clone());
+                }
+            }
+        }
 
         // Render dirty pane content into the caches, then stream what changed.
         let changed: HashSet<u64> = app.tick().into_iter().collect();

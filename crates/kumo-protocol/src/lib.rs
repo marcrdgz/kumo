@@ -44,7 +44,9 @@ mod crossterm;
 /// content, and the chrome actions (rename, worktrees, theme) travel as
 /// commands. v6 introduces tabs: sessions → tabs → panes. v7 adds the custom
 /// theme payload to `DaemonEvent::Theme`. v8 adds copy-mode (scroll + search).
-pub const PROTOCOL_VERSION: u32 = 8;
+/// v9 adds `DaemonEvent::Toast`: agent lifecycle transitions pushed as
+/// transient corner toasts to attached viewers.
+pub const PROTOCOL_VERSION: u32 = 9;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -490,6 +492,16 @@ pub enum AgentStatus {
     Idle,
 }
 
+/// The transition behind a [`DaemonEvent::Toast`]: which agent lifecycle
+/// change the client should announce as a corner toast.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToastKind {
+    /// A working agent became blocked (waiting for an approval).
+    Blocked,
+    /// A working agent finished its task (fell back to idle).
+    Finished,
+}
+
 impl AgentStatus {
     /// Lowercase display label.
     pub fn label(self) -> &'static str {
@@ -855,6 +867,18 @@ pub enum DaemonEvent {
         query: String,
         hits: Vec<CopyHit>,
     },
+    /// An agent lifecycle transition raised as a transient corner toast in
+    /// every attached viewer. The desktop notification (macOS / notify-send)
+    /// fires only when no viewer is attached to see the toast.
+    Toast {
+        /// The agent pane that raised the toast, for click-to-focus.
+        pane_id: u64,
+        kind: ToastKind,
+        /// Short headline, e.g. `claude is blocked`.
+        title: String,
+        /// Location line (the owning session's workspace path); may be empty.
+        body: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -956,6 +980,20 @@ mod tests {
     #[test]
     fn read_write_framed_roundtrip() {
         let msg = DaemonEvent::Shutdown;
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &msg).unwrap();
+        let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn toast_roundtrip() {
+        let msg = DaemonEvent::Toast {
+            pane_id: 42,
+            kind: ToastKind::Blocked,
+            title: "claude is blocked".into(),
+            body: "~/dev/kumo".into(),
+        };
         let mut buf = Vec::new();
         write_framed(&mut buf, &msg).unwrap();
         let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();

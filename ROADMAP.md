@@ -187,14 +187,18 @@ toggle/order + pane titles/border styling.
 - ✅ **Copy-mode**: vi-style keyboard selection over scrollback + `/` search — the
   biggest missing multiplexer feature (the scrollback already exists in ghostty;
   only the selection/search UI is missing).
-- ✅ **System notifications for blocked agents** (pulled forward from 0.9.0):
-  desktop notification on working→blocked (and idle/done) transitions — macOS
-  Notification Center / Linux `notify-send` — alongside the audible chime.
-  Fired from the same server-side detection + rate-limit site as the chime
+- ✅ **Corner-toast notifications for blocked agents** (pulled forward from 0.9.0;
+  desktop notifications were retired at `v0.6.0` — too invasive — so the
+  channel is now a transient in-TUI **corner toast** on
+  working→blocked (and idle/done) transitions, alongside the audible chime):
+  the daemon pushes a `DaemonEvent::Toast` (`kumo-protocol`)
+  from the same server-side detection + rate-limit site as the chime
   (`app/kumo/src/daemon/app/tasks.rs`; both channels share one per-pane
   cooldown), config-gated under `[notifications]` — **off by default**, opt in
   with `enabled = true` (per-channel `blocked` / `finished`,
-  `KUMO_NO_NOTIFY=1`), read live by `kumo reload`.
+  `KUMO_NO_NOTIFY=1`), read live by `kumo reload`. Each viewer draws the
+  toasts bottom-right above the status bar (stacked, ~5 s lifetime,
+  click-to-focus the agent's pane) — `app/kumo/src/cli/client_view.rs`.
 - **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
   prompt out to every AI pane in the tab/session over the existing `send-keys`
   wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI
@@ -240,7 +244,6 @@ Tightens the last gaps before the 1.0 freeze — **not a gate**, just polish so
   - **Marketplace site**: minimal static site — landing, `/docs/plugins/` authoring guide (trust model + event catalog), `/plugins` grid whose cards show **version/platforms/tags** (the index **parses manifests**, not just repo metadata) plus stars/language/last-push; a scheduled Action every 30 min indexes public repos tagged `topic:kumo-plugin` (no forks/archived) into a committed `index.json`; `kumo plugin search` reads the same index. Source resolution sits behind a trait from day one so a hosted/Docker-Hub-style registry can bolt on without breaking v1. Seed a `kumo-plugin-examples` cookbook. Trust model unchanged: plugins run as your user — install from sources you trust, preview and skim manifests first.
   - **Build order (phases)**: (0) manifest + validation + registry/lockfile + `add/rm/ls/dev/undev/check` → (1) protocol variants + async runner + env injection + `run/logs/where` + surface in context menu/palette → (2) trigger dispatcher at event sites + `boot` → (3) keybinding side-table + link interception → (4) `pane` entries (`tab`/`split`) → (5) site + indexer + `search` + examples repo. Each phase lands with `cargo test` + `cargo clippy` and an end-to-end `add → run` test against a fixture git repo.
 - **Command palette / fuzzy switcher** over sessions, actions (including plugin actions), and keybinds.
-- **System notifications** (macOS / notify-send) for blocked agents — today only an audible chime.
 - **tmux control-mode compatibility** so existing tooling (neovim, scripts) keeps working.
 - **Asciinema export**: record a pane's session to a file / stream. Subsumes
   tmux-style **pipe-pane** (cut from 0.6.0): capturing a pane's output to a

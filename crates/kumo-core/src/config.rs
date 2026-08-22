@@ -336,14 +336,17 @@ pub struct StatusBarWidgets {
     pub session: SessionWidgetConfig,
 }
 
-/// Desktop-notification policy for agent lifecycle transitions
-/// (`[notifications]`). **Off by default** — users opt in with
-/// `enabled = true`; the per-channel switches then pick which transitions
-/// notify. The sibling knob for sound is the flat/TOML `agent-sound` key.
+/// Agent-notification policy for lifecycle transitions (`[notifications]`).
+/// **Off by default** — users opt in with `enabled = true`; the per-channel
+/// switches then pick which transitions notify. The channel is a transient
+/// **corner toast** in every attached kumo viewer (no OS-level popups; the
+/// audible chime still covers detached sessions). `KUMO_NO_NOTIFY=1`
+/// disables the toasts. The sibling knob for sound is the flat/TOML
+/// `agent-sound` key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotificationsConfig {
-    /// Master switch: raise desktop notifications at all. Defaults to
-    /// **false**; set `[notifications] enabled = true` to opt in.
+    /// Master switch: raise agent notifications (corner toasts) at all.
+    /// Defaults to **false**; set `[notifications] enabled = true` to opt in.
     pub enabled: bool,
     /// Notify when a working agent becomes blocked (default: true).
     pub blocked: bool,
@@ -412,8 +415,8 @@ pub struct Config {
     pub sidebar: SidebarConfig,
     /// Status bar widget layout (`[status_bar]`).
     pub status_bar: StatusBarConfig,
-    /// Desktop notifications for agent lifecycle transitions
-    /// (`[notifications]`).
+    /// Agent notifications for lifecycle transitions: transient corner
+    /// toasts in attached viewers (`[notifications]`).
     pub notifications: NotificationsConfig,
 }
 

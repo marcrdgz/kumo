@@ -8,7 +8,6 @@ pub mod alert;
 pub mod app;
 pub mod frames;
 pub mod keys;
-pub mod notify;
 pub mod pane;
 pub mod pty;
 pub mod state;

@@ -10,6 +10,7 @@ use kumo_core::layout::{LayoutTree, SplitDir};
 use kumo_core::theme::OwnedTheme;
 use kumo_core::Launch;
 use crate::daemon::agents::AgentStatus;
+use crate::daemon::alert::AgentToast;
 use crate::daemon::pane::{Pane, PtyEvent};
 use crate::daemon::pty::Pty;
 use crate::daemon::state::{self, SavedState};
@@ -136,6 +137,12 @@ pub struct App {
     ai_rx: mpsc::Receiver<AiScanResult>,
     /// Sender for background AI CLI scan jobs.
     ai_tx: mpsc::Sender<AiScanResult>,
+    /// Receives agent lifecycle toasts raised by the status refresh; the
+    /// server loop broadcasts them to attached viewers as corner toasts,
+    /// falling back to a desktop notification when nobody is watching.
+    toast_rx: mpsc::Receiver<AgentToast>,
+    /// Sender for agent lifecycle toasts.
+    toast_tx: mpsc::Sender<AgentToast>,
     /// Workspaces with pending git branch lookups.
     pending_branch_lookups: HashMap<PathBuf, Instant>,
     /// Whether an AI CLI scan is currently in progress.
@@ -169,6 +176,7 @@ impl App {
         let (update_tx, update_rx) = mpsc::channel();
         let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
         let (ai_tx, ai_rx) = mpsc::channel::<AiScanResult>();
+        let (toast_tx, toast_rx) = mpsc::channel::<AgentToast>();
         let _ = std::thread::Builder::new()
             .name("kumo-update-check".into())
             .spawn(move || {
@@ -215,6 +223,8 @@ impl App {
             pending_branch_lookups: HashMap::new(),
             ai_rx,
             ai_tx,
+            toast_rx,
+            toast_tx,
             ai_scan_in_progress: false,
             layout_version: 0,
             cached_layout: None,
