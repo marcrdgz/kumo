@@ -582,6 +582,12 @@ impl View {
         if self.status_bar.enabled { STATUS_H } else { 0 }
     }
 
+    /// First row of the bottom chrome (status bar). Overlay shadows stop
+    /// above it so popups never repaint chrome.
+    fn shadow_floor(&self) -> u16 {
+        self.rows.saturating_sub(self.status_h())
+    }
+
     fn status_bar_contains(&self, w: StatusWidget) -> bool {
         self.status_bar.left.contains(&w) || self.status_bar.center.contains(&w) || self.status_bar.right.contains(&w)
     }
@@ -3261,8 +3267,10 @@ impl View {
     // ------------------------------------------------------------------
 
     fn menu_btn_x(&self) -> u16 {
+        // Mirrors status_bar::slot_spans for [Mode, Menu, ..]: the mode chip
+        // (" NORMAL " / " LEADER ") followed by the " · " group separator.
         let mode = if self.mode == Mode::Leader { "LEADER" } else { "NORMAL" };
-        format!(" {} ", mode).chars().count() as u16 + 1
+        format!(" {} ", mode).chars().count() as u16 + " · ".chars().count() as u16
     }
 
     fn menu_btn_rect(&self) -> Option<Rect> {
@@ -3284,12 +3292,14 @@ impl View {
         }
         let width = MENU_ITEMS.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = MENU_ITEMS.len() as u16 + 2;
-        if self.cols < width || self.rows < height + 1 {
+        let floor = self.shadow_floor();
+        if self.cols < width || floor < height {
             return None;
         }
         let btn_w = MENU_BTN.chars().count() as u16;
         let x = (self.menu_btn_x() + btn_w).saturating_sub(width).min(self.cols.saturating_sub(width));
-        let y = self.rows.saturating_sub(1).saturating_sub(height);
+        // Flush above the status bar, never covering it.
+        let y = floor.saturating_sub(height);
         Some(Rect::new(x, y, width, height))
     }
 
@@ -3308,13 +3318,15 @@ impl View {
         let items = self.ctx_items();
         let width = items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 4;
         let height = items.len() as u16 + 2;
-        if self.cols < width || self.rows < height {
+        // The menu body must stay above the bottom chrome (status bar).
+        let floor = self.shadow_floor();
+        if self.cols < width || floor < height {
             return None;
         }
         let px = self.ctx_menu.x;
         let py = self.ctx_menu.y;
         let x = if px.saturating_add(1) + width <= self.cols { px + 1 } else { px.saturating_sub(width) };
-        let y = if py + 1 + height <= self.rows { py + 1 } else { py.saturating_sub(height) };
+        let y = if py.saturating_add(1) + height <= floor { py + 1 } else { py.saturating_sub(height) };
         Some(Rect::new(x, y, width, height))
     }
 
@@ -4147,7 +4159,7 @@ impl View {
         let Some(rect) = self.update_notice_rect() else { return };
         let Some((line1, line2)) = self.update_notice_lines() else { return };
         let theme = self.current_theme();
-        draw_modal(f, rect, &theme);
+        draw_modal(f, rect, &theme, self.shadow_floor());
         let (x0, y0) = (rect.x, rect.y);
         put(f, x0 + 2, y0 + 1, "✕", Style::default().fg(theme.red).bg(theme.panel_sep).add_modifier(Modifier::BOLD));
         let inner_w = rect.width.saturating_sub(2);
@@ -4161,7 +4173,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.menu_dropdown_rect() else { return };
-        draw_modal(f, dd, &theme);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         for (i, item) in MENU_ITEMS.iter().enumerate() {
             render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.menu.selected, &theme);
         }
@@ -4173,7 +4185,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.ctx_menu_rect() else { return };
-        draw_modal(f, dd, &theme);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         for (i, item) in self.ctx_items().iter().enumerate() {
             render_item_row(f, dd.x, dd.y + 1 + i as u16, dd.width.saturating_sub(2), item, i == self.ctx_menu.selected, &theme);
         }
@@ -4186,7 +4198,7 @@ impl View {
         let theme = self.current_theme();
         let Some(dd) = self.name_popup_rect() else { return };
         let (x0, y0, _x1, _y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
-        draw_modal(f, dd, &theme);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         let title_text = match self.popup.target {
             Some(PopupTarget::RenamePane(_)) => "rename pane",
@@ -4247,7 +4259,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.keybind_overlay_rect() else { return };
-        draw_modal(f, dd, &theme);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "keybindings", title, inner_w);
@@ -4283,7 +4295,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.settings_rect() else { return };
-        draw_modal(f, dd, &theme);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let sep_style = Style::default().fg(theme.accent).bg(theme.panel_sep);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "settings", title, dd.width.saturating_sub(4));
@@ -4385,7 +4397,7 @@ impl View {
         }
         let theme = self.current_theme();
         let Some(dd) = self.worktree_picker_rect() else { return };
-        draw_modal(f, dd, &theme);
+        draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         let count = self.worktree_picker.items.len();
@@ -4835,7 +4847,10 @@ fn short_workspace(ws: &std::path::Path) -> String {
 /// Shared modal chrome: panel fill, rounded accent border, and a one-cell
 /// drop shadow along the bottom/right edges (clamped to the screen). Every
 /// overlay renders through this so popups read as one design system.
-fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme) {
+///
+/// `floor` is the first row of bottom chrome (the status bar): shadow strips
+/// stop above it so a popup anchored to the bar never repaints it.
+fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme, floor: u16) {
     fill(f, dd, theme.panel_sep);
     let border = Style::default().fg(theme.accent).bg(theme.panel_sep);
     let (x0, y0, x1, y1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
@@ -4852,18 +4867,17 @@ fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme) {
         put(f, x1, y, "│", border);
     }
     let shadow_bg = dim_toward(theme.panel_sep, ColorRgb::new(0, 0, 0), &theme.palette, 2, 5);
-    let shadow = Style::default().bg(shadow_bg);
     let scr = f.area();
-    if dd.right() < scr.width {
-        let y_end = dd.bottom().min(scr.height.saturating_sub(1));
-        for y in (dd.y + 1)..=y_end {
-            put(f, dd.right(), y, " ", shadow);
-        }
+    // Last row shadows may occupy: screen bottom, but never chrome.
+    let max_row = scr.height.saturating_sub(1).min(floor.saturating_sub(1));
+    if dd.right() < scr.width && max_row > dd.y {
+        let y_end = dd.bottom().min(max_row);
+        fill(f, Rect::new(dd.right(), dd.y + 1, 1, y_end - dd.y), shadow_bg);
     }
-    if dd.bottom() < scr.height {
+    if dd.bottom() <= max_row {
         let x_end = dd.right().min(scr.width.saturating_sub(1));
-        for x in (dd.x + 1)..=x_end {
-            put(f, x, dd.bottom(), " ", shadow);
+        if x_end > dd.x {
+            fill(f, Rect::new(dd.x + 1, dd.bottom(), x_end - dd.x, 1), shadow_bg);
         }
     }
 }
@@ -5087,16 +5101,16 @@ mod tests {
         view.menu.open = true;
         view.menu.selected = 0;
         // The dropdown sits above the MENU button; item i lives at row 17+i
-        // (cols 80, rows 24, mode NORMAL -> MENU at x 9).
-        view.on_mouse(mouse_moved(4, 18)).unwrap();
+        // (cols 80, rows 24, mode NORMAL -> dropdown anchored at x 5).
+        view.on_mouse(mouse_moved(8, 18)).unwrap();
         assert_eq!(view.menu.selected, 1, "hover item 2 selects it");
         assert!(view.dirty(), "hover must trigger a repaint");
         view.dirty = false;
         // Hovering the same item again is a no-op (no repaint churn).
-        view.on_mouse(mouse_moved(4, 18)).unwrap();
+        view.on_mouse(mouse_moved(8, 18)).unwrap();
         assert!(!view.dirty(), "unchanged hover must not repaint");
         // Hovering item 4 updates selection + repaints.
-        view.on_mouse(mouse_moved(4, 20)).unwrap();
+        view.on_mouse(mouse_moved(8, 20)).unwrap();
         assert_eq!(view.menu.selected, 3);
         assert!(view.dirty());
     }
@@ -5391,5 +5405,94 @@ mod tests {
     #[test]
     fn fit_branch_name_truncates() {
         assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/lo…");
+    }
+
+    fn one_pane_layout() -> Layout {
+        Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        }
+    }
+
+    /// The status-bar dropdown opens flush above the bar; its drop shadow must
+    /// stop at the chrome floor instead of repainting the status row (which
+    /// used to wipe out the MENU button).
+    #[test]
+    fn menu_shadow_never_paints_over_status_bar() {
+        let mut view = test_view();
+        view.menu.open = true;
+        let theme = view.current_theme();
+        let shadow_bg = dim_toward(theme.panel_sep, ColorRgb::new(0, 0, 0), &theme.palette, 2, 5);
+        let dd = view.menu_dropdown_rect().expect("dropdown fits at 80x24");
+        assert_eq!(dd.bottom(), 23, "dropdown sits flush above the status row");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        // The MENU button on the status row is intact under the dropdown
+        // (button starts after the mode chip + " · " separator).
+        let btn: String = (11..17).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
+        assert_eq!(btn, " MENU ", "shadow must not repaint the status row");
+
+        // Vertical strip hugs the modal side but stops above the floor.
+        assert_eq!(buf.cell((dd.right(), dd.bottom() - 1)).unwrap().bg, shadow_bg, "shadow beside the modal");
+        assert_ne!(buf.cell((dd.right(), dd.bottom())).unwrap().bg, shadow_bg, "no shadow on the status row");
+    }
+
+    /// A mouse selection stamps REVERSED onto pane cells; popups painted over
+    /// that region must come out clean (panel bg, no stale modifiers) instead
+    /// of inheriting the highlighted colors underneath.
+    #[test]
+    fn ctx_menu_clears_selection_highlight_underneath() {
+        let mut g = grid();
+        g.cols = 30;
+        g.rows = 10;
+        g.cells = (0..10).map(|_| (0..30).map(|_| cell("a", 1)).collect()).collect();
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        view.grids.insert(1, g);
+        view.recompute_geometry();
+        // Select a band inside the pane that crosses where the ctx menu opens.
+        view.sel = Some(Sel { pane_id: 1, start: (5, 5), end: (25, 6) });
+        view.ctx_menu = CtxMenu { open: true, x: 30, y: 5, selected: 1, target: CtxTarget::Pane(1) };
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        // Control: the selection does render outside the menu.
+        assert!(buf.cell((inner.x + 25, inner.y + 5)).unwrap().modifier.contains(Modifier::REVERSED));
+
+        let dd = view.ctx_menu_rect().unwrap();
+        for y in dd.y..dd.bottom() {
+            for x in dd.x..dd.right() {
+                let c = buf.cell((x, y)).unwrap();
+                assert!(!c.modifier.contains(Modifier::REVERSED), "stale REVERSED inside menu at {x},{y}");
+            }
+        }
+        // Unselected item rows carry the panel surface, not the selection bg.
+        let theme = view.current_theme();
+        assert_eq!(buf.cell((dd.x + 3, dd.y + 3)).unwrap().bg, theme.panel_sep);
     }
 }
