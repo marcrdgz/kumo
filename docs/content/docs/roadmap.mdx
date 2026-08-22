@@ -11,7 +11,7 @@ colors, keybindings, the leader key, the layout of the status bar and
 sidebar, the AI panes, and more. Every `0.x.0` is a feature release; 1.0.0 is
 the finish line for the configurable, persistent kumo.
 
-<Callout type="info" title="Current stable: v0.5.x">
+<Callout type="info" title="Current stable: v0.6.x">
   See [CHANGELOG](https://github.com/marcrdgz/kumo/blob/main/CHANGELOG.md) for
   the full release history, and
   [ROADMAP.md](https://github.com/marcrdgz/kumo/blob/main/ROADMAP.md) for the
@@ -26,17 +26,15 @@ the finish line for the configurable, persistent kumo.
 | 0.3.0 | Daemon core | Daemon owning PTYs, tmux-style CLI (`attach`/`new`/`ls`/`kill`), detach, dirty-row cell-patch streaming, socket security, agents server-side, update without losing the web |
 | 0.4.0 | Config & keymaps | TOML config, custom leader keys, data-driven remappable bindings, keyboard resize/swap/rotate, `[terminal]` section with follow-workspace cwd, live reload |
 | 0.5.0 | Theme & chrome | Theme picker (Catppuccin-style schemes), sidebar SESSIONS/AGENTS tabs, git worktrees, clickable links, selection & copy feedback |
+| 0.6.0 | Copy-mode, search & pane plumbing | User-editable theme engine, status-bar widgets + layout, tabs (windows) per session, vi-style copy-mode + `/` search, corner-toast agent notifications, control CLI, full screen+scrollback restore |
 
 ## Next up
 
-- **0.6.0 — Copy-mode, search & pane plumbing** 🚧 In progress: user-editable theme engine,
-  customizable status-bar widgets, tabs (windows) per session, vi-style copy-mode
-  with `/` search, control CLI (`kumo session|tab|pane|agent`, `send-keys`), and
-  full screen+scrollback restore have landed (see `ROADMAP.md`); remaining are
-  the config file-watcher hot-reload, sync-input, pipe-pane.
 - **0.7.0 — Agent breadth & AI polish**: lifecycle detection for `codex`,
   `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; OSC 133 command-traceback
-  context sharing.
+  context sharing; broadcast prompt to agents (`leader+B`, fan one prompt to
+  every AI pane — replaces tmux sync-input); config file-watcher hot-reload
+  (deferred from 0.6.0).
 - **0.8.0 — Stability**: signal hardening, stable CI, complete config docs +
   `kumo doctor` diagnostics (duplicate keymaps, invalid TOML), state-migration
   and `kill -9` crash-safety harness, published benchmarks with concrete targets

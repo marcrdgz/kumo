@@ -124,7 +124,7 @@ persistent kumo.
   the config and apply `shell`, `ai-cmd`, `leader`, and `keymap.bindings` live
   to panes spawned from then on. `new-cwd` and the `[notifications]` knobs
   (`position`, `sound`) apply instantly
-  (read live on use). The auto-reload **file watcher** stays in 0.6.0.
+  (read live on use). The auto-reload **file watcher** stays in 0.7.0.
 - ✅ **MENU `config`** opens the config file in an editor pane (split) inside
   the session — `$VISUAL` → `$EDITOR` → `vi`, preferring `config.toml`.
 
@@ -157,20 +157,19 @@ persistent kumo.
   repaint and mouse-tracking fixes on resumed panes.
 
 **Deferred from 0.5.0** into 0.6.0: configurable theme values (the theme
-engine — today the schemes are picked, not user-editable), the config
-hot-reload file watcher, status-bar widgets/layout, and sidebar section
-toggle/order + pane titles/border styling.
+engine — today the schemes are picked, not user-editable), status-bar
+widgets/layout, and sidebar section toggle/order + pane titles/border
+styling; the config hot-reload file watcher rolls into 0.7.0.
 
 ## 🔍 0.6.0 — Copy-mode, search & pane plumbing
 
-> 🚧 **In progress** — theme engine, status-bar widgets, sidebar polish, tabs, and copy-mode have landed; scrollback restore and control CLI followed in `v0.5.4` / `v0.5.2`. Remaining: file-watcher hot-reload, broadcast prompt to agents. (tmux's sync-input and pipe-pane were cut from this release: broadcast send-keys supersedes sync-input; pipe-pane moves to 0.9.0 under Asciinema/plugins.)
+> ✅ **Released** — `v0.6.0`, 2026-08-22. (tmux's sync-input and pipe-pane were
+> cut from this release: the broadcast prompt to agents (0.7.0) supersedes
+> sync-input; pipe-pane moves to 0.9.0 under Asciinema/plugins.)
 
 - ✅ **Theme engine** (deferred from 0.5.0): user-editable theme values on top
   of the 0.5.0 picker — full palette customization in `config.toml` (schemes,
   accents, status dots, borders) instead of the built-in constants.
-- **Config hot-reload** (deferred from 0.5.0): watch the config file and
-  reload theme/config live — extends the manual `kumo reload` (0.4.0) so
-  themes are instantly tweakable without a restart.
 - ✅ **Status bar widgets** (deferred from 0.5.0): customizable widgets (branch,
   session, agent status, hostname, clock) — includes the status-bar **layout**
   config deferred from 0.4.0. Configurable via `[status_bar]` (`left`/`center`/`right`
@@ -204,14 +203,6 @@ toggle/order + pane titles/border styling.
   `top-left`, `bottom-right`, `bottom-left`, `center`, or `never`/`off`
   (stacked, ~5 s lifetime, click-to-focus the agent's pane) —
   `app/kumo/src/cli/client_view.rs`.
-- **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
-  prompt out to every AI pane in the tab/session over the existing `send-keys`
-  wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI
-  action reuses the prompt popup and lives in the data-driven bindings table
-  (`app/kumo/src/cli/bindings.rs`), so it shows up in `leader+?` and the
-  leader hint automatically. Replaces tmux's sync-input: same "drive many
-  panes at once" need, without the stray-keystroke footgun of raw input
-  mirroring.
 - ✅ **Full screen+scrollback restore after update/restart**: the daemon now
   carries inline ghostty snapshots (`SavedPane.snapshot` in `app/kumo/src/daemon/state.rs:126`, `vt.rs: snapshot_encode`/`from_snapshot`, `pane.rs: finish_from_snapshot`) so `kumo update` and `daemon --resume` restore screen + scrollback exactly. Shipped in `v0.5.4` ("Preserve scrollback across restart via inline snapshot"); the earlier lossy ANSI-replay fallback is retired.
 - ✅ **Control CLI / scripting** (`kumo session|tab|pane|agent`, `kumo pane send-keys`/`split`/`close`/`focus`, `kumo reload`): client commands over the daemon socket, driven by the same keymap tables (deferred from 0.4.0; `app/kumo/src/cli/cli.rs`, `app/kumo/src/daemon/app/server.rs:409`).
@@ -224,6 +215,17 @@ toggle/order + pane titles/border styling.
   **OSC 133** semantic-prompt boundaries (the snippet installer lands here with
   the traceback work) let the AI pane auto-attach "the last failing command +
   its output" without blind scrollback parsing.
+- **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
+  prompt out to every AI pane in the tab/session over the existing `send-keys`
+  wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI
+  action reuses the prompt popup and lives in the data-driven bindings table
+  (`app/kumo/src/cli/bindings.rs`), so it shows up in `leader+?` and the
+  leader hint automatically. Replaces tmux's sync-input: same "drive many
+  panes at once" need, without the stray-keystroke footgun of raw input
+  mirroring. (moved here from 0.6.0)
+- **Config hot-reload file watcher** (deferred from 0.5.0): watch the config
+  file and reload theme/config live — extends the manual `kumo reload` (0.4.0)
+  so themes are instantly tweakable without a restart. (moved here from 0.6.0)
 
 ## 🛡️ 0.8.0 — Stability
 
