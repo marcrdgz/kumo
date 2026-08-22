@@ -113,7 +113,7 @@ pub struct App {
     proc: proc::ProcSampler,
     /// When the last audible agent alert sounded per pane (cooldown, so a
     /// flickering status does not repeat the beep).
-    last_agent_sound: HashMap<u64, Instant>,
+    last_agent_alert: HashMap<u64, Instant>,
     /// Rendered cells of each pane's viewport, blitted back when the pane is
     /// unchanged so the frame loop never re-iterates unchanged terminals.
     pane_cache: HashMap<u64, Buffer>,
@@ -193,7 +193,7 @@ impl App {
             last_agent_status: HashMap::new(),
             agent_proc_cache: HashMap::new(),
             proc: proc::ProcSampler::default(),
-            last_agent_sound: HashMap::new(),
+            last_agent_alert: HashMap::new(),
             pane_cache: HashMap::new(),
             pane_sizes: HashMap::new(),
             quit: false,
@@ -661,7 +661,8 @@ impl App {
 
     /// Re-apply the config to live state (`kumo reload` / client MENU `reload`).
     /// `shell` and `ai-cmd` are cached at startup, so they refresh here;
-    /// `new-cwd` and `agent-sound` are read live from the config on each use.
+    /// `new-cwd`, `agent-sound`, and `[notifications]` are read live from the
+    /// config on each use.
     /// Applies to panes spawned from now on — existing panes keep their PTY.
     /// For themes, the selection (`[theme] name`) and custom palette
     /// (`[theme.custom]`) are live-reloaded: all existing panes are re-colored.
@@ -790,7 +791,7 @@ impl App {
             self.pane_sizes.remove(&pid);
             self.agent_status_cache.remove(&pid);
             self.last_agent_status.remove(&pid);
-            self.last_agent_sound.remove(&pid);
+            self.last_agent_alert.remove(&pid);
             self.agent_proc_cache.remove(&pid);
             if let Some(os_pid) = os_pid { self.proc.forget(os_pid); }
         }
@@ -906,7 +907,7 @@ impl App {
         self.pane_sizes.remove(&pid);
         self.agent_status_cache.remove(&pid);
         self.last_agent_status.remove(&pid);
-        self.last_agent_sound.remove(&pid);
+        self.last_agent_alert.remove(&pid);
         self.agent_proc_cache.remove(&pid);
         if let Some(os_pid) = os_pid {
             self.proc.forget(os_pid);
@@ -955,7 +956,7 @@ impl App {
                 self.pane_sizes.remove(&pid);
                 self.agent_status_cache.remove(&pid);
                 self.last_agent_status.remove(&pid);
-                self.last_agent_sound.remove(&pid);
+                self.last_agent_alert.remove(&pid);
                 self.agent_proc_cache.remove(&pid);
                 if let Some(os_pid) = os_pid {
                     self.proc.forget(os_pid);
@@ -1010,7 +1011,7 @@ impl App {
         self.pane_sizes.remove(&pid);
         self.agent_status_cache.remove(&pid);
         self.last_agent_status.remove(&pid);
-        self.last_agent_sound.remove(&pid);
+        self.last_agent_alert.remove(&pid);
         self.agent_proc_cache.remove(&pid);
         if let Some(os_pid) = os_pid {
             self.proc.forget(os_pid);

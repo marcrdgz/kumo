@@ -178,10 +178,12 @@ impl App {
     /// quiet agent that just finished would otherwise stay stuck on the last
     /// Working status forever.
     ///
-    /// Also raises an audible alert on the transitions the user cares about
-    /// (Working -> Blocked, Working -> Idle), brings blocked agents into view
-    /// by scrolling the AGENTS section to its top, and keeps the sidebar's
-    /// blocked-first ordering consistent.
+    /// Also raises an alert on the transitions the user cares about (Working
+    /// -> Blocked, Working -> Idle) — the audible chime and, when enabled, a
+    /// desktop notification — brings blocked agents into view by scrolling
+    /// the AGENTS section to its top, and keeps the sidebar's blocked-first
+    /// ordering consistent. Both channels share one cooldown per pane so a
+    /// status flickering between Working and Blocked does not repeat.
     pub(super) fn refresh_agent_statuses(&mut self) {
         if self.last_status_refresh.elapsed() < STATUS_REFRESH {
             return;
@@ -190,6 +192,9 @@ impl App {
         let now = Instant::now();
         let sound_enabled = kumo_core::config::agent_sound_enabled();
         let mut status_changed = false;
+        // Transitions that passed the cooldown this tick; notifications are
+        // raised after the loop because they need `&self` lookups.
+        let mut to_notify = Vec::new();
         for (&pid, pane) in self.panes.iter_mut() {
             if !pane.is_ai_cli() {
                 continue;
@@ -211,20 +216,48 @@ impl App {
             let old = self.last_agent_status.get(&pid).copied();
             if let Some(kind) = old.and_then(|old| should_alert(old, status)) {
                 let cooled = self
-                    .last_agent_sound
+                    .last_agent_alert
                     .get(&pid)
                     .map(|t| now.duration_since(*t) >= ALERT_COOLDOWN)
                     .unwrap_or(true);
-                if sound_enabled && cooled {
-                    alert::play(kind);
-                    self.last_agent_sound.insert(pid, now);
+                if cooled {
+                    self.last_agent_alert.insert(pid, now);
+                    if sound_enabled {
+                        alert::play(kind);
+                    }
+                    let notif = kumo_core::config::agent_notifications();
+                    if notif.enabled && match kind {
+                        AlertKind::Blocked => notif.blocked,
+                        AlertKind::Finished => notif.finished,
+                    } {
+                        to_notify.push((pid, kind));
+                    }
                 }
             }
             self.last_agent_status.insert(pid, status);
         }
+        for (pid, kind) in to_notify {
+            let agent = self
+                .panes
+                .get(&pid)
+                .and_then(|p| p.detected_ai_name.clone())
+                .unwrap_or_default();
+            let context = self.pane_workspace(pid);
+            crate::daemon::notify::send(kind, &agent, &context);
+        }
         if status_changed {
             self.bump_layout_version();
         }
+    }
+
+    /// The workspace path of the session owning `pid`, used as the location
+    /// line of a desktop notification. Empty when no session owns it.
+    fn pane_workspace(&self, pid: u64) -> String {
+        self.sessions
+            .iter()
+            .find(|s| s.contains_pane(pid))
+            .map(|s| s.workspace.display().to_string())
+            .unwrap_or_default()
     }
 
     /// Append the per-pane agent status, output age, and detected CLI to

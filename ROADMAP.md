@@ -162,7 +162,7 @@ toggle/order + pane titles/border styling.
 
 ## 🔍 0.6.0 — Copy-mode, search & pane plumbing
 
-> 🚧 **In progress** — theme engine, status-bar widgets, sidebar polish, tabs, and copy-mode have landed; scrollback restore and control CLI followed in `v0.5.4` / `v0.5.2`. Remaining: file-watcher hot-reload, sync-input, pipe-pane.
+> 🚧 **In progress** — theme engine, status-bar widgets, sidebar polish, tabs, and copy-mode have landed; scrollback restore and control CLI followed in `v0.5.4` / `v0.5.2`. Remaining: file-watcher hot-reload, broadcast prompt to agents. (tmux's sync-input and pipe-pane were cut from this release: broadcast send-keys supersedes sync-input; pipe-pane moves to 0.9.0 under Asciinema/plugins.)
 
 - ✅ **Theme engine** (deferred from 0.5.0): user-editable theme values on top
   of the 0.5.0 picker — full palette customization in `config.toml` (schemes,
@@ -187,8 +187,21 @@ toggle/order + pane titles/border styling.
 - ✅ **Copy-mode**: vi-style keyboard selection over scrollback + `/` search — the
   biggest missing multiplexer feature (the scrollback already exists in ghostty;
   only the selection/search UI is missing).
-- **Sync-input**: type into every pane at once.
-- **Pipe-pane / logging**: capture a pane's output to a file.
+- ✅ **System notifications for blocked agents** (pulled forward from 0.9.0):
+  desktop notification on working→blocked (and idle/done) transitions — macOS
+  Notification Center / Linux `notify-send` — alongside the audible chime.
+  Fired from the same server-side detection + rate-limit site as the chime
+  (`app/kumo/src/daemon/app/tasks.rs`; both channels share one per-pane
+  cooldown), config-gated under `[notifications]` (`enabled` / `blocked` /
+  `finished`, `KUMO_NO_NOTIFY=1`), read live by `kumo reload`.
+- **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
+  prompt out to every AI pane in the tab/session over the existing `send-keys`
+  wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI
+  action reuses the prompt popup and lives in the data-driven bindings table
+  (`app/kumo/src/cli/bindings.rs`), so it shows up in `leader+?` and the
+  leader hint automatically. Replaces tmux's sync-input: same "drive many
+  panes at once" need, without the stray-keystroke footgun of raw input
+  mirroring.
 - ✅ **Full screen+scrollback restore after update/restart**: the daemon now
   carries inline ghostty snapshots (`SavedPane.snapshot` in `app/kumo/src/daemon/state.rs:126`, `vt.rs: snapshot_encode`/`from_snapshot`, `pane.rs: finish_from_snapshot`) so `kumo update` and `daemon --resume` restore screen + scrollback exactly. Shipped in `v0.5.4` ("Preserve scrollback across restart via inline snapshot"); the earlier lossy ANSI-replay fallback is retired.
 - ✅ **Control CLI / scripting** (`kumo session|tab|pane|agent`, `kumo pane send-keys`/`split`/`close`/`focus`, `kumo reload`): client commands over the daemon socket, driven by the same keymap tables (deferred from 0.4.0; `app/kumo/src/cli/cli.rs`, `app/kumo/src/daemon/app/server.rs:409`).
@@ -228,7 +241,10 @@ Tightens the last gaps before the 1.0 freeze — **not a gate**, just polish so
 - **Command palette / fuzzy switcher** over sessions, actions (including plugin actions), and keybinds.
 - **System notifications** (macOS / notify-send) for blocked agents — today only an audible chime.
 - **tmux control-mode compatibility** so existing tooling (neovim, scripts) keeps working.
-- **Asciinema export**: record a pane's session to a file / stream.
+- **Asciinema export**: record a pane's session to a file / stream. Subsumes
+  tmux-style **pipe-pane** (cut from 0.6.0): capturing a pane's output to a
+  file lands as this richer export plus a pane-output stream plugins can
+  consume over the socket, not as a separate daemon tap.
 - **Configurable scrollback limit** (`[terminal] scrollback-limit` / `scrollback-limit-lines`): expose ghostty's cap (`vt.rs: Terminal::new(max_scrollback)`, today hard-coded `10_000` in `app/kumo/src/daemon/pane.rs:323`) as optional `config.toml` keys. QoL only — **not** a 1.0 gate; the default stays `10_000` and the v1 schema can add it compatibly later. See also `vendor/libghostty-vt/src/config/Config.zig: scrollback-limit-bytes`.
 
 ## 🎉 1.0.0
