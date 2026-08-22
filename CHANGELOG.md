@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.6.0
+
+### 🚀 Features
+
+- *(tabs)* Add per-session tabs with hover-close top bar
+- *(tabs)* Polish tab bar visuals and interactions
+- *(tabs)* Add plus button, overflow arrows, context menu and hover-targeted close/rename
+- *(theme)* Add owned theme, hex parsing and gruvbox/dracula/tokyo-night
+- *(protocol)* Add wire theme and bump protocol to v7
+- *(daemon)* Handle dynamic and reloadable themes
+- *(cli)* Support custom theme in picker and rendering
+- *(sidebar)* Toggle/order sections, rounded borders default with hidden
+- *(core)* Add status bar config schema
+- *(cli)* Add status bar widget module
+- *(cli)* Integrate status bar widgets into client view
+- *(copy-mode)* Vi-style selection over scrollback plus search
+- *(copy-mode)* Search as black/red context menu rectangle below tabs
+- *(docs)* Static doc for kumo (#2)
+- *(daemon)* Desktop notifications for agent lifecycle transitions
+- *(config)* Require manual opt-in for agent notifications
+- *(ui)* Add toast notifications
+- *(notifications)* Add position and sound knobs to [notifications]
+- *(docs)* Add interactive config builder to the configuration page
+- *(daemon)* Re-check for updates periodically to notify long-running daemons
+
+### 🐛 Bug Fixes
+
+- *(tabs)* Use text color for active tab close x
+- *(tabs)* Left-align tab label in first cell
+- *(tabs)* Keep absolute numbering after rename and prefer name over id
+- *(copy-mode)* Add leader+/ to enter search and clarify flow
+- *(copy-mode)* Use readable black on input_bg for search bar
+- *(copy-mode)* Move search/hint to popup two lines below tabs with gap
+- *(copy-mode)* Show copy hint as status bar notification on right
+
+### 💼 Other
+
+- *(kumo)* Add chrono and hostname dependencies
+- *(cli)* UI improvements (#3)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(tabs)* Remove dead-code warnings
+- *(workspace)* Remove kumo-desktop and fix clippy warnings
 ## v0.5.4
 
 ### 🐛 Bug Fixes
@@ -20,6 +64,10 @@
 - *(client)* Restore selection highlight and scope to correct pane
 - *(pty)* Gate SIGKILL fallback behind cfg(unix) for Windows builds
 - *(pty)* Implement as_raw_handle for DummyChild on Windows
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.5.4
 ## v0.5.3
 
 ### 🐛 Bug Fixes
