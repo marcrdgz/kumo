@@ -207,7 +207,7 @@ styling; the config hot-reload file watcher rolls into 0.7.0.
   carries inline ghostty snapshots (`SavedPane.snapshot` in `app/kumo/src/daemon/state.rs:126`, `vt.rs: snapshot_encode`/`from_snapshot`, `pane.rs: finish_from_snapshot`) so `kumo update` and `daemon --resume` restore screen + scrollback exactly. Shipped in `v0.5.4` ("Preserve scrollback across restart via inline snapshot"); the earlier lossy ANSI-replay fallback is retired.
 - ✅ **Control CLI / scripting** (`kumo session|tab|pane|agent`, `kumo pane send-keys`/`split`/`close`/`focus`, `kumo reload`): client commands over the daemon socket, driven by the same keymap tables (deferred from 0.4.0; `app/kumo/src/cli/cli.rs`, `app/kumo/src/daemon/app/server.rs:409`).
 
-## 🤖 0.7.0 — Agent breadth & AI polish
+## 🤖 0.7.0 — ADE (AI Development Environment), AI Polish & Native Context
 
 - Lifecycle detection for `codex · gemini · qwen · aider · cody · swe · coco`
   (today auto-listed, always idle).
@@ -226,6 +226,25 @@ styling; the config hot-reload file watcher rolls into 0.7.0.
 - **Config hot-reload file watcher** (deferred from 0.5.0): watch the config
   file and reload theme/config live — extends the manual `kumo reload` (0.4.0)
   so themes are instantly tweakable without a restart. (moved here from 0.6.0)
+- **Compose-prompt popup** (`leader+i`): Context-injection popup that aggregates
+  the active terminal selection, the last failing command + traceback (via OSC 133),
+  `git diff`, and current working directory into actionable prompt chips.
+- **Auto-attach context**: Spawning a new agent pane automatically pre-fills its
+  prompt with the error traceback and dirty file diffs from the active session.
+- **CLI Environment Injection** (`KUMO_SOCKET_PATH`): Expose the daemon socket
+  path directly to spawned AI processes, allowing agents to execute native Kumo
+  commands (`kumo pane split`, `kumo send-keys`, `kumo run`) to drive their own
+  workspace layouts natively. Can be disabled in config.
+- **Verify loop** (`leader+r`): Trigger the project's test suite from an AI pane into
+  a fresh split, automatically routing failure logs back to the agent for self-correction.
+- **Git Worktree Isolation** (`kumo new --ai`): Launch agents inside isolated ephemeral
+  Git Worktrees so they analyze, patch, and test code in parallel without dirtying
+  the main working directory.
+- **Session Checkpoints & Rollback**: Save state snapshots before autonomous execution,
+  enabling single-command rollbacks (`kumo rollback`) if an agent hallucinates or
+  breaks the workspace.
+- **Agent Inbox View**: Aggregate all background agent statuses (*Blocked*, *Waiting for Approval*,
+  *Running*) into a single unified tab with direct keyboard navigation to actionable panes.
 
 ## 🛡️ 0.8.0 — Stability
 
