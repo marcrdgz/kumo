@@ -374,6 +374,20 @@ fn swap_binary_into(new_bin: &Path, dest: &Path) -> Result<()> {
 
 // ----- CLI entry -----
 
+pub fn print_help() {
+    println!("kumo update — check for and install updates");
+    println!();
+    println!("USAGE:");
+    println!("    kumo update [-n] [-c] [--tag TAG]");
+    println!();
+    println!("OPTIONS:");
+    println!("    -n, --nightly    track the nightly channel");
+    println!("    -c, --check      report whether an update is available");
+    println!("    --tag TAG        install a specific release tag");
+    println!();
+    println!("Without --check the daemon restarts itself in place (panes stay alive).");
+}
+
 pub fn parse_args(args: &[String]) -> Result<UpdateOpts> {
     let mut opts = UpdateOpts::default();
     let mut i = 0;
@@ -385,7 +399,7 @@ pub fn parse_args(args: &[String]) -> Result<UpdateOpts> {
                 i += 1;
                 opts.tag = Some(args.get(i).context("--tag requires a value")?.clone());
             }
-            other => bail!("unknown option: {other}"),
+            other => bail!("unknown option for kumo update: {other} (see `kumo update -h`)"),
         }
         i += 1;
     }

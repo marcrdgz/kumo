@@ -9,11 +9,16 @@ use kumo_core::Launch;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    // Top-level flags only (per-command help lives in each command's parser).
+    if args.first().map(|s| s.as_str()) == Some("-h")
+        || args.first().map(|s| s.as_str()) == Some("--help")
+    {
         print_help();
         return Ok(());
     }
-    if args.iter().any(|a| a == "-v" || a == "--version") {
+    if args.first().map(|s| s.as_str()) == Some("-v")
+        || args.first().map(|s| s.as_str()) == Some("--version")
+    {
         println!(
             "kumo {} ({})",
             env!("CARGO_PKG_VERSION"),
@@ -26,9 +31,17 @@ fn main() -> Result<()> {
     // manually. `--resume <file>` makes it adopt the live PTY masters
     // inherited from a `kumo update` restart.
     if args.first().map(|s| s.as_str()) == Some("daemon") {
+        if args[1..].iter().any(|a| a == "-h" || a == "--help") {
+            print_daemon_help();
+            return Ok(());
+        }
         return daemon::run(&args[1..]);
     }
     if args.first().map(|s| s.as_str()) == Some("update") {
+        if args[1..].iter().any(|a| a == "-h" || a == "--help") {
+            update::print_help();
+            return Ok(());
+        }
         let opts = update::parse_args(&args[1..])?;
         match update::update(&opts) {
             Ok(outcome) => {
@@ -44,11 +57,11 @@ fn main() -> Result<()> {
         }
     }
 
-    // Control CLI: `kumo session|pane|agent ...` (and the legacy aliases
+    // Control CLI: `kumo session|pane|agent|tab ...` (and the legacy aliases
     // `ls`/`kill`/`reload`/`server restart`).
     match args.first().map(|s| s.as_str()) {
-        Some("session") | Some("pane") | Some("agent") | Some("ls") | Some("list")
-        | Some("kill") | Some("reload") | Some("server") => {
+        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("ls")
+        | Some("list") | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
                 return cli::cli::run(&args);
@@ -68,12 +81,20 @@ fn main() -> Result<()> {
     // unknown command (prevents `kumo lits` typo silently creating a session).
     let launch = match args.first().map(|s| s.as_str()) {
         Some("attach") => {
+            if args.iter().any(|a| a == "-h" || a == "--help") {
+                print_attach_help();
+                return Ok(());
+            }
             if args.len() > 1 {
                 anyhow::bail!("kumo attach takes no arguments");
             }
             Launch::Attach
         }
         Some("new") => {
+            if args.iter().any(|a| a == "-h" || a == "--help") {
+                print_new_help();
+                return Ok(());
+            }
             match args.get(1) {
                 Some(dir) if dir.starts_with('-') => {
                     anyhow::bail!("unknown option for kumo new: {dir} (expected [WORKSPACE])");
@@ -130,6 +151,7 @@ fn print_help() {
     println!("    kumo new [WORKSPACE]       start a fresh session");
     println!("    kumo [WORKSPACE]           start fresh inside this directory");
     println!("    kumo daemon [WORKSPACE]    run the headless daemon in the foreground");
+    println!("    kumo update [-n] [-c] [--tag TAG]");
     println!();
     println!("SESSIONS:");
     println!("    kumo session list");
@@ -143,15 +165,53 @@ fn print_help() {
     println!("    kumo pane focus -p PANE_ID [-s SESSION]");
     println!("    kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...");
     println!();
+    println!("TABS:");
+    println!("    kumo tab list [-s SESSION]");
+    println!("    kumo tab new [WORKSPACE] [--name NAME] [-s SESSION]");
+    println!("    kumo tab focus TAB [-s SESSION]");
+    println!("    kumo tab kill TAB [-s SESSION]");
+    println!("    kumo tab rename TAB NEW_NAME [-s SESSION]");
+    println!();
     println!("AGENTS:");
     println!("    kumo agent spawn [-s SESSION] [PROGRAM]");
     println!("    kumo agent status");
     println!("    kumo agent kill -p PANE_ID [-s SESSION]");
     println!();
     println!("OTHER:");
-    println!("    kumo ls / kill / reload / server restart / update");
+    println!("    kumo ls / kill / reload / server restart");
     println!();
+    println!("Add -h/--help to any command for its own usage, e.g. `kumo pane -h`.");
     println!("The daemon (`kumo daemon`) runs in the background and owns your panes;");
     println!("the TUI is a client to it, so several terminals and the desktop app can");
     println!("attach at once.");
+}
+
+fn print_attach_help() {
+    println!("kumo attach — attach to the running daemon");
+    println!();
+    println!("USAGE:");
+    println!("    kumo attach");
+    println!();
+    println!("Requires a running daemon (`kumo` or `kumo new` starts one if missing).");
+}
+
+fn print_new_help() {
+    println!("kumo new — start a fresh session");
+    println!();
+    println!("USAGE:");
+    println!("    kumo new [WORKSPACE]");
+    println!();
+    println!("WORKSPACE is the directory to start in; defaults to the current directory.");
+}
+
+fn print_daemon_help() {
+    println!("kumo daemon — run the headless daemon in the foreground");
+    println!();
+    println!("USAGE:");
+    println!("    kumo daemon [WORKSPACE]");
+    println!("    kumo daemon --resume <file>");
+    println!();
+    println!("WORKSPACE is the starting directory (the TUI client and desktop app");
+    println!("spawn this automatically). `--resume <file>` adopts the live PTY masters");
+    println!("inherited from a `kumo update` restart, keeping panes alive.");
 }

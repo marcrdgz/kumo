@@ -40,6 +40,14 @@ enum CliCmd {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    // `-h/--help` anywhere in a domain invocation prints that domain's usage
+    // and exits without touching the daemon.
+    if let Some(domain) = args.first() {
+        if args[1..].iter().any(|a| a == "-h" || a == "--help") {
+            print!("{}", domain_help(domain));
+            return Ok(());
+        }
+    }
     let cmd = parse(args)?;
     let mut stream = connect_daemon()?;
 
@@ -153,7 +161,7 @@ fn parse(args: &[String]) -> Result<CliCmd> {
 
 fn parse_session(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
-        anyhow::bail!("usage: kumo session [list|new [DIR] [--name NAME]|kill NAME|attach NAME]");
+        anyhow::bail!("missing session subcommand (see `kumo session -h`)");
     };
     match sub {
         "list" => Ok(CliCmd::List),
@@ -183,14 +191,14 @@ fn parse_session(args: &[String]) -> Result<CliCmd> {
 
 fn parse_pane(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
-        anyhow::bail!("usage: kumo pane [split|close|focus|send-keys]");
+        anyhow::bail!("missing pane subcommand (see `kumo pane -h`)");
     };
     // `-s SESSION` / `-p PANE` options anywhere in the args.
     let (session, pane_id, positional) = split_options(args);
     match sub {
         "split" => {
             let ai = positional.iter().any(|a| a == "--ai");
-            let dir = if positional.iter().any(|a| a == "--horizontal" || a == "-h") {
+            let dir = if positional.iter().any(|a| a == "--horizontal") {
                 SplitDir::Horizontal
             } else {
                 SplitDir::Vertical
@@ -213,7 +221,7 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
 
 fn parse_agent(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
-        anyhow::bail!("usage: kumo agent [spawn|status|kill]");
+        anyhow::bail!("missing agent subcommand (see `kumo agent -h`)");
     };
     let (session, pane_id, positional) = split_options(args);
     match sub {
@@ -232,7 +240,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
 
 fn parse_tab(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
-        anyhow::bail!("usage: kumo tab [list|new [WORKSPACE] [--name NAME]|focus TAB|kill TAB|rename TAB NEW_NAME] [-s SESSION]");
+        anyhow::bail!("missing tab subcommand (see `kumo tab -h`)");
     };
     // Extract -s/--session wherever it appears
     let mut session: Option<String> = None;
@@ -350,6 +358,104 @@ fn parse_keys(text: &str) -> Vec<WireKeyEvent> {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// Help text
+// ---------------------------------------------------------------------------
+
+fn domain_help(domain: &str) -> &'static str {
+    match domain {
+        "session" => SESSION_HELP,
+        "pane" => PANE_HELP,
+        "agent" => AGENT_HELP,
+        "tab" => TAB_HELP,
+        "server" => SERVER_HELP,
+        "ls" | "list" | "kill" | "reload" => LEGACY_HELP,
+        _ => "",
+    }
+}
+
+const SESSION_HELP: &str = "\
+kumo session — manage sessions
+
+USAGE:
+    kumo session list
+    kumo session new [DIR] [--name NAME]
+    kumo session kill NAME
+    kumo session attach NAME
+
+OPTIONS:
+    --name NAME    name the new session (defaults to the workspace name)
+";
+
+const PANE_HELP: &str = "\
+kumo pane — manage panes
+
+USAGE:
+    kumo pane split [-s SESSION] [--horizontal] [--ai]
+    kumo pane close [-s SESSION] [-p PANE_ID]
+    kumo pane focus -p PANE_ID [-s SESSION]
+    kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...
+
+OPTIONS:
+    -s, --session SESSION   target session (defaults to the active one)
+    -p, --pane PANE_ID      target pane id (defaults to the active pane)
+    --horizontal            split left/right instead of top/bottom
+    --ai                    start the new pane with the AI agent program
+
+send-keys: KEYS... are typed into the pane (plain text plus tokens such as
+Enter, Tab, Esc, Left, Up, PageDown — see `kumo pane send-keys` KEYS).
+";
+
+const AGENT_HELP: &str = "\
+kumo agent — manage AI agents
+
+USAGE:
+    kumo agent spawn [-s SESSION] [PROGRAM]
+    kumo agent status
+    kumo agent kill -p PANE_ID [-s SESSION]
+
+OPTIONS:
+    -s, --session SESSION   target session (defaults to the active one)
+    -p, --pane PANE_ID      target pane id (the agent pane)
+
+PROGRAM defaults to the configured AI program (see config).
+";
+
+const TAB_HELP: &str = "\
+kumo tab — manage tabs (implicit tab bars inside a session)
+
+USAGE:
+    kumo tab list [-s SESSION]
+    kumo tab new [WORKSPACE] [--name NAME] [-s SESSION]
+    kumo tab focus TAB [-s SESSION]
+    kumo tab kill TAB [-s SESSION]
+    kumo tab rename TAB NEW_NAME [-s SESSION]
+
+OPTIONS:
+    -s, --session SESSION   target session (defaults to the active one)
+    --name NAME             name the new tab (defaults to the workspace name)
+";
+
+const SERVER_HELP: &str = "\
+kumo server — control the headless daemon
+
+USAGE:
+    kumo server restart
+
+`kumo server restart` restarts the daemon in place; panes stay alive.
+";
+
+const LEGACY_HELP: &str = "\
+kumo ls | list / kill / reload — legacy aliases
+
+USAGE:
+    kumo ls | list       list sessions (same as `kumo session list`)
+    kumo kill            shut down the daemon
+    kumo reload          reload the configuration on the daemon
+
+Prefer the namespaced commands (`kumo session`, `kumo pane`, `kumo agent`).
+";
 
 // ---------------------------------------------------------------------------
 // Socket plumbing
