@@ -133,10 +133,19 @@ struct DividedPanels {
     agents_items: Vec<SidebarRow>,
     /// Rows of spaces content currently visible.
     spaces_h: usize,
-    /// Rows of the agent panel currently visible (label + entries).
+    /// Rows of agent entries currently visible (label sits above them).
     agents_h: usize,
+    /// Row of the panel divider (`u16::MAX` when only one panel is shown).
+    divider_y: u16,
     /// Row of the agent panel label (`2` when the spaces panel is hidden).
     agents_label_y: u16,
+}
+
+/// In-flight sidebar panel divider drag: (start row, spaces height at start).
+#[derive(Clone, Copy)]
+struct SidebarDrag {
+    start_y: u16,
+    start_split: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -390,6 +399,8 @@ enum SidebarRow {
     GroupHeader(AgentStatus, usize),
     /// A muted placeholder line (e.g. the agents panel with no agents).
     Dim(String),
+    /// Draggable divider between the spaces and agents panels (divided layout).
+    Divider,
     Session(usize),
     Branch(usize, WireBranch),
     AgentDir(usize, u64, String, AgentStatus),
@@ -447,6 +458,11 @@ pub struct View {
     inbox: Option<Inbox>,
     /// Test-only override of the `[sidebar] layout` config.
     sidebar_layout_override: Option<SidebarLayout>,
+    /// User-adjusted spaces-panel height in rows (divided layout); `None`
+    /// keeps the automatic sizing.
+    sidebar_split: Option<u16>,
+    /// In-flight divider drag (divided layout).
+    sidebar_drag: Option<SidebarDrag>,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -624,6 +640,8 @@ impl View {
             copy: None,
             inbox: None,
             sidebar_layout_override: None,
+            sidebar_split: None,
+            sidebar_drag: None,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -2129,7 +2147,7 @@ impl View {
                 if !p.agents_visible {
                     return;
                 }
-                let shown = p.agents_h.saturating_sub(1);
+                let shown = p.agents_h;
                 let Some(idx) = p.agents_items.iter().position(matches) else { return };
                 let max = p.agents_items.len().saturating_sub(shown);
                 let cur = self.sidebar_scroll.1 as usize;
@@ -3120,6 +3138,15 @@ impl View {
                 return Ok(());
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(d) = self.sidebar_drag {
+                    let avail = self.content_region_h() as usize;
+                    let max_spaces = Self::spaces_split_max(avail);
+                    let delta = y as i32 - d.start_y as i32;
+                    let h = (d.start_split as i32 + delta).clamp(0, max_spaces as i32) as u16;
+                    self.sidebar_split = Some(h);
+                    self.mark_dirty();
+                    return Ok(());
+                }
                 if let Some(drag) = self.drag {
                     let ratio = match drag.dir {
                         SplitDir::Vertical => {
@@ -3170,6 +3197,7 @@ impl View {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.drag = None;
+                self.sidebar_drag = None;
                 if let Some(pc) = self.pending_click.take() {
                     let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
                     let up = self
@@ -3431,20 +3459,29 @@ impl View {
         out
     }
 
-    /// Reserved minimum rows for the agent panel in the divided layout
-    /// (label + three rows), so a crowded spaces list never hides it.
-    const AGENTS_PANEL_RESERVE: usize = 4;
+    /// Automatic-space reserve for the agent panel in the divided layout
+    /// (divider + label + three rows), so a crowded spaces list never hides it.
+    const AGENTS_PANEL_RESERVE: usize = 5;
 
     /// The [sidebar] layout the sidebar currently renders with.
     fn sidebar_layout(&self) -> SidebarLayout {
         self.sidebar_layout_override.unwrap_or_else(|| kumo_core::config::sidebar().layout)
     }
 
-    /// Divided-layout panel geometry: the spaces panel shows what it needs up
-    /// to `AGENTS_PANEL_RESERVE`, the agent panel takes the rest.
-    fn divided_panel_heights(spaces_need: usize, avail: usize) -> (usize, usize) {
-        let spaces_h = spaces_need.min(avail.saturating_sub(Self::AGENTS_PANEL_RESERVE));
-        (spaces_h, avail.saturating_sub(spaces_h))
+    /// Valid range of the spaces-panel height in rows: the divider, the agents
+    /// label, and at least one agent row must stay visible.
+    fn spaces_split_max(avail: usize) -> usize {
+        avail.saturating_sub(3)
+    }
+
+    /// Divided-layout panel heights: the user divider (`split`) sets the
+    /// spaces height, clamped to keep at least one agent row; `None` sizes
+    /// automatically (content up to `AGENTS_PANEL_RESERVE`).
+    fn divided_panel_heights(spaces_need: usize, split: Option<u16>, avail: usize) -> (usize, usize) {
+        let max_spaces = Self::spaces_split_max(avail);
+        let auto = spaces_need.min(avail.saturating_sub(Self::AGENTS_PANEL_RESERVE)).min(max_spaces);
+        let spaces_h = split.map(|s| (s as usize).min(max_spaces)).unwrap_or(auto);
+        (spaces_h, avail.saturating_sub(spaces_h + 2))
     }
 
     /// Divided-layout sidebar content: both panels' items and their geometry.
@@ -3455,9 +3492,10 @@ impl View {
         let spaces_items = if spaces_visible { self.sessions_content() } else { Vec::new() };
         let agents_items = if agents_visible { self.agents_panel_items() } else { Vec::new() };
         let avail = self.content_region_h() as usize;
-        let (spaces_h, agents_h) = Self::divided_panel_heights(spaces_items.len(), avail);
-        let agents_label_y = if spaces_visible { (3 + spaces_h) as u16 } else { 2 };
-        DividedPanels { spaces_visible, agents_visible, spaces_items, agents_items, spaces_h, agents_h, agents_label_y }
+        let (spaces_h, agents_h) = Self::divided_panel_heights(spaces_items.len(), self.sidebar_split, avail);
+        let divider_y = if spaces_visible && agents_visible { (3 + spaces_h) as u16 } else { u16::MAX };
+        let agents_label_y = if spaces_visible { divider_y + 1 } else { 2 };
+        DividedPanels { spaces_visible, agents_visible, spaces_items, agents_items, spaces_h, agents_h, divider_y, agents_label_y }
     }
 
     /// Grouped agent rows for the divided layout: state group headers with
@@ -3540,15 +3578,17 @@ impl View {
                         out.push((3 + i as u16, item.clone()));
                     }
                 }
+                if p.spaces_visible && p.agents_visible {
+                    out.push((p.divider_y, SidebarRow::Divider));
+                }
                 if p.agents_visible {
                     out.push((
                         p.agents_label_y,
                         SidebarRow::PanelLabel("agents".to_string(), Some("grouped".to_string())),
                     ));
-                    let entries_shown = p.agents_h.saturating_sub(1);
-                    let max = p.agents_items.len().saturating_sub(entries_shown);
+                    let max = p.agents_items.len().saturating_sub(p.agents_h);
                     let off = (self.sidebar_scroll.1 as usize).min(max);
-                    for (i, item) in p.agents_items.iter().skip(off).take(entries_shown).enumerate() {
+                    for (i, item) in p.agents_items.iter().skip(off).take(p.agents_h).enumerate() {
                         out.push((p.agents_label_y + 1 + i as u16, item.clone()));
                     }
                 }
@@ -3580,7 +3620,7 @@ impl View {
             SidebarLayout::Divided => {
                 let p = self.divided_panels();
                 if p.agents_visible && y >= p.agents_label_y {
-                    let shown = p.agents_h.saturating_sub(1);
+                    let shown = p.agents_h;
                     let max = p.agents_items.len().saturating_sub(shown);
                     let next = if up {
                         (self.sidebar_scroll.1 as usize).saturating_sub(STEP)
@@ -3643,6 +3683,15 @@ impl View {
                 }
                 SidebarRow::NewSession => {
                     self.open_session_popup();
+                    return true;
+                }
+                SidebarRow::Divider => {
+                    // Press on the divider starts a panel-height drag; both
+                    // panels reserve one row each so they stay scrollable.
+                    let spaces_h = self.divided_panels().spaces_h as u16;
+                    self.sidebar_drag =
+                        Some(SidebarDrag { start_y: y, start_split: self.sidebar_split.unwrap_or(spaces_h) });
+                    self.mark_dirty();
                     return true;
                 }
                 _ => return false,
@@ -4241,20 +4290,36 @@ impl View {
                     put(f, x, y, " ", Style::default().bg(RColor::Reset));
                 }
                 SidebarRow::PanelLabel(title, right) => {
-                    let style = Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD);
-                    text(f, x + 2, y, &title, style, max.saturating_sub(2));
+                    // LEADER-chip style: black on secondary, bold.
+                    let chip_bg = theme.secondary;
+                    let chip = Style::default().fg(RColor::Black).bg(chip_bg).add_modifier(Modifier::BOLD);
+                    let chip_w = w.saturating_sub(1).max(1);
+                    fill(f, Rect::new(x, y, chip_w, 1), chip_bg);
+                    text(f, x + 2, y, &title, chip, max.saturating_sub(2));
                     if let Some(right) = right {
                         let rw = right.chars().count() as u16;
-                        if rw <= max.saturating_sub(2) {
+                        if rw <= chip_w.saturating_sub(2) {
                             text(
                                 f,
-                                x + SIDEBAR_WIDTH.saturating_sub(1).saturating_sub(rw),
+                                x + chip_w.saturating_sub(rw),
                                 y,
                                 &right,
-                                Style::default().fg(theme.panel_muted).bg(RColor::Reset),
+                                Style::default().fg(RColor::Black).bg(chip_bg),
                                 rw,
                             );
                         }
+                    }
+                }
+                SidebarRow::Divider => {
+                    let dragging = self.sidebar_drag.is_some();
+                    let style = if dragging {
+                        Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.panel_sep)
+                    };
+                    let line: String = "─".repeat(w.saturating_sub(1).max(1) as usize);
+                    if w > 1 {
+                        text(f, x, y, &line, style, w.saturating_sub(1));
                     }
                 }
                 SidebarRow::GroupHeader(status, count) => {
@@ -4419,7 +4484,7 @@ impl View {
                     let off = (self.sidebar_scroll.0 as usize).min(p.spaces_items.len() - p.spaces_h);
                     draw_scrollbar(f, scroll_x, 3, p.spaces_h as u16, off, p.spaces_items.len(), &theme);
                 }
-                let entries_shown = p.agents_h.saturating_sub(1);
+                let entries_shown = p.agents_h;
                 if p.agents_visible && p.agents_items.len() > entries_shown {
                     let off = (self.sidebar_scroll.1 as usize).min(p.agents_items.len() - entries_shown);
                     draw_scrollbar(f, scroll_x, p.agents_label_y + 1, entries_shown as u16, off, p.agents_items.len(), &theme);
@@ -5663,6 +5728,8 @@ mod tests {
             copy: None,
             inbox: None,
             sidebar_layout_override: None,
+            sidebar_split: None,
+            sidebar_drag: None,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -5849,20 +5916,65 @@ mod tests {
             .collect();
         assert_eq!(labels.len(), 2, "both panels labeled");
         assert_eq!(labels[0], (2, "spaces".to_string(), None));
-        // spaces shows Session + NEW SESSION (2 rows), so agents label lands at 5.
-        assert_eq!(labels[1], (5, "agents".to_string(), Some("grouped".to_string())));
+        // spaces shows Session + NEW SESSION (2 rows), so the divider lands at
+        // 5 and the agents label at 6.
+        assert_eq!(labels[1], (6, "agents".to_string(), Some("grouped".to_string())));
         assert!(
             rows.iter().any(|(y, r)| *y == 3 && matches!(r, SidebarRow::Session(0))),
             "spaces content first"
         );
         assert!(rows.iter().any(|(_, r)| matches!(r, SidebarRow::NewSession)));
         assert!(
-            rows.iter().any(|(y, r)| *y == 6 && matches!(r, SidebarRow::GroupHeader(AgentStatus::Blocked, 1))),
+            rows.iter().any(|(y, r)| *y == 5 && matches!(r, SidebarRow::Divider)),
+            "divider between the panels"
+        );
+        assert!(
+            rows.iter().any(|(y, r)| *y == 7 && matches!(r, SidebarRow::GroupHeader(AgentStatus::Blocked, 1))),
             "group header under the agents label"
         );
         assert!(
-            rows.iter().any(|(y, r)| *y == 7 && matches!(r, SidebarRow::AgentName(0, 1, _, AgentStatus::Blocked))),
+            rows.iter().any(|(y, r)| *y == 8 && matches!(r, SidebarRow::AgentName(0, 1, _, AgentStatus::Blocked))),
             "entry follows its group header"
+        );
+    }
+
+    #[test]
+    fn divided_divider_drag_resizes_panels() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        let down = |x, y| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = |x, y| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let up = |x, y| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Press on the divider (y=5), drag down 3 rows, release.
+        view.on_mouse(down(10, 5)).unwrap();
+        assert!(view.sidebar_drag.is_some(), "press on the divider starts a drag");
+        view.on_mouse(drag(10, 8)).unwrap();
+        view.on_mouse(up(10, 8)).unwrap();
+        assert!(view.sidebar_drag.is_none());
+        assert_eq!(view.sidebar_split, Some(5), "spaces grew by the drag delta");
+        let rows = view.sidebar_rows();
+        assert!(
+            rows.iter().any(|(y, r)| *y == 8 && matches!(r, SidebarRow::Divider)),
+            "divider moves with the drag"
+        );
+        assert!(
+            rows.iter().any(|(y, r)| *y == 11 && matches!(r, SidebarRow::AgentName(0, 1, _, _))),
+            "agent entries follow the moved label"
         );
     }
 
@@ -5883,13 +5995,21 @@ mod tests {
         };
         assert_eq!(row_text(2), "spaces", "spaces label at the old tabs row");
         assert!(row_text(3).contains("sess"), "session row under spaces");
-        let agents_label = row_text(5);
+        let divider = row_text(5);
+        assert!(!divider.is_empty() && divider.chars().all(|c| c == '─'), "divider between the panels: {divider:?}");
+        let agents_label = row_text(6);
         assert!(
             agents_label.starts_with("agents") && agents_label.contains("grouped"),
-            "agents label after the spaces panel: {agents_label:?}"
+            "agents label after the divider: {agents_label:?}"
         );
-        assert_eq!(row_text(6), "blocked (1)", "group header under the agents label");
-        assert!(row_text(7).starts_with("◉ agent1"), "grouped entry row: {}", row_text(7));
+        assert_eq!(row_text(7), "blocked (1)", "group header under the agents label");
+        assert!(row_text(8).starts_with("◉ agent1"), "grouped entry row: {}", row_text(8));
+        // Panel labels render as LEADER chips (black on a filled secondary bg).
+        for y in [2u16, 6u16] {
+            let st = buf.cell((2, y)).unwrap().style();
+            assert!(st.bg.is_some(), "label chip carries a bg at y={y}");
+            assert_eq!(st.fg, Some(RColor::Black), "label chip text is black at y={y}");
+        }
     }
 
     #[test]
