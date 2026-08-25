@@ -314,11 +314,15 @@ terminals, it assembles the prompt):
   `blocked · done · running` with direct keyboard navigation to actionable
   panes (`leader+i` focuses the sidebar agent panel: `j`/`k` move, `Enter`
   jumps to the pane, `Esc`/`q` leave). The sidebar defaults to two stacked
-  panels — spaces on top, the agent panel below grouped by state with counts
-  (idle · unknown dimmed as a trailing section) — with the legacy two-tab
-  toggle one config key away (`[sidebar] layout = "tabs" | "divided"`).
-  Declarative view queries (filter/sort rules read live from config or
-  plugins) defer to 0.9.0 with the plugin system.
+  panels — **spaces** on top (sessions + branches), the **agent panel** below
+  grouped by state with counts (idle · unknown dimmed as a tail) and inline
+  `kind · space · pane` row labels — separated by a grey divider that starts
+  at the exact middle and drags to resize either panel (both scroll
+  independently). Clicking the panel's `grouped` descriptor flips it to the
+  classic rank-sorted workspace rows (and back); the legacy two-tab toggle
+  stays one config key away (`[sidebar] layout = "tabs" | "divided"`,
+  default `divided`). Declarative view queries (filter/sort rules read live
+  from config or plugins) defer to 0.9.0 with the plugin system.
 
 **Also in 0.7.0**:
 - **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one

@@ -31,10 +31,13 @@ the finish line for the configurable, persistent kumo.
 ## Next up
 
 - **0.7.0 — Agent breadth & AI polish**: lifecycle detection for `codex`,
-  `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; OSC 133 command-traceback
-  context sharing; broadcast prompt to agents (`leader+B`, fan one prompt to
-  every AI pane — replaces tmux sync-input); config file-watcher hot-reload
-  (deferred from 0.6.0).
+  `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; **agent inbox view** —
+  `leader+i` keyboard-routes to `blocked · done · running` agents, the sidebar
+  defaults to stacked spaces + agent panels (grouped sections, draggable grey
+  divider at the middle, `[sidebar] layout = "tabs"` restores the classic
+  two-tab sidebar); OSC 133 command-traceback context sharing; broadcast
+  prompt to agents (`leader+B`, fan one prompt to every AI pane — replaces
+  tmux sync-input); config file-watcher hot-reload (deferred from 0.6.0).
 - **0.8.0 — Stability**: signal hardening, stable CI, complete config docs +
   `kumo doctor` diagnostics (duplicate keymaps, invalid TOML), state-migration
   and `kill -9` crash-safety harness, published benchmarks with concrete targets
