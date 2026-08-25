@@ -30,6 +30,27 @@ and plays an audible chime — a distinct sound per event. Blocked agents also
 float to the top of the AGENTS list with a filled `◉` dot and a `· blocked`
 hint, and their pane glows orange even without focus.
 
+## Agent inbox
+
+<kbd>leader+i</kbd> moves the keyboard into the agent panel. `j`/`k` (or the
+arrows) move between the agents that need attention — **blocked · done ·
+running** — and <kbd>Enter</kbd> jumps straight to the chosen pane (switching
+session and tab as needed). <kbd>Esc</kbd> or <kbd>q</kbd> leaves the inbox.
+
+The sidebar's default layout stacks two panels with bold primary-color
+titles: **spaces** on top (sessions + branches), the **agent panel** below,
+grouped by state with counts — the grouped tail (idle · unknown) stays
+dimmed. Click the panel's right-hand `grouped` descriptor to switch it to
+the classic rank-sorted workspace rows (and back). Drag the divider between
+the panels to resize them (each side scrolls when the divider leaves less
+room than its content). The classic two-tab sidebar remains one config line
+away:
+
+```toml
+[sidebar]
+layout = "divided" # "tabs" | "divided"
+```
+
 ```toml
 [notifications]
 position = "top-right"  # top-left | bottom-right | bottom-left | center | off

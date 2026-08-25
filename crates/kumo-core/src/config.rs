@@ -138,6 +138,26 @@ impl BorderStyle {
     }
 }
 
+/// Sidebar layout: a two-tab toggle or two stacked panels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SidebarLayout {
+    /// Two stacked panels: spaces on top, agents below (default).
+    #[default]
+    Divided,
+    /// Toggle tabs (`sessions` / `agents`), one section at a time.
+    Tabs,
+}
+
+impl SidebarLayout {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "divided" | "stacked" => Some(Self::Divided),
+            "tabs" | "toggle" => Some(Self::Tabs),
+            _ => None,
+        }
+    }
+}
+
 /// Which sidebar sections are visible.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarSections {
@@ -170,6 +190,8 @@ pub struct SidebarConfig {
     pub order: Vec<SidebarSection>,
     pub sections: SidebarSections,
     pub borders: SidebarBorders,
+    /// How sidebar sections are arranged (stacked panels or toggle tabs).
+    pub layout: SidebarLayout,
 }
 
 impl Default for SidebarConfig {
@@ -178,6 +200,7 @@ impl Default for SidebarConfig {
             order: vec![SidebarSection::Sessions, SidebarSection::Agents],
             sections: SidebarSections::default(),
             borders: SidebarBorders::default(),
+            layout: SidebarLayout::Divided,
         }
     }
 }
@@ -651,6 +674,13 @@ impl Config {
                 }
             }
         }
+        if let Some(layout) = raw.layout {
+            if let Some(l) = SidebarLayout::parse(&layout) {
+                self.sidebar.layout = l;
+            } else {
+                log::warn!("kumo: ignoring invalid sidebar.layout {layout:?}");
+            }
+        }
         // Legacy flat keys for borders style
         // handled in from_map; toml is canonical.
     }
@@ -926,6 +956,7 @@ pub struct SidebarSectionRaw {
     pub order: Option<Vec<String>>,
     pub sections: Option<SidebarSectionsRaw>,
     pub borders: Option<SidebarBordersRaw>,
+    pub layout: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize, Debug)]
@@ -2273,6 +2304,23 @@ mod tests {
         assert_eq!(s.order, vec![SidebarSection::Sessions, SidebarSection::Agents]);
         assert!(s.sections.sessions && s.sections.agents);
         assert_eq!(s.borders.style, BorderStyle::Rounded);
+        assert_eq!(s.layout, SidebarLayout::Divided);
+    }
+
+    #[test]
+    fn sidebar_parses_layout() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-sidebar-layout");
+        let home = scratch_dir("home-sidebar-layout");
+        write(&cfg_dir.join("config.toml"), "[sidebar]\nlayout = \"tabs\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        assert_eq!(sidebar().layout, SidebarLayout::Tabs);
+        // Unknown values fall back to the default.
+        write(&cfg_dir.join("config.toml"), "[sidebar]\nlayout = \"fancy\"\n");
+        assert_eq!(sidebar().layout, SidebarLayout::Divided);
     }
 
     #[test]
