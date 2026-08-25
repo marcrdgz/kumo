@@ -4466,16 +4466,50 @@ impl View {
                         text(f, x + 4, y, third, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
                     } else {
                         let avail = max.saturating_sub(4) as usize;
-                        let label = if *status == AgentStatus::Blocked
-                            && third.chars().count() + " ·blocked".len() <= avail
-                        {
-                            format!("{third} ·blocked")
-                        } else if *status == AgentStatus::Done
-                            && third.chars().count() + " ·done".len() <= avail
-                        {
-                            format!("{third} ·done")
+                        // Grouped entries fit `kind · space · pane` inline (the
+                        // workspace and tab of the agent pane) when there is
+                        // room; the status suffix joins when it still fits.
+                        let label = if divided && self.agents_panel_order == AgentPanelOrder::Grouped {
+                            let (space, pane) = self
+                                .layout
+                                .as_ref()
+                                .and_then(|l| l.sessions.get(*i))
+                                .map(|s| {
+                                    let space = short_workspace(&s.workspace);
+                                    let pane = s
+                                        .tabs
+                                        .iter()
+                                        .find(|t| Self::find_layout_pane_in_tab(t, *pid).is_some())
+                                        .map(|t| t.name.clone())
+                                        .unwrap_or_default();
+                                    (space, pane)
+                                })
+                                .unwrap_or_default();
+                            let mut label = agent_entry_label(third, &space, &pane, avail);
+                            let suffix = match status {
+                                AgentStatus::Blocked => Some(" ·blocked"),
+                                AgentStatus::Done => Some(" ·done"),
+                                _ => None,
+                            };
+                            if let Some(sfx) = suffix {
+                                if label.chars().count() + sfx.chars().count() <= avail {
+                                    label.push_str(sfx);
+                                }
+                            }
+                            label
                         } else {
-                            third.clone()
+                            let label = if *status == AgentStatus::Blocked
+                                && third.chars().count() + " ·blocked".len() <= avail
+                            {
+                                format!("{third} ·blocked")
+                            } else if *status == AgentStatus::Done
+                                && third.chars().count() + " ·done".len() <= avail
+                            {
+                                format!("{third} ·done")
+                            } else {
+                                third.clone()
+                            };
+                            label
                         };
                         text(f, x + 4, y, &label, name_style, max.saturating_sub(4));
                     }
@@ -5672,6 +5706,29 @@ fn delete_word_forward(s: &str, cursor: usize) -> String {
     out
 }
 
+/// Compose a grouped agent entry label `kind · space · pane` within `avail`
+/// columns: pieces drop from the back (`pane`, then `space`) until it fits,
+/// and the kind is truncated as a last resort. Never longer than `avail`.
+fn agent_entry_label(kind: &str, space: &str, pane: &str, avail: usize) -> String {
+    let make = |parts: &[&str]| parts.join(" · ");
+    let full = make(&[kind, space, pane]);
+    if full.chars().count() <= avail {
+        return full;
+    }
+    let no_pane = make(&[kind, space]);
+    if no_pane.chars().count() <= avail {
+        return no_pane;
+    }
+    if kind.chars().count() <= avail {
+        return kind.to_string();
+    }
+    if avail < 2 {
+        return kind.chars().take(avail).collect();
+    }
+    let t: String = kind.chars().take(avail - 1).collect();
+    format!("{t}…")
+}
+
 /// Short display form of a worktree path for the picker, trimmed to `avail`.
 fn fit_worktree_path(path: &std::path::Path, avail: usize) -> String {
     let text = path.to_string_lossy();
@@ -6014,6 +6071,17 @@ mod tests {
     fn divided_sidebar_render_places_panel_rows() {
         let mut view = test_view();
         view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        // Short kind so the full `kind · space · pane` entry row fits the
+        // sidebar budget.
+        if let Some(LayoutNode::Pane(p)) = view
+            .layout
+            .as_mut()
+            .and_then(|l| l.sessions.first_mut())
+            .and_then(|s| s.tabs.first_mut())
+            .and_then(|t| t.root.as_deref_mut())
+        {
+            p.agent.as_mut().unwrap().name = "ai".into();
+        }
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
@@ -6037,7 +6105,12 @@ mod tests {
             "agents label after the divider: {agents_label:?}"
         );
         assert_eq!(row_text(14), "blocked (1)", "group header under the agents label");
-        assert!(row_text(15).starts_with("◉ agent1"), "grouped entry row: {}", row_text(15));
+        assert_eq!(
+            row_text(15),
+            "◉ ai · .../work · 1",
+            "grouped entry carries kind · space · pane: {}",
+            row_text(15)
+        );
         // Panel labels render in the primary color, bold, with no filled chip.
         for y in [2u16, 13u16] {
             let st = buf.cell((2, y)).unwrap().style();
@@ -6048,6 +6121,18 @@ mod tests {
             assert_ne!(st.fg, Some(RColor::Black), "panel labels are not LEADER-chipped at y={y}");
             assert!(st.add_modifier.contains(Modifier::BOLD), "panel labels are bold at y={y}");
         }
+    }
+
+    #[test]
+    fn agent_entry_label_fits_the_budget() {
+        // Full triple when it fits.
+        assert_eq!(agent_entry_label("opencode", "kumo", "1", 19), "opencode · kumo · 1");
+        // Pane drops first when the triple overflows.
+        assert_eq!(agent_entry_label("opencode", "dev/kumo", "1", 19), "opencode · dev/kumo");
+        // Then the space.
+        assert_eq!(agent_entry_label("opencode", "dev/kumo", "1", 10), "opencode");
+        // The kind is truncated as the last resort, never beyond `avail`.
+        assert_eq!(agent_entry_label("opencode", "dev/kumo", "1", 5), "open…");
     }
 
     #[test]
