@@ -4466,10 +4466,10 @@ impl View {
                         text(f, x + 4, y, third, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
                     } else {
                         let avail = max.saturating_sub(4) as usize;
-                        // Grouped entries fit `kind · space · pane` inline (the
-                        // workspace and tab of the agent pane) when there is
+                        // Agent entries fit `kind · space · pane` inline (the
+                        // session and tab of the agent pane) when there is
                         // room; the status suffix joins when it still fits.
-                        let label = if divided && self.agents_panel_order == AgentPanelOrder::Grouped {
+                        let label = if divided {
                             let (space, pane) = self
                                 .layout
                                 .as_ref()
@@ -6152,6 +6152,17 @@ mod tests {
         assert!(
             rows.iter().any(|r| matches!(r, SidebarRow::AgentDir(..))),
             "ranked ordering keeps workspace-dir rows"
+        );
+        // Ranked name rows carry the same space · pane inline label.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        // Ranked rows: the .../work dir row (y=14), then the name row (y=15).
+        let row: String = (0..24).map(|x| buf.cell((x, 15)).unwrap().symbol().to_string()).collect();
+        assert!(
+            row.trim().starts_with("◉ agent1 · sess · 1"),
+            "ranked entry carries the inline label: {row:?}"
         );
         // Click again to return to grouped.
         view.on_mouse(mouse_click(20, 13)).unwrap();
