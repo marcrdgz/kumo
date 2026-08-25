@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.7.0-prerelease.1
+
+### 🚀 Features
+
+- *(cli)* Add per-subcommand help and keep -h/-v top-level only
+- *(agents)* Five-state agent model (working · blocked · idle · done · unknown) (#4)
+- *(ui)* Agent inbox with divided sidebar panels (#5)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Allow cargo-dist dirty check for hand-edited release.yml
+
+### 💼 Other
+
+- *(ui)* Remove 1-cell separator between panes
+- *(roadmap)* Update 0.7.0
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Restrict release workflow to tags on main
 ## v0.6.0
 
 ### 🚀 Features
@@ -44,6 +64,7 @@
 
 - *(tabs)* Remove dead-code warnings
 - *(workspace)* Remove kumo-desktop and fix clippy warnings
+- Release 0.6.0
 ## v0.5.4
 
 ### 🐛 Bug Fixes
