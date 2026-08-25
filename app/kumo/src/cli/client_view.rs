@@ -3436,6 +3436,24 @@ impl View {
         }
     }
 
+    /// `(session name, tab name)` of the pane `pid` in session `i`, for the
+    /// inline agent row labels.
+    fn agent_pane_location(layout: Option<&Layout>, i: usize, pid: u64) -> (String, String) {
+        layout
+            .and_then(|l| l.sessions.get(i))
+            .map(|s| {
+                let space = s.name.clone();
+                let pane = s
+                    .tabs
+                    .iter()
+                    .find(|t| Self::find_layout_pane_in_tab(t, pid).is_some())
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                (space, pane)
+            })
+            .unwrap_or_default()
+    }
+
     /// Every AI-pane entry across all sessions, with its canonical sort key:
     /// `(rank, session_idx, pane_id, status, agent_name)`, ordered blocked →
     /// done → running → idle → unknown, then session, then pane.
@@ -4463,28 +4481,22 @@ impl View {
                     }
                     if is_dir {
                         let path_color = if focused { theme.fg } else { theme.panel_muted };
-                        text(f, x + 4, y, third, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
+                        // Ranked workspace rows lead with `space · pane`
+                        // instead of the workspace path.
+                        let label = if divided && self.agents_panel_order == AgentPanelOrder::Ranked {
+                            let (space, pane) = Self::agent_pane_location(self.layout.as_ref(), *i, *pid);
+                            agent_space_pane_label(&space, &pane, max.saturating_sub(4) as usize)
+                        } else {
+                            third.clone()
+                        };
+                        text(f, x + 4, y, &label, Style::default().fg(path_color).bg(bg), max.saturating_sub(4));
                     } else {
                         let avail = max.saturating_sub(4) as usize;
-                        // Agent entries fit `kind · space · pane` inline (the
+                        // Grouped entries fit `kind · space · pane` inline (the
                         // session and tab of the agent pane) when there is
                         // room; the status suffix joins when it still fits.
-                        let label = if divided {
-                            let (space, pane) = self
-                                .layout
-                                .as_ref()
-                                .and_then(|l| l.sessions.get(*i))
-                                .map(|s| {
-                                    let space = s.name.clone();
-                                    let pane = s
-                                        .tabs
-                                        .iter()
-                                        .find(|t| Self::find_layout_pane_in_tab(t, *pid).is_some())
-                                        .map(|t| t.name.clone())
-                                        .unwrap_or_default();
-                                    (space, pane)
-                                })
-                                .unwrap_or_default();
+                        let label = if divided && self.agents_panel_order == AgentPanelOrder::Grouped {
+                            let (space, pane) = Self::agent_pane_location(self.layout.as_ref(), *i, *pid);
                             let mut label = agent_entry_label(third, &space, &pane, avail);
                             let suffix = match status {
                                 AgentStatus::Blocked => Some(" ·blocked"),
@@ -5729,6 +5741,24 @@ fn agent_entry_label(kind: &str, space: &str, pane: &str, avail: usize) -> Strin
     format!("{t}…")
 }
 
+/// Compose a ranked workspace row label `space · pane` within `avail`
+/// columns: the pane drops first, the space truncates as a last resort.
+/// Never longer than `avail`.
+fn agent_space_pane_label(space: &str, pane: &str, avail: usize) -> String {
+    let full = format!("{space} · {pane}");
+    if full.chars().count() <= avail {
+        return full;
+    }
+    if space.chars().count() <= avail {
+        return space.to_string();
+    }
+    if avail < 2 {
+        return space.chars().take(avail).collect();
+    }
+    let t: String = space.chars().take(avail - 1).collect();
+    format!("{t}…")
+}
+
 /// Short display form of a worktree path for the picker, trimmed to `avail`.
 fn fit_worktree_path(path: &std::path::Path, avail: usize) -> String {
     let text = path.to_string_lossy();
@@ -6158,11 +6188,14 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Ranked rows: the .../work dir row (y=14), then the name row (y=15).
-        let row: String = (0..24).map(|x| buf.cell((x, 15)).unwrap().symbol().to_string()).collect();
+        // Ranked rows: the workspace row leads with `space · pane` (y=14),
+        // the name row below stays plain (y=15).
+        let dir_row: String = (0..24).map(|x| buf.cell((x, 14)).unwrap().symbol().to_string()).collect();
+        assert_eq!(dir_row.trim(), "sess · 1", "ranked workspace row: {dir_row:?}");
+        let name_row: String = (0..24).map(|x| buf.cell((x, 15)).unwrap().symbol().to_string()).collect();
         assert!(
-            row.trim().starts_with("◉ agent1 · sess · 1"),
-            "ranked entry carries the inline label: {row:?}"
+            name_row.trim().starts_with("◉ agent1"),
+            "ranked name row: {name_row:?}"
         );
         // Click again to return to grouped.
         view.on_mouse(mouse_click(20, 13)).unwrap();
