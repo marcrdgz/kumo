@@ -185,6 +185,8 @@ impl From<crate::daemon::agents::AgentStatus> for kumo_protocol::AgentStatus {
             crate::daemon::agents::AgentStatus::Working => kumo_protocol::AgentStatus::Working,
             crate::daemon::agents::AgentStatus::Blocked => kumo_protocol::AgentStatus::Blocked,
             crate::daemon::agents::AgentStatus::Idle => kumo_protocol::AgentStatus::Idle,
+            crate::daemon::agents::AgentStatus::Done => kumo_protocol::AgentStatus::Done,
+            crate::daemon::agents::AgentStatus::Unknown => kumo_protocol::AgentStatus::Unknown,
         }
     }
 }

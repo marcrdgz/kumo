@@ -3176,8 +3176,10 @@ impl View {
     fn agent_rank(status: AgentStatus) -> u8 {
         match status {
             AgentStatus::Blocked => 0,
-            AgentStatus::Working => 1,
-            AgentStatus::Idle => 2,
+            AgentStatus::Done => 1,
+            AgentStatus::Working => 2,
+            AgentStatus::Idle => 3,
+            AgentStatus::Unknown => 4,
         }
     }
 
@@ -3970,12 +3972,16 @@ impl View {
                     let status_color = match status {
                         AgentStatus::Working => theme.green,
                         AgentStatus::Blocked => theme.orange,
+                        AgentStatus::Done => theme.accent,
                         AgentStatus::Idle => theme.panel_muted,
+                        AgentStatus::Unknown => theme.red,
                     };
                     let dot = match status {
                         AgentStatus::Blocked => "◉",
+                        AgentStatus::Done => "✓",
                         AgentStatus::Working => self.spinner_char(),
                         AgentStatus::Idle => "●",
+                        AgentStatus::Unknown => "?",
                     };
                     let name_style = if *status == AgentStatus::Blocked {
                         Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
@@ -3999,6 +4005,10 @@ impl View {
                             && third.chars().count() + " ·blocked".len() <= avail
                         {
                             format!("{third} ·blocked")
+                        } else if *status == AgentStatus::Done
+                            && third.chars().count() + " ·done".len() <= avail
+                        {
+                            format!("{third} ·done")
                         } else {
                             third.clone()
                         };

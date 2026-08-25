@@ -556,8 +556,10 @@ fn print_session_list(sessions: &[kumo_protocol::SessionInfo]) {
             let line = if color {
                 let (r, g, b) = match agent.status {
                     kumo_protocol::AgentStatus::Blocked => (0xff, 0xb8, 0x4d),
+                    kumo_protocol::AgentStatus::Done => (0x56, 0xa8, 0xff),
                     kumo_protocol::AgentStatus::Working => (0x2e, 0xe0, 0x6b),
                     kumo_protocol::AgentStatus::Idle => (0x88, 0x88, 0x88),
+                    kumo_protocol::AgentStatus::Unknown => (0xff, 0x5f, 0x57),
                 };
                 format!("    {} · \x1b[38;2;{r};{g};{b}m{label}\x1b[0m", agent.name)
             } else {

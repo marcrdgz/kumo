@@ -206,9 +206,11 @@ impl App {
     /// Working status forever.
     ///
     /// Also raises an alert on the transitions the user cares about (Working
-    /// -> Blocked, Working -> Idle) — the audible chime and, when enabled,
-    /// a transient corner toast in every attached viewer. The chime and the
-    /// toast share one cooldown per pane so a status flickering between
+    /// -> Blocked, Working -> Done) — the audible chime and, when enabled,
+    /// a transient corner toast in every attached viewer. A finish that
+    /// happens while the pane is focused is instantly visible, so it stays
+    /// silent (Done only rises when the pane was not focused). The chime and
+    /// the toast share one cooldown per pane so a status flickering between
     /// Working and Blocked does not repeat.
     pub(super) fn refresh_agent_statuses(&mut self) {
         if self.last_status_refresh.elapsed() < STATUS_REFRESH {
@@ -220,11 +222,22 @@ impl App {
         let mut status_changed = false;
         // Transitions that passed the cooldown this tick; notifications are
         // raised after the loop because they need `&self` lookups.
-        let mut to_notify = Vec::new();        for (&pid, pane) in self.panes.iter_mut() {
+        let mut to_notify = Vec::new();
+        // Snapshot focus before `iter_mut` (focused panes are marked seen:
+        // a Done agent the user is looking at falls back to Idle).
+        let focused: Vec<(u64, bool)> = self
+            .panes
+            .keys()
+            .map(|&pid| (pid, self.pane_is_focused(pid)))
+            .collect();
+        for (&pid, pane) in self.panes.iter_mut() {
             if !pane.is_ai_cli() {
                 continue;
             }
-            let status = pane.agent_status();
+            let was_focused = focused.iter().find(|(id, _)| *id == pid).map(|(_, f)| *f).unwrap_or(false);
+            let raw = pane.agent_status();
+            let last = self.last_agent_status.get(&pid).copied();
+            let status = apply_seen(raw, last, was_focused);
             if self.agent_status_cache.get(&pid) != Some(&status) {
                 self.agent_status_cache.insert(pid, status);
                 status_changed = true;
@@ -238,8 +251,7 @@ impl App {
                 status_changed = true;
             }
             self.agent_proc_cache.insert(pid, metrics);
-            let old = self.last_agent_status.get(&pid).copied();
-            if let Some(kind) = old.and_then(|old| should_alert(old, status)) {
+            if let Some(kind) = last.and_then(|old| should_alert(old, status)) {
                 let cooled = self
                     .last_agent_alert
                     .get(&pid)
@@ -375,14 +387,31 @@ fn git_branch(ws: &std::path::Path) -> Option<BranchInfo> {
     name.map(|name| BranchInfo { name, ahead, behind })
 }
 
+/// Apply the done/seen rule to a raw detection: an `Idle` result counts as
+/// `Done` (finished-but-unseen) when the previous state was Working or Done
+/// AND the pane is not focused. Any non-idle raw result supersedes Done
+/// directly; focusing the pane between ticks marks it seen and drops it back
+/// to Idle.
+fn apply_seen(raw: AgentStatus, last: Option<AgentStatus>, focused: bool) -> AgentStatus {
+    match raw {
+        AgentStatus::Idle
+            if matches!(last, Some(AgentStatus::Working | AgentStatus::Done)) && !focused =>
+        {
+            AgentStatus::Done
+        }
+        other => other,
+    }
+}
+
 /// The alert a status transition deserves, if any. A Working agent that goes
-/// Blocked is waiting for an approval; one that falls back to Idle finished
-/// its task. All other transitions (including the very first observation,
-/// when `old` is absent) stay silent.
+/// Blocked is waiting for an approval; one that falls back to Done finished
+/// its task outside a focused pane (the toast announces done; a focused
+/// finish needs no alert). All other transitions (including the very first
+/// observation, when `old` is absent) stay silent.
 fn should_alert(old: AgentStatus, new: AgentStatus) -> Option<AlertKind> {
     match (old, new) {
         (AgentStatus::Working, AgentStatus::Blocked) => Some(AlertKind::Blocked),
-        (AgentStatus::Working, AgentStatus::Idle) => Some(AlertKind::Finished),
+        (AgentStatus::Working, AgentStatus::Done) => Some(AlertKind::Finished),
         _ => None,
     }
 }
@@ -475,9 +504,9 @@ mod tests {
     }
 
     #[test]
-    fn alerts_finished_when_working_agent_goes_idle() {
+    fn alerts_finished_when_working_agent_done_unseen() {
         assert_eq!(
-            should_alert(AgentStatus::Working, AgentStatus::Idle),
+            should_alert(AgentStatus::Working, AgentStatus::Done),
             Some(AlertKind::Finished)
         );
     }
@@ -489,6 +518,55 @@ mod tests {
         assert_eq!(should_alert(AgentStatus::Blocked, AgentStatus::Idle), None);
         assert_eq!(should_alert(AgentStatus::Idle, AgentStatus::Idle), None);
         assert_eq!(should_alert(AgentStatus::Working, AgentStatus::Working), None);
+        assert_eq!(should_alert(AgentStatus::Working, AgentStatus::Idle), None);
+        assert_eq!(should_alert(AgentStatus::Done, AgentStatus::Idle), None);
+        assert_eq!(should_alert(AgentStatus::Done, AgentStatus::Working), None);
+    }
+
+    #[test]
+    fn done_rises_when_working_agent_goes_idle_unfocused() {
+        assert_eq!(
+            apply_seen(AgentStatus::Idle, Some(AgentStatus::Working), false),
+            AgentStatus::Done
+        );
+    }
+
+    #[test]
+    fn done_persists_while_idle_and_unfocused() {
+        assert_eq!(
+            apply_seen(AgentStatus::Idle, Some(AgentStatus::Done), false),
+            AgentStatus::Done
+        );
+    }
+
+    #[test]
+    fn seen_done_drops_back_to_idle() {
+        assert_eq!(
+            apply_seen(AgentStatus::Idle, Some(AgentStatus::Done), true),
+            AgentStatus::Idle
+        );
+    }
+
+    #[test]
+    fn focused_finish_stays_idle() {
+        assert_eq!(
+            apply_seen(AgentStatus::Idle, Some(AgentStatus::Working), true),
+            AgentStatus::Idle
+        );
+    }
+
+    #[test]
+    fn never_working_agent_stays_idle() {
+        assert_eq!(apply_seen(AgentStatus::Idle, None, false), AgentStatus::Idle);
+        assert_eq!(apply_seen(AgentStatus::Idle, Some(AgentStatus::Blocked), false), AgentStatus::Idle);
+        assert_eq!(apply_seen(AgentStatus::Idle, Some(AgentStatus::Idle), false), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn non_idle_results_supersede_done() {
+        assert_eq!(apply_seen(AgentStatus::Working, Some(AgentStatus::Done), false), AgentStatus::Working);
+        assert_eq!(apply_seen(AgentStatus::Blocked, Some(AgentStatus::Done), false), AgentStatus::Blocked);
+        assert_eq!(apply_seen(AgentStatus::Unknown, Some(AgentStatus::Done), false), AgentStatus::Unknown);
     }
 
     #[test]

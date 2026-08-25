@@ -154,13 +154,29 @@ fn pane_count(session: &SessionLayout) -> usize {
         .sum()
 }
 
-fn agent_counts(session: Option<&SessionLayout>) -> (usize, usize, usize) {
+/// Agent-pane counts by lifecycle state, for the status bar widget. `done`
+/// (finished-but-unseen) and `unknown` (classification failed) roll up here
+/// alongside the traditional states.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+struct AgentCounts {
+    blocked: usize,
+    done: usize,
+    working: usize,
+    idle: usize,
+    unknown: usize,
+}
+
+impl AgentCounts {
+    fn total(self) -> usize {
+        self.blocked + self.done + self.working + self.idle + self.unknown
+    }
+}
+
+fn agent_counts(session: Option<&SessionLayout>) -> AgentCounts {
+    let mut counts = AgentCounts::default();
     let Some(s) = session else {
-        return (0, 0, 0);
+        return counts;
     };
-    let mut blocked = 0usize;
-    let mut working = 0usize;
-    let mut idle = 0usize;
     for tab in &s.tabs {
         let mut stack: Vec<&kumo_protocol::LayoutNode> = Vec::new();
         if let Some(root) = &tab.root {
@@ -171,9 +187,11 @@ fn agent_counts(session: Option<&SessionLayout>) -> (usize, usize, usize) {
                 kumo_protocol::LayoutNode::Pane(p) => {
                     if let Some(agent) = &p.agent {
                         match agent.status {
-                            kumo_protocol::AgentStatus::Blocked => blocked += 1,
-                            kumo_protocol::AgentStatus::Working => working += 1,
-                            kumo_protocol::AgentStatus::Idle => idle += 1,
+                            kumo_protocol::AgentStatus::Blocked => counts.blocked += 1,
+                            kumo_protocol::AgentStatus::Done => counts.done += 1,
+                            kumo_protocol::AgentStatus::Working => counts.working += 1,
+                            kumo_protocol::AgentStatus::Idle => counts.idle += 1,
+                            kumo_protocol::AgentStatus::Unknown => counts.unknown += 1,
                         }
                     }
                 }
@@ -184,7 +202,7 @@ fn agent_counts(session: Option<&SessionLayout>) -> (usize, usize, usize) {
             }
         }
     }
-    (blocked, working, idle)
+    counts
 }
 
 pub fn agent_spans(
@@ -193,42 +211,54 @@ pub fn agent_spans(
     theme: &OwnedTheme,
     spinner: &str,
 ) -> Option<Vec<Span<'static>>> {
-    let (blocked, working, idle) = agent_counts(session);
-    let total = blocked + working + idle;
-    if total == 0 {
+    let counts = agent_counts(session);
+    if counts.total() == 0 {
         return None;
     }
-    if cfg.only_blocked && blocked == 0 {
+    if cfg.only_blocked && counts.blocked == 0 && counts.done == 0 {
         return None;
     }
     match cfg.style {
         AgentWidgetStyle::Counts => {
             let mut segs: Vec<Vec<Span<'static>>> = Vec::new();
-            if blocked > 0 {
+            if counts.blocked > 0 {
                 segs.push(vec![
                     Span::styled("◉", Style::default().fg(theme.orange).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{blocked}"), Style::default().fg(theme.orange)),
+                    Span::styled(format!("{}", counts.blocked), Style::default().fg(theme.orange)),
                 ]);
             }
-            if !cfg.only_blocked && working > 0 {
+            if counts.done > 0 {
+                segs.push(vec![
+                    Span::styled("✓", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{}", counts.done), Style::default().fg(theme.accent)),
+                ]);
+            }
+            if !cfg.only_blocked && counts.working > 0 {
                 segs.push(vec![
                     Span::styled(spinner.to_string(), Style::default().fg(theme.green).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{working}"), Style::default().fg(theme.green)),
+                    Span::styled(format!("{}", counts.working), Style::default().fg(theme.green)),
                 ]);
             }
-            if !cfg.only_blocked && idle > 0 {
-                // Show idle only when it adds signal: hide idle when blocked/working dominate
-                // unless the bar is wide. For now show it when it is the only state.
-                if blocked == 0 && working == 0 {
+            if !cfg.only_blocked && counts.unknown > 0 {
+                segs.push(vec![
+                    Span::styled("?", Style::default().fg(theme.red).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{}", counts.unknown), Style::default().fg(theme.red)),
+                ]);
+            }
+            if !cfg.only_blocked && counts.idle > 0 {
+                // Show idle only when it adds signal: hide idle when
+                // blocked/done/working dominate unless the bar is wide. For
+                // now show it when it is the only state.
+                if counts.blocked == 0 && counts.working == 0 && counts.done == 0 {
                     segs.push(vec![
                         Span::styled("○", Style::default().fg(theme.panel_muted)),
-                        Span::styled(format!("{idle}"), Style::default().fg(theme.panel_muted)),
+                        Span::styled(format!("{}", counts.idle), Style::default().fg(theme.panel_muted)),
                     ]);
-                } else if idle > 0 && (blocked > 0 || working > 0) {
+                } else if counts.idle > 0 && (counts.blocked > 0 || counts.working > 0 || counts.done > 0) {
                     // Compact idle count (muted) alongside active counts.
                     segs.push(vec![
                         Span::styled("○", Style::default().fg(theme.panel_muted)),
-                        Span::styled(format!("{idle}"), Style::default().fg(theme.panel_muted)),
+                        Span::styled(format!("{}", counts.idle), Style::default().fg(theme.panel_muted)),
                     ]);
                 }
             }
@@ -247,18 +277,25 @@ pub fn agent_spans(
         }
         AgentWidgetStyle::Dots => {
             let mut s = String::new();
-            s.extend(std::iter::repeat_n('◉', blocked));
-            s.extend(std::iter::repeat_n(spinner.chars().next().unwrap_or('●'), working));
-            s.extend(std::iter::repeat_n('○', if cfg.only_blocked { 0 } else { idle }));
+            s.extend(std::iter::repeat_n('◉', counts.blocked));
+            s.extend(std::iter::repeat_n('✓', counts.done));
+            s.extend(std::iter::repeat_n(spinner.chars().next().unwrap_or('●'), if cfg.only_blocked { 0 } else { counts.working }));
+            s.extend(std::iter::repeat_n('○', if cfg.only_blocked { 0 } else { counts.idle }));
+            s.extend(std::iter::repeat_n('?', if cfg.only_blocked { 0 } else { counts.unknown }));
             if s.is_empty() {
                 return None;
             }
             // Color the whole run muted; per-dot coloring would need multiple spans.
-            // For dots we keep it simple: blocked dots orange, else green/muted via first status.
-            let fg = if blocked > 0 {
+            // For dots we keep it simple: blocked dots orange, done accent,
+            // else green/muted via the dominant state.
+            let fg = if counts.blocked > 0 {
                 theme.orange
-            } else if working > 0 {
+            } else if counts.done > 0 {
+                theme.accent
+            } else if counts.working > 0 {
                 theme.green
+            } else if counts.unknown > 0 {
+                theme.red
             } else {
                 theme.panel_muted
             };
@@ -277,8 +314,10 @@ pub fn agent_spans(
                             if let Some(agent) = &p.agent {
                                 let label = match agent.status {
                                     kumo_protocol::AgentStatus::Blocked => "blocked",
+                                    kumo_protocol::AgentStatus::Done => "done",
                                     kumo_protocol::AgentStatus::Working => "working",
                                     kumo_protocol::AgentStatus::Idle => "idle",
+                                    kumo_protocol::AgentStatus::Unknown => "unknown",
                                 };
                                 parts.push(format!("{}:{label}", agent.name));
                             }
@@ -289,7 +328,17 @@ pub fn agent_spans(
             }
             if parts.is_empty() { return None; }
             let text = parts.join(", ");
-            let fg = if blocked > 0 { theme.orange } else if working > 0 { theme.green } else { theme.panel_muted };
+            let fg = if counts.blocked > 0 {
+                theme.orange
+            } else if counts.done > 0 {
+                theme.accent
+            } else if counts.working > 0 {
+                theme.green
+            } else if counts.unknown > 0 {
+                theme.red
+            } else {
+                theme.panel_muted
+            };
             Some(vec![Span::styled(text, Style::default().fg(fg))])
         }
     }

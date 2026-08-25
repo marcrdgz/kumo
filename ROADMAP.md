@@ -218,13 +218,15 @@ drive kumo over the same JSON socket the CLI uses (`app/kumo/src/cli/cli.rs`,
 `crates/kumo-protocol`).
 
 **Agent state model v2**:
-- **Five states** — `working · blocked · idle · done · unknown`
+- ✅ **Five states** — `working · blocked · idle · done · unknown`
   (`app/kumo/src/daemon/agents/mod.rs`). `done` is *finished-but-unseen*: an
   agent that went idle while its pane/tab was not focused (it aligns with the
-  existing 0.6.0 `finished` toast channel). `unknown` is a recognized agent
-  whose classification failed. The Inbox (below) and the sidebar rollup key off
-  `done` — needing attention, not yet seen — and focusing a pane marks its
-  agent seen.
+  existing 0.6.0 `finished` toast channel — toasts now announce the unseen
+  finish; a focused finish stays silent). `unknown` is a recognized agent
+  whose classification failed (Idle is now proven by explicit per-agent idle
+  markers, not the no-signal fallback). The Inbox (below) and the sidebar
+  rollup key off `done` — needing attention, not yet seen — and focusing a
+  pane marks its agent seen.
 - **Lifecycle detection for `codex · gemini · qwen · aider · cody · swe · coco`**
   (today auto-listed, always idle): the same detection path (screen markers /
   OSC title spinner) promotes each to a **first-class state** instead of a

@@ -1140,6 +1140,13 @@ impl App {
         true
     }
 
+    /// Whether `pid` is the focused pane of the active session's active tab.
+    pub(crate) fn pane_is_focused(&self, pid: u64) -> bool {
+        self.sessions
+            .get(self.active)
+            .is_some_and(|s| s.active_tab().tree.focus == pid)
+    }
+
     /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from
     /// the cached process scan. Falls back to "AI CLI".
     fn agent_label(&self, pid: u64) -> String {
