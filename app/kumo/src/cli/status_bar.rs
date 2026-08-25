@@ -218,47 +218,52 @@ pub fn agent_spans(
     if cfg.only_blocked && counts.blocked == 0 && counts.done == 0 {
         return None;
     }
+    let fg_of = |status| {
+        let (r, g, b) = kumo_core::theme::agent_status_color(status);
+        RColor::Rgb(r, g, b)
+    };
     match cfg.style {
         AgentWidgetStyle::Counts => {
             let mut segs: Vec<Vec<Span<'static>>> = Vec::new();
             if counts.blocked > 0 {
                 segs.push(vec![
-                    Span::styled("◉", Style::default().fg(theme.orange).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{}", counts.blocked), Style::default().fg(theme.orange)),
+                    Span::styled("◉", Style::default().fg(fg_of(kumo_protocol::AgentStatus::Blocked)).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{}", counts.blocked), Style::default().fg(fg_of(kumo_protocol::AgentStatus::Blocked))),
                 ]);
             }
             if counts.done > 0 {
                 segs.push(vec![
-                    Span::styled("✓", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{}", counts.done), Style::default().fg(theme.accent)),
+                    Span::styled("✓", Style::default().fg(fg_of(kumo_protocol::AgentStatus::Done)).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{}", counts.done), Style::default().fg(fg_of(kumo_protocol::AgentStatus::Done))),
                 ]);
             }
             if !cfg.only_blocked && counts.working > 0 {
                 segs.push(vec![
-                    Span::styled(spinner.to_string(), Style::default().fg(theme.green).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{}", counts.working), Style::default().fg(theme.green)),
+                    Span::styled(spinner.to_string(), Style::default().fg(fg_of(kumo_protocol::AgentStatus::Working)).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{}", counts.working), Style::default().fg(fg_of(kumo_protocol::AgentStatus::Working))),
                 ]);
             }
             if !cfg.only_blocked && counts.unknown > 0 {
                 segs.push(vec![
-                    Span::styled("?", Style::default().fg(theme.red).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{}", counts.unknown), Style::default().fg(theme.red)),
+                    Span::styled("?", Style::default().fg(fg_of(kumo_protocol::AgentStatus::Unknown)).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{}", counts.unknown), Style::default().fg(fg_of(kumo_protocol::AgentStatus::Unknown))),
                 ]);
             }
             if !cfg.only_blocked && counts.idle > 0 {
+                let idle_fg = fg_of(kumo_protocol::AgentStatus::Idle);
                 // Show idle only when it adds signal: hide idle when
                 // blocked/done/working dominate unless the bar is wide. For
                 // now show it when it is the only state.
                 if counts.blocked == 0 && counts.working == 0 && counts.done == 0 {
                     segs.push(vec![
-                        Span::styled("○", Style::default().fg(theme.panel_muted)),
-                        Span::styled(format!("{}", counts.idle), Style::default().fg(theme.panel_muted)),
+                        Span::styled("○", Style::default().fg(idle_fg)),
+                        Span::styled(format!("{}", counts.idle), Style::default().fg(idle_fg)),
                     ]);
                 } else if counts.idle > 0 && (counts.blocked > 0 || counts.working > 0 || counts.done > 0) {
                     // Compact idle count (muted) alongside active counts.
                     segs.push(vec![
-                        Span::styled("○", Style::default().fg(theme.panel_muted)),
-                        Span::styled(format!("{}", counts.idle), Style::default().fg(theme.panel_muted)),
+                        Span::styled("○", Style::default().fg(idle_fg)),
+                        Span::styled(format!("{}", counts.idle), Style::default().fg(idle_fg)),
                     ]);
                 }
             }
@@ -286,18 +291,17 @@ pub fn agent_spans(
                 return None;
             }
             // Color the whole run muted; per-dot coloring would need multiple spans.
-            // For dots we keep it simple: blocked dots orange, done accent,
-            // else green/muted via the dominant state.
+            // For dots we keep it simple: use the fixed palette of the dominant state.
             let fg = if counts.blocked > 0 {
-                theme.orange
+                fg_of(kumo_protocol::AgentStatus::Blocked)
             } else if counts.done > 0 {
-                theme.accent
+                fg_of(kumo_protocol::AgentStatus::Done)
             } else if counts.working > 0 {
-                theme.green
+                fg_of(kumo_protocol::AgentStatus::Working)
             } else if counts.unknown > 0 {
-                theme.red
+                fg_of(kumo_protocol::AgentStatus::Unknown)
             } else {
-                theme.panel_muted
+                fg_of(kumo_protocol::AgentStatus::Idle)
             };
             Some(vec![Span::styled(s, Style::default().fg(fg))])
         }
@@ -329,15 +333,15 @@ pub fn agent_spans(
             if parts.is_empty() { return None; }
             let text = parts.join(", ");
             let fg = if counts.blocked > 0 {
-                theme.orange
+                fg_of(kumo_protocol::AgentStatus::Blocked)
             } else if counts.done > 0 {
-                theme.accent
+                fg_of(kumo_protocol::AgentStatus::Done)
             } else if counts.working > 0 {
-                theme.green
+                fg_of(kumo_protocol::AgentStatus::Working)
             } else if counts.unknown > 0 {
-                theme.red
+                fg_of(kumo_protocol::AgentStatus::Unknown)
             } else {
-                theme.panel_muted
+                fg_of(kumo_protocol::AgentStatus::Idle)
             };
             Some(vec![Span::styled(text, Style::default().fg(fg))])
         }

@@ -3969,12 +3969,9 @@ impl View {
                     if focused {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    let status_color = match status {
-                        AgentStatus::Working => theme.green,
-                        AgentStatus::Blocked => theme.orange,
-                        AgentStatus::Done => theme.accent,
-                        AgentStatus::Idle => theme.panel_muted,
-                        AgentStatus::Unknown => theme.red,
+                    let status_color = {
+                        let (r, g, b) = kumo_core::theme::agent_status_color(*status);
+                        RColor::Rgb(r, g, b)
                     };
                     let dot = match status {
                         AgentStatus::Blocked => "◉",
