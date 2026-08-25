@@ -4475,7 +4475,7 @@ impl View {
                                 .as_ref()
                                 .and_then(|l| l.sessions.get(*i))
                                 .map(|s| {
-                                    let space = short_workspace(&s.workspace);
+                                    let space = s.name.clone();
                                     let pane = s
                                         .tabs
                                         .iter()
@@ -6107,8 +6107,8 @@ mod tests {
         assert_eq!(row_text(14), "blocked (1)", "group header under the agents label");
         assert_eq!(
             row_text(15),
-            "◉ ai · .../work · 1",
-            "grouped entry carries kind · space · pane: {}",
+            "◉ ai · sess · 1",
+            "grouped entry carries kind · space (session) · pane: {}",
             row_text(15)
         );
         // Panel labels render in the primary color, bold, with no filled chip.
