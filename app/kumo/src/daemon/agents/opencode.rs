@@ -70,11 +70,15 @@ pub(crate) fn working(snap: &Snapshot) -> bool {
         || snap.footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
 }
 
-/// Markers of opencode's idle prompt box. The prompt bar is rendered as
-/// `Ask anything... ""` with a trailing `esc dismiss` hint. A bare `esc
-/// dismiss` only counts when the footer is the prompt bar — never when it
-/// leaks from a question dialog (see `question_dialog_visible`).
-const IDLE_MARKERS: &[&str] = &["ask anything"];
+/// Markers of opencode's idle prompt box: the `Ask anything...` placeholder
+/// and the keymap-hints row (`tab agents`/`ctrl+p commands`) pinned under the
+/// input bar while the agent is not running. The hints row persists once you
+/// type into the prompt (when the placeholder is replaced by your text), so a
+/// prompt waiting for Enter still classifies as idle instead of unknown. A
+/// bare `esc dismiss` only counts when it is the prompt bar, never a question
+/// dialog (see `question_dialog_visible`) — and `working` (`esc interrupt`
+/// footer) wins by precedence when the agent is mid-turn.
+const IDLE_MARKERS: &[&str] = &["ask anything", "tab agents", "ctrl+p commands"];
 
 /// Whether opencode is conclusively idle. This is NOT the fallback: a
 /// recognized agent with no marker at all reports `Unknown`, so the idle
@@ -162,6 +166,18 @@ mod tests {
     #[test]
     fn idle_on_ask_anything_prompt_box() {
         let s = snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "esc dismiss");
+        assert!(idle(&s));
+    }
+
+    #[test]
+    fn idle_when_typing_without_placeholder() {
+        // Typed input replaces "Ask anything..."; the keymap-hints row stays
+        // pinned under the input bar, so a prompt waiting for Enter is idle
+        // rather than unknown.
+        let s = snap(
+            "opencode 1.18.15\ntab agentsctrl+p commands\nwhy?",
+            "",
+        );
         assert!(idle(&s));
     }
 
