@@ -21,6 +21,7 @@ interface BuilderState {
   rows: Row[];
   aiCmd: string;
   shell: string;
+  sidebarLayout: 'divided' | 'tabs';
   updateCheck: boolean;
   position: Position;
   sound: boolean;
@@ -96,7 +97,13 @@ const ACTION_GROUPS: { label: string; actions: string[] }[] = [
   { label: 'chrome', actions: ['toggle-sidebar'] },
   {
     label: 'general',
-    actions: ['detach', 'show-keybinds', 'copy-mode', 'copy-mode-search'],
+    actions: [
+      'detach',
+      'show-keybinds',
+      'copy-mode',
+      'copy-mode-search',
+      'agent-inbox',
+    ],
   },
 ];
 
@@ -120,6 +127,7 @@ function initial(): BuilderState {
     rows: [{ id: 1, chord: 's', action: 'split-vertical' }],
     aiCmd: '',
     shell: '',
+    sidebarLayout: 'divided',
     updateCheck: true,
     position: 'top-right',
     sound: true,
@@ -184,11 +192,13 @@ function buildToml(b: BuilderState): Seg[][] {
     !b.sound ||
     !b.blocked ||
     !b.finished;
+  const sidebarChanged = b.sidebarLayout !== 'divided';
 
   const changed =
     leaderSet ||
     aiSet ||
     shellSet ||
+    sidebarChanged ||
     bindings.size > 0 ||
     !b.updateCheck ||
     notifChanged;
@@ -205,6 +215,11 @@ function buildToml(b: BuilderState): Seg[][] {
   if (shellSet) {
     table('terminal');
     kv('shell', b.shell.trim(), 'str');
+  }
+
+  if (sidebarChanged) {
+    table('sidebar');
+    kv('layout', b.sidebarLayout, 'str');
   }
 
   if (leaderSet) {
@@ -487,6 +502,27 @@ export function ConfigBuilder() {
               placeholder="$SHELL → /bin/zsh"
               className="h-8 w-full rounded-md border border-fd-border bg-transparent px-2 font-mono text-sm outline-none focus-visible:border-fd-primary"
             />
+          </Field>
+
+          <Field title="sidebar">
+            <div className="flex flex-wrap gap-1.5">
+              <Chip
+                active={st.sidebarLayout === 'divided'}
+                onClick={() => patch({ sidebarLayout: 'divided' })}
+              >
+                divided
+              </Chip>
+              <Chip
+                active={st.sidebarLayout === 'tabs'}
+                onClick={() => patch({ sidebarLayout: 'tabs' })}
+              >
+                tabs
+              </Chip>
+            </div>
+            <p className="text-xs text-fd-muted-foreground">
+              divided: stacked spaces + agent panels · tabs: classic two-tab
+              sidebar
+            </p>
           </Field>
 
           <Field title="startup">
