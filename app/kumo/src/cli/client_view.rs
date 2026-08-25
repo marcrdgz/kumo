@@ -28,7 +28,7 @@ use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
 use crate::cli::status_bar::{self, SlotContext};
-use kumo_core::config::{StatusBarConfig, StatusWidget, ToastPosition};
+use kumo_core::config::{SidebarLayout, StatusBarConfig, StatusWidget, ToastPosition};
 
 /// Width of the left sidebar (its last column is the separator).
 const SIDEBAR_WIDTH: u16 = 25;
@@ -91,11 +91,13 @@ fn dim_toward(c: RColor, bg: ColorRgb, palette: &[ColorRgb; 16], num: u32, den: 
     RColor::Rgb(mix(r, bg.r), mix(g, bg.g), mix(b, bg.b))
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum Mode {
     Normal,
     Leader,
     Copy,
+    /// Agent-inbox focus: the sidebar agent panel owns the keyboard.
+    Inbox,
 }
 
 #[derive(Clone)]
@@ -112,6 +114,29 @@ struct CopyState {
     search_query: Option<String>,
     hits: Vec<CopyHit>,
     hit_idx: Option<usize>,
+}
+
+/// Agent-inbox focus state (active while `Mode::Inbox`): the cursor into the
+/// actionable agent list (blocked · done · running).
+#[derive(Clone, Copy)]
+struct Inbox {
+    /// Index into the actionable list.
+    sel: usize,
+}
+
+/// Geometry of the divided sidebar layout (stacked spaces + agent panels),
+/// computed once per frame from the live layout.
+struct DividedPanels {
+    spaces_visible: bool,
+    agents_visible: bool,
+    spaces_items: Vec<SidebarRow>,
+    agents_items: Vec<SidebarRow>,
+    /// Rows of spaces content currently visible.
+    spaces_h: usize,
+    /// Rows of the agent panel currently visible (label + entries).
+    agents_h: usize,
+    /// Row of the agent panel label (`2` when the spaces panel is hidden).
+    agents_label_y: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -354,10 +379,17 @@ struct SplitDrag {
 }
 
 /// One sidebar row, shared by rendering and mouse hit-testing.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 enum SidebarRow {
     Header(String),
     Spacer,
+    /// A panel label row in the divided layout ("spaces" / "agents"), with an
+    /// optional right-aligned descriptor.
+    PanelLabel(String, Option<String>),
+    /// Agent state group header in the divided layout, with its count.
+    GroupHeader(AgentStatus, usize),
+    /// A muted placeholder line (e.g. the agents panel with no agents).
+    Dim(String),
     Session(usize),
     Branch(usize, WireBranch),
     AgentDir(usize, u64, String, AgentStatus),
@@ -411,6 +443,10 @@ pub struct View {
     /// per pane instead of one IPC frame per wheel tick.
     pending_wheel: HashMap<u64, Vec<u8>>,
     copy: Option<CopyState>,
+    /// Agent-inbox selection while `Mode::Inbox` is active.
+    inbox: Option<Inbox>,
+    /// Test-only override of the `[sidebar] layout` config.
+    sidebar_layout_override: Option<SidebarLayout>,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -586,6 +622,8 @@ impl View {
             pending_click: None,
             pending_wheel: HashMap::new(),
             copy: None,
+            inbox: None,
+            sidebar_layout_override: None,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -1213,6 +1251,10 @@ impl View {
             self.on_copy_key(key)?;
             return Ok(());
         }
+        if self.mode == Mode::Inbox {
+            self.on_inbox_key(key);
+            return Ok(());
+        }
 
         let leader = self.leader.is_leader(key);
         match self.mode {
@@ -1234,6 +1276,7 @@ impl View {
                 self.leader_command(key)?;
             }
             Mode::Copy => unreachable!("handled above"),
+            Mode::Inbox => unreachable!("handled above"),
         }
         Ok(())
     }
@@ -1249,6 +1292,7 @@ impl View {
             || self.pane_numbers.is_some()
             || self.mode == Mode::Leader
             || self.mode == Mode::Copy
+            || self.mode == Mode::Inbox
         {
             return;
         }
@@ -1397,6 +1441,7 @@ impl View {
             Action::ShowKeybinds => self.open_keybind_overlay(),
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
+            Action::AgentInbox => self.open_inbox(),
         }
         self.mark_dirty();
         Ok(())
@@ -1994,6 +2039,168 @@ impl View {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 // nothing extra; selection already synced on drag
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Agent inbox: keyboard focus of the sidebar agent panel
+    // ------------------------------------------------------------------
+
+    /// Actionable agent entries across every session — blocked · done ·
+    /// running — in the same order the sidebar lists them.
+    fn inbox_actionables(&self) -> Vec<(usize, u64, AgentStatus)> {
+        self.all_agent_entries()
+            .into_iter()
+            .filter(|(_, _, _, st, _)| matches!(st, AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Working))
+            .map(|(_, i, pid, status, _)| (i, pid, status))
+            .collect()
+    }
+
+    /// Enter the agent-inbox focus mode: the sidebar agent panel takes the
+    /// keyboard (`j`/`k` to move, `Enter` to focus the pane, `Esc` to leave).
+    fn open_inbox(&mut self) {
+        let cfg = kumo_core::config::sidebar();
+        let panel_ok = match cfg.layout {
+            SidebarLayout::Divided => cfg.sections.agents,
+            SidebarLayout::Tabs => cfg.sections.agents && self.visible_sidebar_tabs().contains(&SidebarTab::Agents),
+        };
+        if !panel_ok {
+            self.notice = Some(("the sidebar agent panel is hidden in the config".to_string(), Instant::now()));
+            self.mark_dirty();
+            return;
+        }
+        if self.inbox_actionables().is_empty() {
+            self.notice = Some(("no agents need attention".to_string(), Instant::now()));
+            self.mark_dirty();
+            return;
+        }
+        if !self.sidebar_open {
+            self.sidebar_open = true;
+            self.recompute_geometry();
+        }
+        if cfg.layout == SidebarLayout::Tabs {
+            self.sidebar_tab = SidebarTab::Agents;
+        }
+        self.mode = Mode::Inbox;
+        self.inbox = Some(Inbox { sel: 0 });
+        self.inbox_follow_selection();
+        self.mark_dirty();
+    }
+
+    fn close_inbox(&mut self) {
+        self.mode = Mode::Normal;
+        self.inbox = None;
+        self.mark_dirty();
+    }
+
+    /// Whether `(session_idx, pane_id)` is the selected inbox entry.
+    fn inbox_selected(&self, si: usize, pid: u64) -> bool {
+        if self.mode != Mode::Inbox {
+            return false;
+        }
+        let sel = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0);
+        self.inbox_actionables()
+            .get(sel)
+            .map(|(s, p, _)| *s == si && *p == pid)
+            .unwrap_or(false)
+    }
+
+    /// Keep the sidebar agent scroll positioned so the inbox cursor is
+    /// visible in the agent panel (either layout).
+    fn inbox_follow_selection(&mut self) {
+        let Some(inb) = self.inbox.as_ref() else { return };
+        let Some(&(si, pid, _)) = self.inbox_actionables().get(inb.sel) else { return };
+        let matches = |row: &SidebarRow| matches!(row, SidebarRow::AgentName(i, p, _, _) if *i == si && *p == pid);
+        match self.sidebar_layout() {
+            SidebarLayout::Tabs => {
+                let items = self.agents_content();
+                let shown = self.content_region_h() as usize;
+                let Some(idx) = items.iter().position(matches) else { return };
+                let max = items.len().saturating_sub(shown);
+                let cur = self.sidebar_scroll.1 as usize;
+                let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
+                self.sidebar_scroll.1 = target as u16;
+            }
+            SidebarLayout::Divided => {
+                let p = self.divided_panels();
+                if !p.agents_visible {
+                    return;
+                }
+                let shown = p.agents_h.saturating_sub(1);
+                let Some(idx) = p.agents_items.iter().position(matches) else { return };
+                let max = p.agents_items.len().saturating_sub(shown);
+                let cur = self.sidebar_scroll.1 as usize;
+                let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
+                self.sidebar_scroll.1 = target as u16;
+            }
+        }
+    }
+
+    /// Focus the pane behind the selected inbox entry (switching session/tab)
+    /// and leave the focus mode.
+    fn inbox_jump(&mut self) {
+        let sel = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0);
+        let Some(&(si, pid, _)) = self.inbox_actionables().get(sel) else {
+            self.close_inbox();
+            return;
+        };
+        let session = self.layout.as_ref().and_then(|l| l.sessions.get(si)).map(|s| s.name.clone());
+        if let Some(session) = session {
+            let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
+        }
+        self.close_inbox();
+    }
+
+    fn on_inbox_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+            self.close_inbox();
+            return;
+        }
+        let len = self.inbox_actionables().len();
+        if len == 0 {
+            self.close_inbox();
+            return;
+        }
+        let page = (self.content_region_h() as usize).max(3) - 1;
+        let cur = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0).min(len - 1);
+        let next = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => (cur + 1).min(len - 1),
+            KeyCode::Char('k') | KeyCode::Up => cur.saturating_sub(1),
+            KeyCode::PageDown => (cur + page).min(len - 1),
+            KeyCode::PageUp => cur.saturating_sub(page),
+            KeyCode::Home => 0,
+            KeyCode::End => len - 1,
+            KeyCode::Enter | KeyCode::Char('\n') => {
+                self.inbox_jump();
+                return;
+            }
+            _ => cur,
+        };
+        if let Some(inb) = self.inbox.as_mut() {
+            inb.sel = next;
+        }
+        self.inbox_follow_selection();
+        self.mark_dirty();
+    }
+
+    fn on_inbox_mouse(&mut self, m: MouseEvent) -> Result<()> {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Clicking an agent row jumps (sidebar_hit ends the focus
+                // mode); any other click just leaves.
+                if self.sidebar_open && m.column < SIDEBAR_WIDTH && self.sidebar_hit(m.column, m.row) {
+                    return Ok(());
+                }
+                self.close_inbox();
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let up = m.kind == MouseEventKind::ScrollUp;
+                if self.sidebar_open && self.sidebar_wheel(m.column, m.row, up) {
+                    self.inbox_follow_selection();
+                }
             }
             _ => {}
         }
@@ -2647,6 +2854,9 @@ impl View {
         if self.mode == Mode::Copy {
             return self.on_copy_mouse(m);
         }
+        if self.mode == Mode::Inbox {
+            return self.on_inbox_mouse(m);
+        }
         let x = m.column;
         let y = m.row;
         // Tab bar hover tracking (y==0) — update before click handling so close "x" appears
@@ -3143,6 +3353,9 @@ impl View {
     }
 
     fn tab_at(&self, x: u16, y: u16) -> Option<SidebarTab> {
+        if self.sidebar_layout() == SidebarLayout::Divided {
+            return None;
+        }
         if y != 2 || x >= SIDEBAR_WIDTH {
             return None;
         }
@@ -3183,26 +3396,93 @@ impl View {
         }
     }
 
-    fn agents_content(&self) -> Vec<SidebarRow> {
-        let mut out: Vec<(u8, usize, u64, SidebarRow)> = Vec::new();
+    /// Every AI-pane entry across all sessions, with its canonical sort key:
+    /// `(rank, session_idx, pane_id, status, agent_name)`, ordered blocked →
+    /// done → running → idle → unknown, then session, then pane.
+    fn all_agent_entries(&self) -> Vec<(u8, usize, u64, AgentStatus, String)> {
+        let mut out = Vec::new();
         if let Some(layout) = &self.layout {
             for (i, s) in layout.sessions.iter().enumerate() {
                 for (_, pane) in session_panes_all(s) {
                     if let Some(agent) = pane.agent.as_ref() {
                         if pane.is_ai {
-                            let status = agent.status;
-                            let rank = Self::agent_rank(status);
-                            let agent_name = agent.name.clone();
-                            let ws = short_workspace(&s.workspace);
-                            out.push((rank, i, pane.id, SidebarRow::AgentDir(i, pane.id, ws, status)));
-                            out.push((rank, i, pane.id, SidebarRow::AgentName(i, pane.id, agent_name, status)));
+                            out.push((Self::agent_rank(agent.status), i, pane.id, agent.status, agent.name.clone()));
                         }
                     }
                 }
             }
         }
-        out.sort_by_key(|(rank, i, pid, _)| (*rank, *i, *pid));
-        out.into_iter().map(|(_, _, _, row)| row).collect()
+        out.sort_by_key(|(rank, i, pid, _, _)| (*rank, *i, *pid));
+        out
+    }
+
+    fn agents_content(&self) -> Vec<SidebarRow> {
+        let mut out = Vec::new();
+        for (_, i, pid, status, name) in self.all_agent_entries() {
+            let ws = self
+                .layout
+                .as_ref()
+                .and_then(|l| l.sessions.get(i))
+                .map(|s| short_workspace(&s.workspace))
+                .unwrap_or_default();
+            out.push(SidebarRow::AgentDir(i, pid, ws, status));
+            out.push(SidebarRow::AgentName(i, pid, name, status));
+        }
+        out
+    }
+
+    /// Reserved minimum rows for the agent panel in the divided layout
+    /// (label + three rows), so a crowded spaces list never hides it.
+    const AGENTS_PANEL_RESERVE: usize = 4;
+
+    /// The [sidebar] layout the sidebar currently renders with.
+    fn sidebar_layout(&self) -> SidebarLayout {
+        self.sidebar_layout_override.unwrap_or_else(|| kumo_core::config::sidebar().layout)
+    }
+
+    /// Divided-layout panel geometry: the spaces panel shows what it needs up
+    /// to `AGENTS_PANEL_RESERVE`, the agent panel takes the rest.
+    fn divided_panel_heights(spaces_need: usize, avail: usize) -> (usize, usize) {
+        let spaces_h = spaces_need.min(avail.saturating_sub(Self::AGENTS_PANEL_RESERVE));
+        (spaces_h, avail.saturating_sub(spaces_h))
+    }
+
+    /// Divided-layout sidebar content: both panels' items and their geometry.
+    fn divided_panels(&self) -> DividedPanels {
+        let cfg = kumo_core::config::sidebar();
+        let spaces_visible = cfg.sections.sessions;
+        let agents_visible = cfg.sections.agents;
+        let spaces_items = if spaces_visible { self.sessions_content() } else { Vec::new() };
+        let agents_items = if agents_visible { self.agents_panel_items() } else { Vec::new() };
+        let avail = self.content_region_h() as usize;
+        let (spaces_h, agents_h) = Self::divided_panel_heights(spaces_items.len(), avail);
+        let agents_label_y = if spaces_visible { (3 + spaces_h) as u16 } else { 2 };
+        DividedPanels { spaces_visible, agents_visible, spaces_items, agents_items, spaces_h, agents_h, agents_label_y }
+    }
+
+    /// Grouped agent rows for the divided layout: state group headers with
+    /// counts (blocked · done · running), then a dimmed idle · unknown tail;
+    /// a placeholder line when no agent exists.
+    fn agents_panel_items(&self) -> Vec<SidebarRow> {
+        type AgentGroup = (AgentStatus, Vec<(usize, u64, String)>);
+        let mut out = Vec::new();
+        let mut groups: Vec<AgentGroup> = Vec::new();
+        for (_, i, pid, status, name) in self.all_agent_entries() {
+            match groups.last_mut() {
+                Some((st, v)) if *st == status => v.push((i, pid, name)),
+                _ => groups.push((status, vec![(i, pid, name)])),
+            }
+        }
+        for (status, entries) in groups {
+            out.push(SidebarRow::GroupHeader(status, entries.len()));
+            for (i, pid, name) in entries {
+                out.push(SidebarRow::AgentName(i, pid, name, status));
+            }
+        }
+        if out.is_empty() {
+            out.push(SidebarRow::Dim("no agents".to_string()));
+        }
+        out
     }
 
     fn effective_sidebar_tab(&self) -> SidebarTab {
@@ -3242,10 +3522,37 @@ impl View {
             (1, SidebarRow::Spacer),
         ];
         let region_h = self.content_region_h() as usize;
-        let items = self.active_tab_items();
-        let offset = (self.active_scroll() as usize).min(items.len().saturating_sub(region_h));
-        for (i, item) in items.iter().skip(offset).take(region_h).enumerate() {
-            out.push((3 + i as u16, item.clone()));
+        match self.sidebar_layout() {
+            SidebarLayout::Tabs => {
+                let items = self.active_tab_items();
+                let offset = (self.active_scroll() as usize).min(items.len().saturating_sub(region_h));
+                for (i, item) in items.iter().skip(offset).take(region_h).enumerate() {
+                    out.push((3 + i as u16, item.clone()));
+                }
+            }
+            SidebarLayout::Divided => {
+                let p = self.divided_panels();
+                if p.spaces_visible {
+                    out.push((2, SidebarRow::PanelLabel("spaces".to_string(), None)));
+                    let max = p.spaces_items.len().saturating_sub(p.spaces_h);
+                    let off = (self.sidebar_scroll.0 as usize).min(max);
+                    for (i, item) in p.spaces_items.iter().skip(off).take(p.spaces_h).enumerate() {
+                        out.push((3 + i as u16, item.clone()));
+                    }
+                }
+                if p.agents_visible {
+                    out.push((
+                        p.agents_label_y,
+                        SidebarRow::PanelLabel("agents".to_string(), Some("grouped".to_string())),
+                    ));
+                    let entries_shown = p.agents_h.saturating_sub(1);
+                    let max = p.agents_items.len().saturating_sub(entries_shown);
+                    let off = (self.sidebar_scroll.1 as usize).min(max);
+                    for (i, item) in p.agents_items.iter().skip(off).take(entries_shown).enumerate() {
+                        out.push((p.agents_label_y + 1 + i as u16, item.clone()));
+                    }
+                }
+            }
         }
         out
     }
@@ -3257,16 +3564,45 @@ impl View {
         if y < 3 || y > self.sidebar_footer_y() {
             return false;
         }
-        const STEP: u16 = 3;
-        let max = self.active_scroll_max();
-        let scroll = if up {
-            self.active_scroll().saturating_sub(STEP)
-        } else {
-            self.active_scroll().saturating_add(STEP).min(max)
-        };
-        self.set_active_scroll(scroll);
-        self.mark_dirty();
-        true
+        const STEP: usize = 3;
+        match self.sidebar_layout() {
+            SidebarLayout::Tabs => {
+                let max = self.active_scroll_max() as usize;
+                let scroll = if up {
+                    (self.active_scroll() as usize).saturating_sub(STEP)
+                } else {
+                    (self.active_scroll() as usize).saturating_add(STEP).min(max)
+                };
+                self.set_active_scroll(scroll as u16);
+                self.mark_dirty();
+                true
+            }
+            SidebarLayout::Divided => {
+                let p = self.divided_panels();
+                if p.agents_visible && y >= p.agents_label_y {
+                    let shown = p.agents_h.saturating_sub(1);
+                    let max = p.agents_items.len().saturating_sub(shown);
+                    let next = if up {
+                        (self.sidebar_scroll.1 as usize).saturating_sub(STEP)
+                    } else {
+                        (self.sidebar_scroll.1 as usize).saturating_add(STEP).min(max)
+                    };
+                    self.sidebar_scroll.1 = next as u16;
+                } else if p.spaces_visible {
+                    let max = p.spaces_items.len().saturating_sub(p.spaces_h);
+                    let next = if up {
+                        (self.sidebar_scroll.0 as usize).saturating_sub(STEP)
+                    } else {
+                        (self.sidebar_scroll.0 as usize).saturating_add(STEP).min(max)
+                    };
+                    self.sidebar_scroll.0 = next as u16;
+                } else {
+                    return false;
+                }
+                self.mark_dirty();
+                true
+            }
+        }
     }
 
     fn sidebar_hit(&mut self, x: u16, y: u16) -> bool {
@@ -3297,6 +3633,11 @@ impl View {
                     let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
                     if let Some(name) = name {
                         let _ = self.send(&Command::PaneFocus { session: name, pane_id: pid });
+                    }
+                    // A click while the inbox owns the keyboard ends the focus
+                    // mode (the jump replaces the cursor).
+                    if self.mode == Mode::Inbox {
+                        self.close_inbox();
                     }
                     return true;
                 }
@@ -3880,7 +4221,10 @@ impl View {
                 put(f, area.x + area.width, y, sep, Style::default().fg(theme.panel_sep));
             }
         }
-        self.render_tabs(f, area, w);
+        if self.sidebar_layout() == SidebarLayout::Tabs {
+            self.render_tabs(f, area, w);
+        }
+        let divided = self.sidebar_layout() == SidebarLayout::Divided;
         for (y, row) in self.sidebar_rows() {
             if y > area.y + area.height {
                 break;
@@ -3895,6 +4239,37 @@ impl View {
                 }
                 SidebarRow::Spacer => {
                     put(f, x, y, " ", Style::default().bg(RColor::Reset));
+                }
+                SidebarRow::PanelLabel(title, right) => {
+                    let style = Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD);
+                    text(f, x + 2, y, &title, style, max.saturating_sub(2));
+                    if let Some(right) = right {
+                        let rw = right.chars().count() as u16;
+                        if rw <= max.saturating_sub(2) {
+                            text(
+                                f,
+                                x + SIDEBAR_WIDTH.saturating_sub(1).saturating_sub(rw),
+                                y,
+                                &right,
+                                Style::default().fg(theme.panel_muted).bg(RColor::Reset),
+                                rw,
+                            );
+                        }
+                    }
+                }
+                SidebarRow::GroupHeader(status, count) => {
+                    let dim = matches!(status, AgentStatus::Idle | AgentStatus::Unknown);
+                    let (r, g, b) = kumo_core::theme::agent_status_color(status);
+                    let style = if dim {
+                        Style::default().fg(theme.panel_muted).bg(RColor::Reset)
+                    } else {
+                        Style::default().fg(RColor::Rgb(r, g, b)).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+                    };
+                    let label = format!("{} ({count})", status.label());
+                    text(f, x + 2, y, &label, style, max.saturating_sub(2));
+                }
+                SidebarRow::Dim(s) => {
+                    text(f, x + 2, y, &s, Style::default().fg(theme.panel_muted).bg(RColor::Reset), max.saturating_sub(2));
                 }
                 SidebarRow::Session(i) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
@@ -3964,15 +4339,21 @@ impl View {
                         .and_then(|l| l.sessions.get(*i))
                         .map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == *pid).unwrap_or(false))
                         .unwrap_or(false);
-                    let focused = session_active && pane_focused;
+                    let focused = (session_active && pane_focused) || self.inbox_selected(*i, *pid);
                     let bg = if focused { theme.panel_sep } else { RColor::Reset };
                     if focused {
                         fill(f, Rect::new(x, y, w, 1), bg);
+                    }
+                    if self.inbox_selected(*i, *pid) {
+                        put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
                     }
                     let status_color = {
                         let (r, g, b) = kumo_core::theme::agent_status_color(*status);
                         RColor::Rgb(r, g, b)
                     };
+                    // The divided layout dims the idle/unknown tail; the tabs
+                    // layout keeps its look for the same rows.
+                    let dim = divided && matches!(status, AgentStatus::Idle | AgentStatus::Unknown);
                     let dot = match status {
                         AgentStatus::Blocked => "◉",
                         AgentStatus::Done => "✓",
@@ -3980,13 +4361,16 @@ impl View {
                         AgentStatus::Idle => "●",
                         AgentStatus::Unknown => "?",
                     };
+                    let entry_color = if dim { theme.panel_muted } else { status_color };
                     let name_style = if *status == AgentStatus::Blocked {
-                        Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
+                        Style::default().fg(entry_color).bg(bg).add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(status_color).bg(bg)
+                        Style::default().fg(entry_color).bg(bg)
                     };
                     if !is_dir {
-                        let dot_style = if *status == AgentStatus::Idle {
+                        let dot_style = if dim {
+                            Style::default().fg(theme.panel_muted).bg(bg)
+                        } else if *status == AgentStatus::Idle {
                             Style::default().fg(status_color).bg(bg)
                         } else {
                             Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
@@ -4018,13 +4402,29 @@ impl View {
                 }
             }
         }
-        // Scrollbar (rightmost sidebar column) when the active tab overflows.
+        // Scrollbars (rightmost sidebar column): one per overflowing panel.
         let scroll_x = w.saturating_sub(1);
-        let region_h = self.content_region_h();
-        let items = self.active_tab_items();
-        if items.len() > region_h as usize {
-            let offset = (self.active_scroll() as usize).min(items.len() - region_h as usize);
-            draw_scrollbar(f, scroll_x, 3, region_h, offset, items.len(), &theme);
+        match self.sidebar_layout() {
+            SidebarLayout::Tabs => {
+                let region_h = self.content_region_h();
+                let items = self.active_tab_items();
+                if items.len() > region_h as usize {
+                    let offset = (self.active_scroll() as usize).min(items.len() - region_h as usize);
+                    draw_scrollbar(f, scroll_x, 3, region_h, offset, items.len(), &theme);
+                }
+            }
+            SidebarLayout::Divided => {
+                let p = self.divided_panels();
+                if p.spaces_visible && p.spaces_items.len() > p.spaces_h {
+                    let off = (self.sidebar_scroll.0 as usize).min(p.spaces_items.len() - p.spaces_h);
+                    draw_scrollbar(f, scroll_x, 3, p.spaces_h as u16, off, p.spaces_items.len(), &theme);
+                }
+                let entries_shown = p.agents_h.saturating_sub(1);
+                if p.agents_visible && p.agents_items.len() > entries_shown {
+                    let off = (self.sidebar_scroll.1 as usize).min(p.agents_items.len() - entries_shown);
+                    draw_scrollbar(f, scroll_x, p.agents_label_y + 1, entries_shown as u16, off, p.agents_items.len(), &theme);
+                }
+            }
         }
     }
 
@@ -5261,6 +5661,8 @@ mod tests {
             pending_click: None,
             pending_wheel: HashMap::new(),
             copy: None,
+            inbox: None,
+            sidebar_layout_override: None,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -5280,6 +5682,240 @@ mod tests {
     fn mouse_moved(x: u16, y: u16) -> crossterm::event::MouseEvent {
         use crossterm::event::MouseEventKind;
         MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ai_pane(pid: u64, status: AgentStatus) -> kumo_protocol::LayoutPane {
+        kumo_protocol::LayoutPane {
+            id: pid,
+            title: " AI CLI ".to_string(),
+            cwd: std::path::PathBuf::from("/tmp/work"),
+            is_ai: true,
+            agent: Some(kumo_protocol::AgentInfo { name: format!("agent{pid}"), status, cpu: 0.0, mem_kb: 0 }),
+            mouse_reporting: false,
+            alt_screen: false,
+        }
+    }
+
+    /// One session `sess` with all entries as panes in one tab (left-leaning
+    /// split chain, so every pane is found by the traversals).
+    fn panes_layout(entries: &[(u64, AgentStatus)]) -> Layout {
+        let mut root: Option<Box<LayoutNode>> = None;
+        for &(pid, status) in entries {
+            let leaf = LayoutNode::Pane(ai_pane(pid, status));
+            root = Some(match root.take() {
+                None => Box::new(leaf),
+                Some(a) => Box::new(LayoutNode::Split { id: pid, dir: SplitDir::Vertical, ratio: 0.5, a, b: Box::new(leaf) }),
+            });
+        }
+        let focus = entries.first().map(|(p, _)| *p).unwrap_or(1);
+        let tabs = vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus, zoom: false, root }];
+        Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp/work"),
+                active_tab: 0,
+                tabs,
+                focus,
+                zoom: false,
+                branch: None,
+                root: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn agents_panel_groups_by_state_in_order() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Working),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Idle),
+            (4, AgentStatus::Done),
+        ]));
+        let rows = view.agents_panel_items();
+        let heads: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::GroupHeader(st, n) => Some((*st, *n)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            vec![
+                (AgentStatus::Blocked, 1),
+                (AgentStatus::Done, 1),
+                (AgentStatus::Working, 1),
+                (AgentStatus::Idle, 1),
+            ]
+        );
+        let entries: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::AgentName(_, pid, _, _) => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entries, vec![2, 4, 1, 3], "entries follow group order");
+        assert!(
+            rows.iter().all(|r| !matches!(r, SidebarRow::AgentDir(..))),
+            "grouped panel has no workspace-dir rows"
+        );
+    }
+
+    #[test]
+    fn agents_panel_placeholder_when_no_agents() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[]));
+        assert_eq!(view.agents_panel_items(), vec![SidebarRow::Dim("no agents".to_string())]);
+    }
+
+    #[test]
+    fn inbox_lists_only_actionable_states() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Idle),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Working),
+            (4, AgentStatus::Done),
+            (5, AgentStatus::Unknown),
+        ]));
+        assert_eq!(
+            view.inbox_actionables(),
+            vec![(0, 2, AgentStatus::Blocked), (0, 4, AgentStatus::Done), (0, 3, AgentStatus::Working)]
+        );
+    }
+
+    #[test]
+    fn open_inbox_with_nothing_actionable_notes() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        view.open_inbox();
+        assert_eq!(view.mode, Mode::Normal);
+        assert!(view.notice.is_some(), "notice shown when nothing actionable");
+    }
+
+    #[test]
+    fn inbox_keyboard_moves_and_enter_jumps() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Working)]));
+        view.open_inbox();
+        assert_eq!(view.mode, Mode::Inbox);
+        assert_eq!(view.inbox.unwrap().sel, 0);
+        view.on_inbox_key(key(KeyCode::Char('j')));
+        assert_eq!(view.inbox.unwrap().sel, 1);
+        view.on_inbox_key(key(KeyCode::Char('j')));
+        assert_eq!(view.inbox.unwrap().sel, 1, "clamps at the end");
+        view.on_inbox_key(key(KeyCode::Char('k')));
+        assert_eq!(view.inbox.unwrap().sel, 0);
+        view.on_inbox_key(key(KeyCode::Char('j')));
+        view.on_inbox_key(key(KeyCode::Home));
+        assert_eq!(view.inbox.unwrap().sel, 0, "Home returns to the first entry");
+        // Enter focuses the pane and leaves the focus mode.
+        view.on_inbox_key(key(KeyCode::Enter));
+        assert_eq!(view.mode, Mode::Normal);
+        assert!(view.inbox.is_none(), "inbox closed after jump");
+    }
+
+    #[test]
+    fn inbox_esc_and_q_close() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        view.open_inbox();
+        view.on_inbox_key(key(KeyCode::Esc));
+        assert_eq!(view.mode, Mode::Normal);
+        view.open_inbox();
+        view.on_inbox_key(key(KeyCode::Char('q')));
+        assert_eq!(view.mode, Mode::Normal);
+        assert!(view.inbox.is_none());
+    }
+
+    #[test]
+    fn divided_sidebar_stacks_panels() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        let rows = view.sidebar_rows();
+        let labels: Vec<_> = rows
+            .iter()
+            .filter_map(|(y, r)| match r {
+                SidebarRow::PanelLabel(t, right) => Some((*y, t.clone(), right.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels.len(), 2, "both panels labeled");
+        assert_eq!(labels[0], (2, "spaces".to_string(), None));
+        // spaces shows Session + NEW SESSION (2 rows), so agents label lands at 5.
+        assert_eq!(labels[1], (5, "agents".to_string(), Some("grouped".to_string())));
+        assert!(
+            rows.iter().any(|(y, r)| *y == 3 && matches!(r, SidebarRow::Session(0))),
+            "spaces content first"
+        );
+        assert!(rows.iter().any(|(_, r)| matches!(r, SidebarRow::NewSession)));
+        assert!(
+            rows.iter().any(|(y, r)| *y == 6 && matches!(r, SidebarRow::GroupHeader(AgentStatus::Blocked, 1))),
+            "group header under the agents label"
+        );
+        assert!(
+            rows.iter().any(|(y, r)| *y == 7 && matches!(r, SidebarRow::AgentName(0, 1, _, AgentStatus::Blocked))),
+            "entry follows its group header"
+        );
+    }
+
+    #[test]
+    fn divided_sidebar_render_places_panel_rows() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..24)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(row_text(2), "spaces", "spaces label at the old tabs row");
+        assert!(row_text(3).contains("sess"), "session row under spaces");
+        let agents_label = row_text(5);
+        assert!(
+            agents_label.starts_with("agents") && agents_label.contains("grouped"),
+            "agents label after the spaces panel: {agents_label:?}"
+        );
+        assert_eq!(row_text(6), "blocked (1)", "group header under the agents label");
+        assert!(row_text(7).starts_with("◉ agent1"), "grouped entry row: {}", row_text(7));
+    }
+
+    #[test]
+    fn tabs_layout_rows_keep_legacy_structure() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Tabs);
+        view.sidebar_tab = SidebarTab::Agents;
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Working)]));
+        let rows = view.sidebar_rows();
+        assert!(
+            rows.iter().all(|(_, r)| !matches!(r, SidebarRow::PanelLabel(..))),
+            "tabs layout renders no panel labels"
+        );
+        let entries: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, r)| match r {
+                SidebarRow::AgentName(_, pid, _, _) => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entries, vec![1, 2], "rank order (blocked first)");
+        assert_eq!(
+            rows.iter().filter(|(_, r)| matches!(r, SidebarRow::AgentDir(..))).count(),
+            2,
+            "workspace-dir rows kept"
+        );
     }
 
     /// Hovering the MENU dropdown or the context menu must move the selection

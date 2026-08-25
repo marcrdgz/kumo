@@ -89,6 +89,7 @@ pub(crate) enum Action {
     ShowKeybinds,
     EnterCopyMode,
     EnterCopyModeSearch,
+    AgentInbox,
 }
 
 /// Logical group a binding belongs to, used to organize the showcase.
@@ -221,6 +222,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('/')), keys: "/", desc: "search forward in scrollback (copy-mode)", group: Group::Panes, action: Action::EnterCopyModeSearch },
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
+    BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "focus the agent inbox (blocked · done · running)", group: Group::General, action: Action::AgentInbox },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
 ];
 
@@ -364,6 +366,7 @@ pub(crate) fn action_id(action: Action) -> &'static str {
         Action::ShowKeybinds => "show-keybinds",
         Action::EnterCopyMode => "copy-mode",
         Action::EnterCopyModeSearch => "copy-mode-search",
+        Action::AgentInbox => "agent-inbox",
     }
 }
 
@@ -419,6 +422,7 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "show-keybinds" => Action::ShowKeybinds,
         "copy-mode" | "enter-copy-mode" => Action::EnterCopyMode,
         "copy-mode-search" | "copy-search" => Action::EnterCopyModeSearch,
+        "agent-inbox" | "focus-agent-inbox" => Action::AgentInbox,
         _ => return None,
     })
 }
@@ -451,6 +455,7 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::ShowKeybinds => "show all keybindings",
         Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
         Action::EnterCopyModeSearch => "search forward (enter copy-mode)",
+        Action::AgentInbox => "focus the agent inbox (blocked · done · running)",
     }
 }
 
@@ -468,7 +473,7 @@ pub(crate) fn action_group(action: Action) -> Group {
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
         | Action::JumpSession(_) => Group::Sessions,
         Action::ToggleSidebar => Group::Chrome,
-        Action::Detach | Action::ShowKeybinds => Group::General,
+        Action::Detach | Action::ShowKeybinds | Action::AgentInbox => Group::General,
     }
 }
 

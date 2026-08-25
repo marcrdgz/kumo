@@ -310,10 +310,15 @@ terminals, it assembles the prompt):
   execution, enabling single-command rollbacks (`kumo rollback`); inside a
   worktree the rollback is a branch switch, not a surgical rebase.
 
-**Agent Inbox View** (on the v2 state model): one unified tab aggregating
-`blocked · done · running` with direct keyboard navigation to actionable panes.
-Declarative view queries (filter/sort rules read live from config or plugins)
-defer to 0.9.0 with the plugin system.
+- ✅ **Agent Inbox View** (on the v2 state model): one unified tab aggregating
+  `blocked · done · running` with direct keyboard navigation to actionable
+  panes (`leader+i` focuses the sidebar agent panel: `j`/`k` move, `Enter`
+  jumps to the pane, `Esc`/`q` leave). The sidebar defaults to two stacked
+  panels — spaces on top, the agent panel below grouped by state with counts
+  (idle · unknown dimmed as a trailing section) — with the legacy two-tab
+  toggle one config key away (`[sidebar] layout = "tabs" | "divided"`).
+  Declarative view queries (filter/sort rules read live from config or
+  plugins) defer to 0.9.0 with the plugin system.
 
 **Also in 0.7.0**:
 - **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
