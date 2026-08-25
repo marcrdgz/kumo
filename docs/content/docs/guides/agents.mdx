@@ -37,12 +37,14 @@ arrows) move between the agents that need attention — **blocked · done ·
 running** — and <kbd>Enter</kbd> jumps straight to the chosen pane (switching
 session and tab as needed). <kbd>Esc</kbd> or <kbd>q</kbd> leaves the inbox.
 
-The sidebar's default layout stacks two panels: **spaces** on top
-(sessions + branches) with LEADER-chip titles, the **agent panel** below,
+The sidebar's default layout stacks two panels with bold primary-color
+titles: **spaces** on top (sessions + branches), the **agent panel** below,
 grouped by state with counts — the grouped tail (idle · unknown) stays
-dimmed. Drag the divider between them to resize the panels (each side
-scrolls when the divider leaves less room than its content). The classic
-two-tab sidebar remains one config line away:
+dimmed. Click the panel's right-hand `grouped` descriptor to switch it to
+the classic rank-sorted workspace rows (and back). Drag the divider between
+the panels to resize them (each side scrolls when the divider leaves less
+room than its content). The classic two-tab sidebar remains one config line
+away:
 
 ```toml
 [sidebar]

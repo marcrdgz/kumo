@@ -148,6 +148,15 @@ struct SidebarDrag {
     start_split: u16,
 }
 
+/// Ordering style of the agent panel in the divided sidebar: state-grouped
+/// sections or the classic rank-sorted workspace rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum AgentPanelOrder {
+    #[default]
+    Grouped,
+    Ranked,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarTab {
     Sessions,
@@ -463,6 +472,8 @@ pub struct View {
     sidebar_split: Option<u16>,
     /// In-flight divider drag (divided layout).
     sidebar_drag: Option<SidebarDrag>,
+    /// Sorting of the agent panel (divided layout); toggled by its label.
+    agents_panel_order: AgentPanelOrder,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -642,6 +653,7 @@ impl View {
             sidebar_layout_override: None,
             sidebar_split: None,
             sidebar_drag: None,
+            agents_panel_order: AgentPanelOrder::default(),
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -3498,10 +3510,14 @@ impl View {
         DividedPanels { spaces_visible, agents_visible, spaces_items, agents_items, spaces_h, agents_h, divider_y, agents_label_y }
     }
 
-    /// Grouped agent rows for the divided layout: state group headers with
-    /// counts (blocked · done · running), then a dimmed idle · unknown tail;
-    /// a placeholder line when no agent exists.
+    /// Agent rows for the divided layout. Grouped: state sections with counts
+    /// (blocked · done · running) and a dimmed idle · unknown tail. Ranked:
+    /// the classic rank-sorted workspace rows. Both fall back to a placeholder
+    /// line when no agent exists.
     fn agents_panel_items(&self) -> Vec<SidebarRow> {
+        if self.agents_panel_order == AgentPanelOrder::Ranked {
+            return self.agents_content();
+        }
         type AgentGroup = (AgentStatus, Vec<(usize, u64, String)>);
         let mut out = Vec::new();
         let mut groups: Vec<AgentGroup> = Vec::new();
@@ -3582,9 +3598,13 @@ impl View {
                     out.push((p.divider_y, SidebarRow::Divider));
                 }
                 if p.agents_visible {
+                    let desc = match self.agents_panel_order {
+                        AgentPanelOrder::Grouped => "grouped",
+                        AgentPanelOrder::Ranked => "ranked",
+                    };
                     out.push((
                         p.agents_label_y,
-                        SidebarRow::PanelLabel("agents".to_string(), Some("grouped".to_string())),
+                        SidebarRow::PanelLabel("agents".to_string(), Some(desc.to_string())),
                     ));
                     let max = p.agents_items.len().saturating_sub(p.agents_h);
                     let off = (self.sidebar_scroll.1 as usize).min(max);
@@ -3680,6 +3700,21 @@ impl View {
                         self.close_inbox();
                     }
                     return true;
+                }
+                SidebarRow::PanelLabel(title, Some(right)) if title == "agents" => {
+                    // Clicking the right-hand sort descriptor toggles the
+                    // agent panel between grouped and ranked ordering.
+                    let rw = right.chars().count() as u16;
+                    let max_r = SIDEBAR_WIDTH.saturating_sub(1).max(1);
+                    if x >= max_r.saturating_sub(rw) && x < max_r {
+                        self.agents_panel_order = match self.agents_panel_order {
+                            AgentPanelOrder::Grouped => AgentPanelOrder::Ranked,
+                            AgentPanelOrder::Ranked => AgentPanelOrder::Grouped,
+                        };
+                        self.mark_dirty();
+                        return true;
+                    }
+                    return false;
                 }
                 SidebarRow::NewSession => {
                     self.open_session_popup();
@@ -4290,23 +4325,13 @@ impl View {
                     put(f, x, y, " ", Style::default().bg(RColor::Reset));
                 }
                 SidebarRow::PanelLabel(title, right) => {
-                    // LEADER-chip style: black on secondary, bold.
-                    let chip_bg = theme.secondary;
-                    let chip = Style::default().fg(RColor::Black).bg(chip_bg).add_modifier(Modifier::BOLD);
-                    let chip_w = w.saturating_sub(1).max(1);
-                    fill(f, Rect::new(x, y, chip_w, 1), chip_bg);
-                    text(f, x + 2, y, &title, chip, max.saturating_sub(2));
+                    let style = Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD);
+                    text(f, x + 2, y, &title, style, max.saturating_sub(2));
                     if let Some(right) = right {
                         let rw = right.chars().count() as u16;
-                        if rw <= chip_w.saturating_sub(2) {
-                            text(
-                                f,
-                                x + chip_w.saturating_sub(rw),
-                                y,
-                                &right,
-                                Style::default().fg(RColor::Black).bg(chip_bg),
-                                rw,
-                            );
+                        let max_r = w.saturating_sub(1).max(1);
+                        if rw <= max_r.saturating_sub(2) {
+                            text(f, x + max_r.saturating_sub(rw), y, &right, style, rw);
                         }
                     }
                 }
@@ -4416,9 +4441,11 @@ impl View {
                         let (r, g, b) = kumo_core::theme::agent_status_color(*status);
                         RColor::Rgb(r, g, b)
                     };
-                    // The divided layout dims the idle/unknown tail; the tabs
-                    // layout keeps its look for the same rows.
-                    let dim = divided && matches!(status, AgentStatus::Idle | AgentStatus::Unknown);
+                    // The grouped panel dims the idle/unknown tail; the ranked
+                    // panel (and the tabs layout) keep their look.
+                    let dim = divided
+                        && self.agents_panel_order == AgentPanelOrder::Grouped
+                        && matches!(status, AgentStatus::Idle | AgentStatus::Unknown);
                     let dot = match status {
                         AgentStatus::Blocked => "◉",
                         AgentStatus::Done => "✓",
@@ -5730,6 +5757,7 @@ mod tests {
             sidebar_layout_override: None,
             sidebar_split: None,
             sidebar_drag: None,
+            agents_panel_order: AgentPanelOrder::default(),
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -5749,6 +5777,15 @@ mod tests {
     fn mouse_moved(x: u16, y: u16) -> crossterm::event::MouseEvent {
         use crossterm::event::MouseEventKind;
         MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE }
+    }
+
+    fn mouse_click(x: u16, y: u16) -> crossterm::event::MouseEvent {
+        MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -6004,12 +6041,39 @@ mod tests {
         );
         assert_eq!(row_text(7), "blocked (1)", "group header under the agents label");
         assert!(row_text(8).starts_with("◉ agent1"), "grouped entry row: {}", row_text(8));
-        // Panel labels render as LEADER chips (black on a filled secondary bg).
+        // Panel labels render in the primary color, bold, with no filled chip.
         for y in [2u16, 6u16] {
             let st = buf.cell((2, y)).unwrap().style();
-            assert!(st.bg.is_some(), "label chip carries a bg at y={y}");
-            assert_eq!(st.fg, Some(RColor::Black), "label chip text is black at y={y}");
+            assert!(
+                st.bg.is_none() || st.bg == Some(RColor::Reset),
+                "panel labels carry no filled bg at y={y}"
+            );
+            assert_ne!(st.fg, Some(RColor::Black), "panel labels are not LEADER-chipped at y={y}");
+            assert!(st.add_modifier.contains(Modifier::BOLD), "panel labels are bold at y={y}");
         }
+    }
+
+    #[test]
+    fn agents_panel_order_toggles_on_label_click() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        assert_eq!(view.agents_panel_order, AgentPanelOrder::Grouped);
+        assert!(view.agents_panel_items().iter().any(|r| matches!(r, SidebarRow::GroupHeader(..))));
+        // Click the sort descriptor on the agents label row (y=6).
+        view.on_mouse(mouse_click(20, 6)).unwrap();
+        assert_eq!(view.agents_panel_order, AgentPanelOrder::Ranked);
+        let rows = view.agents_panel_items();
+        assert!(
+            rows.iter().all(|r| !matches!(r, SidebarRow::GroupHeader(..))),
+            "ranked ordering shows no state headers"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(r, SidebarRow::AgentDir(..))),
+            "ranked ordering keeps workspace-dir rows"
+        );
+        // Click again to return to grouped.
+        view.on_mouse(mouse_click(20, 6)).unwrap();
+        assert_eq!(view.agents_panel_order, AgentPanelOrder::Grouped);
     }
 
     #[test]
