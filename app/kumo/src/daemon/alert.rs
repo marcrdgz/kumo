@@ -1,7 +1,7 @@
 /// Audible alerts for agent lifecycle transitions.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AlertKind {
-    /// The agent finished its task (Working -> Idle).
+    /// The agent finished its task unseen (Working -> Done).
     Finished,
     /// The agent is blocked waiting for an approval (Working -> Blocked).
     Blocked,
