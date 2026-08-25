@@ -525,3 +525,24 @@ pub fn wire_to_owned(w: kumo_protocol::WireTheme) -> OwnedTheme {
         input_bg: triplet_to_rcolor(w.input_bg),
     }
 }
+
+/// Agent-status chrome colors (Tailwind palette), fixed across themes so the
+/// status dots of every kumo surface read identically:
+/// working blue, blocked amber, idle grey, done green, unknown violet.
+pub const AGENT_WORKING: (u8, u8, u8) = (0x3b, 0x82, 0xf6);
+pub const AGENT_BLOCKED: (u8, u8, u8) = (0xf5, 0x9e, 0x0b);
+pub const AGENT_IDLE: (u8, u8, u8) = (0x6b, 0x72, 0x80);
+pub const AGENT_DONE: (u8, u8, u8) = (0x10, 0xb9, 0x81);
+pub const AGENT_UNKNOWN: (u8, u8, u8) = (0x8b, 0x5c, 0xf6);
+
+/// The fixed RGB color of an agent status. Shared by the TUI chrome (sidebar,
+/// status bar) and the CLI so every surface uses the same palette.
+pub fn agent_status_color(status: kumo_protocol::AgentStatus) -> (u8, u8, u8) {
+    match status {
+        kumo_protocol::AgentStatus::Working => AGENT_WORKING,
+        kumo_protocol::AgentStatus::Blocked => AGENT_BLOCKED,
+        kumo_protocol::AgentStatus::Idle => AGENT_IDLE,
+        kumo_protocol::AgentStatus::Done => AGENT_DONE,
+        kumo_protocol::AgentStatus::Unknown => AGENT_UNKNOWN,
+    }
+}

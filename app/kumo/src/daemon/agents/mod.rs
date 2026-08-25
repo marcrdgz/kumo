@@ -1,15 +1,17 @@
 //! Agent lifecycle-state detection, one module per supported AI CLI.
 //!
-//! Each agent module implements two predicates over a [`Snapshot`] of the
+//! Each agent module implements three predicates over a [`Snapshot`] of the
 //! pane's live terminal buffer:
 //!
 //! - `blocked(&Snapshot) -> bool` — the agent is waiting on a command approval
 //! - `working(&Snapshot) -> bool` — the agent is actively producing output
+//! - `idle(&Snapshot) -> bool` — the agent is conclusively idle (e.g. its
+//!   dedicated idle prompt box)
 //!
 //! `detect` dispatches across every implemented agent: a blocked signal wins
-//! over working, and idle is the fallback when no marker matches. The rules
-//! `agent-detection/<agent>.toml`), where the same split between blocked,
-//! working, and idle fallback applies.
+//! over working, working wins over idle, and `Unknown` is the fallback when
+//! no signal matches — a recognized agent whose classification failed (see
+//! also `agent-detection/<agent>.toml`), where the same split applies.
 
 pub mod claude;
 pub mod opencode;
@@ -34,6 +36,13 @@ pub enum AgentStatus {
     Blocked,
     /// Quiet and idle.
     Idle,
+    /// Finished-but-unseen: the agent went idle while its pane was not
+    /// focused. Held by the daemon until the pane is focused, which marks it
+    /// seen (back to Idle).
+    Done,
+    /// A recognized agent whose classification failed: no blocked, working,
+    /// or idle signal matched its screen.
+    Unknown,
 }
 
 /// A text snapshot of an AI pane's terminal, captured from the screen buffer
@@ -121,7 +130,8 @@ pub(crate) fn ends_with_ci(haystack: &str, needle: &str) -> bool {
 }
 
 /// Detect the agent lifecycle state across every implemented agent. A blocked
-/// signal wins over working; idle is the fallback when no marker matches.
+/// signal wins over working; working wins over explicit idle; `Unknown` is
+/// the fallback when no signal matches.
 pub fn detect(snap: &Snapshot) -> AgentStatus {
     if opencode::blocked(snap) || claude::blocked(snap) {
         return AgentStatus::Blocked;
@@ -129,7 +139,10 @@ pub fn detect(snap: &Snapshot) -> AgentStatus {
     if opencode::working(snap) || claude::working(snap) {
         return AgentStatus::Working;
     }
-    AgentStatus::Idle
+    if opencode::idle(snap) || claude::idle(snap) {
+        return AgentStatus::Idle;
+    }
+    AgentStatus::Unknown
 }
 
 /// Text of `screen` below its last horizontal rule (a run of box-drawing
@@ -186,9 +199,17 @@ mod tests {
     }
 
     #[test]
-    fn idle_is_the_fallback() {
-        let s = snap("opencode 1.18.15\n~/.opencode\n", "", "\u{2733} ~/proj");
+    fn idle_when_any_agent_reports_an_idle_marker() {
+        // opencode's prompt box (ask anything) is an explicit idle marker.
+        let s = snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "", "");
         assert_eq!(detect(&s), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn unknown_is_the_fallback() {
+        // No blocked/working/idle marker matches: classification failed.
+        let s = snap("opencode 1.18.15\n~/.opencode\n", "", "");
+        assert_eq!(detect(&s), AgentStatus::Unknown);
     }
 
     #[test]

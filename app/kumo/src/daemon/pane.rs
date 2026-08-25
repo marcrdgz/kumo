@@ -744,9 +744,11 @@ impl Pane {
         }
     }
 
-    /// Agent lifecycle state, derived from a snapshot of the terminal buffer
-    /// (see [`crate::daemon::agents`]): Blocked/Working win via distinctive markers,
-    /// Idle is the fallback.
+    /// Raw agent lifecycle state, derived from a snapshot of the terminal
+    /// buffer (see [`crate::daemon::agents`]): Blocked/Working win via
+    /// distinctive markers, Idle requires an explicit idle marker, and
+    /// `Unknown` is the fallback when classification fails. The daemon turns
+    /// Idle into `Done` (finished-but-unseen) around focus.
     pub fn agent_status(&self) -> AgentStatus {
         self.compute_agent_status()
     }
@@ -1199,23 +1201,25 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
-    fn idle_after_quiet_period() {
+    fn unknown_when_buffer_has_no_agent_signal() {
         let mut p = test_pane(true);
         p.feed(b"finished the task");
         p.last_output = Instant::now() - Duration::from_secs(10);
         render_pane(&mut p);
-        assert_eq!(p.agent_status(), AgentStatus::Idle);
+        // No agent UI marker at all: a bare transcript cannot prove idle.
+        assert_eq!(p.agent_status(), AgentStatus::Unknown);
     }
 
     #[test]
-    fn idle_when_transcript_contains_generic_prompt_text() {
+    fn unknown_when_transcript_contains_generic_prompt_text() {
         // Generic approval text in the conversation transcript must NOT flag
-        // the agent as blocked; only real dialogs do.
+        // the agent as blocked; only real dialogs do. Without any idle marker
+        // either, the classification is unknown.
         let mut p = test_pane(true);
         p.feed(b"the assistant asked: Do you want to proceed? (y/n)\n");
         p.last_output = Instant::now() - Duration::from_secs(10);
         render_pane(&mut p);
-        assert_eq!(p.agent_status(), AgentStatus::Idle);
+        assert_eq!(p.agent_status(), AgentStatus::Unknown);
     }
 
     #[test]
@@ -1294,11 +1298,11 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
-    fn idle_when_screen_has_no_working_marker() {
+    fn unknown_when_screen_has_no_working_marker() {
         let mut p = test_pane(true);
         p.feed(b"opencode 1.18.15\n~/.opencode\n");
         render_pane(&mut p);
-assert_eq!(p.agent_status(), AgentStatus::Idle);
+        assert_eq!(p.agent_status(), AgentStatus::Unknown);
     }
 
     #[test]
@@ -1362,27 +1366,29 @@ assert_eq!(p.agent_status(), AgentStatus::Idle);
     }
 
     #[test]
-    fn claude_idle_on_prompt_box() {
-        // A bare `❯` prompt means idle, even with generic question text above
-        // in the transcript.
+    fn claude_unknown_on_bare_prompt_without_hints() {
+        // A bare `❯` prompt is not proof of idle: without the prompt box
+        // shortcuts hint or the ✳ title, the classification stays unknown
+        // even though generic question text above is not blocked.
         let mut p = test_pane(true);
         p.feed(b"assistant: do you want to proceed? (y/n)\n");
         p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
         p.feed("\u{276f} ".as_bytes());
         render_pane(&mut p);
-        assert_eq!(p.agent_status(), AgentStatus::Idle);
+        assert_eq!(p.agent_status(), AgentStatus::Unknown);
     }
 
     #[test]
     fn claude_not_blocked_without_form_chrome() {
         // "esc to cancel" needs the matching enter action; a select list
-        // without a navigation hint stays idle.
+        // without a navigation hint is neither blocked, working, nor idle —
+        // classification fails to unknown.
         let mut p = test_pane(true);
         p.feed("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n".as_bytes());
         p.feed(b"enter to select\n");
         p.feed(b"esc to cancel\n");
         render_pane(&mut p);
-        assert_eq!(p.agent_status(), AgentStatus::Idle);
+        assert_eq!(p.agent_status(), AgentStatus::Unknown);
     }
 
     #[test]

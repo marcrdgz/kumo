@@ -3176,8 +3176,10 @@ impl View {
     fn agent_rank(status: AgentStatus) -> u8 {
         match status {
             AgentStatus::Blocked => 0,
-            AgentStatus::Working => 1,
-            AgentStatus::Idle => 2,
+            AgentStatus::Done => 1,
+            AgentStatus::Working => 2,
+            AgentStatus::Idle => 3,
+            AgentStatus::Unknown => 4,
         }
     }
 
@@ -3967,15 +3969,16 @@ impl View {
                     if focused {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    let status_color = match status {
-                        AgentStatus::Working => theme.green,
-                        AgentStatus::Blocked => theme.orange,
-                        AgentStatus::Idle => theme.panel_muted,
+                    let status_color = {
+                        let (r, g, b) = kumo_core::theme::agent_status_color(*status);
+                        RColor::Rgb(r, g, b)
                     };
                     let dot = match status {
                         AgentStatus::Blocked => "◉",
+                        AgentStatus::Done => "✓",
                         AgentStatus::Working => self.spinner_char(),
                         AgentStatus::Idle => "●",
+                        AgentStatus::Unknown => "?",
                     };
                     let name_style = if *status == AgentStatus::Blocked {
                         Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD)
@@ -3999,6 +4002,10 @@ impl View {
                             && third.chars().count() + " ·blocked".len() <= avail
                         {
                             format!("{third} ·blocked")
+                        } else if *status == AgentStatus::Done
+                            && third.chars().count() + " ·done".len() <= avail
+                        {
+                            format!("{third} ·done")
                         } else {
                             third.clone()
                         };

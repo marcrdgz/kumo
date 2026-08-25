@@ -45,8 +45,9 @@ mod crossterm;
 /// commands. v6 introduces tabs: sessions → tabs → panes. v7 adds the custom
 /// theme payload to `DaemonEvent::Theme`. v8 adds copy-mode (scroll + search).
 /// v9 adds `DaemonEvent::Toast`: agent lifecycle transitions pushed as
-/// transient corner toasts to attached viewers.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// transient corner toasts to attached viewers. v10 extends `AgentStatus`
+/// with `done` (finished-but-unseen) and `unknown` (classification failed).
+pub const PROTOCOL_VERSION: u32 = 10;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -490,6 +491,11 @@ pub enum AgentStatus {
     Blocked,
     /// Quiet and idle.
     Idle,
+    /// Finished-but-unseen: went idle while its pane was not focused; focus
+    /// marks it seen (back to Idle).
+    Done,
+    /// A recognized agent whose classification failed.
+    Unknown,
 }
 
 /// The transition behind a [`DaemonEvent::Toast`]: which agent lifecycle
@@ -509,6 +515,8 @@ impl AgentStatus {
             AgentStatus::Working => "working",
             AgentStatus::Blocked => "blocked",
             AgentStatus::Idle => "idle",
+            AgentStatus::Done => "done",
+            AgentStatus::Unknown => "unknown",
         }
     }
 }
@@ -1085,5 +1093,7 @@ mod tests {
         assert_eq!(AgentStatus::Working.label(), "working");
         assert_eq!(AgentStatus::Blocked.label(), "blocked");
         assert_eq!(AgentStatus::Idle.label(), "idle");
+        assert_eq!(AgentStatus::Done.label(), "done");
+        assert_eq!(AgentStatus::Unknown.label(), "unknown");
     }
 }

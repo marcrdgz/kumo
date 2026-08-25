@@ -71,6 +71,22 @@ pub(crate) fn blocked(snap: &Snapshot) -> bool {
     .any(|m| contains_ci(&snap.screen, m))
 }
 
+/// Markers of Claude's idle prompt box. The live prompt/forms region shows
+/// `? for shortcuts · ← for agents` while idle; while it runs it pins
+/// `· esc to interrupt ·` instead (matched by `working`). The `✳ ` OSC
+/// window title is the same idle verdict for older UIs.
+const IDLE_PROMPT_MARKERS: &[&str] = &["? for shortcuts", "\u{2190} for agents"];
+
+/// Whether Claude is conclusively idle. This is NOT the fallback: a
+/// recognized agent with no marker at all reports `Unknown`, so the idle
+/// signal must be a real marker of the idle prompt box or OSC title.
+pub(crate) fn idle(snap: &Snapshot) -> bool {
+    IDLE_PROMPT_MARKERS
+        .iter()
+        .any(|m| contains_ci(&snap.form, m) || contains_ci(&snap.footer, m))
+        || snap.title.trim_start().starts_with('\u{2733}')
+}
+
 /// Dingbat spinner glyphs newer Claude paints inside the prompt box while
 /// working (the braille OSC-title spinner moved into the UI). Each is a single
 /// codepoint in the U+2700 block, so a scan of the form/footer region catches
@@ -298,6 +314,18 @@ mod tests {
             title: String::new(),
         };
         assert!(working(&snap));
+    }
+
+    #[test]
+    fn idle_on_prompt_box_shortcuts_hint() {
+        let s = snap("─────\n❯\n? for shortcuts · ← for agents\n", "");
+        assert!(idle(&s));
+    }
+
+    #[test]
+    fn not_idle_without_prompt_box_marker() {
+        let s = snap("assistant: hello\n❯ ", "");
+        assert!(!idle(&s));
     }
 
     #[test]

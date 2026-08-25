@@ -70,6 +70,24 @@ pub(crate) fn working(snap: &Snapshot) -> bool {
         || snap.footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
 }
 
+/// Markers of opencode's idle prompt box: the `Ask anything...` placeholder
+/// and the keymap-hints row (`tab agents`/`ctrl+p commands`) pinned under the
+/// input bar while the agent is not running. The hints row persists once you
+/// type into the prompt (when the placeholder is replaced by your text), so a
+/// prompt waiting for Enter still classifies as idle instead of unknown. A
+/// bare `esc dismiss` only counts when it is the prompt bar, never a question
+/// dialog (see `question_dialog_visible`) — and `working` (`esc interrupt`
+/// footer) wins by precedence when the agent is mid-turn.
+const IDLE_MARKERS: &[&str] = &["ask anything", "tab agents", "ctrl+p commands"];
+
+/// Whether opencode is conclusively idle. This is NOT the fallback: a
+/// recognized agent with no marker at all reports `Unknown`, so the idle
+/// signal must be a real marker of the prompt box.
+pub(crate) fn idle(snap: &Snapshot) -> bool {
+    IDLE_MARKERS.iter().any(|m| contains_ci(&snap.screen, m))
+        || (contains_ci(&snap.footer, "esc dismiss") && !question_dialog_visible(snap))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +161,41 @@ mod tests {
     fn not_working_when_screen_has_no_working_marker() {
         let s = snap("opencode 1.18.15\n~/.opencode\n", "~/.opencode");
         assert!(!working(&s));
+    }
+
+    #[test]
+    fn idle_on_ask_anything_prompt_box() {
+        let s = snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "esc dismiss");
+        assert!(idle(&s));
+    }
+
+    #[test]
+    fn idle_when_typing_without_placeholder() {
+        // Typed input replaces "Ask anything..."; the keymap-hints row stays
+        // pinned under the input bar, so a prompt waiting for Enter is idle
+        // rather than unknown.
+        let s = snap(
+            "opencode 1.18.15\ntab agentsctrl+p commands\nwhy?",
+            "",
+        );
+        assert!(idle(&s));
+    }
+
+    #[test]
+    fn idle_on_esc_dismiss_footer_without_dialog() {
+        let s = snap("done\n", "esc dismiss");
+        assert!(idle(&s));
+    }
+
+    #[test]
+    fn not_idle_when_esc_dismiss_is_a_question_dialog() {
+        let s = snap("\u{21c6} tab   \u{2191}\u{2193} select\nenter submit   esc dismiss\n", "");
+        assert!(!idle(&s));
+    }
+
+    #[test]
+    fn not_idle_without_any_prompt_marker() {
+        let s = snap("opencode 1.18.15\n~/.opencode\n", "~/.opencode");
+        assert!(!idle(&s));
     }
 }
