@@ -349,18 +349,22 @@ impl App {
                                 PaneInfo { id: pid, label, active }
                             })
                             .collect(),
-                    }).collect(),
+                    })                        .collect(),
                     agents: all_pids
                         .into_iter()
                         .filter_map(|pid| {
                             let pane = self.panes.get(&pid)?;
                             if !pane.is_ai_cli() { return None; }
                             let (cpu, mem_kb) = self.agent_proc_cache.get(&pid).copied().unwrap_or((0.0, 0));
+                            let (_, tab_index, pane_index) =
+                                self.pane_position(pid).unwrap_or((0, 0, 0));
                             Some(AgentInfo {
                                 name: self.agent_label(pid),
                                 status: self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle).into(),
                                 cpu, mem_kb,
                                 pane_id: pid,
+                                pane_index: pane_index as u64,
+                                tab_index: tab_index as u64,
                             })
                         })
                         .collect(),
@@ -400,11 +404,14 @@ impl App {
                 for pid in tab.tree.pane_ids() {
                     let Some(pane) = self.panes.get(&pid) else { continue };
                     if !pane.is_ai_cli() { continue; }
+                    let (_, tab_index, pane_index) = self.pane_position(pid).unwrap_or((0, 0, 0));
                     out.push(AgentStatusLine {
                         session: s.name.clone(),
                         pane_id: pid,
                         name: self.agent_label(pid),
                         status: self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle).into(),
+                        pane_index: pane_index as u64,
+                        tab_index: tab_index as u64,
                     });
                 }
             }
@@ -469,6 +476,7 @@ impl App {
             }
         }
         let (cpu, mem_kb) = self.agent_proc_cache.get(&pane_id).copied().unwrap_or((0.0, 0));
+        let (_, tab_index, pane_index) = self.pane_position(pane_id).unwrap_or((0, 0, 0));
         let cli = pane
             .custom_name
             .clone()
@@ -490,6 +498,8 @@ impl App {
             last_output_age_ms: pane.last_output_age().as_millis() as u64,
             cpu,
             mem_kb,
+            pane_index: pane_index as u64,
+            tab_index: tab_index as u64,
         })
     }
 

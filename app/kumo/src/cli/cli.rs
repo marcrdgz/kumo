@@ -16,6 +16,84 @@ use kumo_protocol::{
     Command, DaemonEvent, SplitDir, WireKeyCode, WireKeyEvent, WireModifiers,
 };
 
+/// A pane selector: the stable numeric id, or a composite `s1:t2:p3` /
+/// `kumo:t2:p3` spec (1-based indexes; the session part may be a name).
+/// Composite specs are resolved client-side via a `SessionList` round trip —
+/// the daemon always gets the canonical `u64`.
+enum PaneRef {
+    Id(u64),
+    Spec(String),
+}
+
+/// A composite position `s1:t2:p3`, `kumo:t2:p1`, `t2:p1` (session from `-s`),
+/// or `t2` (tab-only, for `kumo pane list`). Components may carry an optional
+/// `s`/`t`/`p` letter; the session part is a name or a 1-based index. Positions
+/// are indexes in the visible session list / tab list / pane list ordering.
+#[derive(Debug, Clone)]
+struct CompositeSpec {
+    session: Option<String>,
+    session_index: Option<usize>,
+    tab: Option<usize>,
+    pane: Option<usize>,
+}
+
+impl CompositeSpec {
+    /// Parse a 1- to 3-part `:`-separated spec.
+    fn parse(text: &str) -> Result<CompositeSpec> {
+        let parts: Vec<&str> = text.split(':').map(str::trim).collect();
+        let seg = |i: usize| match parts.get(i) {
+            Some(s) if !s.is_empty() => Ok(s),
+            _ => anyhow::bail!("bad pane spec {text:?}: empty component"),
+        };
+        let indexed = |s: &str, label: char, what: &str| -> Result<Option<usize>> {
+            let v = s.strip_prefix(label).unwrap_or(s);
+            if v.is_empty() {
+                anyhow::bail!("bad {what}: {s:?} (expects a 1-based index)");
+            }
+            v.parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1)
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("bad {what}: {s:?} (expects a 1-based index)"))
+        };
+        match parts.len() {
+            1 => Ok(CompositeSpec {
+                session: None,
+                session_index: None,
+                tab: indexed(seg(0)?, 't', "tab index")?,
+                pane: None,
+            }),
+            2 => Ok(CompositeSpec {
+                session: None,
+                session_index: None,
+                tab: indexed(seg(0)?, 't', "tab index")?,
+                pane: indexed(seg(1)?, 'p', "pane index")?,
+            }),
+            3 => {
+                let s = seg(0)?;
+                // Session part: a 1-based index (`s2`) or a name (`kumo`).
+                let v = s.strip_prefix('s').unwrap_or(s);
+                let (session, session_index) = if v.is_empty() {
+                    anyhow::bail!("bad session: {s:?} (expects a name or a 1-based index)");
+                } else {
+                    match v.parse::<usize>() {
+                        Ok(n) if n >= 1 => (None, Some(n)),
+                        Ok(_) => anyhow::bail!("bad session index: {s:?} (indexes are 1-based)"),
+                        Err(_) => (Some(v.to_string()), None),
+                    }
+                };
+                Ok(CompositeSpec {
+                    session,
+                    session_index,
+                    tab: indexed(seg(1)?, 't', "tab index")?,
+                    pane: indexed(seg(2)?, 'p', "pane index")?,
+                })
+            }
+            _ => anyhow::bail!("bad pane spec {text:?}: expected [s:]t[:p], e.g. s1:t2:p1"),
+        }
+    }
+}
+
 /// One parsed CLI invocation.
 enum CliCmd {
     List,
@@ -28,17 +106,29 @@ enum CliCmd {
     TabFocus { session: Option<String>, tab: String },
     TabRename { session: Option<String>, tab: String, new_name: String },
     PaneSplit { session: Option<String>, dir: SplitDir, ai: bool },
-    PaneClose { session: Option<String>, pane: Option<u64> },
-    PaneFocus { session: Option<String>, pane: u64 },
-    PaneSendKeys { session: Option<String>, pane: Option<u64>, keys: String },
-    PaneList { session: Option<String>, tab: Option<u64> },
+    PaneClose { session: Option<String>, pane: Option<PaneRef> },
+    PaneFocus { session: Option<String>, pane: PaneRef },
+    PaneSendKeys { session: Option<String>, pane: Option<PaneRef>, keys: String },
+    PaneList { session: Option<String>, tab: Option<PaneRef> },
     AgentSpawn { session: Option<String>, program: Option<String> },
     AgentStatus,
-    AgentKill { session: Option<String>, pane: u64 },
-    AgentExplain { session: Option<String>, pane: Option<u64> },
+    AgentKill { session: Option<String>, pane: PaneRef },
+    AgentExplain { session: Option<String>, pane: Option<PaneRef> },
     Kill,
     Reload,
     Restart,
+}
+
+/// `-p` value or a positional selector: all-digits = stable numeric id,
+/// anything with `:` = composite spec.
+fn parse_pane_ref(v: &str) -> Option<PaneRef> {
+    if let Ok(n) = v.parse::<u64>() {
+        Some(PaneRef::Id(n))
+    } else if v.contains(':') {
+        Some(PaneRef::Spec(v.to_string()))
+    } else {
+        None
+    }
 }
 
 pub fn run(args: &[String]) -> Result<()> {
@@ -73,20 +163,28 @@ pub fn run(args: &[String]) -> Result<()> {
             }
         }
         CliCmd::PaneList { session, tab } => {
-            let target = resolve_session(&mut stream, session)?;
-            kumo_core::protocol::write_framed(&mut stream, &Command::SessionList)?;
-            stream.set_read_timeout(Some(Duration::from_millis(800)))?;
-            loop {
-                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
-                    Ok(DaemonEvent::SessionList { sessions }) => {
-                        print_pane_list(&sessions, &target, tab);
-                        return Ok(());
+            let mut target = resolve_session(&mut stream, session)?;
+            let sessions = fetch_session_list(&mut stream)?;
+            // The tab filter is client-side: a numeric id, or a composite
+            // `s1:t2` / `t2` positional spec.
+            let tab_id: Option<u64> = match &tab {
+                None => None,
+                Some(PaneRef::Id(id)) => Some(*id),
+                Some(PaneRef::Spec(raw)) => {
+                    let spec = CompositeSpec::parse(raw)?;
+                    let s = find_spec_session(&sessions, &spec, &target)?;
+                    target = s.name.clone();
+                    match spec.tab {
+                        Some(t) => match s.tabs.get(t - 1) {
+                            Some(tab) => Some(tab.id),
+                            None => anyhow::bail!("session {:?} has no tab {t}", s.name),
+                        },
+                        None => None,
                     }
-                    Ok(_) => continue,
-                    Err(e) if is_timeout(&e) => return Ok(()),
-                    Err(e) => return Err(e),
                 }
-            }
+            };
+            print_pane_list(&sessions, &target, tab_id);
+            Ok(())
         }
         cmd => {
             let command = match cmd {
@@ -123,33 +221,42 @@ pub fn run(args: &[String]) -> Result<()> {
                     dir,
                     is_ai: ai,
                 },
-                CliCmd::PaneClose { session, pane } => Command::PaneClose {
-                    session: resolve_session(&mut stream, session)?,
-                    pane_id: pane,
-                },
-                CliCmd::PaneFocus { session, pane } => Command::PaneFocus {
-                    session: resolve_session(&mut stream, session)?,
-                    pane_id: pane,
-                },
-                CliCmd::PaneSendKeys { session, pane, keys } => Command::PaneSendKeys {
-                    session: resolve_session(&mut stream, session)?,
-                    pane_id: pane,
-                    keys: parse_keys(&keys),
-                },
+                CliCmd::PaneClose { session, pane } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = match pane {
+                        Some(p) => Some(resolve_pane_ref(&mut stream, &session, &p)?),
+                        None => None,
+                    };
+                    Command::PaneClose { session, pane_id }
+                }
+                CliCmd::PaneFocus { session, pane } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::PaneFocus { session, pane_id }
+                }
+                CliCmd::PaneSendKeys { session, pane, keys } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = match pane {
+                        Some(p) => Some(resolve_pane_ref(&mut stream, &session, &p)?),
+                        None => None,
+                    };
+                    Command::PaneSendKeys { session, pane_id, keys: parse_keys(&keys) }
+                }
                 CliCmd::PaneList { .. } => unreachable!(),
                 CliCmd::AgentSpawn { session, program } => Command::AgentSpawn {
                     session: resolve_session(&mut stream, session)?,
                     program,
                 },
                 CliCmd::AgentStatus => Command::AgentStatus,
-                CliCmd::AgentKill { session, pane } => Command::AgentKill {
-                    session: resolve_session(&mut stream, session)?,
-                    pane_id: pane,
-                },
+                CliCmd::AgentKill { session, pane } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::AgentKill { session, pane_id }
+                }
                 CliCmd::AgentExplain { session, pane } => {
                     let session = resolve_session(&mut stream, session)?;
                     let pane_id = match pane {
-                        Some(p) => p,
+                        Some(p) => resolve_pane_ref(&mut stream, &session, &p)?,
                         // Default: the first AI pane of the target session
                         // (same data `kumo agent status` prints).
                         None => {
@@ -271,15 +378,23 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
             keys: positional.join(" "),
         }),
         "list" => {
-            // Optional -t/--tab TAB_ID filter (split_options leaves it in the
+            // Optional -t/--tab TAB_ID (numeric id) or a positional composite
+            // `s1:t2[:p3]` / `t2` filter (split_options leaves both in the
             // positional args).
-            let mut tab = None;
+            let mut tab: Option<PaneRef> = None;
             let mut i = 0;
             while i < positional.len() {
                 if positional[i] == "-t" || positional[i] == "--tab" {
-                    tab = positional.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                    tab = positional.get(i + 1).and_then(|v| v.parse::<u64>().ok().map(PaneRef::Id));
                     i += 2;
                 } else {
+                    if tab.is_some() {
+                        anyhow::bail!("pane list takes one tab filter (got {:?} after -t)", positional[i]);
+                    }
+                    tab = parse_pane_ref(&positional[i]).or_else(|| {
+                        // `t2` (tab-only composite) has no colon; accept it here.
+                        CompositeSpec::parse(&positional[i]).ok().map(|_| PaneRef::Spec(positional[i].clone()))
+                    });
                     i += 1;
                 }
             }
@@ -306,7 +421,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
         }),
         "explain" => Ok(CliCmd::AgentExplain {
             session,
-            pane: pane_id.or_else(|| positional.first().and_then(|s| s.parse::<u64>().ok())),
+            pane: pane_id.or_else(|| positional.first().and_then(|s| parse_pane_ref(s))),
         }),
         other => anyhow::bail!("unknown agent subcommand {other:?}"),
     }
@@ -367,9 +482,10 @@ fn parse_tab(args: &[String]) -> Result<CliCmd> {
     }
 }
 
-/// Extract `-s SESSION` and `-p PANE_ID` options, returning the rest as
-/// positional args.
-fn split_options(args: &[String]) -> (Option<String>, Option<u64>, Vec<String>) {
+/// Extract `-s SESSION` and `-p PANE` options, returning the rest as
+/// positional args. `-p` accepts a stable numeric id or a composite
+/// `s1:t2:p3` / `kumo:t2:p1` spec.
+fn split_options(args: &[String]) -> (Option<String>, Option<PaneRef>, Vec<String>) {
     let mut session = None;
     let mut pane = None;
     let mut positional = Vec::new();
@@ -386,7 +502,11 @@ fn split_options(args: &[String]) -> (Option<String>, Option<u64>, Vec<String>) 
             }
             "-p" | "--pane" => {
                 if let Some(v) = args.get(i + 1) {
-                    pane = v.parse::<u64>().ok();
+                    pane = match v.parse::<u64>() {
+                        Ok(n) => Some(PaneRef::Id(n)),
+                        Err(_) if v.contains(':') => Some(PaneRef::Spec(v.clone())),
+                        Err(_) => None,
+                    };
                     i += 2;
                 } else {
                     i += 1;
@@ -467,22 +587,28 @@ kumo pane — manage panes
 
 USAGE:
     kumo pane split [-s SESSION] [--horizontal] [--ai]
-    kumo pane close [-s SESSION] [-p PANE_ID]
-    kumo pane focus -p PANE_ID [-s SESSION]
-    kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...
-    kumo pane list [-s SESSION] [-t TAB_ID]
+    kumo pane close [-s SESSION] [PANE]
+    kumo pane focus [PANE] [-s SESSION]
+    kumo pane send-keys [-s SESSION] [PANE] KEYS...
+    kumo pane list [-s SESSION] [-t TAB_ID] [PANE]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
-    -p, --pane PANE_ID      target pane id (defaults to the active pane)
-    -t, --tab TAB_ID        filter `list` to one tab
+    -p, --pane PANE         target pane: a pane id or a composite position
+    -t, --tab TAB_ID        filter `list` to one tab id
     --horizontal            split left/right instead of top/bottom
     --ai                    start the new pane with the AI agent program
 
 send-keys: KEYS... are typed into the pane (plain text plus tokens such as
 Enter, Tab, Esc, Left, Up, PageDown — see `kumo pane send-keys` KEYS).
-list: prints every pane with its id (marking the focused one) — the ids feed
-`kumo agent explain` / `kumo pane focus`.
+list: prints every pane with its id + composite position (marking the
+focused one) — the ids feed `kumo agent explain` / `kumo pane focus`.
+
+PANE may be a stable numeric id, or a composite position (1-based indexes):
+    s1:t2:p3    session 1, tab 2, pane 3
+    kumo:t2:p1  the session named kumo, tab 2, pane 1
+    t2:p1       tab 2, pane 1 (session from -s)
+list also accepts `s1:t2` / `t2` as a tab filter.
 ";
 
 const AGENT_HELP: &str = "\
@@ -491,19 +617,21 @@ kumo agent — manage AI agents
 USAGE:
     kumo agent spawn [-s SESSION] [PROGRAM]
     kumo agent status          (aliases: list, ls)
-    kumo agent kill -p PANE_ID [-s SESSION]
-    kumo agent explain [PANE_ID] [-s SESSION]
+    kumo agent kill [PANE] [-s SESSION]
+    kumo agent explain [PANE] [-s SESSION]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
-    -p, --pane PANE_ID      target pane id (the agent pane)
+    -p, --pane PANE         target pane id (the agent pane)
 
+PANE is a stable numeric id or a composite position (see `kumo pane -h`):
+s1:t2:p3, kumo:t2:p1, or t2:p1 with -s.
 PROGRAM defaults to the configured AI program (see config).
-status: one line per running AI CLI with its pane id.
+status: one line per running AI CLI with its pane id and position.
 explain: why this pane reads the state it does — matched markers, evidence
 region (screen/form/footer/title), and the idle-fallback reason, evaluated
-live by the daemon. PANE_ID may also be given as the first positional, or
-omitted to pick the first AI pane of the session.
+live by the daemon. PANE may also be a composite position given as the
+first positional, or omitted to pick the first AI pane of the session.
 ";
 
 const TAB_HELP: &str = "\
@@ -575,6 +703,81 @@ fn resolve_session(stream: &mut UnixStream, session: Option<String>) -> Result<S
     }
 }
 
+/// One `SessionList` round trip (the composite-spec resolver's data source).
+fn fetch_session_list(stream: &mut UnixStream) -> Result<Vec<kumo_protocol::SessionInfo>> {
+    kumo_core::protocol::write_framed(stream, &Command::SessionList)?;
+    loop {
+        match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
+            Ok(DaemonEvent::SessionList { sessions }) => return Ok(sessions),
+            Ok(_) => continue,
+            Err(e) if is_timeout(&e) => anyhow::bail!("no reply from the daemon"),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Resolve a composite spec to the canonical `u64` pane id, plus a display
+/// string (`name:t2:p3`) for printouts.
+fn resolve_pane_ref(stream: &mut UnixStream, session: &str, pane: &PaneRef) -> Result<u64> {
+    match pane {
+        PaneRef::Id(id) => Ok(*id),
+        PaneRef::Spec(raw) => {
+            let spec = CompositeSpec::parse(raw)?;
+            let sessions = fetch_session_list(stream)?;
+            resolve_spec_pane(&sessions, &spec, session).map(|(id, _)| id)
+        }
+    }
+}
+
+/// Find the `SessionInfo` a spec targets: explicit name, session index, or
+/// the default session.
+fn find_spec_session<'a>(
+    sessions: &'a [kumo_protocol::SessionInfo],
+    spec: &CompositeSpec,
+    default_session: &str,
+) -> Result<&'a kumo_protocol::SessionInfo> {
+    if let Some(name) = &spec.session {
+        sessions
+            .iter()
+            .find(|s| &s.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no session {name:?}"))
+    } else if let Some(n) = spec.session_index {
+        sessions
+            .get(n - 1)
+            .ok_or_else(|| anyhow::anyhow!("no session {n} of {}", sessions.len()))
+    } else {
+        sessions
+            .iter()
+            .find(|s| s.name == default_session)
+            .ok_or_else(|| anyhow::anyhow!("no session {default_session:?}"))
+    }
+}
+
+/// Resolve a parsed composite spec against `SessionInfo` data: `(pane id,
+/// display string)`. Pure — unit-testable without a socket.
+fn resolve_spec_pane(
+    sessions: &[kumo_protocol::SessionInfo],
+    spec: &CompositeSpec,
+    default_session: &str,
+) -> Result<(u64, String)> {
+    let tab = spec
+        .tab
+        .ok_or_else(|| anyhow::anyhow!("pane spec needs a tab index (t:n)"))?;
+    let pane = spec
+        .pane
+        .ok_or_else(|| anyhow::anyhow!("pane spec needs a pane index (p:n)"))?;
+    let s = find_spec_session(sessions, spec, default_session)?;
+    let t = s
+        .tabs
+        .get(tab - 1)
+        .ok_or_else(|| anyhow::anyhow!("session {:?} has {} tabs; no tab {tab}", s.name, s.tabs.len()))?;
+    let p = t
+        .panes
+        .get(pane - 1)
+        .ok_or_else(|| anyhow::anyhow!("tab {:?} has {} panes; no pane {pane}", t.name, t.panes.len()))?;
+    Ok((p.id, format!("{}:t{tab}:p{pane}", s.name)))
+}
+
 /// Read the daemon's reply and print it. A short read timeout covers commands
 /// that produce no reply (focus/resize): those simply exit.
 fn read_reply(stream: &mut UnixStream) -> Result<()> {
@@ -619,7 +822,7 @@ fn is_timeout(e: &anyhow::Error) -> bool {
 }
 
 fn print_session_list(sessions: &[kumo_protocol::SessionInfo]) {
-    for s in sessions {
+    for (i, s) in sessions.iter().enumerate() {
         let mark = if s.active { "* " } else { "  " };
         let pane_word = if s.pane_count == 1 { "pane" } else { "panes" };
         let tab_word = if s.tab_count == 1 { "tab" } else { "tabs" };
@@ -641,11 +844,16 @@ fn print_session_list(sessions: &[kumo_protocol::SessionInfo]) {
         let color = io::stdout().is_terminal();
         for agent in &s.agents {
             let label = agent.status.label();
+            let pos = if agent.tab_index > 0 && agent.pane_index > 0 {
+                format!(" (pane {} · s{}:t{}:p{})", agent.pane_id, i + 1, agent.tab_index, agent.pane_index)
+            } else {
+                format!(" (pane {})", agent.pane_id)
+            };
             let line = if color {
                 let (r, g, b) = kumo_core::theme::agent_status_color(agent.status);
-                format!("    {} · \x1b[38;2;{r};{g};{b}m{label}\x1b[0m (pane {})", agent.name, agent.pane_id)
+                format!("    {} · \x1b[38;2;{r};{g};{b}m{label}\x1b[0m{pos}", agent.name)
             } else {
-                format!("    {} · {label} (pane {})", agent.name, agent.pane_id)
+                format!("    {} · {label}{pos}", agent.name)
             };
             println!("{line}");
         }
@@ -672,12 +880,13 @@ fn print_tab_list(sessions: &[kumo_protocol::SessionInfo], target: &str) {
 }
 
 fn print_pane_list(sessions: &[kumo_protocol::SessionInfo], target: &str, tab: Option<u64>) {
-    let Some(s) = sessions.iter().find(|s| s.name == target) else {
+    let Some(si) = sessions.iter().position(|s| s.name == target) else {
         println!("no session {target:?}");
         return;
     };
+    let s = &sessions[si];
     let mut any = false;
-    for t in &s.tabs {
+    for (ti, t) in s.tabs.iter().enumerate() {
         if tab.is_some() && tab != Some(t.id) {
             continue;
         }
@@ -686,9 +895,9 @@ fn print_pane_list(sessions: &[kumo_protocol::SessionInfo], target: &str, tab: O
         }
         any = true;
         println!("[{}] (id {})", t.name, t.id);
-        for p in &t.panes {
+        for (pi, p) in t.panes.iter().enumerate() {
             let mark = if p.active { "* " } else { "  " };
-            println!("{mark}pane {} · {}", p.id, p.label);
+            println!("{mark}pane {} · s{}:t{}:p{} · {}", p.id, si + 1, ti + 1, pi + 1, p.label);
         }
     }
     if !any {
@@ -698,7 +907,12 @@ fn print_pane_list(sessions: &[kumo_protocol::SessionInfo], target: &str, tab: O
 
 fn print_agent_status(agents: &[kumo_protocol::AgentStatusLine]) {
     for a in agents {
-        println!("{} · {} · {} (pane {})", a.session, a.name, a.status.label(), a.pane_id);
+        let pos = if a.tab_index > 0 && a.pane_index > 0 {
+            format!(" · {}:t{}:p{}", a.session, a.tab_index, a.pane_index)
+        } else {
+            String::new()
+        };
+        println!("{} · {} · {} (pane {}{})", a.session, a.name, a.status.label(), a.pane_id, pos);
     }
     if agents.is_empty() {
         println!("(no agents running)");
@@ -714,7 +928,12 @@ fn print_agent_explain(r: &kumo_protocol::AgentExplainReport) {
     } else {
         label.to_string()
     };
-    println!("pane {} · {} · {}", r.pane_id, r.cli, status);
+    let pos = if r.tab_index > 0 && r.pane_index > 0 {
+        format!(" ({}:t{}:p{})", r.session, r.tab_index, r.pane_index)
+    } else {
+        String::new()
+    };
+    println!("pane {}{} · {} · {}", r.pane_id, pos, r.cli, status);
     println!(
         "  session: {}    {}    os pid: {}    dead: {}",
         r.session,
@@ -749,5 +968,108 @@ fn print_agent_explain(r: &kumo_protocol::AgentExplainReport) {
         for m in &r.markers {
             println!("  marker: {} · {} · in {}", m.agent, m.marker, m.region.label());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kumo_protocol::{AgentInfo, AgentStatus, PaneInfo};
+
+    fn fixture_session(name: &str, panes: &[u64]) -> kumo_protocol::SessionInfo {
+        kumo_protocol::SessionInfo {
+            name: name.to_string(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            tab_count: 1,
+            pane_count: panes.len(),
+            zoomed: false,
+            active: name == "kumo",
+            active_tab: Some("1".to_string()),
+            focus: panes.first().copied(),
+            tabs: vec![kumo_protocol::TabInfo {
+                id: 7,
+                name: "1".to_string(),
+                pane_count: panes.len(),
+                zoomed: false,
+                active: true,
+                focus: panes.first().copied(),
+                panes: panes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| PaneInfo { id: *id, label: format!("p{}", i + 1), active: i == 0 })
+                    .collect(),
+            }],
+            agents: vec![AgentInfo {
+                name: "opencode".into(),
+                status: AgentStatus::Idle,
+                cpu: 0.0,
+                mem_kb: 0,
+                pane_id: panes[0],
+                pane_index: 1,
+                tab_index: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn composite_spec_parses_all_forms() {
+        let s = CompositeSpec::parse("s1:t2:p1").unwrap();
+        assert_eq!(s.session_index, Some(1));
+        assert_eq!(s.tab, Some(2));
+        assert_eq!(s.pane, Some(1));
+
+        let s = CompositeSpec::parse("kumo:t2:p1").unwrap();
+        assert_eq!(s.session.as_deref(), Some("kumo"));
+        assert_eq!(s.tab, Some(2));
+
+        let s = CompositeSpec::parse("2:1").unwrap();
+        assert_eq!(s.session, None);
+        assert_eq!(s.tab, Some(2));
+        assert_eq!(s.pane, Some(1));
+
+        let s = CompositeSpec::parse("t2").unwrap();
+        assert_eq!(s.tab, Some(2));
+        assert_eq!(s.pane, None);
+
+        let s = CompositeSpec::parse("3:2:1").unwrap();
+        assert_eq!(s.session_index, Some(3));
+        assert_eq!(s.tab, Some(2));
+        assert_eq!(s.pane, Some(1));
+    }
+
+    #[test]
+    fn composite_spec_rejects_garbage() {
+        assert!(CompositeSpec::parse("0:1").is_err(), "indexes are 1-based");
+        assert!(CompositeSpec::parse("a:b").is_err(), "session name needs t:p");
+        assert!(CompositeSpec::parse("s:2:1").is_err(), "bare s = no index");
+        assert!(CompositeSpec::parse("1:2:3:4").is_err());
+        assert!(CompositeSpec::parse("").is_err());
+    }
+
+    #[test]
+    fn resolve_spec_pane_by_name_and_index() {
+        let sessions = vec![fixture_session("kumo", &[10, 11]), fixture_session("two", &[20])];
+        let spec = CompositeSpec::parse("kumo:t1:p2").unwrap();
+        let (id, display) = resolve_spec_pane(&sessions, &spec, "kumo").unwrap();
+        assert_eq!(id, 11);
+        assert_eq!(display, "kumo:t1:p2");
+
+        // Session index form (1-based into the session list).
+        let spec = CompositeSpec::parse("2:1:1").unwrap();
+        let (id, _) = resolve_spec_pane(&sessions, &spec, "kumo").unwrap();
+        assert_eq!(id, 20);
+
+        // Tab:pane form inherits the default session.
+        let spec = CompositeSpec::parse("t1:p1").unwrap();
+        let (id, _) = resolve_spec_pane(&sessions, &spec, "two").unwrap();
+        assert_eq!(id, 20);
+    }
+
+    #[test]
+    fn resolve_spec_pane_reports_oob_precisely() {
+        let sessions = vec![fixture_session("kumo", &[10, 11])];
+        assert!(resolve_spec_pane(&sessions, &CompositeSpec::parse("kumo:t1:p3").unwrap(), "kumo").is_err());
+        assert!(resolve_spec_pane(&sessions, &CompositeSpec::parse("kumo:t2:p1").unwrap(), "kumo").is_err());
+        assert!(resolve_spec_pane(&sessions, &CompositeSpec::parse("nope:t1:p1").unwrap(), "kumo").is_err());
     }
 }

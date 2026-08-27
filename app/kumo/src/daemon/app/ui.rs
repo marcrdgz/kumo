@@ -150,6 +150,7 @@ impl App {
         let is_ai = pane.map(|p| p.is_ai_cli()).unwrap_or(false);
         let agent = if is_ai {
             let (cpu, mem_kb) = self.agent_proc_cache.get(&pid).copied().unwrap_or((0.0, 0));
+            let (_, tab_index, pane_index) = self.pane_position(pid).unwrap_or((0, 0, 0));
             Some(kumo_protocol::AgentInfo {
                 name: self.agent_label(pid),
                 status: self
@@ -161,6 +162,8 @@ impl App {
                 cpu,
                 mem_kb,
                 pane_id: pid,
+                pane_index: pane_index as u64,
+                tab_index: tab_index as u64,
             })
         } else {
             None

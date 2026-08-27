@@ -87,10 +87,13 @@ status it does — evaluated **live by the running daemon** against the pane's
 terminal buffer:
 
 ```sh
-kumo agent status            # who runs, and in which pane (e.g. pane 42)
-kumo pane list               # every pane id (optional -t TAB filter)
-kumo agent explain 42        # or `-p 42`; defaults to the first AI pane
+kumo agent status            # who runs, and where (e.g. pane 42 · work:t1:p2)
+kumo pane list               # every pane id + s/t/p position (optional -t filter)
+kumo agent explain 42        # or by position: s1:t2:p1, work:t2:p1 (with -s: t2:p1)
 ```
+
+Both the id and the composite position (`[s:]t[:p]`, 1-based) are accepted —
+positions are friendly for interactive use, ids stay stable for scripts.
 
 The report shows the matched **markers** for each agent (opencode / claude)
 with the **evidence region** they were found in — `screen` (buffer tail),

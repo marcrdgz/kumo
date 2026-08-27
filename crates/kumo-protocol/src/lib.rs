@@ -483,6 +483,14 @@ pub struct AgentInfo {
     /// The kumo pane id this agent runs in.
     #[serde(default)]
     pub pane_id: u64,
+    /// Position of the agent's pane inside its tab (1-based, layout order).
+    /// `#[serde(default)]` keeps older daemons wire-compatible.
+    #[serde(default)]
+    pub pane_index: u64,
+    /// Position of its tab inside the session (1-based). Folded into the
+    /// composite `s1:t2:p3` addressing the CLI prints for humans.
+    #[serde(default)]
+    pub tab_index: u64,
 }
 
 /// Wire copy of the daemon's `AgentStatus`: the AI agent's lifecycle state.
@@ -576,6 +584,12 @@ pub struct AgentStatusLine {
     pub pane_id: u64,
     pub name: String,
     pub status: AgentStatus,
+    /// Position of the agent's pane inside its tab (1-based, layout order).
+    #[serde(default)]
+    pub pane_index: u64,
+    /// Position of its tab inside the session (1-based).
+    #[serde(default)]
+    pub tab_index: u64,
 }
 
 /// The evidence region a marker was found in, for `kumo agent explain`.
@@ -686,6 +700,12 @@ pub struct AgentExplainReport {
     pub cpu: f32,
     /// Resident memory of the agent process tree, in KiB.
     pub mem_kb: u64,
+    /// Position of the pane inside its tab (1-based, layout order).
+    #[serde(default)]
+    pub pane_index: u64,
+    /// Position of its tab inside the session (1-based).
+    #[serde(default)]
+    pub tab_index: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,6 +1200,8 @@ mod tests {
                     cpu: 0.7,
                     mem_kb: 6144,
                     pane_id: 12,
+                    pane_index: 1,
+                    tab_index: 1,
                 }),
                 mouse_reporting: true,
                 alt_screen: true,
@@ -1251,6 +1273,8 @@ mod tests {
             last_output_age_ms: 321,
             cpu: 0.5,
             mem_kb: 4096,
+            pane_index: 2,
+            tab_index: 1,
         };
         let mut buf = Vec::new();
         write_framed(&mut buf, &DaemonEvent::AgentExplain { report: report.clone() }).unwrap();
