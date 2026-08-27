@@ -160,6 +160,7 @@ impl App {
                     .into(),
                 cpu,
                 mem_kb,
+                pane_id: pid,
             })
         } else {
             None

@@ -75,7 +75,29 @@ finished = true         # toast when an agent finishes / goes idle
 
 <Callout title="Agents live in the daemon">
   Lifecycle detection, status, and audible alerts run server-side, so they are
-  visible in the sidebar of any attached terminal — and `kumo ls` surfaces
-  each agent's status from outside the TUI, so a blocked agent is noticeable
-  even when you are not attached.
+  visible in the sidebar of any attached terminal — and `kumo agent status`
+  (`list` / `ls`) surfaces each agent's status and pane id from outside the
+  TUI, so a blocked agent is noticeable even when you are not attached.
 </Callout>
+
+## Debugging status: `kumo agent explain`
+
+Detection is heuristic, so kumo can explain on demand why any pane reads the
+status it does — evaluated **live by the running daemon** against the pane's
+terminal buffer:
+
+```sh
+kumo agent status            # who runs, and in which pane (e.g. pane 42)
+kumo pane list               # every pane id (optional -t TAB filter)
+kumo agent explain 42        # or `-p 42`; defaults to the first AI pane
+```
+
+The report shows the matched **markers** for each agent (opencode / claude)
+with the **evidence region** they were found in — `screen` (buffer tail),
+`form` (below the last rule — Claude's live prompt), `footer` (opencode's
+prompt footer), or `title` (OSC window title) — the **precedence** that
+decided the winner (blocked > working > idle > unknown), and the **reason
+chain** behind an idle verdict: explicit idle markers, unseen-finish hold
+(`done` until focused), seen-after-focus, dead pane, the not-an-AI-CLI
+default, or the no-signal fallback (`unknown`). Raw vs. displayed status
+differ when the done/seen rule is active, which the report makes explicit.

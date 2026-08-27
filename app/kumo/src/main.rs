@@ -164,6 +164,7 @@ fn print_help() {
     println!("    kumo pane close [-s SESSION] [-p PANE_ID]");
     println!("    kumo pane focus -p PANE_ID [-s SESSION]");
     println!("    kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...");
+    println!("    kumo pane list [-s SESSION] [-t TAB_ID]");
     println!();
     println!("TABS:");
     println!("    kumo tab list [-s SESSION]");
@@ -174,8 +175,9 @@ fn print_help() {
     println!();
     println!("AGENTS:");
     println!("    kumo agent spawn [-s SESSION] [PROGRAM]");
-    println!("    kumo agent status");
+    println!("    kumo agent status  (aliases: list, ls)");
     println!("    kumo agent kill -p PANE_ID [-s SESSION]");
+    println!("    kumo agent explain [PANE_ID] [-s SESSION]");
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");

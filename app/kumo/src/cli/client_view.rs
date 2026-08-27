@@ -5877,7 +5877,7 @@ mod tests {
             title: " AI CLI ".to_string(),
             cwd: std::path::PathBuf::from("/tmp/work"),
             is_ai: true,
-            agent: Some(kumo_protocol::AgentInfo { name: format!("agent{pid}"), status, cpu: 0.0, mem_kb: 0 }),
+            agent: Some(kumo_protocol::AgentInfo { name: format!("agent{pid}"), status, cpu: 0.0, mem_kb: 0, pane_id: pid }),
             mouse_reporting: false,
             alt_screen: false,
         }
@@ -6490,6 +6490,7 @@ mod tests {
                             status: AgentStatus::Blocked,
                             cpu: 0.0,
                             mem_kb: 0,
+                            pane_id: 2,
                         }),
                         mouse_reporting: true,
                         alt_screen: false,

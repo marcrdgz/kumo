@@ -31,9 +31,11 @@ enum CliCmd {
     PaneClose { session: Option<String>, pane: Option<u64> },
     PaneFocus { session: Option<String>, pane: u64 },
     PaneSendKeys { session: Option<String>, pane: Option<u64>, keys: String },
+    PaneList { session: Option<String>, tab: Option<u64> },
     AgentSpawn { session: Option<String>, program: Option<String> },
     AgentStatus,
     AgentKill { session: Option<String>, pane: u64 },
+    AgentExplain { session: Option<String>, pane: Option<u64> },
     Kill,
     Reload,
     Restart,
@@ -51,84 +53,137 @@ pub fn run(args: &[String]) -> Result<()> {
     let cmd = parse(args)?;
     let mut stream = connect_daemon()?;
 
-    // Tab list is special: it needs SessionList filtering
-    if let CliCmd::TabList { session } = cmd {
-        let target = resolve_session(&mut stream, session)?;
-        kumo_core::protocol::write_framed(&mut stream, &Command::SessionList)?;
-        stream.set_read_timeout(Some(Duration::from_millis(800)))?;
-        loop {
-            match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
-                Ok(DaemonEvent::SessionList { sessions }) => {
-                    print_tab_list(&sessions, &target);
-                    return Ok(());
+    // Tab/pane list are special: they need a SessionList round trip and filter
+    // client-side (the metadata travels in SessionInfo).
+    match cmd {
+        CliCmd::TabList { session } => {
+            let target = resolve_session(&mut stream, session)?;
+            kumo_core::protocol::write_framed(&mut stream, &Command::SessionList)?;
+            stream.set_read_timeout(Some(Duration::from_millis(800)))?;
+            loop {
+                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    Ok(DaemonEvent::SessionList { sessions }) => {
+                        print_tab_list(&sessions, &target);
+                        return Ok(());
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_timeout(&e) => return Ok(()),
+                    Err(e) => return Err(e),
                 }
-                Ok(_) => continue,
-                Err(e) if is_timeout(&e) => return Ok(()),
-                Err(e) => return Err(e),
             }
         }
-    }
-
-    let command = match cmd {
-        CliCmd::List => Command::SessionList,
-        CliCmd::Kill => Command::KillServer,
-        CliCmd::Reload => Command::ReloadConfig,
-        CliCmd::Restart => Command::Restart,
-        CliCmd::SessionNew { name, workspace } => {
-            Command::SessionNew { name, workspace }
+        CliCmd::PaneList { session, tab } => {
+            let target = resolve_session(&mut stream, session)?;
+            kumo_core::protocol::write_framed(&mut stream, &Command::SessionList)?;
+            stream.set_read_timeout(Some(Duration::from_millis(800)))?;
+            loop {
+                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    Ok(DaemonEvent::SessionList { sessions }) => {
+                        print_pane_list(&sessions, &target, tab);
+                        return Ok(());
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_timeout(&e) => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
         }
-        CliCmd::SessionKill { name } => Command::SessionKill { name },
-        CliCmd::SessionAttach { name } => Command::SessionFocus { name },
-        CliCmd::TabList { .. } => unreachable!(),
-        CliCmd::TabNew { session, name, workspace } => Command::TabNew {
-            session: resolve_session(&mut stream, session)?,
-            name,
-            workspace,
-        },
-        CliCmd::TabClose { session, tab } => Command::TabClose {
-            session: resolve_session(&mut stream, session)?,
-            tab: Some(tab),
-        },
-        CliCmd::TabFocus { session, tab } => Command::TabFocus {
-            session: resolve_session(&mut stream, session)?,
-            tab,
-        },
-        CliCmd::TabRename { session, tab, new_name } => Command::TabRename {
-            session: resolve_session(&mut stream, session)?,
-            tab,
-            new_name,
-        },
-        CliCmd::PaneSplit { session, dir, ai } => Command::PaneSplit {
-            session: resolve_session(&mut stream, session)?,
-            dir,
-            is_ai: ai,
-        },
-        CliCmd::PaneClose { session, pane } => Command::PaneClose {
-            session: resolve_session(&mut stream, session)?,
-            pane_id: pane,
-        },
-        CliCmd::PaneFocus { session, pane } => Command::PaneFocus {
-            session: resolve_session(&mut stream, session)?,
-            pane_id: pane,
-        },
-        CliCmd::PaneSendKeys { session, pane, keys } => Command::PaneSendKeys {
-            session: resolve_session(&mut stream, session)?,
-            pane_id: pane,
-            keys: parse_keys(&keys),
-        },
-        CliCmd::AgentSpawn { session, program } => Command::AgentSpawn {
-            session: resolve_session(&mut stream, session)?,
-            program,
-        },
-        CliCmd::AgentStatus => Command::AgentStatus,
-        CliCmd::AgentKill { session, pane } => Command::AgentKill {
-            session: resolve_session(&mut stream, session)?,
-            pane_id: pane,
-        },
-    };
+        cmd => {
+            let command = match cmd {
+                CliCmd::List => Command::SessionList,
+                CliCmd::Kill => Command::KillServer,
+                CliCmd::Reload => Command::ReloadConfig,
+                CliCmd::Restart => Command::Restart,
+                CliCmd::SessionNew { name, workspace } => {
+                    Command::SessionNew { name, workspace }
+                }
+                CliCmd::SessionKill { name } => Command::SessionKill { name },
+                CliCmd::SessionAttach { name } => Command::SessionFocus { name },
+                CliCmd::TabList { .. } => unreachable!(),
+                CliCmd::TabNew { session, name, workspace } => Command::TabNew {
+                    session: resolve_session(&mut stream, session)?,
+                    name,
+                    workspace,
+                },
+                CliCmd::TabClose { session, tab } => Command::TabClose {
+                    session: resolve_session(&mut stream, session)?,
+                    tab: Some(tab),
+                },
+                CliCmd::TabFocus { session, tab } => Command::TabFocus {
+                    session: resolve_session(&mut stream, session)?,
+                    tab,
+                },
+                CliCmd::TabRename { session, tab, new_name } => Command::TabRename {
+                    session: resolve_session(&mut stream, session)?,
+                    tab,
+                    new_name,
+                },
+                CliCmd::PaneSplit { session, dir, ai } => Command::PaneSplit {
+                    session: resolve_session(&mut stream, session)?,
+                    dir,
+                    is_ai: ai,
+                },
+                CliCmd::PaneClose { session, pane } => Command::PaneClose {
+                    session: resolve_session(&mut stream, session)?,
+                    pane_id: pane,
+                },
+                CliCmd::PaneFocus { session, pane } => Command::PaneFocus {
+                    session: resolve_session(&mut stream, session)?,
+                    pane_id: pane,
+                },
+                CliCmd::PaneSendKeys { session, pane, keys } => Command::PaneSendKeys {
+                    session: resolve_session(&mut stream, session)?,
+                    pane_id: pane,
+                    keys: parse_keys(&keys),
+                },
+                CliCmd::PaneList { .. } => unreachable!(),
+                CliCmd::AgentSpawn { session, program } => Command::AgentSpawn {
+                    session: resolve_session(&mut stream, session)?,
+                    program,
+                },
+                CliCmd::AgentStatus => Command::AgentStatus,
+                CliCmd::AgentKill { session, pane } => Command::AgentKill {
+                    session: resolve_session(&mut stream, session)?,
+                    pane_id: pane,
+                },
+                CliCmd::AgentExplain { session, pane } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = match pane {
+                        Some(p) => p,
+                        // Default: the first AI pane of the target session
+                        // (same data `kumo agent status` prints).
+                        None => {
+                            kumo_core::protocol::write_framed(&mut stream, &Command::AgentStatus)?;
+                            let mut found = None;
+                            loop {
+                                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                                    Ok(DaemonEvent::AgentStatus { agents }) => {
+                                        found = agents
+                                            .into_iter()
+                                            .find(|a| a.session == session)
+                                            .map(|a| a.pane_id);
+                                        break;
+                                    }
+                                    Ok(_) => continue,
+                                    Err(e) if is_timeout(&e) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            found.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "no AI agent in session {session:?} — pass a pane id (see `kumo pane list`)"
+                                )
+                            })?
+                        }
+                    };
+                    Command::AgentExplain { session, pane_id }
+                }
+            };
 
-    kumo_core::protocol::write_framed(&mut stream, &command)?;
-    read_reply(&mut stream)
+            kumo_core::protocol::write_framed(&mut stream, &command)?;
+            read_reply(&mut stream)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +270,21 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
             pane: pane_id,
             keys: positional.join(" "),
         }),
+        "list" => {
+            // Optional -t/--tab TAB_ID filter (split_options leaves it in the
+            // positional args).
+            let mut tab = None;
+            let mut i = 0;
+            while i < positional.len() {
+                if positional[i] == "-t" || positional[i] == "--tab" {
+                    tab = positional.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            Ok(CliCmd::PaneList { session, tab })
+        }
         other => anyhow::bail!("unknown pane subcommand {other:?}"),
     }
 }
@@ -229,10 +299,14 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             session,
             program: positional.first().cloned(),
         }),
-        "status" => Ok(CliCmd::AgentStatus),
+        "status" | "list" | "ls" => Ok(CliCmd::AgentStatus),
         "kill" => Ok(CliCmd::AgentKill {
             session,
             pane: pane_id.ok_or_else(|| anyhow::anyhow!("agent kill needs -p PANE_ID"))?,
+        }),
+        "explain" => Ok(CliCmd::AgentExplain {
+            session,
+            pane: pane_id.or_else(|| positional.first().and_then(|s| s.parse::<u64>().ok())),
         }),
         other => anyhow::bail!("unknown agent subcommand {other:?}"),
     }
@@ -396,15 +470,19 @@ USAGE:
     kumo pane close [-s SESSION] [-p PANE_ID]
     kumo pane focus -p PANE_ID [-s SESSION]
     kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...
+    kumo pane list [-s SESSION] [-t TAB_ID]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
     -p, --pane PANE_ID      target pane id (defaults to the active pane)
+    -t, --tab TAB_ID        filter `list` to one tab
     --horizontal            split left/right instead of top/bottom
     --ai                    start the new pane with the AI agent program
 
 send-keys: KEYS... are typed into the pane (plain text plus tokens such as
 Enter, Tab, Esc, Left, Up, PageDown — see `kumo pane send-keys` KEYS).
+list: prints every pane with its id (marking the focused one) — the ids feed
+`kumo agent explain` / `kumo pane focus`.
 ";
 
 const AGENT_HELP: &str = "\
@@ -412,14 +490,20 @@ kumo agent — manage AI agents
 
 USAGE:
     kumo agent spawn [-s SESSION] [PROGRAM]
-    kumo agent status
+    kumo agent status          (aliases: list, ls)
     kumo agent kill -p PANE_ID [-s SESSION]
+    kumo agent explain [PANE_ID] [-s SESSION]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
     -p, --pane PANE_ID      target pane id (the agent pane)
 
 PROGRAM defaults to the configured AI program (see config).
+status: one line per running AI CLI with its pane id.
+explain: why this pane reads the state it does — matched markers, evidence
+region (screen/form/footer/title), and the idle-fallback reason, evaluated
+live by the daemon. PANE_ID may also be given as the first positional, or
+omitted to pick the first AI pane of the session.
 ";
 
 const TAB_HELP: &str = "\
@@ -517,6 +601,10 @@ fn read_reply(stream: &mut UnixStream) -> Result<()> {
                 print_agent_status(&agents);
                 return Ok(());
             }
+            Ok(DaemonEvent::AgentExplain { report }) => {
+                print_agent_explain(&report);
+                return Ok(());
+            }
             Ok(_) => continue,
             Err(e) if is_timeout(&e) => return Ok(()),
             Err(e) => return Err(e),
@@ -555,9 +643,9 @@ fn print_session_list(sessions: &[kumo_protocol::SessionInfo]) {
             let label = agent.status.label();
             let line = if color {
                 let (r, g, b) = kumo_core::theme::agent_status_color(agent.status);
-                format!("    {} · \x1b[38;2;{r};{g};{b}m{label}\x1b[0m", agent.name)
+                format!("    {} · \x1b[38;2;{r};{g};{b}m{label}\x1b[0m (pane {})", agent.name, agent.pane_id)
             } else {
-                format!("    {} · {label}", agent.name)
+                format!("    {} · {label} (pane {})", agent.name, agent.pane_id)
             };
             println!("{line}");
         }
@@ -583,11 +671,83 @@ fn print_tab_list(sessions: &[kumo_protocol::SessionInfo], target: &str) {
     }
 }
 
+fn print_pane_list(sessions: &[kumo_protocol::SessionInfo], target: &str, tab: Option<u64>) {
+    let Some(s) = sessions.iter().find(|s| s.name == target) else {
+        println!("no session {target:?}");
+        return;
+    };
+    let mut any = false;
+    for t in &s.tabs {
+        if tab.is_some() && tab != Some(t.id) {
+            continue;
+        }
+        if t.panes.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("[{}] (id {})", t.name, t.id);
+        for p in &t.panes {
+            let mark = if p.active { "* " } else { "  " };
+            println!("{mark}pane {} · {}", p.id, p.label);
+        }
+    }
+    if !any {
+        println!("(no panes)");
+    }
+}
+
 fn print_agent_status(agents: &[kumo_protocol::AgentStatusLine]) {
     for a in agents {
         println!("{} · {} · {} (pane {})", a.session, a.name, a.status.label(), a.pane_id);
     }
     if agents.is_empty() {
         println!("(no agents running)");
+    }
+}
+
+fn print_agent_explain(r: &kumo_protocol::AgentExplainReport) {
+    let color = io::stdout().is_terminal();
+    let label = r.status.label();
+    let status = if color {
+        let (r_, g, b) = kumo_core::theme::agent_status_color(r.status);
+        format!("\x1b[38;2;{r_};{g};{b}m{label}\x1b[0m")
+    } else {
+        label.to_string()
+    };
+    println!("pane {} · {} · {}", r.pane_id, r.cli, status);
+    println!(
+        "  session: {}    {}    os pid: {}    dead: {}",
+        r.session,
+        if r.is_ai_cli { "AI CLI" } else { "shell" },
+        r.os_pid,
+        r.dead
+    );
+    match r.prev_status {
+        Some(prev) => println!(
+            "  raw: {}    displayed: {}    prev observed: {}    focused: {}",
+            r.raw_status.label(),
+            r.status.label(),
+            prev.label(),
+            r.focused
+        ),
+        None => println!(
+            "  raw: {}    displayed: {}    prev observed: none    focused: {}",
+            r.raw_status.label(),
+            r.status.label(),
+            r.focused
+        ),
+    }
+    println!(
+        "  output silence: {} ms    cpu: {:.1}%    mem: {} KiB",
+        r.last_output_age_ms, r.cpu, r.mem_kb
+    );
+    println!("  precedence: {}", r.precedence);
+    println!("  reason: {}", r.idle_reason.label());
+    if r.markers.is_empty() {
+        println!("  no markers matched");
+    } else {
+        for m in &r.markers {
+            println!("  marker: {} · {} · in {}", m.agent, m.marker, m.region.label());
+        }
     }
 }

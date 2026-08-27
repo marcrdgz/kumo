@@ -12,11 +12,13 @@ use std::path::PathBuf;
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 
 use kumo_protocol::{
-    AgentInfo, AgentStatusLine, SessionInfo, SplitDir, WireKeyEvent, WireNotice, WireWorktree,
+    AgentExplainReport, AgentIdleReason, AgentInfo, AgentMarkerMatch, AgentStatusLine,
+    EvidenceRegion, PaneInfo, SessionInfo, SplitDir, WireKeyEvent, WireNotice, WireWorktree,
 };
 
 use super::App;
 use kumo_core::layout;
+use crate::daemon::agents::{self, AgentStatus, Snapshot};
 use crate::daemon::pane::Pane;
 use crate::daemon::pty::Pty;
 
@@ -334,6 +336,19 @@ impl App {
                         zoomed: t.zoom,
                         active: ti == s.active_tab,
                         focus: (t.tree.pane_count()>0).then_some(t.tree.focus),
+                        panes: t.tree
+                            .pane_ids()
+                            .into_iter()
+                            .map(|pid| {
+                                let active = t.tree.pane_count() > 0 && t.tree.focus == pid;
+                                let label = self
+                                    .panes
+                                    .get(&pid)
+                                    .map(|p| self.pane_info_label(p))
+                                    .unwrap_or_default();
+                                PaneInfo { id: pid, label, active }
+                            })
+                            .collect(),
                     }).collect(),
                     agents: all_pids
                         .into_iter()
@@ -343,8 +358,9 @@ impl App {
                             let (cpu, mem_kb) = self.agent_proc_cache.get(&pid).copied().unwrap_or((0.0, 0));
                             Some(AgentInfo {
                                 name: self.agent_label(pid),
-                                status: self.agent_status_cache.get(&pid).copied().unwrap_or(crate::daemon::agents::AgentStatus::Idle).into(),
+                                status: self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle).into(),
                                 cpu, mem_kb,
+                                pane_id: pid,
                             })
                         })
                         .collect(),
@@ -388,12 +404,106 @@ impl App {
                         session: s.name.clone(),
                         pane_id: pid,
                         name: self.agent_label(pid),
-                        status: self.agent_status_cache.get(&pid).copied().unwrap_or(crate::daemon::agents::AgentStatus::Idle).into(),
+                        status: self.agent_status_cache.get(&pid).copied().unwrap_or(AgentStatus::Idle).into(),
                     });
                 }
             }
         }
         out
+    }
+
+    /// Diagnostic report for `kumo agent explain`: why this pane reads the
+    /// state it does — matched markers, evidence region, and the idle verdict
+    /// reason — evaluated live against the pane's terminal buffer and the
+    /// daemon's cached state.
+    pub(crate) fn agent_explain(&self, session: &str, pane_id: u64) -> Result<AgentExplainReport> {
+        let Some(s) = self.sessions.iter().find(|s| s.name == session) else {
+            anyhow::bail!("no session {session:?}");
+        };
+        if !s.contains_pane(pane_id) {
+            anyhow::bail!("no pane {pane_id} in session {session:?}");
+        }
+        let Some(pane) = self.panes.get(&pane_id) else {
+            anyhow::bail!("no pane {pane_id}");
+        };
+        let exp = agents::explain(&Snapshot::capture(&pane.vt));
+        // Detection only runs for AI panes; a dead or plain shell pane reads
+        // the default Idle (matching what the UI displays via the cache).
+        let raw = if pane.dead || !pane.is_ai_cli() {
+            AgentStatus::Idle
+        } else {
+            exp.status
+        };
+        let prev = self.last_agent_status.get(&pane_id).copied();
+        let focused = self.pane_is_focused(pane_id);
+        let status = super::tasks::apply_seen(raw, prev, focused);
+        let idle_reason = if !pane.is_ai_cli() {
+            AgentIdleReason::NotAnAgent
+        } else if pane.dead {
+            AgentIdleReason::DeadPane
+        } else if status == AgentStatus::Done {
+            AgentIdleReason::UnseenFinish
+        } else if status == AgentStatus::Idle && prev == Some(AgentStatus::Done) {
+            AgentIdleReason::SeenAfterFocus
+        } else if exp.status == AgentStatus::Idle {
+            AgentIdleReason::IdleMarkers
+        } else if exp.status == AgentStatus::Unknown {
+            AgentIdleReason::UnknownFallback
+        } else {
+            AgentIdleReason::Active
+        };
+        let mut markers = Vec::new();
+        for ev in exp.blocked {
+            for m in ev.blocked {
+                markers.push(marker_wire(ev.agent, "blocked", m));
+            }
+        }
+        for ev in exp.working {
+            for m in ev.working {
+                markers.push(marker_wire(ev.agent, "working", m));
+            }
+        }
+        for ev in exp.idle {
+            for m in ev.idle {
+                markers.push(marker_wire(ev.agent, "idle", m));
+            }
+        }
+        let (cpu, mem_kb) = self.agent_proc_cache.get(&pane_id).copied().unwrap_or((0.0, 0));
+        let cli = pane
+            .custom_name
+            .clone()
+            .unwrap_or_else(|| if pane.is_ai_cli() { self.agent_label(pane_id) } else { "shell".to_string() });
+        Ok(AgentExplainReport {
+            pane_id,
+            session: s.name.clone(),
+            cli,
+            os_pid: pane.pty.process_id().map(u64::from).unwrap_or(0),
+            is_ai_cli: pane.is_ai_cli(),
+            dead: pane.dead,
+            focused,
+            raw_status: raw.into(),
+            status: status.into(),
+            prev_status: prev.map(Into::into),
+            idle_reason,
+            markers,
+            precedence: agents::PRECEDENCE.to_string(),
+            last_output_age_ms: pane.last_output_age().as_millis() as u64,
+            cpu,
+            mem_kb,
+        })
+    }
+
+    /// Wire label of a pane in the `session list` views: custom name, then the
+    /// AI CLI name, then `shell`. (The chrome's `shell N` numbering is a
+    /// focused-tab rendering concern, not list data.)
+    fn pane_info_label(&self, pane: &Pane) -> String {
+        if let Some(name) = &pane.custom_name {
+            return name.clone();
+        }
+        if pane.is_ai_cli() {
+            return self.agent_label(pane.id);
+        }
+        "shell".to_string()
     }
 
     // ------------------------------------------------------------------
@@ -607,5 +717,21 @@ impl App {
     pub(crate) fn dismiss_update(&mut self, key: &str) {
         kumo_core::update::dismiss(key);
         self.update_notice = None;
+    }
+}
+
+/// Convert a detected marker match into its wire form for `agent explain`.
+fn marker_wire(agent: &str, kind: &str, m: agents::MarkerMatch) -> AgentMarkerMatch {
+    let region = match m.region {
+        agents::Region::Screen => EvidenceRegion::Screen,
+        agents::Region::Form => EvidenceRegion::Form,
+        agents::Region::Footer => EvidenceRegion::Footer,
+        agents::Region::Title => EvidenceRegion::Title,
+    };
+    AgentMarkerMatch {
+        agent: agent.to_string(),
+        kind: kind.to_string(),
+        marker: m.marker.to_string(),
+        region,
     }
 }

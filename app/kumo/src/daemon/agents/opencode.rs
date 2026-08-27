@@ -4,7 +4,7 @@
 //! prompt when blocked, and a prompt footer ("esc interrupt", spinner,
 //! bundled `opencode.toml` manifest.
 
-use super::{contains_ci, Snapshot};
+use super::{contains_ci, AgentEvidence, MarkerMatch, Region, Snapshot};
 
 /// Output markers that indicate the agent is waiting on a command approval.
 ///
@@ -57,6 +57,73 @@ fn question_dialog_visible(snap: &Snapshot) -> bool {
 /// Whether opencode is waiting on a command approval.
 pub(crate) fn blocked(snap: &Snapshot) -> bool {
     question_dialog_visible(snap) || BLOCKED_MARKERS.iter().any(|m| contains_ci(&snap.screen, m))
+}
+
+/// Every matched opencode marker, per signal kind and evidence region
+/// (diagnostics for `kumo agent explain`; kept in sync with the boolean
+/// predicates by the consistency tests below).
+pub(crate) fn evidence(snap: &Snapshot) -> AgentEvidence {
+    AgentEvidence {
+        agent: "opencode",
+        blocked: blocked_evidence(snap),
+        working: working_evidence(snap),
+        idle: idle_evidence(snap),
+    }
+}
+
+fn blocked_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
+    let mut out = Vec::new();
+    if question_dialog_visible(snap) {
+        out.push(MarkerMatch { marker: "question dialog", region: Region::Screen });
+        if contains_ci(&snap.screen, "esc dismiss") {
+            out.push(MarkerMatch { marker: "esc dismiss", region: Region::Screen });
+        }
+        for m in QUESTION_DIALOG_ENTER {
+            if contains_ci(&snap.screen, m) {
+                out.push(MarkerMatch { marker: m, region: Region::Screen });
+            }
+        }
+        for m in QUESTION_DIALOG_NAV {
+            if snap.screen.contains(m) {
+                out.push(MarkerMatch { marker: m, region: Region::Screen });
+            }
+        }
+    }
+    for m in BLOCKED_MARKERS {
+        if contains_ci(&snap.screen, m) {
+            out.push(MarkerMatch { marker: m, region: Region::Screen });
+        }
+    }
+    out
+}
+
+fn working_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
+    let mut out = Vec::new();
+    for m in WORKING_MARKERS {
+        if contains_ci(&snap.footer, m) {
+            out.push(MarkerMatch { marker: m, region: Region::Footer });
+        }
+    }
+    if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| snap.footer.contains(p)) {
+        out.push(MarkerMatch { marker: "knight-rider bar", region: Region::Footer });
+    }
+    if snap.footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
+        out.push(MarkerMatch { marker: "braille spinner", region: Region::Footer });
+    }
+    out
+}
+
+fn idle_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
+    let mut out = Vec::new();
+    for m in IDLE_MARKERS {
+        if contains_ci(&snap.screen, m) {
+            out.push(MarkerMatch { marker: m, region: Region::Screen });
+        }
+    }
+    if contains_ci(&snap.footer, "esc dismiss") && !question_dialog_visible(snap) {
+        out.push(MarkerMatch { marker: "esc dismiss (idle prompt)", region: Region::Footer });
+    }
+    out
 }
 
 /// Whether opencode is actively producing output. The footer is scanned

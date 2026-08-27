@@ -546,7 +546,7 @@ mod tests {
                     title: "AI CLI".into(),
                     cwd: std::path::PathBuf::from("/tmp"),
                     is_ai: true,
-                    agent: Some(AgentInfo { name: "opencode".into(), status, cpu: 0.0, mem_kb: 0 }),
+                    agent: Some(AgentInfo { name: "opencode".into(), status, cpu: 0.0, mem_kb: 0, pane_id: 7 }),
                     mouse_reporting: false,
                     alt_screen: false,
                 }))),

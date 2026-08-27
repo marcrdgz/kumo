@@ -391,8 +391,8 @@ fn git_branch(ws: &std::path::Path) -> Option<BranchInfo> {
 /// `Done` (finished-but-unseen) when the previous state was Working or Done
 /// AND the pane is not focused. Any non-idle raw result supersedes Done
 /// directly; focusing the pane between ticks marks it seen and drops it back
-/// to Idle.
-fn apply_seen(raw: AgentStatus, last: Option<AgentStatus>, focused: bool) -> AgentStatus {
+/// to Idle. Shared with the `kumo agent explain` diagnostic.
+pub(super) fn apply_seen(raw: AgentStatus, last: Option<AgentStatus>, focused: bool) -> AgentStatus {
     match raw {
         AgentStatus::Idle
             if matches!(last, Some(AgentStatus::Working | AgentStatus::Done)) && !focused =>
