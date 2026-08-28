@@ -230,6 +230,9 @@ impl App {
             .keys()
             .map(|&pid| (pid, self.pane_is_focused(pid)))
             .collect();
+        // One process-table read for all AI panes this tick (the agent
+        // metrics are summed across each pane's whole process tree).
+        let process_table = crate::daemon::pane::ProcessSnapshot::capture();
         for (&pid, pane) in self.panes.iter_mut() {
             if !pane.is_ai_cli() {
                 continue;
@@ -243,10 +246,10 @@ impl App {
                 status_changed = true;
             }
             // Sample the agent process tree for the sidebar's micro-pill
-            // metrics. `pid` here is the kumo pane id (u64); the OS pid comes
+            // metrics. `pid` here is the kumo pane id (u64); the os pid comes
             // from the pane's PTY child.
             let os_pid = pane.pty.process_id().unwrap_or(0);
-            let metrics = self.proc.sample(os_pid);
+            let metrics = sample_agent_tree(&mut self.proc, os_pid, process_table.as_ref());
             if self.agent_proc_cache.get(&pid) != Some(&metrics) {
                 status_changed = true;
             }
@@ -385,6 +388,32 @@ fn git_branch(ws: &std::path::Path) -> Option<BranchInfo> {
         }
     }
     name.map(|name| BranchInfo { name, ahead, behind })
+}
+
+/// Sum CPU% (of one core) and RSS (KiB) across `root`'s whole process tree,
+/// so work in agent-launched children (servers, git, formatters) counts
+/// toward the agent's metrics. Falls back to the root process alone when the
+/// process table is unavailable.
+fn sample_agent_tree(
+    proc: &mut crate::daemon::app::proc::ProcSampler,
+    root: u32,
+    table: Option<&crate::daemon::pane::ProcessSnapshot>,
+) -> (f32, u64) {
+    if root == 0 {
+        return (0.0, 0);
+    }
+    let pids = match table {
+        Some(t) => t.descendants(root),
+        None => vec![root],
+    };
+    let mut cpu = 0.0f32;
+    let mut rss = 0u64;
+    for pid in pids {
+        let (c, r) = proc.sample(pid);
+        cpu += c;
+        rss += r;
+    }
+    (cpu, rss)
 }
 
 /// Apply the done/seen rule to a raw detection: an `Idle` result counts as
