@@ -95,6 +95,10 @@ kumo agent explain 42        # or by position: s1:t2:p1, work:t2:p1 (with -s: t2
 Both the id and the composite position (`[s:]t[:p]`, 1-based) are accepted —
 positions are friendly for interactive use, ids stay stable for scripts.
 
+The `cpu`/`mem` line covers the agent's **whole process tree** (children
+included) with CPU measured over a sliding ~6 s window, so a bursty agent
+reads a truthful average instead of flat 0%.
+
 The report shows the matched **markers** for each agent (opencode / claude)
 with the **evidence region** they were found in — `screen` (buffer tail),
 `form` (below the last rule — Claude's live prompt), `footer` (opencode's
