@@ -168,6 +168,8 @@ pub struct App {
 impl App {
     fn new(launch: Launch) -> Result<App> {
         let shell = kumo_core::config::default_shell();
+        // Load user-dir agent-detection rules (bundled defaults otherwise).
+        super::agents::reload_agent_rules();
         let (ai_prog, ai_args) = kumo_core::config::ai_command();
         let ai_prog = kumo_core::config::resolve_program(&ai_prog);
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
@@ -689,6 +691,8 @@ impl App {
     /// (`[theme.custom]`) are live-reloaded: all existing panes are re-colored.
     pub(super) fn reload_config(&mut self) {
         kumo_core::config::invalidate_cache();
+        // User-dir agent-detection rules (replaces bundled per agent).
+        super::agents::reload_agent_rules();
         let shell = kumo_core::config::default_shell();
         let (ai_prog, ai_args) = kumo_core::config::ai_command();
         let ai_prog = kumo_core::config::resolve_program(&ai_prog);

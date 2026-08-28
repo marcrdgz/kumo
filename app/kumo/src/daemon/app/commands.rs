@@ -461,18 +461,21 @@ impl App {
         };
         let mut markers = Vec::new();
         for ev in exp.blocked {
+            let agent = ev.agent;
             for m in ev.blocked {
-                markers.push(marker_wire(ev.agent, "blocked", m));
+                markers.push(marker_wire(&agent, "blocked", m));
             }
         }
         for ev in exp.working {
+            let agent = ev.agent;
             for m in ev.working {
-                markers.push(marker_wire(ev.agent, "working", m));
+                markers.push(marker_wire(&agent, "working", m));
             }
         }
         for ev in exp.idle {
+            let agent = ev.agent;
             for m in ev.idle {
-                markers.push(marker_wire(ev.agent, "idle", m));
+                markers.push(marker_wire(&agent, "idle", m));
             }
         }
         let (cpu, mem_kb) = self.agent_proc_cache.get(&pane_id).copied().unwrap_or((0.0, 0));
