@@ -1834,7 +1834,7 @@ impl Terminal {
         unsafe {
             ghostty_terminal_set(
                 self.term,
-                TERMINAL_DATA_MODE,
+                TERMINAL_OPT_MODE,
                 &config as *const TerminalModeConfig as *const c_void,
             )
             .is_ok()
