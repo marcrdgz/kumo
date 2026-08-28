@@ -49,15 +49,6 @@ impl Result {
     }
 }
 
-/// Terminal initialization options.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TerminalOptions {
-    pub cols: u16,
-    pub rows: u16,
-    pub max_scrollback: usize,
-}
-
 /// A caller-provided byte buffer for output APIs.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -447,6 +438,9 @@ pub const TERMINAL_OPT_COLOR_PALETTE: i32 = 14;
 pub const TERMINAL_OPT_PWD_CHANGED: i32 = 25;
 pub const TERMINAL_OPT_CLIPBOARD_WRITE: i32 = 26;
 pub const TERMINAL_OPT_MODE: i32 = 34;
+/// Maximum number of physical lines retained in scrollback. Set after
+/// `ghostty_terminal_new` (the vendored constructor no longer takes it).
+pub const TERMINAL_OPT_SCROLLBACK_MAX_LINES: i32 = 28;
 pub const TERMINAL_OPT_CONTINUATION_MAX_BYTES: i32 = 31;
 
 pub const TERMINAL_DATA_COLS: i32 = 1;
@@ -515,7 +509,8 @@ unsafe extern "C" {
     fn ghostty_terminal_new(
         allocator: *const c_void,
         terminal: *mut TerminalHandle,
-        options: TerminalOptions,
+        cols: u16,
+        rows: u16,
     ) -> Result;
     fn ghostty_terminal_free(terminal: TerminalHandle);
     fn ghostty_terminal_reset(terminal: TerminalHandle);
@@ -1024,13 +1019,10 @@ impl Terminal {
         cursor: ColorRgb,
     ) -> anyhow::Result<Terminal> {
         let mut term: TerminalHandle = ptr::null_mut();
-        let options = TerminalOptions {
-            cols: cols.max(1),
-            rows: rows.max(1),
-            max_scrollback,
-        };
         unsafe {
-            if !ghostty_terminal_new(ptr::null(), &mut term, options).is_ok() || term.is_null() {
+            if !ghostty_terminal_new(ptr::null(), &mut term, cols.max(1), rows.max(1)).is_ok()
+                || term.is_null()
+            {
                 return Err(anyhow::anyhow!("libghostty-vt: failed to create terminal"));
             }
         }
@@ -1046,6 +1038,19 @@ impl Terminal {
         }
 
         set_terminal_colors(term, palette, fg, bg, cursor);
+
+        // The constructor no longer takes a scrollback limit; configure it
+        // here so the grid actually grows into history at most `max_scrollback`
+        // lines. Reading TERMINAL_DATA_TOTAL_ROWS then reports content rows,
+        // not capacity (agent detection's `bottom_text` relies on it).
+        let sb_lines: usize = max_scrollback;
+        unsafe {
+            let _ = ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                &sb_lines as *const usize as *const c_void,
+            );
+        }
 
         // Enable continuation tracking so an unfinished VT/UTF-8 sequence can be
         // snapshotted (required for lossless restart). 64KB matches the
@@ -1141,11 +1146,12 @@ impl Terminal {
     }
 
     /// Create a `Terminal` from a snapshot byte buffer. The snapshot already
-    /// contains cols/rows/max_scrollback/colors, but we re-install callbacks
-    /// and the current theme's palette so the new terminal integrates with
-    /// the daemon's PTY writer.
+    /// contains cols/rows/colors, but we re-install callbacks, the current
+    /// theme's palette, and the scrollback limit so the new terminal integrates
+    /// with the daemon's PTY writer.
     pub fn from_snapshot(
         bytes: &[u8],
+        max_scrollback: usize,
         palette: &[ColorRgb; 16],
         fg: ColorRgb,
         bg: ColorRgb,
@@ -1185,10 +1191,16 @@ impl Terminal {
 
         // Re-apply theme palette (snapshot carries its own palette, but the
         // daemon's current theme may differ). Also re-enable continuation for
-        // future snapshots.
+        // future snapshots and a stable scrollback limit.
         set_terminal_colors(term, palette, fg, bg, cursor);
+        let sb_lines: usize = max_scrollback;
         let cont_limit: usize = 64 * 1024;
         unsafe {
+            let _ = ghostty_terminal_set(
+                term,
+                TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                &sb_lines as *const usize as *const std::ffi::c_void,
+            );
             let _ = ghostty_terminal_set(
                 term,
                 TERMINAL_OPT_CONTINUATION_MAX_BYTES,
@@ -2345,6 +2357,7 @@ mod tests {
         assert!(!snap.is_empty(), "snapshot should not be empty");
         let mut t2 = Terminal::from_snapshot(
             &snap,
+            100,
             &palette(),
             ColorRgb::new(0, 0, 0),
             ColorRgb::new(0, 0, 0),

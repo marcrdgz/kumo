@@ -264,6 +264,7 @@ impl Pane {
         let (mut pane, is_snapshot) = if let Some(bytes) = snapshot {
             match vt::Terminal::from_snapshot(
                 &bytes,
+                10_000,
                 &theme.palette,
                 theme.term_fg,
                 theme.term_bg,
@@ -344,6 +345,7 @@ impl Pane {
     ) -> Result<Pane> {
         let vt = vt::Terminal::from_snapshot(
             &snapshot,
+            10_000,
             &theme.palette,
             theme.term_fg,
             theme.term_bg,
