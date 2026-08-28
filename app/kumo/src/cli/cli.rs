@@ -71,17 +71,18 @@ impl CompositeSpec {
             }),
             3 => {
                 let s = seg(0)?;
-                // Session part: a 1-based index (`s2`) or a name (`kumo`).
-                let v = s.strip_prefix('s').unwrap_or(s);
-                let (session, session_index) = if v.is_empty() {
-                    anyhow::bail!("bad session: {s:?} (expects a name or a 1-based index)");
-                } else {
-                    match v.parse::<usize>() {
-                        Ok(n) if n >= 1 => (None, Some(n)),
-                        Ok(_) => anyhow::bail!("bad session index: {s:?} (indexes are 1-based)"),
-                        Err(_) => (Some(v.to_string()), None),
-                    }
-                };
+                // Session part: a 1-based index (`s2` — the `s` label only
+                // counts when the remainder is numeric, so a session literally
+                // named "session-1" is never mangled), or a name (`kumo`).
+                let (session, session_index) =
+                    match s.strip_prefix('s').and_then(|r| r.parse::<usize>().ok()) {
+                        Some(n) if n >= 1 => (None, Some(n)),
+                        _ => match s.parse::<usize>() {
+                            Ok(n) if n >= 1 => (None, Some(n)),
+                            Ok(_) => anyhow::bail!("bad session index: {s:?} (indexes are 1-based)"),
+                            Err(_) => (Some(s.to_string()), None),
+                        },
+                    };
                 Ok(CompositeSpec {
                     session,
                     session_index,
@@ -132,6 +133,30 @@ fn parse_pane_ref(v: &str) -> Option<PaneRef> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    run_inner(args).map_err(friendly_protocol_error)
+}
+
+/// A bincode decode failure against a running daemon means a binary version
+/// mismatch (the CLI and the daemon are the same binary — they ship and must
+/// run together). Turn the bare bincode error into an actionable message.
+fn friendly_protocol_error(e: anyhow::Error) -> anyhow::Error {
+    let msg = format!("{e}");
+    if msg.contains("UnexpectedEnd")
+        || msg.contains("Unexpected end")
+        || msg.contains("unexpected eof")
+        || msg.contains("unexpected end")
+    {
+        anyhow::anyhow!(
+            "the running kumo daemon is too old to speak this protocol — restart it with \
+             `kumo server restart` after `kumo update` (or kill it and start the new binary: \
+             `kumo daemon`)"
+        )
+    } else {
+        e
+    }
+}
+
+fn run_inner(args: &[String]) -> Result<()> {
     // `-h/--help` anywhere in a domain invocation prints that domain's usage
     // and exits without touching the daemon.
     if let Some(domain) = args.first() {
@@ -417,7 +442,9 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
         "status" | "list" | "ls" => Ok(CliCmd::AgentStatus),
         "kill" => Ok(CliCmd::AgentKill {
             session,
-            pane: pane_id.ok_or_else(|| anyhow::anyhow!("agent kill needs -p PANE_ID"))?,
+            pane: pane_id
+                .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
+                .ok_or_else(|| anyhow::anyhow!("agent kill needs a PANE (see `kumo pane -h`)"))?,
         }),
         "explain" => Ok(CliCmd::AgentExplain {
             session,
@@ -1041,9 +1068,25 @@ mod tests {
     fn composite_spec_rejects_garbage() {
         assert!(CompositeSpec::parse("0:1").is_err(), "indexes are 1-based");
         assert!(CompositeSpec::parse("a:b").is_err(), "session name needs t:p");
-        assert!(CompositeSpec::parse("s:2:1").is_err(), "bare s = no index");
+        assert!(CompositeSpec::parse(":2:1").is_err(), "empty session");
         assert!(CompositeSpec::parse("1:2:3:4").is_err());
         assert!(CompositeSpec::parse("").is_err());
+    }
+
+    #[test]
+    fn composite_spec_keeps_s_leading_session_names() {
+        // A session named "session-1" must not lose its leading `s` to the
+        // optional `s` label (regression: it parsed as "ession-1").
+        let s = CompositeSpec::parse("session-1:t2:p3").unwrap();
+        assert_eq!(s.session.as_deref(), Some("session-1"));
+        assert_eq!(s.session_index, None);
+        assert_eq!(s.tab, Some(2));
+        assert_eq!(s.pane, Some(3));
+        // The `s` label still works: `s2` = session index 2.
+        let s = CompositeSpec::parse("s2:t1:p1").unwrap();
+        assert_eq!(s.session_index, Some(2));
+        assert_eq!(s.session, None);
+        assert_eq!(s.tab, Some(1));
     }
 
     #[test]
