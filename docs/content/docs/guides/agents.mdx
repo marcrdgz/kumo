@@ -69,9 +69,76 @@ finished = true         # toast when an agent finishes / goes idle
 - `opencode` — permission dialogs, question prompt, prompt-footer signals
 - `claude` — approval forms, permission prompts, OSC-title spinner
 
-### Auto-listed, status always idle
+### Auto-listed until it gets rules
 
 - `codex` · `gemini` · `qwen` · `aider` · `cody` · `swe` · `coco`
+
+These are detected by name and listed in the sidebar, but read **unknown**
+until a detection-rules file describes their UI (see below) — no kumo release
+is needed to promote one to a first-class working/blocked/idle state.
+
+## Custom detection rules (`agent-detection/<agent>.toml`)
+
+The lifecycle classifiers are **data-driven** (`0.7.0`): kumo ships rule
+manifests for `claude` and `opencode` (built into the binary), and reads
+per-agent overrides from your config dir:
+
+```
+~/.config/kumo/agent-detection/<agent>.toml   # $KUMO_CONFIG_DIR/agent-detection
+```
+
+A file for an agent kumo already knows **replaces** its bundled rules; a file
+for any other agent id **adds** it. Rules load at daemon start and are re-read
+on `kumo reload`. Invalid files (bad id charset, unknown region, test with
+more than one matcher) are warned about and skipped — detection never crashes
+and keeps the bundled defaults.
+
+```toml
+# ~/.config/kumo/agent-detection/my-agent.toml
+[agent]
+id = "my-agent"   # [a-z0-9-]+ — must match the filename stem
+
+[[blocked]]
+tests = [
+  { region = "screen", contains = "do you want to proceed?" },
+  { region = "form",   yes-no-line = true },
+]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+
+[[idle]]
+tests = [{ region = "screen", contains = "ask anything" }]
+```
+
+A signal is an OR of `[[signal]]` groups; a group is an AND of its `tests`.
+Tests may nest:
+
+- `any-of = [...]` — at least one branch matches (branches may be nested
+  groups)
+- `not = [...]` — succeeds when the AND of the listed entries does **not**
+  match (used to keep a question dialog from reading as idle)
+- `tests = [...]` — a nested AND group, inside `any-of` or `not`
+
+Each leaf test binds one matcher to one **evidence region** — `screen` (buffer
+tail), `form` (below the last rule), `footer` (pinned prompt footer), `title`
+(OSC window title):
+
+| Matcher | Meaning |
+| --- | --- |
+| `contains` | ASCII case-insensitive substring |
+| `contains-any` | first matching pattern of the list |
+| `prefix` | trimmed text starts with (idle OSC title, e.g. `✳`) |
+| `spinner` | `"braille"` / `"half-circle"` first glyph of the OSC title |
+| `spinner-line` | short line holding a dingbat glyph (working prompt box) |
+| `btw-overlay` | the `/btw` reasoning overlay (header + `esc to close`) |
+| `yes-no-line` | a `1. yes / 2. no` option line |
+| `braille-in` | any braille glyph in the region |
+
+**Adding a new agent:** run it in a pane, watch the markers via
+`kumo agent explain <pane>`, write the file, then `kumo reload` until the
+status is right — exactly what we did for the built-ins
+(`app/kumo/src/daemon/agents/rules/`).
 
 <Callout title="Agents live in the daemon">
   Lifecycle detection, status, and audible alerts run server-side, so they are
@@ -99,12 +166,13 @@ The `cpu`/`mem` line covers the agent's **whole process tree** (children
 included) with CPU measured over a sliding ~6 s window, so a bursty agent
 reads a truthful average instead of flat 0%.
 
-The report shows the matched **markers** for each agent (opencode / claude)
-with the **evidence region** they were found in — `screen` (buffer tail),
-`form` (below the last rule — Claude's live prompt), `footer` (opencode's
-prompt footer), or `title` (OSC window title) — the **precedence** that
-decided the winner (blocked > working > idle > unknown), and the **reason
-chain** behind an idle verdict: explicit idle markers, unseen-finish hold
-(`done` until focused), seen-after-focus, dead pane, the not-an-AI-CLI
-default, or the no-signal fallback (`unknown`). Raw vs. displayed status
-differ when the done/seen rule is active, which the report makes explicit.
+The report shows the matched **markers** for every agent with rules (bundled
+or your own) and the **evidence region** where each was found — `screen`
+(buffer tail), `form` (below the last rule — Claude's live prompt), `footer`
+(opencode's prompt footer), or `title` (OSC window title) — the
+**precedence** that decided the winner (blocked > working > idle > unknown),
+and the **reason chain** behind an idle verdict: explicit idle markers,
+unseen-finish hold (`done` until focused), seen-after-focus, dead pane, the
+not-an-AI-CLI default, or the no-signal fallback (`unknown`). Raw vs.
+displayed status differ when the done/seen rule is active, which the report
+makes explicit.
