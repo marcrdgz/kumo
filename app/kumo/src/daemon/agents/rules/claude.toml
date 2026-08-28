@@ -1,0 +1,105 @@
+# Claude Code lifecycle detection rules (bundled; user-dir override replaces
+# this whole file: ~/.config/kumo/agent-detection/claude.toml).
+#
+# Claude renders its live state outside the main transcript: an interactive
+# prompt box below a horizontal rule (where approval forms appear) plus a
+# status spinner in the OSC window title (braille/half-circle while working,
+# `✳ ` when idle).
+
+[agent]
+id = "claude"
+
+# Live form / select prompt: "esc to cancel" plus a confirm action; a select
+# list also needs a navigation hint.
+[[blocked]]
+tests = [
+  { region = "form", contains = "esc to cancel" },
+  { any-of = [
+      { region = "form", contains = "enter to confirm" },
+      { tests = [
+          { region = "form", contains = "enter to select" },
+          { any-of = [
+              { region = "form", contains = "tab/arrow keys to navigate" },
+              { region = "form", contains = "arrow keys to navigate" },
+              { region = "form", contains = "arrows to navigate" },
+              { region = "form", contains = "↑/↓ to navigate" },
+              { region = "form", contains = "↑↓ to navigate" },
+          ]},
+      ]},
+  ]},
+]
+
+# Dynamic workflow confirmation.
+[[blocked]]
+tests = [
+  { region = "form", contains = "run a dynamic workflow?" },
+  { region = "form", contains = "esc to cancel" },
+]
+
+# Bash command approval: "do you want to proceed?" with command chrome and a
+# yes/no option line.
+[[blocked]]
+tests = [
+  { region = "screen", contains = "do you want to proceed?" },
+  { any-of = [
+      { region = "screen", contains = "bash command" },
+      { region = "screen", contains = "bash(" },
+      { region = "screen", contains = "contains expansion" },
+      { region = "screen", contains = "tab to amend" },
+      { region = "screen", contains = "ctrl+e to explain" },
+  ]},
+  { region = "screen", yes-no-line = true },
+]
+
+# Generic permission with numbered yes/no options rendered in the form.
+[[blocked]]
+tests = [
+  { region = "form", contains = "do you want to proceed?" },
+  { region = "form", contains = "esc to cancel" },
+  { region = "form", yes-no-line = true },
+]
+
+# Standalone approval markers (legacy / connection / bash-approval hints).
+[[blocked]]
+tests = [{ region = "screen", contains = "waiting for permission" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "do you want to allow this connection?" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "review your answers" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "skip interview and plan immediately" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "tab to amend" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "ctrl+e to explain" }]
+
+# Working: braille or half-circle spinner leading the OSC title, the working
+# prompt box (`· esc to interrupt ·` or a short dingbat spinner in the live
+# form/footer), or the `/btw` reasoning overlay.
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+[[working]]
+tests = [{ region = "title", spinner = "half-circle" }]
+[[working]]
+tests = [{ region = "form", contains = "esc to interrupt" }]
+[[working]]
+tests = [{ region = "footer", contains = "esc to interrupt" }]
+[[working]]
+tests = [{ region = "form", spinner-line = true }]
+[[working]]
+tests = [{ region = "footer", spinner-line = true }]
+[[working]]
+tests = [{ region = "screen", btw-overlay = true }]
+
+# Idle prompt box: `? for shortcuts · ← for agents` while idle (it pins
+# `· esc to interrupt ·` instead while running), or the `✳ ` OSC title.
+[[idle]]
+tests = [{ region = "form", contains = "? for shortcuts" }]
+[[idle]]
+tests = [{ region = "footer", contains = "? for shortcuts" }]
+[[idle]]
+tests = [{ region = "form", contains = "← for agents" }]
+[[idle]]
+tests = [{ region = "footer", contains = "← for agents" }]
+[[idle]]
+tests = [{ region = "title", prefix = "✳" }]

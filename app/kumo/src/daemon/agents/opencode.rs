@@ -1,158 +1,42 @@
-//! opencode lifecycle detection.
+//! opencode lifecycle detection, driven by the bundled
+//! `rules/opencode.toml` manifest (see [`super::rules`]):
 //!
 //! opencode signals its state on screen: permission dialogs and a question
 //! prompt when blocked, and a prompt footer ("esc interrupt", spinner,
-//! bundled `opencode.toml` manifest.
+//! progress bar) while working, plus the `Ask anything...` prompt box when
+//! idle.
 
-use super::{contains_ci, AgentEvidence, MarkerMatch, Region, Snapshot};
-
-/// Output markers that indicate the agent is waiting on a command approval.
-///
-/// Only markers tied to a real on-screen dialog qualify. Generic prompts
-/// ("proceed?", "(y/n)", "would you like to", ...) are deliberately excluded:
-/// they also match conversation transcript text, falsely flagging an idle
-const BLOCKED_MARKERS: &[&str] = &[
-    // opencode permission dialog ("△ Permission required" header + buttons).
-    "permission required",
-    "allow once",
-    "allow always",
-    "always allow",
-    "reject permission",
-    "waiting for permission",
-];
-
-/// opencode's question dialog footer strings (QuestionPrompt). All three must
-/// be present together — "esc dismiss" alone also matches the idle prompt.
-const QUESTION_DIALOG_ENTER: &[&str] = &["enter submit", "enter confirm", "enter toggle"];
-const QUESTION_DIALOG_NAV: &[&str] = &["\u{2191}\u{2193} select", "\u{21c6} tab"];
-
-/// Markers, scanned against the current screen text, that indicate the agent
-/// is actively working. Idle is the fallback when none match (manifest-based
-/// detection instead of an output-recently window).
-const WORKING_MARKERS: &[&str] = &[
-    // opencode prompt footer ("esc interrupt" / "esc again to interrupt").
-    "esc interrupt",
-    "esc again to interrupt",
-    "ctrl+c to interrupt",
-    "press esc to interrupt",
-    // Generic in-progress text.
-    "waiting for assistant",
-    "sending prompt",
-    "retrying in",
-];
-
-/// True when opencode's question dialog is on screen: its footer pairs
-/// opencode manifest rule (state = "blocked").
-fn question_dialog_visible(snap: &Snapshot) -> bool {
-    if !contains_ci(&snap.screen, "esc dismiss") {
-        return false;
-    }
-    let enter = QUESTION_DIALOG_ENTER
-        .iter()
-        .any(|m| contains_ci(&snap.screen, m));
-    let nav = QUESTION_DIALOG_NAV.iter().any(|m| snap.screen.contains(m));
-    enter && nav
-}
+use super::{AgentEvidence, Snapshot};
+use super::rules;
 
 /// Whether opencode is waiting on a command approval.
+#[cfg(test)]
 pub(crate) fn blocked(snap: &Snapshot) -> bool {
-    question_dialog_visible(snap) || BLOCKED_MARKERS.iter().any(|m| contains_ci(&snap.screen, m))
+    rules::agent("opencode").blocked(snap)
 }
 
 /// Every matched opencode marker, per signal kind and evidence region
 /// (diagnostics for `kumo agent explain`; kept in sync with the boolean
-/// predicates by the consistency tests below).
+/// predicates by the consistency tests in `super`).
+#[cfg(test)]
 pub(crate) fn evidence(snap: &Snapshot) -> AgentEvidence {
-    AgentEvidence {
-        agent: "opencode",
-        blocked: blocked_evidence(snap),
-        working: working_evidence(snap),
-        idle: idle_evidence(snap),
-    }
-}
-
-fn blocked_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
-    let mut out = Vec::new();
-    if question_dialog_visible(snap) {
-        out.push(MarkerMatch { marker: "question dialog", region: Region::Screen });
-        if contains_ci(&snap.screen, "esc dismiss") {
-            out.push(MarkerMatch { marker: "esc dismiss", region: Region::Screen });
-        }
-        for m in QUESTION_DIALOG_ENTER {
-            if contains_ci(&snap.screen, m) {
-                out.push(MarkerMatch { marker: m, region: Region::Screen });
-            }
-        }
-        for m in QUESTION_DIALOG_NAV {
-            if snap.screen.contains(m) {
-                out.push(MarkerMatch { marker: m, region: Region::Screen });
-            }
-        }
-    }
-    for m in BLOCKED_MARKERS {
-        if contains_ci(&snap.screen, m) {
-            out.push(MarkerMatch { marker: m, region: Region::Screen });
-        }
-    }
-    out
-}
-
-fn working_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
-    let mut out = Vec::new();
-    for m in WORKING_MARKERS {
-        if contains_ci(&snap.footer, m) {
-            out.push(MarkerMatch { marker: m, region: Region::Footer });
-        }
-    }
-    if ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| snap.footer.contains(p)) {
-        out.push(MarkerMatch { marker: "knight-rider bar", region: Region::Footer });
-    }
-    if snap.footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)) {
-        out.push(MarkerMatch { marker: "braille spinner", region: Region::Footer });
-    }
-    out
-}
-
-fn idle_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
-    let mut out = Vec::new();
-    for m in IDLE_MARKERS {
-        if contains_ci(&snap.screen, m) {
-            out.push(MarkerMatch { marker: m, region: Region::Screen });
-        }
-    }
-    if contains_ci(&snap.footer, "esc dismiss") && !question_dialog_visible(snap) {
-        out.push(MarkerMatch { marker: "esc dismiss (idle prompt)", region: Region::Footer });
-    }
-    out
+    rules::agent("opencode").evidence(snap)
 }
 
 /// Whether opencode is actively producing output. The footer is scanned
 /// instead of the whole screen so a frozen "esc interrupt" from an earlier
 /// turn in the scrolled transcript is not misread as currently working.
+#[cfg(test)]
 pub(crate) fn working(snap: &Snapshot) -> bool {
-    WORKING_MARKERS.iter().any(|m| contains_ci(&snap.footer, m))
-        // Knight-rider status bar: 4+ block cells in a row.
-        || ["■■■■", "⬝⬝⬝⬝"].iter().any(|p| snap.footer.contains(p))
-        // Braille spinner (tool call / thinking) in the prompt footer.
-        || snap.footer.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+    rules::agent("opencode").working(snap)
 }
-
-/// Markers of opencode's idle prompt box: the `Ask anything...` placeholder
-/// and the keymap-hints row (`tab agents`/`ctrl+p commands`) pinned under the
-/// input bar while the agent is not running. The hints row persists once you
-/// type into the prompt (when the placeholder is replaced by your text), so a
-/// prompt waiting for Enter still classifies as idle instead of unknown. A
-/// bare `esc dismiss` only counts when it is the prompt bar, never a question
-/// dialog (see `question_dialog_visible`) — and `working` (`esc interrupt`
-/// footer) wins by precedence when the agent is mid-turn.
-const IDLE_MARKERS: &[&str] = &["ask anything", "tab agents", "ctrl+p commands"];
 
 /// Whether opencode is conclusively idle. This is NOT the fallback: a
 /// recognized agent with no marker at all reports `Unknown`, so the idle
 /// signal must be a real marker of the prompt box.
+#[cfg(test)]
 pub(crate) fn idle(snap: &Snapshot) -> bool {
-    IDLE_MARKERS.iter().any(|m| contains_ci(&snap.screen, m))
-        || (contains_ci(&snap.footer, "esc dismiss") && !question_dialog_visible(snap))
+    rules::agent("opencode").idle(snap)
 }
 
 #[cfg(test)]

@@ -231,7 +231,9 @@ drive kumo over the same JSON socket the CLI uses (`app/kumo/src/cli/cli.rs`,
   (today auto-listed, always idle): the same detection path (screen markers /
   OSC title spinner) promotes each to a **first-class state** instead of a
   silent always-idle row — every supported agent at minimum reports working, so
-  the idle fallback stays trustworthy.
+  the idle fallback stays trustworthy. With the ✅ rule engine below, each one
+  now needs only a bundled/user `agent-detection/<agent>.toml` capturing its
+  real UI markers (iterate with `kumo agent explain`) — no kumo release.
 - ✅ **`kumo agent explain`** + **pane-id discovery**: debug why a pane reads
   the state it does — every matched marker region-tagged (screen /
   form / footer / title, per agent), the precedence breakdown
@@ -285,10 +287,16 @@ it, and it's the core of agent-to-agent work.
 - **`KUMO_AGENT` wrapper hint** (`KUMO_AGENT=claude fence -- claude`): tell the
   daemon which detection rules a wrapper-launched agent uses — opaque wrappers
   no longer break detection.
-- **Per-agent detection rules** (`agent-detection/<agent>.toml`, user-dir
+- ✅ **Per-agent detection rules** (`agent-detection/<agent>.toml`, user-dir
   override, same rule shapes as the built-ins — markers + OSC title patterns):
-  third-party agents get accurate state without a kumo release. Deliberately
-  **local-only** in 0.7.0; remote manifest updates defer to 0.8.0.
+  third-party agents get accurate state without a kumo release. The built-in
+  classifiers (claude, opencode) now live as bundled manifests
+  (`app/kumo/src/daemon/agents/rules/*.toml`) compiled into the binary and
+  evaluated by a small data-driven engine (`app/kumo/src/daemon/agents/rules.rs`);
+  a `config_dir()/agent-detection/<id>.toml` replaces or adds an agent's rules,
+  loaded at daemon start and re-read by `kumo reload` (invalid files are
+  warned and skipped — detection never crashes). Deliberately **local-only** in
+  0.7.0; remote manifest updates defer to 0.8.0.
 
 **JSON surface for agents** — the bincode socket stays for TUI-fast paths;
 agents get a machine layer:

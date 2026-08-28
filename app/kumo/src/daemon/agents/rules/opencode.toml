@@ -1,0 +1,84 @@
+# opencode lifecycle detection rules (bundled; user-dir override replaces
+# this whole file: ~/.config/kumo/agent-detection/opencode.toml).
+#
+# opencode signals its state on screen: permission dialogs and a question
+# prompt when blocked, a prompt footer ("esc interrupt", spinner, progress
+# bar) while working, and the `Ask anything...` prompt box when idle.
+
+[agent]
+id = "opencode"
+
+# Question dialog (QuestionPrompt): "esc dismiss" must be paired with an
+# enter action AND a navigation hint — otherwise it is the idle prompt.
+[[blocked]]
+tests = [
+  { region = "screen", contains = "esc dismiss" },
+  { any-of = [
+      { region = "screen", contains = "enter submit" },
+      { region = "screen", contains = "enter confirm" },
+      { region = "screen", contains = "enter toggle" },
+  ]},
+  { any-of = [
+      { region = "screen", contains = "↑↓ select" },
+      { region = "screen", contains = "⇆ tab" },
+  ]},
+]
+
+# Permission dialog ("△ Permission required" header + buttons).
+[[blocked]]
+tests = [{ region = "screen", contains = "permission required" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "allow once" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "allow always" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "always allow" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "reject permission" }]
+[[blocked]]
+tests = [{ region = "screen", contains = "waiting for permission" }]
+
+# Working: prompt footer hints, the knight-rider status bar, or a braille
+# spinner in the footer.
+[[working]]
+tests = [{ region = "footer", contains = "esc interrupt" }]
+[[working]]
+tests = [{ region = "footer", contains = "esc again to interrupt" }]
+[[working]]
+tests = [{ region = "footer", contains = "ctrl+c to interrupt" }]
+[[working]]
+tests = [{ region = "footer", contains = "press esc to interrupt" }]
+[[working]]
+tests = [{ region = "footer", contains = "waiting for assistant" }]
+[[working]]
+tests = [{ region = "footer", contains = "sending prompt" }]
+[[working]]
+tests = [{ region = "footer", contains = "retrying in" }]
+[[working]]
+tests = [{ region = "footer", contains-any = ["■■■■", "⬝⬝⬝⬝"] }]
+[[working]]
+tests = [{ region = "footer", braille-in = true }]
+
+# Idle: the `Ask anything...` placeholder or the keymap-hints row; a bare
+# footer `esc dismiss` only counts when no question dialog is on screen.
+[[idle]]
+tests = [{ region = "screen", contains = "ask anything" }]
+[[idle]]
+tests = [{ region = "screen", contains = "tab agents" }]
+[[idle]]
+tests = [{ region = "screen", contains = "ctrl+p commands" }]
+[[idle]]
+tests = [
+  { region = "footer", contains = "esc dismiss" },
+  { not = [
+      { any-of = [
+          { region = "screen", contains = "enter submit" },
+          { region = "screen", contains = "enter confirm" },
+          { region = "screen", contains = "enter toggle" },
+      ]},
+      { any-of = [
+          { region = "screen", contains = "↑↓ select" },
+          { region = "screen", contains = "⇆ tab" },
+      ]},
+  ]},
+]

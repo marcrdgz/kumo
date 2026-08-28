@@ -8,13 +8,19 @@
 //! - `idle(&Snapshot) -> bool` — the agent is conclusively idle (e.g. its
 //!   dedicated idle prompt box)
 //!
-//! `detect` dispatches across every implemented agent: a blocked signal wins
-//! over working, working wins over idle, and `Unknown` is the fallback when
-//! no signal matches — a recognized agent whose classification failed (see
-//! also `agent-detection/<agent>.toml`), where the same split applies.
-
+//! The rules themselves are data-driven: bundled `agent-detection/<agent>.toml`
+//! manifests (see [`rules`]) express the classifiers, and a user-dir override
+//! (`config_dir()/agent-detection/<agent>.toml`) replaces them per agent, so
+//! third-party agents get accurate state without a kumo release. `detect`
+//! dispatches across every loaded agent: a blocked signal wins over working,
+//! working wins over idle, and `Unknown` is the fallback when no signal
+//! matches — a recognized agent whose classification failed. The per-agent
+//! modules exist as test surfaces over the bundled manifests.
+#[cfg(test)]
 pub mod claude;
+#[cfg(test)]
 pub mod opencode;
+pub(crate) mod rules;
 
 use crate::daemon::vt;
 
@@ -130,20 +136,28 @@ pub(crate) fn ends_with_ci(haystack: &str, needle: &str) -> bool {
     true
 }
 
-/// Detect the agent lifecycle state across every implemented agent. A blocked
+/// Detect the agent lifecycle state across every loaded agent. A blocked
 /// signal wins over working; working wins over explicit idle; `Unknown` is
 /// the fallback when no signal matches.
 pub fn detect(snap: &Snapshot) -> AgentStatus {
-    if opencode::blocked(snap) || claude::blocked(snap) {
-        return AgentStatus::Blocked;
-    }
-    if opencode::working(snap) || claude::working(snap) {
-        return AgentStatus::Working;
-    }
-    if opencode::idle(snap) || claude::idle(snap) {
-        return AgentStatus::Idle;
-    }
-    AgentStatus::Unknown
+    rules::with_rules(|r| {
+        for agent in &r.agents {
+            if agent.blocked(snap) {
+                return AgentStatus::Blocked;
+            }
+        }
+        for agent in &r.agents {
+            if agent.working(snap) {
+                return AgentStatus::Working;
+            }
+        }
+        for agent in &r.agents {
+            if agent.idle(snap) {
+                return AgentStatus::Idle;
+            }
+        }
+        AgentStatus::Unknown
+    })
 }
 
 /// The detection precedence chain, in human-readable form. A blocked signal
@@ -167,16 +181,16 @@ pub(crate) enum Region {
 
 /// One matched detection marker: the signal phrase/glyph and the region it
 /// was found in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct MarkerMatch {
-    pub marker: &'static str,
+    pub marker: String,
     pub region: Region,
 }
 
 /// Marker evidence of one agent's verdicts over a snapshot.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct AgentEvidence {
-    pub agent: &'static str,
+    pub agent: String,
     pub blocked: Vec<MarkerMatch>,
     pub working: Vec<MarkerMatch>,
     pub idle: Vec<MarkerMatch>,
@@ -200,17 +214,20 @@ pub(crate) fn explain(snap: &Snapshot) -> Explanation {
     let mut blocked = Vec::new();
     let mut working = Vec::new();
     let mut idle = Vec::new();
-    for ev in [opencode::evidence(snap), claude::evidence(snap)] {
-        if !ev.blocked.is_empty() {
-            blocked.push(ev.clone());
+    rules::with_rules(|r| {
+        for agent in &r.agents {
+            let ev = agent.evidence(snap);
+            if !ev.blocked.is_empty() {
+                blocked.push(ev.clone());
+            }
+            if !ev.working.is_empty() {
+                working.push(ev.clone());
+            }
+            if !ev.idle.is_empty() {
+                idle.push(ev.clone());
+            }
         }
-        if !ev.working.is_empty() {
-            working.push(ev.clone());
-        }
-        if !ev.idle.is_empty() {
-            idle.push(ev.clone());
-        }
-    }
+    });
     let has_blocked = blocked.iter().any(|e| !e.blocked.is_empty());
     let has_working = working.iter().any(|e| !e.working.is_empty());
     let has_idle = idle.iter().any(|e| !e.idle.is_empty());
@@ -226,10 +243,15 @@ pub(crate) fn explain(snap: &Snapshot) -> Explanation {
     Explanation { status, blocked, working, idle }
 }
 
+/// Re-read `config_dir()/agent-detection/*.toml` user overrides. Called on
+/// daemon start and `kumo reload`; bundled defaults persist for invalid files.
+pub(crate) fn reload_agent_rules() {
+    rules::reload_rules();
+}
+
 /// Text of `screen` below its last horizontal rule (a run of box-drawing
 /// dashes), where Claude Code renders the live prompt and approval forms.
-fn after_last_rule(screen: &str) -> String {
-    let mut start = 0usize;
+fn after_last_rule(screen: &str) -> String {    let mut start = 0usize;
     for (i, line) in screen.lines().enumerate() {
         if is_hrule(line) {
             start = i + 1;
@@ -347,7 +369,7 @@ mod tests {
         assert_eq!(exp.idle.len(), 1);
         let ev = &exp.idle[0];
         assert_eq!(ev.agent, "opencode");
-        assert!(ev.idle.iter().any(|m| m.marker == "ask anything" && m.region == Region::Screen));
+        assert!(ev.idle.iter().any(|m| m.marker.as_str() == "ask anything" && m.region == Region::Screen));
     }
 
     #[test]
@@ -359,6 +381,6 @@ mod tests {
         assert_eq!(exp.status, AgentStatus::Blocked);
         assert_eq!(exp.blocked.len(), 1);
         assert_eq!(exp.working.len(), 1);
-        assert!(exp.working[0].working.iter().any(|m| m.marker == "esc interrupt" && m.region == Region::Footer));
+        assert!(exp.working[0].working.iter().any(|m| m.marker.as_str() == "esc interrupt" && m.region == Region::Footer));
     }
 }
