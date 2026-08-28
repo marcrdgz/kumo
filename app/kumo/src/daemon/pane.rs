@@ -925,6 +925,24 @@ impl ProcessSnapshot {
         None
     }
 
+    /// Every pid in `root`'s process tree, including `root` itself (breadth
+    /// first). Used to aggregate an agent's CPU/RAM across its whole tree.
+    pub fn descendants(&self, root: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(pid) = stack.pop() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            out.push(pid);
+            if let Some(kids) = self.children.get(&pid) {
+                stack.extend(kids);
+            }
+        }
+        out
+    }
+
     /// The deepest living descendant of `root` (a process with no children),
     /// or `root` itself when it is a leaf. The leaf is where you *are*: a
     /// shell's cwd only moves when a child (editor, `cd`ed tool) forked from
@@ -1811,6 +1829,19 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         assert_eq!(snap.deepest_descendant(1), Some(5), "deepest child wins");
         assert_eq!(snap.deepest_descendant(3), Some(3), "a leaf is its own deepest descendant");
         assert_eq!(snap.deepest_descendant(2), Some(5));
+    }
+
+    #[test]
+    fn descendants_include_root_and_whole_tree() {
+        let snap = ProcessSnapshot {
+            children: HashMap::from([(1, vec![2, 3]), (2, vec![4]), (4, vec![5])]),
+            names: HashMap::new(),
+        };
+        let mut got = snap.descendants(1);
+        got.sort();
+        assert_eq!(got, vec![1, 2, 3, 4, 5]);
+        assert_eq!(snap.descendants(3), vec![3], "a leaf is just itself");
+        assert_eq!(snap.descendants(7), vec![7], "an unknown pid is a single-pid tree");
     }
 
     #[test]

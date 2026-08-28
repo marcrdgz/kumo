@@ -35,7 +35,10 @@ the finish line for the configurable, persistent kumo.
   `leader+i` keyboard-routes to `blocked · done · running` agents, the sidebar
   defaults to stacked spaces + agent panels (grouped sections, draggable grey
   divider at the middle, `[sidebar] layout = "tabs"` restores the classic
-  two-tab sidebar); OSC 133 command-traceback context sharing; broadcast
+  two-tab sidebar); **`kumo agent explain`** — live, daemon-side diagnostics of
+  why a pane reads the state it does (matched markers, evidence region, verdict
+  reason chain) with `kumo agent status`/`list` and `kumo pane list` for
+  pane-id discovery; OSC 133 command-traceback context sharing; broadcast
   prompt to agents (`leader+B`, fan one prompt to every AI pane — replaces
   tmux sync-input); config file-watcher hot-reload (deferred from 0.6.0).
 - **0.8.0 — Stability**: signal hardening, stable CI, complete config docs +

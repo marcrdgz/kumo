@@ -161,10 +161,11 @@ fn print_help() {
     println!();
     println!("PANES:");
     println!("    kumo pane split [-s SESSION] [--horizontal] [--ai]");
-    println!("    kumo pane close [-s SESSION] [-p PANE_ID]");
-    println!("    kumo pane focus -p PANE_ID [-s SESSION]");
-    println!("    kumo pane send-keys [-s SESSION] [-p PANE_ID] KEYS...");
-    println!();
+    println!("    kumo pane close [-s SESSION] [-p PANE]");
+    println!("    kumo pane focus -p PANE [-s SESSION]");
+    println!("    kumo pane send-keys [-s SESSION] [-p PANE] KEYS...");
+    println!("    kumo pane list [-s SESSION] [-t TAB_ID] [S1:T2[:P3]]");
+    println!("            PANE = pane id or s1:t2:p3 (kumo:t2:p1, t2:p1 with -s)");
     println!("TABS:");
     println!("    kumo tab list [-s SESSION]");
     println!("    kumo tab new [WORKSPACE] [--name NAME] [-s SESSION]");
@@ -174,8 +175,9 @@ fn print_help() {
     println!();
     println!("AGENTS:");
     println!("    kumo agent spawn [-s SESSION] [PROGRAM]");
-    println!("    kumo agent status");
-    println!("    kumo agent kill -p PANE_ID [-s SESSION]");
+    println!("    kumo agent status  (aliases: list, ls)");
+    println!("    kumo agent kill -p PANE [-s SESSION]");
+    println!("    kumo agent explain [PANE] [-s SESSION]");
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");

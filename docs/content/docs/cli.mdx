@@ -12,7 +12,28 @@ icon: 🛠️
 | `kumo attach` | Force-attach to the running daemon |
 | `kumo new [WORKSPACE]` | Start a fresh session in the daemon (never attaches); uses the client's cwd when no workspace is given |
 | `kumo [WORKSPACE]` | Fresh-start alias for back-compat |
-| `kumo ls` | List the daemon's sessions (`*` = active), including each AI agent's status |
+| `kumo session list` | List sessions: tab names + ids, AI agent rows with their pane ids |
+| `kumo session new [DIR] [--name NAME]` | Create and focus a session in the daemon |
+| `kumo session kill NAME` | Close a session and its panes |
+| `kumo session attach NAME` | Focus the named session (a viewer attaches with `kumo`) |
+| `kumo tab list [-s SESSION]` | List the session's tabs with ids |
+| `kumo tab new [WORKSPACE] [--name NAME]` | Create a tab (window) in a session |
+| `kumo tab focus TAB` / `kumo tab kill TAB` / `kumo tab rename TAB NAME` | Manage tabs |
+| `kumo pane split [-s SESSION] [--horizontal] [--ai]` | Split the focused pane (AI split = agent pane) |
+| `kumo pane close [-s SESSION] [-p PANE]` / `kumo pane focus -p PANE` | Manage panes |
+| `kumo pane send-keys [-s SESSION] [-p PANE] KEYS...` | Type keys into a pane (tokens: `Enter`, `Tab`, `Esc`, `Left`, `Up`, `PageDown`, …) |
+| `kumo pane list [-s SESSION] [-t TAB_ID] [S1:T2]` | Every pane with its id + composite position (`*` = focused) |
+| `kumo agent spawn [-s SESSION] [PROGRAM]` | Spawn an AI CLI in a new pane (default = configured `ai-cmd`) |
+| `kumo agent status` | One line per running AI CLI with its pane id + position (aliases: `list`, `ls`) |
+| `kumo agent kill -p PANE [-s SESSION]` | Kill the agent in a pane (closes it) |
+| `kumo agent explain [PANE] [-s SESSION]` | Why a pane reads the state it does: matched markers, evidence region, verdict-reason chain — evaluated live by the daemon |
+
+**PANE addressing** — a stable numeric pane id, or a composite position
+(`1-based` indexes, session may be a name):
+`s1:t2:p3` · `kumo:t2:p1` · `t2:p1` (session from `-s`). Composites are
+resolved client-side against the live session list; the daemon always gets
+the canonical id.
+| `kumo ls` | Legacy alias of `kumo session list` |
 | `kumo kill` | Stop the daemon (kills its panes) |
 | `kumo reload` | Re-read the config and apply it live |
 | `kumo daemon [WORKSPACE]` | Run the headless daemon in the foreground |
@@ -26,6 +47,8 @@ icon: 🛠️
 ```sh
 kumo new ~/proyecto        # fresh session in ~/proyecto
 kumo daemon ~/proyecto     # headless daemon in the foreground
+kumo agent status          # which agents run, and in which pane
+kumo agent explain 42      # why pane 42 reads the status it does
 ```
 
 During development: `cargo run -p kumo` or `make run`.

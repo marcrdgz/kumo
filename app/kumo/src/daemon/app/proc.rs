@@ -1,63 +1,83 @@
 //! Per-process CPU/RAM sampling for the sidebar's agent micro-pill metrics.
 //!
 //! The daemon owns every pane's process tree, so it can report live numbers
-//! instead of shipping placeholder text. Instantaneous CPU is the CPU time
-//! consumed since the previous sample divided by the wall-clock elapsed, so a
-//! busy agent reads ~100% per core while an idle one settles near zero.
+//! instead of shipping placeholder text. CPU is measured over a *sliding
+//! window* (the last `WINDOW` samples, ~6 s at the 500 ms agent-status
+//! refresh): the CPU consumed across the window divided by its wall-clock
+//! length, so a bursty agent (a TUI that idles between work pulses) still
+//! reads a truthful average instead of a 0 to 100% random guess between
+//! consecutive samples.
 //!
-//! Sampling runs only for AI panes (usually a handful), at the agent-status
-//! refresh cadence, via `ps` on macOS and `/proc` on Linux. Any failure yields
-//! a `(0.0, 0)` and the PID's delta state is dropped, so a missing process is
-//! never mistaken for a busy one.
+//! Sampling runs only for AI panes (usually a handful), via `ps` on macOS and
+//! `/proc` on Linux. Any failure yields `(0.0, 0)` and the PID's state is
+//! dropped, so a missing process is never mistaken for a busy one.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::time::Instant;
 
-/// CPU-time snapshot of one process, for delta-based instantaneous CPU%.
-struct CpuState {
-    cpu_secs: f64,
-    at: Instant,
+/// How many consecutive samples to retain per PID (at the 500 ms agent-status
+/// refresh this is ~6 s of history).
+const WINDOW: usize = 12;
+
+/// Short history of CPU-time snapshots for one process.
+#[derive(Default)]
+struct PidSamples {
+    snapshots: VecDeque<(f64, Instant)>,
+    rss_kb: u64,
 }
 
-/// Stateful sampler: keeps the previous CPU-time snapshot per PID so each call
-/// returns the CPU consumed *between* calls.
+/// Stateful sampler: keeps a sliding window of CPU-time snapshots per PID so
+/// each call returns the CPU consumed across the window (see module docs).
 #[derive(Default)]
 pub struct ProcSampler {
-    prev: HashMap<u32, CpuState>,
+    samples: HashMap<u32, PidSamples>,
 }
 
 impl ProcSampler {
-    /// Sample `pid`'s instantaneous CPU% (of one core) and resident memory in
-    /// KiB. `(0.0, 0)` when the process is gone or the platform cannot read it.
+    /// Sample `pid`'s CPU% (of one core) across the sliding window and its
+    /// resident memory in KiB. `(0.0, 0)` when the process is gone or the
+    /// platform cannot read it.
     pub fn sample(&mut self, pid: u32) -> (f32, u64) {
         let (cpu_secs, rss_kb) = match cpu_time_rss(pid) {
             Some(v) => v,
             None => {
-                self.prev.remove(&pid);
+                self.samples.remove(&pid);
                 return (0.0, 0);
             }
         };
         let now = Instant::now();
-        let cpu = match self.prev.get(&pid) {
-            Some(prev) if now > prev.at => {
-                let wall = now.duration_since(prev.at).as_secs_f64();
-                if wall > 0.0 {
-                    ((cpu_secs - prev.cpu_secs).max(0.0) / wall * 100.0) as f32
-                } else {
-                    0.0
-                }
+        let cpu = {
+            let s = self.samples.entry(pid).or_default();
+            s.snapshots.push_back((cpu_secs, now));
+            if s.snapshots.len() > WINDOW {
+                s.snapshots.pop_front();
             }
-            _ => 0.0,
+            s.rss_kb = rss_kb;
+            window_cpu(&s.snapshots, now)
         };
-        self.prev.insert(pid, CpuState { cpu_secs, at: now });
         (cpu.clamp(0.0, 999.0), rss_kb)
     }
 
-    /// Drop any delta state for `pid` (pane closed / agent killed), so the
-    /// next sample starts fresh instead of reporting a huge "usage" spike.
+    /// Drop any state for `pid` (pane closed / agent killed), so the next
+    /// sample starts fresh instead of reporting a huge "usage" spike.
     pub fn forget(&mut self, pid: u32) {
-        self.prev.remove(&pid);
+        self.samples.remove(&pid);
     }
+}
+
+/// CPU% across the retained window: the CPU time consumed from the oldest
+/// snapshot to `now` over the wall-clock span. The first sample (no window
+/// history) reads 0.0.
+fn window_cpu(snapshots: &VecDeque<(f64, Instant)>, now: Instant) -> f32 {
+    let (Some(&(c0, t0)), Some(&(c1, _))) = (snapshots.front(), snapshots.back()) else {
+        return 0.0;
+    };
+    let wall = now.duration_since(t0).as_secs_f64();
+    if wall <= 0.0 {
+        return 0.0;
+    }
+    ((c1 - c0).max(0.0) / wall * 100.0) as f32
 }
 
 #[cfg(target_os = "macos")]
@@ -114,6 +134,34 @@ fn cpu_time_rss(_pid: u32) -> Option<(f64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn window_consumes_cpu_time_half_of_wall_clock() {
+        // 0.5 s of CPU over 1.0 s of wall clock = 50% (of one core).
+        let now = Instant::now();
+        let mut snapshots = VecDeque::new();
+        snapshots.push_back((10.0, now - std::time::Duration::from_secs(1)));
+        snapshots.push_back((10.5, now));
+        assert_eq!(window_cpu(&snapshots, now), 50.0);
+        // Bursts between samples vanish inside the window: 1.5 s CPU over
+        // 6.0 s wall = 25% — not 0%, not 100%.
+        let now2 = now + std::time::Duration::from_secs(5);
+        snapshots.push_back((11.5, now2));
+        assert_eq!(window_cpu(&snapshots, now2), 25.0);
+    }
+
+    #[test]
+    fn window_first_sample_is_zero_and_never_negative() {
+        let now = Instant::now();
+        let mut snapshots = VecDeque::new();
+        snapshots.push_back((5.0, now));
+        assert_eq!(window_cpu(&snapshots, now), 0.0);
+        // cpu clock moving backwards (proc reset) must still read 0.0.
+        snapshots.push_back((4.9, now));
+        assert_eq!(window_cpu(&snapshots, now), 0.0);
+    }
+
     #[test]
     fn parses_ps_time_format() {
         let mmss_to_secs = |s: &str| -> Option<f64> {

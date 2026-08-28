@@ -5,7 +5,17 @@
 //! appear) plus a status spinner in the OSC window title (a braille spinner
 //! while working, `✳ ` when idle).
 
-use super::{contains_ci, ends_with_ci, Snapshot};
+use super::{contains_ci, ends_with_ci, AgentEvidence, MarkerMatch, Region, Snapshot};
+
+/// Standalone approval markers (legacy / connection / bash-approval hints).
+const STANDALONE_BLOCKED: &[&str] = &[
+    "waiting for permission",
+    "do you want to allow this connection?",
+    "review your answers",
+    "skip interview and plan immediately",
+    "tab to amend",
+    "ctrl+e to explain",
+];
 
 /// Navigation hints in Claude's option lists, paired with "enter to select".
 const NAV_HINTS: &[&str] = &[
@@ -59,16 +69,137 @@ pub(crate) fn blocked(snap: &Snapshot) -> bool {
         return true;
     }
     // Standalone approval markers (legacy / connection / bash-approval hints).
-    [
-        "waiting for permission",
-        "do you want to allow this connection?",
-        "review your answers",
-        "skip interview and plan immediately",
-        "tab to amend",
-        "ctrl+e to explain",
-    ]
-    .iter()
-    .any(|m| contains_ci(&snap.screen, m))
+    STANDALONE_BLOCKED.iter().any(|m| contains_ci(&snap.screen, m))
+}
+
+/// Every matched Claude marker, per signal kind and evidence region
+/// (diagnostics for `kumo agent explain`; kept in sync with the boolean
+/// predicates by the consistency tests below).
+pub(crate) fn evidence(snap: &Snapshot) -> AgentEvidence {
+    AgentEvidence {
+        agent: "claude",
+        blocked: blocked_evidence(snap),
+        working: working_evidence(snap),
+        idle: idle_evidence(snap),
+    }
+}
+
+fn blocked_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
+    // Live form / select prompt: "esc to cancel" plus a confirm or select
+    // action (a select list also needs a navigation hint).
+    if contains_ci(&snap.form, "esc to cancel")
+        && (contains_ci(&snap.form, "enter to confirm")
+            || (contains_ci(&snap.form, "enter to select")
+                && NAV_HINTS.iter().any(|m| contains_ci(&snap.form, m))))
+    {
+        let mut out = vec![MarkerMatch { marker: "esc to cancel", region: Region::Form }];
+        if contains_ci(&snap.form, "enter to confirm") {
+            out.push(MarkerMatch { marker: "enter to confirm", region: Region::Form });
+        }
+        if contains_ci(&snap.form, "enter to select") {
+            out.push(MarkerMatch { marker: "enter to select", region: Region::Form });
+            for m in NAV_HINTS {
+                if contains_ci(&snap.form, m) {
+                    out.push(MarkerMatch { marker: m, region: Region::Form });
+                }
+            }
+        }
+        return out;
+    }
+    // Dynamic workflow confirmation.
+    if contains_ci(&snap.form, "run a dynamic workflow?")
+        && contains_ci(&snap.form, "esc to cancel")
+    {
+        return vec![
+            MarkerMatch { marker: "run a dynamic workflow?", region: Region::Form },
+            MarkerMatch { marker: "esc to cancel", region: Region::Form },
+        ];
+    }
+    // Bash command approval: "do you want to proceed?" with command chrome and
+    // a yes/no option line.
+    if contains_ci(&snap.screen, "do you want to proceed?")
+        && [
+            "bash command",
+            "bash(",
+            "contains expansion",
+            "tab to amend",
+            "ctrl+e to explain",
+        ]
+        .iter()
+        .any(|m| contains_ci(&snap.screen, m))
+        && snap.screen.lines().any(yes_no_line)
+    {
+        let mut out = vec![MarkerMatch { marker: "do you want to proceed?", region: Region::Screen }];
+        for m in ["bash command", "bash(", "contains expansion", "tab to amend", "ctrl+e to explain"] {
+            if contains_ci(&snap.screen, m) {
+                out.push(MarkerMatch { marker: m, region: Region::Screen });
+            }
+        }
+        out.push(MarkerMatch { marker: "yes/no options", region: Region::Screen });
+        return out;
+    }
+    // Generic permission with numbered yes/no options rendered in the form.
+    if contains_ci(&snap.form, "do you want to proceed?")
+        && contains_ci(&snap.form, "esc to cancel")
+        && snap.form.lines().any(yes_no_line)
+    {
+        return vec![
+            MarkerMatch { marker: "do you want to proceed?", region: Region::Form },
+            MarkerMatch { marker: "esc to cancel", region: Region::Form },
+            MarkerMatch { marker: "yes/no options", region: Region::Form },
+        ];
+    }
+    // Standalone approval markers (legacy / connection / bash-approval hints).
+    let mut out = Vec::new();
+    for m in STANDALONE_BLOCKED {
+        if contains_ci(&snap.screen, m) {
+            out.push(MarkerMatch { marker: m, region: Region::Screen });
+        }
+    }
+    out
+}
+
+fn working_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
+    let mut out = Vec::new();
+    if let Some(c) = snap.title.chars().next() {
+        if ('\u{2800}'..='\u{28ff}').contains(&c) {
+            out.push(MarkerMatch { marker: "title spinner (braille)", region: Region::Title });
+        } else if ('\u{25d0}'..='\u{25d3}').contains(&c) {
+            out.push(MarkerMatch { marker: "title spinner (half-circle)", region: Region::Title });
+        }
+    }
+    if contains_ci(&snap.form, "esc to interrupt") {
+        out.push(MarkerMatch { marker: "esc to interrupt", region: Region::Form });
+    }
+    if contains_ci(&snap.footer, "esc to interrupt") {
+        out.push(MarkerMatch { marker: "esc to interrupt", region: Region::Footer });
+    }
+    if dingbat_spinner_in(&snap.form) {
+        out.push(MarkerMatch { marker: "dingbat spinner", region: Region::Form });
+    }
+    if dingbat_spinner_in(&snap.footer) {
+        out.push(MarkerMatch { marker: "dingbat spinner", region: Region::Footer });
+    }
+    if btw_overlay(&snap.screen) {
+        out.push(MarkerMatch { marker: "/btw overlay", region: Region::Screen });
+    }
+    out
+}
+
+fn idle_evidence(snap: &Snapshot) -> Vec<MarkerMatch> {
+    let mut out = Vec::new();
+    for m in IDLE_PROMPT_MARKERS {
+        if contains_ci(&snap.form, m) {
+            out.push(MarkerMatch { marker: m, region: Region::Form });
+        }
+        if contains_ci(&snap.footer, m) {
+            out.push(MarkerMatch { marker: m, region: Region::Footer });
+        }
+    }
+    if snap.title.trim_start().starts_with('\u{2733}') {
+        out.push(MarkerMatch { marker: "\u{2733} idle title", region: Region::Title });
+    }
+    out
 }
 
 /// Markers of Claude's idle prompt box. The live prompt/forms region shows

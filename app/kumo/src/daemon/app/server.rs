@@ -422,6 +422,15 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let reply = app.close_pane_in_session(&session, Some(pane_id)).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
+                Command::AgentExplain { session, pane_id } => match app.agent_explain(&session, pane_id) {
+                    Ok(report) => {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::AgentExplain { report });
+                    }
+                    Err(e) => {
+                        let message = format!("error: {e:#}");
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message });
+                    }
+                },
             }
         }
 
@@ -797,6 +806,141 @@ mod tests {
                 pane_title_contains(a, needle) || pane_title_contains(b, needle)
             }
         }
+    }
+
+    /// End-to-end: `kumo agent explain` answers over the socket with a
+    /// structured report evaluated live against the pane's buffer.
+    #[test]
+    fn agent_explain_over_socket() {
+        let cfg = scratch("explain-cfg");
+        std::fs::write(
+            cfg.join("config"),
+            "shell = /bin/sh\naicmd = /bin/sh\nupdate-check = false\nnew-cwd = current\n",
+        )
+        .unwrap();
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let prev_cfg = std::env::var("KUMO_CONFIG_DIR").ok();
+        let prev_update = std::env::var("KUMO_NO_UPDATE").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        std::env::set_var("KUMO_NO_UPDATE", "1");
+
+        let rt = scratch("explain-rt");
+        let sock = rt.join("kumo").join("kumo.sock");
+        let s = sock.clone();
+        std::thread::spawn(move || {
+            let _ = run_daemon_at(s, Launch::New(None));
+        });
+        let _ = wait_for_socket(&sock, Duration::from_secs(10));
+        match prev_cfg {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        match prev_update {
+            Some(v) => std::env::set_var("KUMO_NO_UPDATE", v),
+            None => std::env::remove_var("KUMO_NO_UPDATE"),
+        }
+        drop(_lock);
+
+        let mut stream = wait_for_socket(&sock, Duration::from_secs(10));
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+
+        // Attach as a viewer so the Layout stream is pushed, then find the
+        // active session name and spawn an AI pane in it.
+        protocol::write_framed(&mut stream, &Command::Attach {
+            protocol: PROTOCOL_VERSION,
+            kind: ClientKind::Desktop,
+            cols: 100,
+            rows: 30,
+        })
+        .unwrap();
+        protocol::write_framed(&mut stream, &Command::SubscribeLayout).unwrap();
+        protocol::write_framed(&mut stream, &Command::SessionList).unwrap();
+        let session = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "SessionList") {
+                DaemonEvent::SessionList { sessions } => {
+                    break sessions.into_iter().find(|s| s.active).unwrap().name
+                }
+                _ => continue,
+            }
+        };
+        protocol::write_framed(&mut stream, &Command::AgentSpawn { session: session.clone(), program: Some("/bin/sh".into()) }).unwrap();
+        let layout = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "AI pane Layout") {
+                DaemonEvent::Layout { layout } => {
+                    let active = layout.sessions.iter().find(|s| s.name == session).unwrap();
+                    let tab = &active.tabs[active.active_tab];
+                    if layout_node_panes(&tab.root).len() >= 2 {
+                        break layout;
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+        };
+        let active = layout.sessions.iter().find(|s| s.name == session).unwrap();
+        let (shell_pane, ai_pane) = layout_node_panes(&active.tabs[active.active_tab].root)
+            .into_iter()
+            .map(|p| (p.id, p.is_ai))
+            .fold((0u64, 0u64), |(shell, ai), (id, is_ai)| {
+                if is_ai && ai == 0 {
+                    (shell, id)
+                } else if !is_ai && shell == 0 {
+                    (id, ai)
+                } else {
+                    (shell, ai)
+                }
+            });
+        assert_ne!(ai_pane, 0, "the spawn must have created an AI pane");
+
+        // Explain the AI pane: recognized shell-with-no-markers → Unknown.
+        protocol::write_framed(&mut stream, &Command::AgentExplain { session: session.clone(), pane_id: ai_pane }).unwrap();
+        let report = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "AgentExplain") {
+                DaemonEvent::AgentExplain { report } => break report,
+                DaemonEvent::Reply { message } => panic!("explain failed: {message}"),
+                _ => continue,
+            }
+        };
+        assert_eq!(report.pane_id, ai_pane);
+        assert!(report.is_ai_cli);
+        assert_eq!(report.status, kumo_protocol::AgentStatus::Unknown);
+        assert_eq!(report.idle_reason, kumo_protocol::AgentIdleReason::UnknownFallback);
+
+        // Explain a plain shell pane: default Idle, NotAnAgent reason.
+        protocol::write_framed(&mut stream, &Command::AgentExplain { session, pane_id: shell_pane }).unwrap();
+        let report = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "AgentExplain shell pane") {
+                DaemonEvent::AgentExplain { report } => break report,
+                DaemonEvent::Reply { message } => panic!("explain failed: {message}"),
+                _ => continue,
+            }
+        };
+        assert_eq!(report.pane_id, shell_pane);
+        assert!(!report.is_ai_cli);
+        assert_eq!(report.status, kumo_protocol::AgentStatus::Idle);
+        assert_eq!(report.idle_reason, kumo_protocol::AgentIdleReason::NotAnAgent);
+
+        // Don't let the daemon linger (it otherwise lives until the last
+        // session closes, keeping its socket for the next test run).
+        protocol::write_framed(&mut stream, &Command::KillServer).unwrap();
+    }
+
+    /// All pane nodes of a layout tree (leaf panes only).
+    fn layout_node_panes(node: &Option<Box<LayoutNode>>) -> Vec<&kumo_protocol::LayoutPane> {
+        let mut out = Vec::new();
+        fn walk<'a>(node: &'a LayoutNode, out: &mut Vec<&'a kumo_protocol::LayoutPane>) {
+            match node {
+                LayoutNode::Pane(p) => out.push(p),
+                LayoutNode::Split { a, b, .. } => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+            }
+        }
+        if let Some(root) = node {
+            walk(root, &mut out);
+        }
+        out
     }
 
     /// End-to-end: the daemon is driven purely by commands over the socket and

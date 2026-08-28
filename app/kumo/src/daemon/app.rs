@@ -1147,6 +1147,20 @@ impl App {
             .is_some_and(|s| s.active_tab().tree.focus == pid)
     }
 
+    /// Position of `pid` in the session → tab → pane hierarchy, as 1-based
+    /// indexes: `(session, tab, pane)`. Folds into the composite `s1:t2:p3`
+    /// addressing the CLI prints for humans.
+    pub(crate) fn pane_position(&self, pid: u64) -> Option<(usize, usize, usize)> {
+        for (si, s) in self.sessions.iter().enumerate() {
+            for (ti, t) in s.tabs.iter().enumerate() {
+                if let Some(pi) = t.tree.pane_ids().into_iter().position(|id| id == pid) {
+                    return Some((si + 1, ti + 1, pi + 1));
+                }
+            }
+        }
+        None
+    }
+
     /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from
     /// the cached process scan. Falls back to "AI CLI".
     fn agent_label(&self, pid: u64) -> String {

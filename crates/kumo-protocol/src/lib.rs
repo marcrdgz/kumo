@@ -480,6 +480,17 @@ pub struct AgentInfo {
     /// Resident memory of the agent's process tree, in kibibytes.
     #[serde(default)]
     pub mem_kb: u64,
+    /// The kumo pane id this agent runs in.
+    #[serde(default)]
+    pub pane_id: u64,
+    /// Position of the agent's pane inside its tab (1-based, layout order).
+    /// `#[serde(default)]` keeps older daemons wire-compatible.
+    #[serde(default)]
+    pub pane_index: u64,
+    /// Position of its tab inside the session (1-based). Folded into the
+    /// composite `s1:t2:p3` addressing the CLI prints for humans.
+    #[serde(default)]
+    pub tab_index: u64,
 }
 
 /// Wire copy of the daemon's `AgentStatus`: the AI agent's lifecycle state.
@@ -521,6 +532,16 @@ impl AgentStatus {
     }
 }
 
+/// One pane inside a tab, for the `kumo pane list` / `kumo tab list` views.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PaneInfo {
+    pub id: u64,
+    /// Display label: custom name, then the AI CLI name, then `shell N`.
+    pub label: String,
+    /// Whether this pane is the tab's focused pane.
+    pub active: bool,
+}
+
 /// Minimal info about one tab, for `kumo tab list`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct TabInfo {
@@ -530,6 +551,10 @@ pub struct TabInfo {
     pub zoomed: bool,
     pub active: bool,
     pub focus: Option<u64>,
+    /// Panes in this tab, in layout order. `#[serde(default)]` keeps older
+    /// daemons wire-compatible with this client.
+    #[serde(default)]
+    pub panes: Vec<PaneInfo>,
 }
 
 /// One session, as reported to `kumo session list` (metadata only; the full
@@ -559,6 +584,128 @@ pub struct AgentStatusLine {
     pub pane_id: u64,
     pub name: String,
     pub status: AgentStatus,
+    /// Position of the agent's pane inside its tab (1-based, layout order).
+    #[serde(default)]
+    pub pane_index: u64,
+    /// Position of its tab inside the session (1-based).
+    #[serde(default)]
+    pub tab_index: u64,
+}
+
+/// The evidence region a marker was found in, for `kumo agent explain`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EvidenceRegion {
+    /// The recent screen-buffer tail (200 rows pinned to the buffer bottom).
+    Screen,
+    /// Text below the last horizontal rule (Claude's live prompt/forms area).
+    Form,
+    /// Bottom rows pinned to opencode's prompt footer.
+    Footer,
+    /// The OSC window title.
+    Title,
+}
+
+impl EvidenceRegion {
+    /// Lowercase display label.
+    pub fn label(self) -> &'static str {
+        match self {
+            EvidenceRegion::Screen => "screen",
+            EvidenceRegion::Form => "form",
+            EvidenceRegion::Footer => "footer",
+            EvidenceRegion::Title => "title",
+        }
+    }
+}
+
+/// One matched detection marker, for `kumo agent explain`: which agent, which
+/// signal kind, the marker text/glyph, and where it was found.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AgentMarkerMatch {
+    /// Agent that matched, e.g. "opencode".
+    pub agent: String,
+    /// Signal kind: "blocked", "working", or "idle".
+    pub kind: String,
+    /// Marker phrase or glyph description, e.g. "permission required" or
+    /// "braille spinner".
+    pub marker: String,
+    /// Region the marker was found in.
+    pub region: EvidenceRegion,
+}
+
+/// Why a pane reads its reported status — for `kumo agent explain`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentIdleReason {
+    /// Explicit idle markers matched (listed in the report).
+    IdleMarkers,
+    /// Recognized agent, no signal matched: classification fell back to
+    /// Unknown (the opposite of an idle proof).
+    UnknownFallback,
+    /// The pane's process is dead; status is forced to Idle.
+    DeadPane,
+    /// Not a scanned AI CLI: the default (Idle) applies.
+    NotAnAgent,
+    /// Raw Idle with a Working/Done predecessor while unfocused: Done
+    /// (finished-but-unseen).
+    UnseenFinish,
+    /// Prior Done, pane focused again: marked seen, back to Idle.
+    SeenAfterFocus,
+    /// A blocked/working signal matched (status is not Idle).
+    Active,
+}
+
+impl AgentIdleReason {
+    /// Lowercase display label.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentIdleReason::IdleMarkers => "idle markers",
+            AgentIdleReason::UnknownFallback => "no-signal fallback (unknown)",
+            AgentIdleReason::DeadPane => "dead pane",
+            AgentIdleReason::NotAnAgent => "not an AI CLI (default)",
+            AgentIdleReason::UnseenFinish => "unseen finish (done)",
+            AgentIdleReason::SeenAfterFocus => "done then focused (seen)",
+            AgentIdleReason::Active => "active signal",
+        }
+    }
+}
+
+/// Diagnostic report, as replied to `Command::AgentExplain`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct AgentExplainReport {
+    pub pane_id: u64,
+    pub session: String,
+    /// Pane label: custom name, AI CLI name, or `shell`.
+    pub cli: String,
+    /// OS pid of the pane's PTY child (0 when unknown).
+    pub os_pid: u64,
+    pub is_ai_cli: bool,
+    pub dead: bool,
+    /// Whether the pane is currently the session's focused pane.
+    pub focused: bool,
+    /// Raw detection from the terminal snapshot.
+    pub raw_status: AgentStatus,
+    /// Status after the daemon's seen/done rule (what the UI displays).
+    pub status: AgentStatus,
+    /// Previous observed status, when known.
+    #[serde(default)]
+    pub prev_status: Option<AgentStatus>,
+    /// The idle-fallback / verdict reason chain.
+    pub idle_reason: AgentIdleReason,
+    /// Every marker that matched, per agent and signal kind.
+    pub markers: Vec<AgentMarkerMatch>,
+    /// Human-readable precedence summary.
+    pub precedence: String,
+    /// Milliseconds since the pane last produced output.
+    pub last_output_age_ms: u64,
+    /// Sampled CPU% of the agent process tree.
+    pub cpu: f32,
+    /// Resident memory of the agent process tree, in KiB.
+    pub mem_kb: u64,
+    /// Position of the pane inside its tab (1-based, layout order).
+    #[serde(default)]
+    pub pane_index: u64,
+    /// Position of its tab inside the session (1-based).
+    #[serde(default)]
+    pub tab_index: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +927,12 @@ pub enum Command {
         session: String,
         pane_id: u64,
     },
+    /// `kumo agent explain`: reply with a diagnostic report of why the pane
+    /// reads the state it does (matched markers, evidence region, idle reason).
+    AgentExplain {
+        session: String,
+        pane_id: u64,
+    },
 
     // -- interactive input (attached viewers) -------------------------------
     /// A key pressed in the focused pane's terminal.
@@ -840,6 +993,10 @@ pub enum DaemonEvent {
     /// Reply to `AgentStatus`.
     AgentStatus {
         agents: Vec<AgentStatusLine>,
+    },
+    /// Reply to `AgentExplain` (diagnostic report).
+    AgentExplain {
+        report: AgentExplainReport,
     },
     /// Pushed to `SubscribeLayout` subscribers whenever sessions/panes/agents
     /// change: the full semantic tree.
@@ -1042,6 +1199,9 @@ mod tests {
                     status: AgentStatus::Blocked,
                     cpu: 0.7,
                     mem_kb: 6144,
+                    pane_id: 12,
+                    pane_index: 1,
+                    tab_index: 1,
                 }),
                 mouse_reporting: true,
                 alt_screen: true,
@@ -1079,6 +1239,7 @@ mod tests {
             },
             Command::AgentSpawn { session: "session-1".into(), program: Some("opencode".into()) },
             Command::AgentStatus,
+            Command::AgentExplain { session: "session-1".into(), pane_id: 42 },
         ];
         for cmd in cmds {
             let mut buf = Vec::new();
@@ -1086,6 +1247,39 @@ mod tests {
             let decoded: Command = read_framed(&mut &buf[..]).unwrap();
             assert_eq!(decoded, cmd);
         }
+    }
+
+    #[test]
+    fn explain_report_roundtrip() {
+        let report = AgentExplainReport {
+            pane_id: 42,
+            session: "session-1".into(),
+            cli: "opencode".into(),
+            os_pid: 1234,
+            is_ai_cli: true,
+            dead: false,
+            focused: false,
+            raw_status: AgentStatus::Idle,
+            status: AgentStatus::Done,
+            prev_status: Some(AgentStatus::Working),
+            idle_reason: AgentIdleReason::UnseenFinish,
+            markers: vec![AgentMarkerMatch {
+                agent: "opencode".into(),
+                kind: "idle".into(),
+                marker: "ask anything".into(),
+                region: EvidenceRegion::Screen,
+            }],
+            precedence: "blocked > working > idle > unknown".into(),
+            last_output_age_ms: 321,
+            cpu: 0.5,
+            mem_kb: 4096,
+            pane_index: 2,
+            tab_index: 1,
+        };
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &DaemonEvent::AgentExplain { report: report.clone() }).unwrap();
+        let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, DaemonEvent::AgentExplain { report });
     }
 
     #[test]

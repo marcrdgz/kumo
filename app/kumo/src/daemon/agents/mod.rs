@@ -47,6 +47,7 @@ pub enum AgentStatus {
 
 /// A text snapshot of an AI pane's terminal, captured from the screen buffer
 /// (not the viewport) so detection ignores whatever the user is scrolling.
+#[derive(Debug)]
 pub struct Snapshot {
     /// Recent screen-buffer tail (`bottom_text(DETECTION_TAIL_LINES)`).
     pub(crate) screen: String,
@@ -145,6 +146,86 @@ pub fn detect(snap: &Snapshot) -> AgentStatus {
     AgentStatus::Unknown
 }
 
+/// The detection precedence chain, in human-readable form. A blocked signal
+/// wins over working; working wins over explicit idle; `Unknown` is the
+/// fallback when no signal matches.
+pub(crate) const PRECEDENCE: &str = "blocked > working > idle > unknown";
+
+/// The evidence region a marker was found in. Each agent predicate is bound
+/// to a specific region of the pane's terminal output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Region {
+    /// Recent screen-buffer tail (`Snapshot::screen`).
+    Screen,
+    /// Text below the last horizontal rule (`Snapshot::form`).
+    Form,
+    /// Bottom rows pinned to opencode's prompt footer (`Snapshot::footer`).
+    Footer,
+    /// The OSC window title (`Snapshot::title`).
+    Title,
+}
+
+/// One matched detection marker: the signal phrase/glyph and the region it
+/// was found in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MarkerMatch {
+    pub marker: &'static str,
+    pub region: Region,
+}
+
+/// Marker evidence of one agent's verdicts over a snapshot.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct AgentEvidence {
+    pub agent: &'static str,
+    pub blocked: Vec<MarkerMatch>,
+    pub working: Vec<MarkerMatch>,
+    pub idle: Vec<MarkerMatch>,
+}
+
+/// Full detection explanation: the verdict plus every matched marker, per
+/// agent. Diagnostics only (built on demand by `kumo agent explain`); the hot
+/// path stays on the zero-allocation `detect` above.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Explanation {
+    pub status: AgentStatus,
+    pub blocked: Vec<AgentEvidence>,
+    pub working: Vec<AgentEvidence>,
+    pub idle: Vec<AgentEvidence>,
+}
+
+/// Detect *and* explain, on demand for `kumo agent explain`: computes each
+/// agent's per-region marker evidence and derives the status with the same
+/// precedence `detect` uses (kept in sync by the consistency tests below).
+pub(crate) fn explain(snap: &Snapshot) -> Explanation {
+    let mut blocked = Vec::new();
+    let mut working = Vec::new();
+    let mut idle = Vec::new();
+    for ev in [opencode::evidence(snap), claude::evidence(snap)] {
+        if !ev.blocked.is_empty() {
+            blocked.push(ev.clone());
+        }
+        if !ev.working.is_empty() {
+            working.push(ev.clone());
+        }
+        if !ev.idle.is_empty() {
+            idle.push(ev.clone());
+        }
+    }
+    let has_blocked = blocked.iter().any(|e| !e.blocked.is_empty());
+    let has_working = working.iter().any(|e| !e.working.is_empty());
+    let has_idle = idle.iter().any(|e| !e.idle.is_empty());
+    let status = if has_blocked {
+        AgentStatus::Blocked
+    } else if has_working {
+        AgentStatus::Working
+    } else if has_idle {
+        AgentStatus::Idle
+    } else {
+        AgentStatus::Unknown
+    };
+    Explanation { status, blocked, working, idle }
+}
+
 /// Text of `screen` below its last horizontal rule (a run of box-drawing
 /// dashes), where Claude Code renders the live prompt and approval forms.
 fn after_last_rule(screen: &str) -> String {
@@ -225,5 +306,59 @@ mod tests {
     fn after_last_rule_returns_whole_screen_without_a_rule() {
         let screen = "just a transcript\nwith two lines\n";
         assert_eq!(after_last_rule(screen), "just a transcript\nwith two lines");
+    }
+
+    /// `detect` (hot path) and `explain` (diagnostics) must agree on every
+    /// snapshot: same status, and each boolean predicate matches the presence
+    /// of evidence markers.
+    #[test]
+    fn detect_and_explain_agree() {
+        let snapshots = [
+            snap("△ Permission required\nAllow once\nAllow always\nesc interrupt", "esc interrupt", ""),
+            snap("\u{21c6} tab   \u{2191}\u{2193} select\nenter submit   esc dismiss\n", "", ""),
+            snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "esc dismiss", ""),
+            snap("opencode 1.18.15\n~/.opencode\n", "~/.opencode", ""),
+            snap("some transcript text\nesc interrupt", "esc interrupt", ""),
+            snap("", "", "\u{280b} Fixing the bug"),
+            snap("", "", "\u{2733} ~/proj"),
+            snap("─────\nDo you want to proceed?\n  1. yes\n  2. no\n  esc to cancel\n", "", ""),
+            snap("─────\n✢\n✶\n✻\nNoodling…\n", "", ""),
+            snap("─────\n❯\n? for shortcuts · \u{2190} for agents\n", "", ""),
+            snap("/btw reasoning about the bug\n  esc to close\n", "", ""),
+            snap("assistant: do you want to proceed? (y/n)\n\u{276f} ", "", ""),
+        ];
+        for s in &snapshots {
+            assert_eq!(detect(s), explain(s).status, "status mismatch for {s:?}");
+            assert_eq!(opencode::blocked(s), !opencode::evidence(s).blocked.is_empty());
+            assert_eq!(opencode::working(s), !opencode::evidence(s).working.is_empty());
+            assert_eq!(opencode::idle(s), !opencode::evidence(s).idle.is_empty());
+            assert_eq!(claude::blocked(s), !claude::evidence(s).blocked.is_empty());
+            assert_eq!(claude::working(s), !claude::evidence(s).working.is_empty());
+            assert_eq!(claude::idle(s), !claude::evidence(s).idle.is_empty());
+        }
+    }
+
+    #[test]
+    fn explain_reports_region_and_marker() {
+        // opencode idle marker lives in the screen region; the status derives.
+        let s = snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "esc dismiss", "");
+        let exp = explain(&s);
+        assert_eq!(exp.status, AgentStatus::Idle);
+        assert_eq!(exp.idle.len(), 1);
+        let ev = &exp.idle[0];
+        assert_eq!(ev.agent, "opencode");
+        assert!(ev.idle.iter().any(|m| m.marker == "ask anything" && m.region == Region::Screen));
+    }
+
+    #[test]
+    fn explain_reports_precedence_winner() {
+        // Both a blocked dialog and a working footer are present: explain
+        // records both but the status is Blocked (precedence).
+        let s = snap("△ Permission required\nAllow once\nesc interrupt", "esc interrupt", "");
+        let exp = explain(&s);
+        assert_eq!(exp.status, AgentStatus::Blocked);
+        assert_eq!(exp.blocked.len(), 1);
+        assert_eq!(exp.working.len(), 1);
+        assert!(exp.working[0].working.iter().any(|m| m.marker == "esc interrupt" && m.region == Region::Footer));
     }
 }

@@ -232,9 +232,22 @@ drive kumo over the same JSON socket the CLI uses (`app/kumo/src/cli/cli.rs`,
   OSC title spinner) promotes each to a **first-class state** instead of a
   silent always-idle row — every supported agent at minimum reports working, so
   the idle fallback stays trustworthy.
-- **`kumo agent explain`**: debug why a pane reads the state it does — matched
-  markers, evidence region, and the idle-fallback reason, evaluated live by the
-  running daemon.
+- ✅ **`kumo agent explain`** + **pane-id discovery**: debug why a pane reads
+  the state it does — every matched marker region-tagged (screen /
+  form / footer / title, per agent), the precedence breakdown
+  (`blocked > working > idle > unknown`), and the verdict reason chain
+  (idle markers · unseen finish / done · seen after focus · dead pane ·
+  not-an-AI-CLI default · no-signal fallback), evaluated live by the running
+  daemon (`Command::AgentExplain` → `DaemonEvent::AgentExplain`, evidenced
+  path in `app/kumo/src/daemon/agents/mod.rs`). Pane ids are discoverable via
+  `kumo agent status`/`list`/`ls` (one line per AI CLI with its pane id),
+  `kumo pane list [-t TAB]` (every pane, optional tab filter), and
+  `kumo session list` agents rows (`pane N`) — `kumo agent explain [PANE]`
+  defaults to the first AI pane of the active session. Panes are also
+  addressable by **composite position** `s1:t2:p3` / `kumo:t2:p1` / `t2:p1`
+  (1-based, resolved client-side against the session list; the daemon keeps
+  the canonical `u64` id), and every CLI list/explain/status line prints the
+  position next to the id.
 
 **Agent orchestration primitives** — the *wait* half of the `send-keys` story;
 waiting (not just injecting) is the actual ADE differentiator: tmux never had
