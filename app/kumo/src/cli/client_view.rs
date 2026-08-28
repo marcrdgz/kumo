@@ -6602,7 +6602,7 @@ mod tests {
     /// `center` floats mid-screen, and `off` drops events before they queue.
     #[test]
     fn agent_toast_positions_follow_config() {
-        let mut push = |view: &mut View, pane_id: u64| {
+        let push = |view: &mut View, pane_id: u64| {
             view.on_event(DaemonEvent::Toast {
                 pane_id,
                 kind: ToastKind::Finished,
