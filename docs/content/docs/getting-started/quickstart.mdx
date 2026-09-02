@@ -46,6 +46,19 @@ agent blocks or finishes, kumo chimes so you notice without watching.
 - <kbd>leader+n</kbd> / <kbd>leader+p</kbd> — cycle sessions
 - <kbd>leader+1…9</kbd> — jump to the session at that sidebar position
 
+## Orchestrate agents (and dev servers)
+
+Every `kumo` command is an API an AI inside a pane can use — no SDK:
+
+```sh
+kumo agent wait -p 42 --until idle            # server holds the socket, no polling
+kumo agent prompt -p 42 "fix the test" --wait idle
+kumo agent read -p 42 --source recent         # daemon owns the buffer, alt-screen intact
+kumo pane wait-output -p 12 --regex "Ready|passed|failed"
+```
+
+See [Orchestration](/docs/guides/orchestration) for the full ADE guide, including the copy-paste skill prompt for agents.
+
 ## Detach and come back
 
 <kbd>leader+d</kbd> detaches this terminal; the daemon keeps running in the
@@ -62,6 +75,9 @@ kumo ls     # list sessions (* = active)
   </Card>
   <Card title="AI Agents" href="/docs/guides/agents">
     Status detection, alerts, and per-agent lifecycle support.
+  </Card>
+  <Card title="Orchestration" href="/docs/guides/orchestration">
+    Drive kumo as an ADE — waits, prompts, reads, dev servers, and the AI skill prompt.
   </Card>
   <Card title="Configuration" href="/docs/configuration">
     Leader keys, shells, AI commands, and more.

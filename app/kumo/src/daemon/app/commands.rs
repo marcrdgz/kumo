@@ -396,6 +396,120 @@ impl App {
         Ok(format!("spawned agent in {session:?}"))
     }
 
+    /// `kumo agent start --kind <kind> --pane <id> [-- <args>]`: launches an
+    /// agent program in an existing shell pane. Returns once the pane's
+    /// detection is not immediately blocked (`agent_not_ready` on blocked).
+    pub(crate) fn agent_start(
+        &mut self,
+        session: &str,
+        pane_id: u64,
+        kind: &str,
+        args: &[String],
+    ) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        if !self.sessions[idx].contains_pane(pane_id) {
+            return Ok(format!("no pane {pane_id} in {session:?}"));
+        }
+        let kind = kind.trim();
+        if kind.is_empty() {
+            return Ok("kind cannot be empty".to_string());
+        }
+        // Build command line: `kind` + args, shell-escaped naively (args with spaces quoted)
+        let mut cmd = kind.to_string();
+        for a in args {
+            cmd.push(' ');
+            if a.contains(' ') || a.contains('"') {
+                cmd.push('"');
+                cmd.push_str(&a.replace('"', "\\\""));
+                cmd.push('"');
+            } else {
+                cmd.push_str(a);
+            }
+        }
+        cmd.push('\r');
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.write(cmd.as_bytes());
+        }
+        // Check immediately whether pane went blocked (e.g. permission prompt on launch)
+        if let Some(pane) = self.panes.get(&pane_id) {
+            let st = pane.agent_status();
+            if st == crate::daemon::agents::AgentStatus::Blocked {
+                return Ok("error: agent_not_ready (pane is blocked immediately after start)".to_string());
+            }
+        }
+        Ok(format!("started {kind} in pane {pane_id}"))
+    }
+
+    /// `kumo agent rename <pane> <name>`: live alias so scripts reference agents
+    /// by name. No persistence — ephemeral per daemon.
+    pub(crate) fn agent_rename(&mut self, session: &str, pane_id: u64, name: &str) -> Result<String> {
+        let Some(s) = self.sessions.iter().find(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        if !s.contains_pane(pane_id) {
+            return Ok(format!("no pane {pane_id} in {session:?}"));
+        }
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Ok("name cannot be empty".to_string());
+        }
+        if name.len() > 64 {
+            return Ok("name too long (max 64)".to_string());
+        }
+        self.agent_aliases.insert(pane_id, name.clone());
+        self.bump_layout_version();
+        Ok(format!("renamed pane {pane_id} to {name:?}"))
+    }
+
+    /// `kumo agent broadcast <text> [--filter status]`: fan one prompt out to
+    /// every AI pane in the session, filtered by status when provided.
+    pub(crate) fn agent_broadcast(
+        &mut self,
+        session: &str,
+        text: &str,
+        filter: Option<kumo_protocol::AgentStatus>,
+    ) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let pids: Vec<u64> = self.sessions[idx]
+            .tabs
+            .iter()
+            .flat_map(|t| t.tree.pane_ids())
+            .collect();
+        let mut sent = 0usize;
+        for pid in pids {
+            let pane = match self.panes.get(&pid) {
+                Some(p) if p.is_ai_cli() => p,
+                _ => continue,
+            };
+            if let Some(f) = filter {
+                let st: kumo_protocol::AgentStatus = self
+                    .current_agent_status(pid)
+                    .unwrap_or(crate::daemon::agents::AgentStatus::Idle)
+                    .into();
+                if st != f {
+                    continue;
+                }
+            }
+            // Bracketed-paste aware inject without the blocked guard (broadcast
+            // intentionally sends even if blocked — the receiver will queue).
+            let bracketed = pane.vt.mode_get(crate::daemon::vt::MODE_BRACKETED_PASTE);
+            let payload = if bracketed {
+                format!("\x1b[200~{}\x1b[201~\r", text)
+            } else {
+                format!("{}\r", text)
+            };
+            if let Some(p) = self.panes.get_mut(&pid) {
+                p.write(payload.as_bytes());
+                sent += 1;
+            }
+        }
+        Ok(format!("broadcast to {sent} agent(s) in {session:?}"))
+    }
+
     /// One status line per running AI CLI, for `kumo agent status`.
     pub(crate) fn agent_status_lines(&self) -> Vec<AgentStatusLine> {
         let mut out = Vec::new();

@@ -1,0 +1,264 @@
+---
+title: Orchestration
+description: Use kumo as an ADE — how humans and AI agents wait, prompt, read, and coordinate across panes.
+icon: 🕸️
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout title="Who is this for?" type="info">
+**Humans** driving a session from a shell, and **AI agents running inside a kumo pane** that need to drive their own web. The entire `kumo` CLI is the API — agents and humans use the same commands over the same daemon socket. If you are an LLM inside kumo, this is your skill file.
+</Callout>
+
+## Why kumo can orchestrate
+
+Classic multiplexers can `send-keys`. None could **wait**. An agent that injects a command and then polls `sleep 1; check again` is fragile, wasteful, and races with the shell.
+
+Kumo adds **server-owned, event-driven waits**: the daemon holds your socket open and replies once — when the condition is met, on timeout, or if the pane's occupant changed. No polling loop on the client, no race between submit and wait.
+
+```
+tmux:  send-keys "npm test"  →  sleep 2  →  hope
+kumo:  agent prompt -p 42 "npm test" --wait idle  →  daemon replies once
+       pane wait-output -p 12 --regex "passed|failed"  →  exactly when it appears
+```
+
+## How agents use kumo
+
+Any process inside a pane can shell out to the `kumo` binary (sibling to the daemon, or on `PATH`). It talks to the daemon over the IPC socket at `$XDG_RUNTIME_DIR/kumo` (owner-only `0o600`, same-user check via `SO_PEERCRED`/`getpeereid`). Humans, TUI clients, scripts, and AI agents all speak the same protocol.
+
+You do not need a special SDK. If you can run a command, you can orchestrate:
+
+```sh
+kumo pane list -s myproj        # discover panes: ids + s1:t2:p3 positions
+kumo agent status -s myproj     # which panes host agents, their status
+kumo agent wait -p 42 --until idle
+kumo agent read -p 42 --source recent
+```
+
+<Callout title="Composite pane addresses" type="info">
+Panes have a stable numeric `id` and a **composite position** `s1:t2:p3` (1-based: session index or name, tab, pane). Use whichever is convenient — composites are resolved client-side via `kumo session list` against the live layout; the daemon always gets the canonical `id`. `kumo pane list` and `kumo agent status` print both.
+
+* `s1:t2:p3` — session 1, tab 2, pane 3
+* `kumo:t2:p1` — session named `kumo`, tab 2, pane 1
+* `t2:p1` — tab 2, pane 1 (session from `-s`)
+* `42` — stable numeric id (best for scripts)
+</Callout>
+
+## The primitives
+
+| Primitive | What it does | Server behavior |
+| --- | --- | --- |
+| `kumo agent wait` | Wait until an agent reaches `blocked\|done\|idle\|working` | Holds socket; pinned to `pane_os_pid` (`agent_replaced` if occupant changes); immediate reply if already there (`agent_blocked` special case); timeout → error |
+| `kumo agent prompt` | Send text to a pane (bracketed-paste aware) | `ESC[200~…ESC[201~` when pane has `MODE_BRACKETED_PASTE`; refuses with `agent_blocked` if already blocked |
+| `kumo agent prompt --wait` | Prompt **and** wait in one RPC | Atomic — no race between send and wait |
+| `kumo agent read` | Read the pane's buffer from the daemon | Alt-screen intact; no scraping; `--source` selects the view |
+| `kumo pane wait-output` | Wait for `PATTERN` in any pane's output | One-shot, regex or substring, on recent tail + visible buffer |
+| `kumo agent start` | Launch an agent in an existing shell pane | Returns once detection shows ready; `agent_not_ready` if blocked at start |
+| `kumo agent rename` | Live alias for a pane | So scripts can use names, not ids |
+| `kumo agent broadcast` | Fan one prompt to every AI pane | Over existing `send-keys` path; optional `--filter STATUS` |
+
+### `kumo agent wait`
+
+```sh
+kumo agent wait <PANE> --until <STATUS> [--timeout 30s] [-s SESSION]
+
+# examples
+kumo agent wait -p 42 --until idle --timeout 60s
+kumo agent wait -p s1:t1:p2 --until blocked --timeout 10s
+kumo agent wait -p 42 --until done          # finished-but-unseen (went idle while unfocused)
+```
+
+* `STATUS`: `blocked` (needs approval) · `done` (finished while you weren't looking) · `idle` (quiet, ready) · `working` (producing output). The five-state model is `working · blocked · idle · done · unknown` — see [AI Agents](/docs/guides/agents).
+* **Pinned occupant**: the wait is pinned to the pane's `OS pid` at creation. If the process is replaced, the daemon replies `agent_replaced` instead of falsely succeeding. `agent_blocked` is returned immediately when `--until` is not `blocked` but the pane is already blocked.
+* Default timeout: `30s`. Accepts `500ms` / `30s` / `2m` or bare milliseconds.
+
+### `kumo agent prompt`
+
+```sh
+kumo agent prompt <PANE> <TEXT> [--wait [STATUS]] [--timeout 60s] [-s SESSION]
+
+# examples
+kumo agent prompt -p 42 "fix the failing test in src/foo.rs"
+kumo agent prompt -p 42 "rebase onto main" --wait idle --timeout 120s
+kumo agent prompt -p 42 "ship it" --wait blocked        # wait until it needs approval
+kumo agent prompt --wait -p 42 "hello"                  # bare --wait means idle
+kumo agent prompt -p 42 -- "echo --wait is not a flag"  # -- separates text from flags
+```
+
+* **Bracketed-paste aware**: when the pane's terminal has `MODE_BRACKETED_PASTE`, kumo wraps the payload as `\x1b[200~TEXT\x1b[201~\r`; otherwise `TEXT\r`. No stray escapes.
+* **Refuses when blocked**: if the agent is already `blocked`, prompt returns `agent_blocked` without injecting — you must handle the approval first.
+* **`--wait` is atomic**: `prompt --wait idle` does *submit + wait* in one server-owned request, so there is no window where the agent could go idle between your `send-keys` and your separate `wait`. Default `prompt --wait` timeout is `120s`.
+
+### `kumo agent read`
+
+```sh
+kumo agent read <PANE> [--source <SOURCE>] [-s SESSION]
+# SOURCE: visible | recent | detection | traceback  (default visible)
+```
+
+| Source | What you get |
+| --- | --- |
+| `visible` | The viewport as the daemon sees it (what is on screen right now) |
+| `recent` | Last ~16 KiB of output (ring tail) — good for recent logs |
+| `detection` | Raw signal regions as `screen / form / footer / title` — for debugging detection |
+| `traceback` | Last prompt block: `form` (below last rule) or last 120 rows if empty — structured traceback until OSC 133 lands |
+
+The daemon **owns the screen buffer including the alt-screen** (ghostty's buffer holds it), so full-screen agent transcripts (claude/codex) read directly without mouse-scroll scraping.
+
+```sh
+kumo agent read -p 42 --source visible
+kumo agent read -p 42 --source recent | tail -n 100
+kumo agent read -p 42 --source traceback   # last failing command + output when available
+```
+
+Output may be truncated (flagged in the reply); keep `--source` targeted and page with `tail`/`grep`.
+
+### `kumo pane wait-output`
+
+```sh
+kumo pane wait-output [PANE] PATTERN [--regex] [--timeout 30s] [-s SESSION]
+
+# examples — PANE may be positional or -p; PATTERN is positional
+kumo pane wait-output -p 12 "Ready on http"
+kumo pane wait-output -p 12 --regex "passed|failed" --timeout 60s
+kumo pane wait-output s1:t1:p2 "TASK_DONE" --timeout 10s
+kumo pane wait-output -p 12 --timeout 500ms "demo-token"
+```
+
+* **Any pane**, not just AI panes — the primitive behind dev servers, test suites, and builds.
+* **Substring by default**, `--regex` treats `PATTERN` as a Rust `regex`. Bad regex returns `bad_regex: "…: error"` immediately.
+* Checks **recent tail + visible buffer**; holds the socket until the next tick's output contains the pattern. Pinned to `pane_os_pid` like `agent wait`. Default timeout `30s`.
+
+### `kumo agent start` / `rename` / `broadcast`
+
+```sh
+kumo agent start --kind <agent> --pane <PANE> [-- <args>] [-s SESSION]
+kumo agent rename <PANE> <NAME> [-s SESSION]
+kumo agent broadcast "TEXT" [-s SESSION] [--filter STATUS]
+
+# examples
+kumo agent start --kind claude --pane 12 -- --model sonnet --resume abc
+kumo agent start --kind opencode --pane s1:t2:p1 -- --help
+kumo agent rename -p 42 worker
+kumo agent broadcast -s myproj "rebase onto main" --filter idle
+kumo agent broadcast "echo broadcast-ok" -s myproj --filter blocked
+```
+
+* `start` launches the agent program in an existing shell pane and returns once detection shows it ready (`agent_not_ready` if it starts blocked; `--kind` selects the detection rules `agent-detection/<kind>.toml`).
+* `rename` sets a live alias so scripts reference agents by name, not id.
+* `broadcast` fans the prompt over the existing `send-keys` wire path to every AI pane in the session; `--filter` restricts to `working|blocked|idle|done|unknown`.
+
+## Patterns (copy-paste)
+
+### 1 — Dev server: run it, wait for ready, then read
+
+```sh
+SESSION=myproj
+kumo pane split -s $SESSION --horizontal
+PANE=$(kumo pane list -s $SESSION | grep -o 'pane [0-9]\+' | tail -1 | awk '{print $2}')
+
+kumo agent prompt -p $PANE "npm run dev" &
+kumo pane wait-output -p $PANE --regex "Ready|listening|Local:" --timeout 30s
+echo "dev server is up — checking output"
+kumo agent read -p $PANE --source recent | grep -i "ready"
+```
+
+### 2 — Verify loop: run tests, wait for result, feed failure back
+
+This is how `leader+r` (the coming verify loop) works — run the suite into a fresh split, `wait-output` on it, and only then feed the failure to the agent:
+
+```sh
+SESSION=myproj
+WORKER=42   # your agent pane
+kumo pane split -s $SESSION --horizontal
+TEST_PANE=$(kumo pane list -s $SESSION | grep -o 'pane [0-9]\+' | tail -1 | awk '{print $2}')
+
+kumo agent prompt -p $TEST_PANE "npm test 2>&1"
+if kumo pane wait-output -p $TEST_PANE --regex "passed|failed" --timeout 120s; then
+  FAIL=$(kumo agent read -p $TEST_PANE --source recent | grep -A 50 "failed\|FAIL")
+  if echo "$FAIL" | grep -qi "failed"; then
+    kumo agent prompt -p $WORKER "tests failed: $FAIL" --wait idle --timeout 180s
+  fi
+else
+  echo "tests timed out" >&2
+fi
+```
+
+### 3 — Agent-to-agent handoff
+
+Agent in `s1:t1:p1` (opencode) waits for worker `s1:t1:p2` to finish:
+
+```sh
+# inside opencode's shell (or any pane):
+kumo pane wait-output -p s1:t1:p2 "TASK_DONE" --timeout 300s
+RESULT=$(kumo agent read -p s1:t1:p2 --source recent)
+kumo agent prompt -p s1:t1:p1 "worker done: $RESULT" --wait idle
+```
+
+Atomic prompt+wait for a worker task:
+
+```sh
+kumo agent prompt -p s1:t1:p2 "implement feature X and run tests" --wait done --timeout 600s
+kumo agent read -p s1:t1:p2 --source traceback
+```
+
+### 4 — Parallel workers + aggregator
+
+```sh
+# three workers, one aggregator pane
+for TASK in "task A" "task B" "task C"; do
+  kumo pane split -s myproj --horizontal
+  P=$(kumo pane list -s myproj | grep -o 'pane [0-9]\+' | tail -1 | awk '{print $2}')
+  kumo agent prompt -p $P "$TASK" --wait idle &
+done
+wait
+kumo agent broadcast -s myproj "summarize all results" --filter idle
+```
+
+### 5 — Broadcast to the fleet
+
+```sh
+kumo agent broadcast -s myproj "git fetch && git rebase origin/main" --filter idle
+kumo agent broadcast "echo tick" -s myproj   # all AI panes
+```
+
+## Errors, timeouts, and pinning
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `timeout` | Condition not met before `--timeout` | Retry, increase timeout, or `agent read --source recent` to see progress |
+| `agent_blocked` | Pane already blocked but `--until` was not `blocked` / prompt refused while blocked | Handle the approval (`agent read` to see prompt, `prompt` after resolving), or wait with `--until blocked` |
+| `agent_replaced` | Pane's `OS pid` changed since wait was created | Re-resolve the pane id and retry; do not treat as success |
+| `bad_regex` | `--regex` pattern failed to compile (`bad regex "…": error`) | Fix the pattern |
+
+All waits are **server-owned and event-driven**: the CLI blocks on the socket, the daemon polls the registry after each `tick()` (agent-status transition or new output) and after timeout sweep, so there is no client polling. Idle includes transient waits for aggregation in the daemon's idle path.
+
+## Tips for AI agents
+
+* **Discover panes first**: `kumo pane list` (every pane + `s:t:p`) and `kumo agent status` (AI panes + status + positions). Use stable numeric `id` in scripts; composite `s1:t2:p3` for interactive use.
+* **Prefer `read` over scraping**: `agent read --source visible|recent` comes from the daemon's ghostty buffer. `traceback` gives the last prompt block.
+* **Use `--regex "passed|failed"` for test watchers**, substring for dev-server banners.
+* **Always set a timeout** long enough for the job (`--timeout 120s` for `prompt --wait` default 120s, `30s` for `wait`/`wait-output`).
+* **No polling**: do `kumo agent wait` or `kumo pane wait-output`, not `while true; do kumo agent status; sleep 1; done`.
+* **Handle `agent_blocked`**: never `prompt` a blocked pane. `read --source visible` to see the permission dialog, then act.
+* **Bracketed paste is automatic**: you do not need to send `ESC[200~` yourself — `agent prompt` does it when the pane has the mode enabled.
+* **Keep reads small**: `recent` is ~16 KiB; pipe through `grep`/`tail` rather than dumping the whole buffer into context.
+
+## Minimal skill prompt for your agent
+
+Paste this into any agent that runs inside kumo (opencode, claude, codex):
+
+> You are running inside kumo, a terminal multiplexer. You can orchestrate any pane with the `kumo` CLI (same binary, same socket, no SDK).
+> Discover: `kumo pane list`, `kumo agent status`.
+> Wait: `kumo agent wait -p <pane> --until idle|blocked|done --timeout 30s` (server holds socket, pinned to pid).
+> Prompt: `kumo agent prompt -p <pane> "text" --wait idle --timeout 120s` (bracketed-paste, atomic wait, refuses if blocked).
+> Read: `kumo agent read -p <pane> --source visible|recent|traceback`.
+> Output: `kumo pane wait-output -p <pane> [--regex] "PATTERN" --timeout 30s` (any pane, for dev servers / test suites).
+> Fleet: `kumo agent broadcast "text" --filter idle`.
+> PANE is `id` or `s1:t2:p3` / `t2:p1`. Never poll — wait. Handle `agent_blocked`/`agent_replaced`/`timeout`/`bad_regex`.
+
+## See also
+
+* [AI Agents](/docs/guides/agents) — the five-state model, detection rules, and `agent explain`
+* [CLI Reference](/docs/cli) — every `kumo` command
+* [Sessions & Panes](/docs/guides/sessions-and-panes) — split tree, focus, resize, zoom

@@ -13,13 +13,15 @@ use std::time::Duration;
 use anyhow::Result;
 
 use kumo_protocol::{
-    Command, DaemonEvent, SplitDir, WireKeyCode, WireKeyEvent, WireModifiers,
+    AgentReadSource, AgentStatus, AgentWaitKind, Command, DaemonEvent, SplitDir, WireKeyCode,
+    WireKeyEvent, WireModifiers,
 };
 
 /// A pane selector: the stable numeric id, or a composite `s1:t2:p3` /
 /// `kumo:t2:p3` spec (1-based indexes; the session part may be a name).
 /// Composite specs are resolved client-side via a `SessionList` round trip —
 /// the daemon always gets the canonical `u64`.
+#[derive(Clone, Debug)]
 enum PaneRef {
     Id(u64),
     Spec(String),
@@ -111,10 +113,17 @@ enum CliCmd {
     PaneFocus { session: Option<String>, pane: PaneRef },
     PaneSendKeys { session: Option<String>, pane: Option<PaneRef>, keys: String },
     PaneList { session: Option<String>, tab: Option<PaneRef> },
+    PaneWaitOutput { session: Option<String>, pane: PaneRef, pattern: String, is_regex: bool, timeout_ms: Option<u64> },
     AgentSpawn { session: Option<String>, program: Option<String> },
     AgentStatus,
     AgentKill { session: Option<String>, pane: PaneRef },
     AgentExplain { session: Option<String>, pane: Option<PaneRef> },
+    AgentWait { session: Option<String>, pane: PaneRef, until: AgentWaitKind, timeout_ms: Option<u64> },
+    AgentPrompt { session: Option<String>, pane: PaneRef, text: String, wait: Option<AgentWaitKind>, timeout_ms: Option<u64> },
+    AgentRead { session: Option<String>, pane: PaneRef, source: AgentReadSource },
+    AgentStart { session: Option<String>, pane: PaneRef, kind: String, args: Vec<String> },
+    AgentRename { session: Option<String>, pane: PaneRef, name: String },
+    AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
     Kill,
     Reload,
     Restart,
@@ -310,10 +319,57 @@ fn run_inner(args: &[String]) -> Result<()> {
                     };
                     Command::AgentExplain { session, pane_id }
                 }
+                CliCmd::PaneWaitOutput { session, pane, pattern, is_regex, timeout_ms } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::PaneWaitOutput { session, pane_id, pattern, is_regex, timeout_ms }
+                }
+                CliCmd::AgentWait { session, pane, until, timeout_ms } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::AgentWait { session, pane_id, until, timeout_ms }
+                }
+                CliCmd::AgentPrompt { session, pane, text, wait, timeout_ms } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::AgentPrompt { session, pane_id, text, wait, timeout_ms }
+                }
+                CliCmd::AgentRead { session, pane, source } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::AgentRead { session, pane_id, source }
+                }
+                CliCmd::AgentStart { session, pane, kind, args } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::AgentStart { session, pane_id, kind, args }
+                }
+                CliCmd::AgentRename { session, pane, name } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    Command::AgentRename { session, pane_id, name }
+                }
+                CliCmd::AgentBroadcast { session, text, filter } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    Command::AgentBroadcast { session, text, filter }
+                }
             };
 
+            // Waiter commands need a long read timeout (agent wait up to 120s, output wait 30s)
+            let is_waiter = matches!(command, Command::AgentWait{..} | Command::AgentPrompt{wait: Some(_), ..} | Command::PaneWaitOutput{..});
+            let timeout_ms = match &command {
+                Command::AgentWait{ timeout_ms, ..} => timeout_ms.unwrap_or(30_000),
+                Command::AgentPrompt{ wait: Some(_), timeout_ms, ..} => timeout_ms.unwrap_or(120_000),
+                Command::PaneWaitOutput{ timeout_ms, ..} => timeout_ms.unwrap_or(30_000),
+                _ => 0,
+            };
             kumo_core::protocol::write_framed(&mut stream, &command)?;
-            read_reply(&mut stream)
+            if is_waiter {
+                // Waiters block: use timeout + 5s buffer
+                read_reply_with_timeout(&mut stream, Duration::from_millis(timeout_ms + 5000))
+            } else {
+                read_reply(&mut stream)
+            }
         }
     }
 }
@@ -425,6 +481,56 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
             }
             Ok(CliCmd::PaneList { session, tab })
         }
+        "wait-output" | "wait" => {
+            let pane = pane_id.clone()
+                .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
+                .ok_or_else(|| anyhow::anyhow!("pane wait-output needs a PANE (see `kumo pane -h`)"))?;
+            // Remaining positional after pane (if pane was positional)
+            let mut rest = if pane_id.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            // Flags: --regex, --timeout, and positional pattern
+            let mut is_regex = false;
+            let mut timeout_ms: Option<u64> = None;
+            let mut pattern_parts: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--regex" => {
+                        is_regex = true;
+                        i += 1;
+                    }
+                    "--timeout" => {
+                        let v = need(&rest, i+1, "a timeout after --timeout (e.g. 30s, 500ms)")?;
+                        timeout_ms = Some(parse_timeout_ms(&v)?);
+                        i += 2;
+                    }
+                    s if s.starts_with("--timeout=") => {
+                        let v = s.strip_prefix("--timeout=").unwrap();
+                        timeout_ms = Some(parse_timeout_ms(v)?);
+                        i += 1;
+                    }
+                    "--pattern" => {
+                        let v = need(&rest, i+1, "a pattern after --pattern")?;
+                        pattern_parts.push(v);
+                        i += 2;
+                    }
+                    arg if !arg.starts_with('-') => {
+                        pattern_parts.push(arg.to_string());
+                        i += 1;
+                    }
+                    _ => {
+                        anyhow::bail!("unknown pane wait-output flag {:?}", rest[i]);
+                    }
+                }
+            }
+            // Also support `--regex <pattern>` where --regex takes a value: treat next as pattern if no explicit pattern yet
+            // For compat, if pattern was given as `--regex pattern`, the above captures.
+            // If pattern is empty, try to find leftover: if positional had "--regex" + pattern, pattern already captured.
+            let pattern = pattern_parts.join(" ");
+            if pattern.is_empty() {
+                anyhow::bail!("pane wait-output needs a pattern (e.g. --regex \"passed|failed\")");
+            }
+            Ok(CliCmd::PaneWaitOutput { session, pane, pattern, is_regex, timeout_ms })
+        }
         other => anyhow::bail!("unknown pane subcommand {other:?}"),
     }
 }
@@ -433,23 +539,252 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
         anyhow::bail!("missing agent subcommand (see `kumo agent -h`)");
     };
-    let (session, pane_id, positional) = split_options(args);
+    // For agent subcommands we parse manually to support --until/--wait/--timeout etc
+    // Extract common session/pane from -s/-p wherever they appear, plus positional.
+    let (session_opt, pane_opt, positional) = split_options(args);
     match sub {
         "spawn" => Ok(CliCmd::AgentSpawn {
-            session,
+            session: session_opt,
             program: positional.first().cloned(),
         }),
         "status" | "list" | "ls" => Ok(CliCmd::AgentStatus),
         "kill" => Ok(CliCmd::AgentKill {
-            session,
-            pane: pane_id
+            session: session_opt,
+            pane: pane_opt
                 .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
                 .ok_or_else(|| anyhow::anyhow!("agent kill needs a PANE (see `kumo pane -h`)"))?,
         }),
         "explain" => Ok(CliCmd::AgentExplain {
-            session,
-            pane: pane_id.or_else(|| positional.first().and_then(|s| parse_pane_ref(s))),
+            session: session_opt,
+            pane: pane_opt.or_else(|| positional.first().and_then(|s| parse_pane_ref(s))),
         }),
+        "wait" => {
+            // kumo agent wait <PANE> --until blocked|done|idle [--timeout 30s]
+            let pane = pane_opt.clone()
+                .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
+                .ok_or_else(|| anyhow::anyhow!("agent wait needs a PANE (see `kumo agent -h`)"))?;
+            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let mut until: Option<AgentWaitKind> = None;
+            let mut timeout_ms: Option<u64> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--until" => {
+                        let v = need(&rest, i+1, "a status after --until (blocked|done|idle)")?;
+                        until = Some(AgentWaitKind::parse(&v).ok_or_else(|| anyhow::anyhow!("bad --until {v:?} (use blocked|done|idle|working)"))?);
+                        i += 2;
+                    }
+                    s if s.starts_with("--until=") => {
+                        let v = s.strip_prefix("--until=").unwrap();
+                        until = Some(AgentWaitKind::parse(v).ok_or_else(|| anyhow::anyhow!("bad --until {v:?}"))?);
+                        i += 1;
+                    }
+                    "--timeout" => {
+                        let v = need(&rest, i+1, "a timeout after --timeout")?;
+                        timeout_ms = Some(parse_timeout_ms(&v)?);
+                        i += 2;
+                    }
+                    s if s.starts_with("--timeout=") => {
+                        let v = s.strip_prefix("--timeout=").unwrap();
+                        timeout_ms = Some(parse_timeout_ms(v)?);
+                        i += 1;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+            let until = until.ok_or_else(|| anyhow::anyhow!("agent wait needs --until blocked|done|idle|working"))?;
+            Ok(CliCmd::AgentWait { session: session_opt, pane, until, timeout_ms })
+        }
+        "prompt" => {
+            // kumo agent prompt <PANE> <TEXT> [--wait blocked|...] [--timeout 60s]
+            let pane = pane_opt.clone()
+                .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
+                .ok_or_else(|| anyhow::anyhow!("agent prompt needs a PANE"))?;
+            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let mut wait: Option<AgentWaitKind> = None;
+            let mut timeout_ms: Option<u64> = None;
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--wait" => {
+                        if let Some(nxt) = rest.get(i+1) {
+                            if let Some(k) = AgentWaitKind::parse(nxt) {
+                                wait = Some(k);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        // --wait without value means wait for idle (back-compat: default idle)
+                        wait = Some(AgentWaitKind::Idle);
+                        i += 1;
+                    }
+                    s if s.starts_with("--wait=") => {
+                        let v = s.strip_prefix("--wait=").unwrap();
+                        wait = Some(AgentWaitKind::parse(v).ok_or_else(|| anyhow::anyhow!("bad --wait {v:?}"))?);
+                        i += 1;
+                    }
+                    "--timeout" => {
+                        let v = need(&rest, i+1, "a timeout after --timeout")?;
+                        timeout_ms = Some(parse_timeout_ms(&v)?);
+                        i += 2;
+                    }
+                    s if s.starts_with("--timeout=") => {
+                        let v = s.strip_prefix("--timeout=").unwrap();
+                        timeout_ms = Some(parse_timeout_ms(v)?);
+                        i += 1;
+                    }
+                    "--" => {
+                        // everything after -- is text
+                        text_parts.extend(rest.iter().skip(i+1).cloned());
+                        break;
+                    }
+                    arg if arg.starts_with("--") => {
+                        anyhow::bail!("unknown agent prompt flag {:?}", arg);
+                    }
+                    _ => {
+                        text_parts.push(rest[i].clone());
+                        i += 1;
+                    }
+                }
+            }
+            let text = text_parts.join(" ");
+            if text.is_empty() {
+                anyhow::bail!("agent prompt needs TEXT (e.g. kumo agent prompt 123 \"hello\")");
+            }
+            Ok(CliCmd::AgentPrompt { session: session_opt, pane, text, wait, timeout_ms })
+        }
+        "read" => {
+            // kumo agent read <PANE> --source visible|recent|detection|traceback
+            let pane = pane_opt.clone()
+                .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
+                .ok_or_else(|| anyhow::anyhow!("agent read needs a PANE"))?;
+            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let mut source: Option<AgentReadSource> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--source" => {
+                        let v = need(&rest, i+1, "a source after --source")?;
+                        source = Some(AgentReadSource::parse(&v).ok_or_else(|| anyhow::anyhow!("bad --source {v:?} (use visible|recent|detection|traceback)"))?);
+                        i += 2;
+                    }
+                    s if s.starts_with("--source=") => {
+                        let v = s.strip_prefix("--source=").unwrap();
+                        source = Some(AgentReadSource::parse(v).ok_or_else(|| anyhow::anyhow!("bad --source {v:?}"))?);
+                        i += 1;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+            let source = source.unwrap_or(AgentReadSource::Visible);
+            Ok(CliCmd::AgentRead { session: session_opt, pane, source })
+        }
+        "start" => {
+            // kumo agent start --kind <kind> --pane <id> [-- <args>]
+            let mut kind: Option<String> = None;
+            let mut pane = pane_opt;
+            let mut session = session_opt.clone();
+            let mut args_out: Vec<String> = Vec::new();
+            // Scan raw args[1..] for --kind/--pane/--session/--
+            let raw = &args[1..];
+            let mut j = 0;
+            while j < raw.len() {
+                match raw[j].as_str() {
+                    "--kind" => {
+                        kind = Some(need(raw, j+1, "a kind after --kind")?);
+                        j += 2;
+                    }
+                    s if s.starts_with("--kind=") => {
+                        kind = Some(s.strip_prefix("--kind=").unwrap().to_string());
+                        j += 1;
+                    }
+                    "-p" | "--pane" => {
+                        let v = need(raw, j+1, "a pane after --pane")?;
+                        pane = parse_pane_ref(&v).or(Some(PaneRef::Id(v.parse().unwrap_or(0))));
+                        j += 2;
+                    }
+                    "-s" | "--session" => {
+                        session = Some(need(raw, j+1, "a session after --session")?);
+                        j += 2;
+                    }
+                    "--" => {
+                        args_out.extend(raw.iter().skip(j+1).cloned());
+                        break;
+                    }
+                    _ => { j += 1; }
+                }
+            }
+            let kind = kind.ok_or_else(|| anyhow::anyhow!("agent start needs --kind <name>"))?;
+            let pane = pane.ok_or_else(|| anyhow::anyhow!("agent start needs --pane <id>"))?;
+            Ok(CliCmd::AgentStart { session, pane, kind, args: args_out })
+        }
+        "rename" => {
+            let pane = pane_opt.clone()
+                .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
+                .ok_or_else(|| anyhow::anyhow!("agent rename needs a PANE"))?;
+            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let name = rest.iter().find(|s| !s.starts_with('-')).cloned().ok_or_else(|| anyhow::anyhow!("agent rename needs a NAME"))?;
+            // also accept name as second positional even if pane was via -p
+            let name = if rest.len() >= 2 && pane_opt.is_some() {
+                // when pane via -p, positional is e.g. ["myname"] -> name is first
+                // when both via positional, we already skipped pane, so rest[0] is name
+                // handle both
+                rest.iter().find(|s| !s.starts_with('-')).cloned().unwrap_or(name)
+            } else {
+                name
+            };
+            // Better: if command is `kumo agent rename 123 myname` rest = ["myname"], we have name.
+            // If `kumo agent rename -p 123 myname` rest = ["myname"], same.
+            // If `kumo agent rename --pane 123 --name myname`, not handled; but we treat last non-flag as name.
+            let name = rest.into_iter().filter(|s| !s.starts_with('-')).next_back().unwrap_or(name);
+            Ok(CliCmd::AgentRename { session: session_opt, pane, name })
+        }
+        "broadcast" => {
+            // kumo agent broadcast "text" [-s SESSION] [--filter status]
+            let mut filter: Option<AgentStatus> = None;
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < positional.len() {
+                match positional[i].as_str() {
+                    "--filter" => {
+                        let v = need(&positional, i+1, "a status after --filter")?;
+                        let st = match v.to_ascii_lowercase().as_str() {
+                            "working" => AgentStatus::Working,
+                            "blocked" => AgentStatus::Blocked,
+                            "idle" => AgentStatus::Idle,
+                            "done" => AgentStatus::Done,
+                            "unknown" => AgentStatus::Unknown,
+                            _ => anyhow::bail!("bad --filter {v:?}"),
+                        };
+                        filter = Some(st);
+                        i += 2;
+                    }
+                    s if s.starts_with("--filter=") => {
+                        let v = s.strip_prefix("--filter=").unwrap();
+                        let st = match v.to_ascii_lowercase().as_str() {
+                            "working" => AgentStatus::Working,
+                            "blocked" => AgentStatus::Blocked,
+                            "idle" => AgentStatus::Idle,
+                            "done" => AgentStatus::Done,
+                            "unknown" => AgentStatus::Unknown,
+                            _ => anyhow::bail!("bad --filter {v:?}"),
+                        };
+                        filter = Some(st);
+                        i += 1;
+                    }
+                    _ => {
+                        text_parts.push(positional[i].clone());
+                        i += 1;
+                    }
+                }
+            }
+            let text = text_parts.join(" ");
+            if text.is_empty() {
+                anyhow::bail!("agent broadcast needs TEXT");
+            }
+            Ok(CliCmd::AgentBroadcast { session: session_opt, text, filter })
+        }
         other => anyhow::bail!("unknown agent subcommand {other:?}"),
     }
 }
@@ -507,6 +842,24 @@ fn parse_tab(args: &[String]) -> Result<CliCmd> {
         }
         other => anyhow::bail!("unknown tab subcommand {other:?}"),
     }
+}
+
+/// Parse a timeout string like `30s`, `500ms`, `2m`, or plain `30000` (ms) into milliseconds.
+fn parse_timeout_ms(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if s.is_empty() { anyhow::bail!("empty timeout"); }
+    let (num_str, mul) = if let Some(stripped) = s.strip_suffix("ms") {
+        (stripped, 1u64)
+    } else if let Some(stripped) = s.strip_suffix('s') {
+        (stripped, 1000u64)
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        (stripped, 60_000u64)
+    } else {
+        (s, 1u64)
+    };
+    let n: f64 = num_str.parse().map_err(|_| anyhow::anyhow!("bad timeout {s:?} (use e.g. 30s, 500ms)"))?;
+    if n < 0.0 { anyhow::bail!("timeout cannot be negative"); }
+    Ok((n * mul as f64) as u64)
 }
 
 /// Extract `-s SESSION` and `-p PANE` options, returning the rest as
@@ -618,6 +971,7 @@ USAGE:
     kumo pane focus [PANE] [-s SESSION]
     kumo pane send-keys [-s SESSION] [PANE] KEYS...
     kumo pane list [-s SESSION] [-t TAB_ID] [PANE]
+    kumo pane wait-output [PANE] PATTERN [--regex] [--timeout 30s] [-s SESSION]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
@@ -625,11 +979,15 @@ OPTIONS:
     -t, --tab TAB_ID        filter `list` to one tab id
     --horizontal            split left/right instead of top/bottom
     --ai                    start the new pane with the AI agent program
+    --regex                 treat PATTERN as a regex (otherwise substring)
+    --timeout DURATION      how long to wait (e.g. 30s, 500ms, 2m; default 30s)
 
 send-keys: KEYS... are typed into the pane (plain text plus tokens such as
 Enter, Tab, Esc, Left, Up, PageDown — see `kumo pane send-keys` KEYS).
 list: prints every pane with its id + composite position (marking the
 focused one) — the ids feed `kumo agent explain` / `kumo pane focus`.
+wait-output: server-owned one-shot output waiter — no polling; returns
+when PATTERN appears in the pane's recent output + visible buffer.
 
 PANE may be a stable numeric id, or a composite position (1-based indexes):
     s1:t2:p3    session 1, tab 2, pane 3
@@ -646,10 +1004,22 @@ USAGE:
     kumo agent status          (aliases: list, ls)
     kumo agent kill [PANE] [-s SESSION]
     kumo agent explain [PANE] [-s SESSION]
+    kumo agent wait <PANE> --until blocked|done|idle [--timeout 30s] [-s SESSION]
+    kumo agent prompt <PANE> <TEXT> [--wait blocked|done|idle] [--timeout 60s] [-s SESSION]
+    kumo agent read <PANE> [--source visible|recent|detection|traceback] [-s SESSION]
+    kumo agent start --kind <agent> --pane <PANE> [-- <args>] [-s SESSION]
+    kumo agent rename <PANE> <NAME> [-s SESSION]
+    kumo agent broadcast \"TEXT\" [-s SESSION] [--filter blocked|idle|...]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
     -p, --pane PANE         target pane id (the agent pane)
+    --until STATUS          for `wait`: blocked|done|idle|working
+    --wait [STATUS]         for `prompt`: atomically wait after submit
+    --source SOURCE         for `read`: visible|recent|detection|traceback (default visible)
+    --kind KIND             for `start`: agent kind (claude|codex|...)
+    --timeout DURATION      how long to wait (e.g. 30s, 500ms; wait=30s, prompt --wait=120s)
+    --filter STATUS         for `broadcast`: only agents with that status
 
 PANE is a stable numeric id or a composite position (see `kumo pane -h`):
 s1:t2:p3, kumo:t2:p1, or t2:p1 with -s.
@@ -659,6 +1029,13 @@ explain: why this pane reads the state it does — matched markers, evidence
 region (screen/form/footer/title), and the idle-fallback reason, evaluated
 live by the daemon. PANE may also be a composite position given as the
 first positional, or omitted to pick the first AI pane of the session.
+wait: server-owned event-driven wait, pinned to the pane occupant; returns
+`agent_blocked` immediately if already blocked, `agent_replaced` if the pane's
+process changes, `timeout` on expiry.
+prompt: bracketed-paste aware submit; `--wait` races submit+wait in one
+server request and refuses when already blocked.
+read: the daemon owns the screen buffer (including alt-screen); with --source
+traceback returns the last prompt block (fallback to form region).
 ";
 
 const TAB_HELP: &str = "\
@@ -808,7 +1185,11 @@ fn resolve_spec_pane(
 /// Read the daemon's reply and print it. A short read timeout covers commands
 /// that produce no reply (focus/resize): those simply exit.
 fn read_reply(stream: &mut UnixStream) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_millis(800)))?;
+    read_reply_with_timeout(stream, Duration::from_millis(800))
+}
+
+fn read_reply_with_timeout(stream: &mut UnixStream, timeout: Duration) -> Result<()> {
+    stream.set_read_timeout(Some(timeout))?;
     loop {
         match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
             Ok(DaemonEvent::Reply { message }) => {
@@ -834,6 +1215,25 @@ fn read_reply(stream: &mut UnixStream) -> Result<()> {
             Ok(DaemonEvent::AgentExplain { report }) => {
                 print_agent_explain(&report);
                 return Ok(());
+            }
+            Ok(DaemonEvent::AgentWaitResult { pane_id, status }) => {
+                println!("pane {pane_id} is {}", status.label());
+                return Ok(());
+            }
+            Ok(DaemonEvent::AgentReadResult { pane_id, source, text, truncated }) => {
+                if truncated {
+                    eprintln!("(truncated at 512 KiB, pane {pane_id} source {})", source.label());
+                }
+                println!("{text}");
+                return Ok(());
+            }
+            Ok(DaemonEvent::PaneWaitResult { pane_id, matched }) => {
+                println!("pane {pane_id} matched: {matched}");
+                return Ok(());
+            }
+            Ok(DaemonEvent::Error { code, message }) => {
+                eprintln!("error: {code}: {message}");
+                anyhow::bail!("{code}: {message}");
             }
             Ok(_) => continue,
             Err(e) if is_timeout(&e) => return Ok(()),

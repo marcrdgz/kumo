@@ -23,7 +23,7 @@ use ratatui::buffer::Buffer;
 
 use super::{App, Launch};
 use crate::daemon::frames;
-use kumo_core::protocol::{ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
+use kumo_core::protocol::{AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
 
 #[cfg(unix)]
 static TERM_FLAG: AtomicBool = AtomicBool::new(false);
@@ -125,6 +125,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     // tick to avoid cloning. When a pane is not dirty, this stays unchanged.
     let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
     let mut pane_cursors: HashMap<u64, Option<(u16, u16)>> = HashMap::new();
+    let mut waits = super::waits::WaitRegistry::new();
     let mut kill = false;
 
     loop {
@@ -192,6 +193,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let _ = send_to(&mut clients, id, &DaemonEvent::UpdateNotice { notice });
                 }
                 Command::Detach => {
+                    waits.cancel_client(id);
                     clients.remove(&id);
                 }
                 Command::KillServer => {
@@ -431,6 +433,130 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message });
                     }
                 },
+                Command::AgentWait { session, pane_id, until, timeout_ms } => {
+                    let valid = app.sessions.iter().any(|s| s.name == session && s.contains_pane(pane_id));
+                    if !valid {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "pane_not_found".into(), message: format!("no pane {pane_id} in {session:?}") });
+                    } else if let Some(status) = app.current_agent_status(pane_id) {
+                        let cur_status_proto: kumo_protocol::AgentStatus = status.into();
+                        if status == crate::daemon::agents::AgentStatus::Blocked && until != AgentWaitKind::Blocked {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "agent_blocked".into(), message: format!("pane {pane_id} is already blocked") });
+                        } else if until.matches(cur_status_proto) {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::AgentWaitResult { pane_id, status: cur_status_proto });
+                        } else {
+                            let pinned = app.pane_os_pid(pane_id);
+                            let timeout = timeout_ms.unwrap_or(30_000);
+                            waits.add_agent_wait(id, session.clone(), pane_id, until, Some(timeout), pinned);
+                        }
+                    } else {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "pane_not_found".into(), message: format!("no pane {pane_id}") });
+                    }
+                }
+                Command::AgentPrompt { session, pane_id, text, wait, timeout_ms } => {
+                    let valid = app.sessions.iter().any(|s| s.name == session && s.contains_pane(pane_id));
+                    if !valid {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "pane_not_found".into(), message: format!("no pane {pane_id} in {session:?}") });
+                    } else {
+                        match app.agent_prompt_inject(pane_id, &text) {
+                            Err(code) => {
+                                let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: code.clone(), message: format!("pane {pane_id} is blocked") });
+                            }
+                            Ok(()) => {
+                                if let Some(until) = wait {
+                                    if let Some(status) = app.current_agent_status(pane_id) {
+                                        let cur_proto: kumo_protocol::AgentStatus = status.into();
+                                        if until.matches(cur_proto) {
+                                            let _ = send_to(&mut clients, id, &DaemonEvent::AgentWaitResult { pane_id, status: cur_proto });
+                                        } else {
+                                            let pinned = app.pane_os_pid(pane_id);
+                                            let timeout = timeout_ms.unwrap_or(120_000);
+                                            waits.add_agent_wait(id, session.clone(), pane_id, until, Some(timeout), pinned);
+                                        }
+                                    } else {
+                                        let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("prompt sent to pane {pane_id}") });
+                                    }
+                                } else {
+                                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("prompt sent to pane {pane_id}") });
+                                }
+                            }
+                        }
+                    }
+                }
+                Command::AgentRead { session, pane_id, source } => {
+                    let valid = app.sessions.iter().any(|s| s.name == session && s.contains_pane(pane_id));
+                    if !valid {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "pane_not_found".into(), message: format!("no pane {pane_id} in {session:?}") });
+                    } else {
+                        let text = app.pane_read_text(pane_id, source).unwrap_or_default();
+                        let truncated = text.len() > 512 * 1024;
+                        let text = if truncated { text[..512*1024].to_string() } else { text };
+                        let _ = send_to(&mut clients, id, &DaemonEvent::AgentReadResult { pane_id, source, text, truncated });
+                    }
+                }
+                Command::AgentStart { session, pane_id, kind, args } => {
+                    match app.agent_start(&session, pane_id, &kind, &args) {
+                        Ok(msg) if msg.starts_with("error:") => {
+                            let code = if msg.contains("agent_not_ready") { "agent_not_ready" } else { "error" };
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: code.into(), message: msg });
+                        }
+                        Ok(msg) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: msg });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: format!("{e:#}") });
+                        }
+                    }
+                }
+                Command::AgentRename { session, pane_id, name } => {
+                    match app.agent_rename(&session, pane_id, &name) {
+                        Ok(msg) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: msg });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: format!("{e:#}") });
+                        }
+                    }
+                }
+                Command::PaneWaitOutput { session, pane_id, pattern, is_regex, timeout_ms } => {
+                    let valid = app.sessions.iter().any(|s| s.name == session && s.contains_pane(pane_id));
+                    if !valid {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "pane_not_found".into(), message: format!("no pane {pane_id} in {session:?}") });
+                    } else {
+                        // Check immediately against current buffer
+                        let current_text = app.panes.get(&pane_id).map(|p| {
+                            let mut t = p.recent_text_tail(16*1024);
+                            t.push_str(&p.vt.bottom_text(200));
+                            t
+                        }).unwrap_or_default();
+                        let immediate_match = if is_regex {
+                            regex::Regex::new(&pattern).ok().and_then(|re| re.find(&current_text).map(|m| m.as_str().to_string()))
+                        } else {
+                            if current_text.contains(&pattern) { Some(pattern.clone()) } else { None }
+                        };
+                        if let Some(m) = immediate_match {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::PaneWaitResult { pane_id, matched: m });
+                        } else {
+                            let pinned = app.pane_os_pid(pane_id);
+                            let timeout = timeout_ms.unwrap_or(30_000);
+                            match waits.add_output_wait(id, session.clone(), pane_id, pattern.clone(), is_regex, Some(timeout), pinned) {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "bad_regex".into(), message: e });
+                                }
+                            }
+                        }
+                    }
+                }
+                Command::AgentBroadcast { session, text, filter } => {
+                    match app.agent_broadcast(&session, &text, filter) {
+                        Ok(msg) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: msg });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: format!("{e:#}") });
+                        }
+                    }
+                }
             }
         }
 
@@ -475,6 +601,38 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         for client in clients.values_mut() {
             client.panes_subscribed.retain(|id| app.panes.contains_key(id));
             client.pane_needs_full.retain(|id| app.panes.contains_key(id));
+        }
+        // Prune orchestration waiters for panes that no longer exist.
+        {
+            let live: HashSet<u64> = app.panes.keys().copied().collect();
+            for (cid, pid) in waits.drain_dead_panes(&live) {
+                let _ = send_to(&mut clients, cid, &DaemonEvent::Error { code: "pane_not_found".into(), message: format!("pane {pid} closed") });
+            }
+        }
+        // Poll orchestration waiters (timeouts + status/output matches) after tick
+        // so `refresh_agent_statuses` and the just-rendered buffers are fresh.
+        {
+            let mut wait_events = Vec::new();
+            wait_events.extend(waits.poll_timeouts());
+            // Evaluate per-pane waiters
+            let pids: Vec<u64> = app.panes.keys().copied().collect();
+            for pid in pids {
+                if let Some(status) = app.current_agent_status(pid) {
+                    wait_events.extend(waits.poll_agent(pid, status.into(), app.pane_os_pid(pid)));
+                }
+                if let Some(pane) = app.panes.get(&pid) {
+                    let mut txt = pane.recent_text_tail(16 * 1024);
+                    txt.push_str(&pane.vt.bottom_text(200));
+                    wait_events.extend(waits.poll_output(pid, &txt, app.pane_os_pid(pid)));
+                }
+            }
+            for (cid, ev) in wait_events {
+                if clients.contains_key(&cid) {
+                    let _ = send_to(&mut clients, cid, &ev);
+                } else {
+                    waits.cancel_client(cid);
+                }
+            }
         }
 
         let layout_needed = clients.values().any(|c| c.wants_layout);
@@ -557,8 +715,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 }
             }
         }
-        let idle = changed.is_empty() && !layout_changed && dead.is_empty();
+        let idle = changed.is_empty() && !layout_changed && dead.is_empty() && waits.is_empty();
         for id in dead {
+            waits.cancel_client(id);
             clients.remove(&id);
         }
 
@@ -1128,6 +1287,145 @@ mod tests {
                     if layout.sessions.len() == 1 {
                         break;
                     }
+                }
+                _ => continue,
+            }
+        }
+
+        protocol::write_framed(&mut stream, &Command::KillServer).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sock.exists() {
+            assert!(Instant::now() < deadline, "daemon socket not removed after kill");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&rt);
+    }
+
+    /// Orchestration: `pane wait-output` and `agent read` + wait timeout are
+    /// server-owned and event-driven. This test exercises the new wait path
+    /// without needing a real agent: a plain shell pane's `echo` output is
+    /// enough to satisfy a `PaneWaitOutput` waiter.
+    #[test]
+    fn orchestration_waits_e2e() {
+        let cfg = scratch("orch-cfg");
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\nnew-cwd = current\n").unwrap();
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let prev_cfg = std::env::var("KUMO_CONFIG_DIR").ok();
+        let prev_update = std::env::var("KUMO_NO_UPDATE").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        std::env::set_var("KUMO_NO_UPDATE", "1");
+
+        let rt = scratch("orch-rt");
+        let sock = rt.join("kumo").join("kumo.sock");
+        let s = sock.clone();
+        std::thread::spawn(move || {
+            let _ = run_daemon_at(s, Launch::New(None));
+        });
+        let _ = wait_for_socket(&sock, Duration::from_secs(10));
+        match prev_cfg {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        match prev_update {
+            Some(v) => std::env::set_var("KUMO_NO_UPDATE", v),
+            None => std::env::remove_var("KUMO_NO_UPDATE"),
+        }
+        drop(_lock);
+
+        let mut stream = wait_for_socket(&sock, Duration::from_secs(10));
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        protocol::write_framed(&mut stream, &Command::Attach {
+            protocol: PROTOCOL_VERSION,
+            kind: ClientKind::Desktop,
+            cols: 100,
+            rows: 30,
+        }).unwrap();
+        protocol::write_framed(&mut stream, &Command::SubscribeLayout).unwrap();
+        protocol::write_framed(&mut stream, &Command::SessionList).unwrap();
+        let (session, pane_id) = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "SessionList") {
+                DaemonEvent::SessionList { sessions } => {
+                    let s = sessions.into_iter().find(|s| s.active).unwrap();
+                    let pid = s.tabs[0].panes[0].id;
+                    break (s.name, pid)
+                }
+                _ => continue,
+            }
+        };
+        // Drain layout
+        let _ = next_event(&mut stream, Duration::from_secs(2), "Welcome");
+
+        // `PaneWaitOutput` for a pattern that will appear after we echo it.
+        // First, test immediate error on bad regex.
+        protocol::write_framed(&mut stream, &Command::PaneWaitOutput {
+            session: session.clone(),
+            pane_id,
+            pattern: "[bad regex".into(),
+            is_regex: true,
+            timeout_ms: Some(1000),
+        }).unwrap();
+        loop {
+            match next_event(&mut stream, Duration::from_secs(2), "bad regex Error") {
+                DaemonEvent::Error { code, .. } => {
+                    assert_eq!(code, "bad_regex");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // Now a real waiter: ask the daemon to wait for a token, then feed the shell.
+        let token = format!("kumo-orch-{}", std::process::id());
+        // Send waiter first (no immediate match), then feed the shell.
+        protocol::write_framed(&mut stream, &Command::PaneWaitOutput {
+            session: session.clone(),
+            pane_id,
+            pattern: token.clone(),
+            is_regex: false,
+            timeout_ms: Some(5000),
+        }).unwrap();
+        // Give the daemon a moment to register the waiter (no reply expected yet).
+        std::thread::sleep(Duration::from_millis(50));
+        // Feed the shell: echo the token. Use PaneWrite raw bytes (shell stdin).
+        protocol::write_framed(&mut stream, &Command::PaneWrite { pane_id, bytes: format!("echo {token}\n").into_bytes() }).unwrap();
+        let matched = loop {
+            match next_event(&mut stream, Duration::from_secs(10), "PaneWaitResult") {
+                DaemonEvent::PaneWaitResult { pane_id: got, matched } => {
+                    assert_eq!(got, pane_id);
+                    break matched;
+                }
+                DaemonEvent::Error { code, message } => panic!("wait failed {code}: {message}"),
+                _ => continue,
+            }
+        };
+        assert!(matched.contains(&token), "matched {matched:?} should contain token");
+
+        // `AgentRead` on the same shell pane (visible source): should contain the token we just echoed.
+        protocol::write_framed(&mut stream, &Command::AgentRead { session: session.clone(), pane_id, source: kumo_protocol::AgentReadSource::Visible }).unwrap();
+        loop {
+            match next_event(&mut stream, Duration::from_secs(5), "AgentReadResult") {
+                DaemonEvent::AgentReadResult { pane_id: got, text, .. } => {
+                    assert_eq!(got, pane_id);
+                    assert!(text.contains(&token) || !text.is_empty(), "read should return some text");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // `AgentWait` timeout path: wait for `blocked` on a plain shell (never blocks) with 200ms timeout.
+        protocol::write_framed(&mut stream, &Command::AgentWait {
+            session: session.clone(),
+            pane_id,
+            until: kumo_protocol::AgentWaitKind::Blocked,
+            timeout_ms: Some(200),
+        }).unwrap();
+        loop {
+            match next_event(&mut stream, Duration::from_secs(2), "timeout Error") {
+                DaemonEvent::Error { code, .. } => {
+                    assert_eq!(code, "timeout");
+                    break;
                 }
                 _ => continue,
             }

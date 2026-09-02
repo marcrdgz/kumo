@@ -11,11 +11,8 @@ colors, keybindings, the leader key, the layout of the status bar and
 sidebar, the AI panes, and more. Every `0.x.0` is a feature release; 1.0.0 is
 the finish line for the configurable, persistent kumo.
 
-<Callout type="info" title="Current stable: v0.6.x">
-  See [CHANGELOG](https://github.com/marcrdgz/kumo/blob/main/CHANGELOG.md) for
-  the full release history, and
-  [ROADMAP.md](https://github.com/marcrdgz/kumo/blob/main/ROADMAP.md) for the
-  detailed plan.
+<Callout type="info" title="Current: v0.7.0 ADE — orchestration is here">
+  `kumo agent wait/prompt/read`, `pane wait-output`, `agent start/rename/broadcast` land in 0.7.0 (PR #7, protocol v11) — the *wait* half of `send-keys`. See the [Orchestration guide](/docs/guides/orchestration) and [ROADMAP.md](https://github.com/marcrdgz/kumo/blob/main/ROADMAP.md) for the full plan; [CHANGELOG](https://github.com/marcrdgz/kumo/blob/main/CHANGELOG.md) for released history.
 </Callout>
 
 ## Released
@@ -30,17 +27,7 @@ the finish line for the configurable, persistent kumo.
 
 ## Next up
 
-- **0.7.0 — Agent breadth & AI polish**: lifecycle detection for `codex`,
-  `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; **agent inbox view** —
-  `leader+i` keyboard-routes to `blocked · done · running` agents, the sidebar
-  defaults to stacked spaces + agent panels (grouped sections, draggable grey
-  divider at the middle, `[sidebar] layout = "tabs"` restores the classic
-  two-tab sidebar); **`kumo agent explain`** — live, daemon-side diagnostics of
-  why a pane reads the state it does (matched markers, evidence region, verdict
-  reason chain) with `kumo agent status`/`list` and `kumo pane list` for
-  pane-id discovery; OSC 133 command-traceback context sharing; broadcast
-  prompt to agents (`leader+B`, fan one prompt to every AI pane — replaces
-  tmux sync-input); config file-watcher hot-reload (deferred from 0.6.0).
+- **0.7.0 — ADE & AI polish**: ✅ **agent orchestration primitives** (`kumo agent wait --until`, `agent prompt --wait`, `agent read --source`, `pane wait-output --regex`, `agent start/rename/broadcast` — server-owned, occupant-pinned, bracketed-paste-aware; see [Orchestration](/docs/guides/orchestration)) — the *wait* half of `send-keys`. Lifecycle detection for `codex`, `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; **agent inbox view** — `leader+i` keyboard-routes to `blocked · done · running` agents, the sidebar defaults to stacked spaces + agent panels (grouped sections, draggable grey divider at the middle, `[sidebar] layout = "tabs"` restores the classic two-tab sidebar); **`kumo agent explain`** — live, daemon-side diagnostics of why a pane reads the state it does (matched markers, evidence region, verdict reason chain) with `kumo agent status`/`list` and `kumo pane list` for pane-id discovery; OSC 133 command-traceback context sharing; broadcast prompt to agents (`leader+B`, fan one prompt to every AI pane — replaces tmux sync-input); config file-watcher hot-reload (deferred from 0.6.0).
 - **0.8.0 — Stability**: signal hardening, stable CI, complete config docs +
   `kumo doctor` diagnostics (duplicate keymaps, invalid TOML), state-migration
   and `kill -9` crash-safety harness, published benchmarks with concrete targets

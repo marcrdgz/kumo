@@ -23,6 +23,7 @@ pub(super) mod server;
 mod tasks;
 pub(crate) mod ui;
 pub(crate) mod proc;
+pub(crate) mod waits;
 
 // The daemon is the only engine: it owns PTYs, the semantic layout tree, and
 // per-pane terminal content, and is driven entirely by commands. Every client
@@ -160,6 +161,9 @@ pub struct App {
     /// Cached `Arc<Layout>` for the current `layout_version`.
     cached_layout: Option<std::sync::Arc<kumo_protocol::Layout>>,
     cached_layout_version: u64,
+    /// Live aliases for agent panes (`kumo agent rename`), so scripts can
+    /// reference agents by name. Not persisted — ephemeral per daemon.
+    agent_aliases: HashMap<u64, String>,
 }
 
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
@@ -242,6 +246,7 @@ impl App {
             layout_version: 0,
             cached_layout: None,
             cached_layout_version: 0,
+            agent_aliases: HashMap::new(),
         };
 
         match launch {
@@ -818,6 +823,7 @@ impl App {
             self.last_agent_status.remove(&pid);
             self.last_agent_alert.remove(&pid);
             self.agent_proc_cache.remove(&pid);
+            self.agent_aliases.remove(&pid);
             if let Some(os_pid) = os_pid { self.proc.forget(os_pid); }
         }
         // fix active_tab
@@ -934,6 +940,7 @@ impl App {
         self.last_agent_status.remove(&pid);
         self.last_agent_alert.remove(&pid);
         self.agent_proc_cache.remove(&pid);
+        self.agent_aliases.remove(&pid);
         if let Some(os_pid) = os_pid {
             self.proc.forget(os_pid);
         }
@@ -983,6 +990,7 @@ impl App {
                 self.last_agent_status.remove(&pid);
                 self.last_agent_alert.remove(&pid);
                 self.agent_proc_cache.remove(&pid);
+                self.agent_aliases.remove(&pid);
                 if let Some(os_pid) = os_pid {
                     self.proc.forget(os_pid);
                 }
@@ -1038,6 +1046,7 @@ impl App {
         self.last_agent_status.remove(&pid);
         self.last_agent_alert.remove(&pid);
         self.agent_proc_cache.remove(&pid);
+        self.agent_aliases.remove(&pid);
         if let Some(os_pid) = os_pid {
             self.proc.forget(os_pid);
         }
@@ -1168,11 +1177,85 @@ impl App {
     /// Short label of the AI CLI running in `pid` (e.g. "opencode"), read from
     /// the cached process scan. Falls back to "AI CLI".
     fn agent_label(&self, pid: u64) -> String {
+        if let Some(alias) = self.agent_aliases.get(&pid) {
+            return alias.clone();
+        }
         self.panes
             .get(&pid)
             .and_then(|p| p.detected_ai_name.clone())
             .map(|name| name.rsplit('/').next().unwrap_or(&name).to_string())
             .unwrap_or_else(|| "AI CLI".to_string())
+    }
+
+    fn drop_pane_alias(&mut self, pid: u64) {
+        self.agent_aliases.remove(&pid);
+    }
+
+    /// Current `AgentStatus` as seen by the daemon (including the `Done` pin).
+    pub(crate) fn current_agent_status(&self, pane_id: u64) -> Option<AgentStatus> {
+        let pane = self.panes.get(&pane_id)?;
+        let raw = if pane.dead || !pane.is_ai_cli() {
+            AgentStatus::Idle
+        } else {
+            pane.agent_status()
+        };
+        let prev = self.last_agent_status.get(&pane_id).copied();
+        let focused = self.pane_is_focused(pane_id);
+        Some(crate::daemon::app::tasks::apply_seen(raw, prev, focused))
+    }
+
+    /// OS pid of the pane's child, if known.
+    pub(crate) fn pane_os_pid(&self, pane_id: u64) -> Option<u32> {
+        self.panes.get(&pane_id).and_then(|p| p.pty.process_id())
+    }
+
+    /// Text sources for `kumo agent read`.
+    pub(crate) fn pane_read_text(&mut self, pane_id: u64, source: kumo_protocol::AgentReadSource) -> Option<String> {
+        let pane = self.panes.get_mut(&pane_id)?;
+        Some(match source {
+            kumo_protocol::AgentReadSource::Visible => pane.vt.screen_text(),
+            kumo_protocol::AgentReadSource::Recent => pane.recent_text_tail(16 * 1024),
+            kumo_protocol::AgentReadSource::Detection => {
+                let snap = crate::daemon::agents::Snapshot::capture(&pane.vt);
+                format!("{}\n---form---\n{}\n---footer---\n{}\n---title---\n{}", snap.screen, snap.form, snap.footer, snap.title)
+            }
+            kumo_protocol::AgentReadSource::Traceback => {
+                // Structured traceback: last marked prompt + output block. Falls back
+                // to `form` region (text below last horizontal rule) plus visible
+                // tail, until OSC 133 semantic markers are piped from vt.
+                let snap = crate::daemon::agents::Snapshot::capture(&pane.vt);
+                if !snap.form.trim().is_empty() {
+                    snap.form
+                } else {
+                    // Fallback: last 120 rows of screen text
+                    pane.vt.bottom_text(120)
+                }
+            }
+        })
+    }
+
+    /// Bracketed-paste aware prompt injection. Returns error code on blocked.
+    pub(crate) fn agent_prompt_inject(&mut self, pane_id: u64, text: &str) -> Result<(), String> {
+        // Check blocked before taking &mut to avoid borrow conflict.
+        let is_blocked = {
+            let pane = self.panes.get(&pane_id).ok_or_else(|| format!("no pane {pane_id}"))?;
+            let live = pane.agent_status();
+            let cached = self.agent_status_cache.get(&pane_id).copied();
+            live == crate::daemon::agents::AgentStatus::Blocked
+                || cached == Some(crate::daemon::agents::AgentStatus::Blocked)
+        };
+        if is_blocked {
+            return Err("agent_blocked".into());
+        }
+        let pane = self.panes.get_mut(&pane_id).ok_or_else(|| format!("no pane {pane_id}"))?;
+        let bracketed = pane.vt.mode_get(crate::daemon::vt::MODE_BRACKETED_PASTE);
+        let payload = if bracketed {
+            format!("\x1b[200~{}\x1b[201~\r", text)
+        } else {
+            format!("{}\r", text)
+        };
+        pane.write(payload.as_bytes());
+        Ok(())
     }
 }
 
