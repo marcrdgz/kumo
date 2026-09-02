@@ -49,7 +49,7 @@ pub fn run(launch: Launch) -> Result<()> {
     // instead of silently attaching to the existing one.
     let pre: Vec<Command> = if !spawned && matches!(launch, Launch::New(_)) {
         let workspace = workspace_for(&launch).or_else(|| std::env::current_dir().ok());
-        vec![Command::SessionNew { name: None, workspace }]
+        vec![Command::SessionNew { name: None, workspace, is_ai: false, with_context: false }]
     } else {
         Vec::new()
     };

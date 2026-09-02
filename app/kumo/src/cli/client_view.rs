@@ -98,6 +98,7 @@ enum Mode {
     Copy,
     /// Agent-inbox focus: the sidebar agent panel owns the keyboard.
     Inbox,
+    Compose,
 }
 
 #[derive(Clone)]
@@ -122,6 +123,18 @@ struct CopyState {
 struct Inbox {
     /// Index into the actionable list.
     sel: usize,
+}
+
+#[derive(Clone)]
+struct ComposeState {
+    pane_id: u64,
+    session: String,
+    chips: Vec<kumo_protocol::WireChip>,
+    enabled: Vec<bool>,
+    input: String,
+    cursor: usize,
+    selected: usize,
+    is_popup: bool,
 }
 
 /// Geometry of the divided sidebar layout (stacked spaces + agent panels),
@@ -474,6 +487,9 @@ pub struct View {
     sidebar_drag: Option<SidebarDrag>,
     /// Sorting of the agent panel (divided layout); toggled by its label.
     agents_panel_order: AgentPanelOrder,
+    compose: Option<ComposeState>,
+    compose_pending: bool,
+    compose_pending_is_popup: bool,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -650,6 +666,9 @@ impl View {
             pending_wheel: HashMap::new(),
             copy: None,
             inbox: None,
+            compose: None,
+            compose_pending: false,
+            compose_pending_is_popup: false,
             sidebar_layout_override: None,
             sidebar_split: None,
             sidebar_drag: None,
@@ -877,6 +896,19 @@ impl View {
                     }
                 }
                 self.mark_dirty();
+            }
+            DaemonEvent::ContextChips { pane_id, chips } => {
+                if self.compose_pending {
+                    self.compose_pending = false;
+                    let session = self.active_session().map(|s| s.name.clone()).unwrap_or_default();
+                    let enabled = vec![true; chips.len()];
+                    self.compose = Some(ComposeState { pane_id, session, chips, enabled, input: String::new(), cursor: 0, selected: 0, is_popup: self.compose_pending_is_popup });
+                    self.mode = Mode::Compose;
+                    self.mark_dirty();
+                }
+            }
+            DaemonEvent::LayoutExport { spec: _ } => {
+                // Handled via CLI path; TUI ignores
             }
             _ => {}
         }
@@ -1285,6 +1317,10 @@ impl View {
             self.on_inbox_key(key);
             return Ok(());
         }
+        if self.mode == Mode::Compose {
+            self.on_compose_key(key)?;
+            return Ok(());
+        }
 
         let leader = self.leader.is_leader(key);
         match self.mode {
@@ -1307,12 +1343,21 @@ impl View {
             }
             Mode::Copy => unreachable!("handled above"),
             Mode::Inbox => unreachable!("handled above"),
+            Mode::Compose => unreachable!("handled above"),
         }
         Ok(())
     }
 
     pub fn on_paste(&mut self, text: &str) {
         let _ = self.flush_wheel();
+        if self.mode == Mode::Compose {
+            if let Some(comp) = self.compose.as_mut() {
+                comp.input.insert_str(comp.cursor, text);
+                comp.cursor += text.len();
+                self.mark_dirty();
+            }
+            return;
+        }
         if self.popup.open
             || self.menu.open
             || self.ctx_menu.open
@@ -1355,13 +1400,13 @@ impl View {
         };
         match action {
             Action::SplitVertical => {
-                let _ = self.send(&Command::PaneSplit { session, dir: SplitDir::Vertical, is_ai: false });
+                let _ = self.send(&Command::PaneSplit { session, dir: SplitDir::Vertical, is_ai: false, with_context: false });
             }
             Action::SplitHorizontal => {
-                let _ = self.send(&Command::PaneSplit { session, dir: SplitDir::Horizontal, is_ai: false });
+                let _ = self.send(&Command::PaneSplit { session, dir: SplitDir::Horizontal, is_ai: false, with_context: false });
             }
             Action::SplitAi => {
-                let _ = self.send(&Command::PaneSplit { session, dir: SplitDir::Vertical, is_ai: true });
+                let _ = self.send(&Command::PaneSplit { session, dir: SplitDir::Vertical, is_ai: true, with_context: false });
             }
             Action::NewSession => self.open_session_popup(),
             Action::NewWorktree => {
@@ -1472,8 +1517,120 @@ impl View {
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
             Action::AgentInbox => self.open_inbox(),
+            Action::Compose => self.open_compose(false),
+            Action::ComposePopup => self.open_compose(true),
         }
         self.mark_dirty();
+        Ok(())
+    }
+
+    fn open_compose(&mut self, is_popup: bool) {
+        let Some(session) = self.active_session().map(|s| s.name.clone()) else { return; };
+        let Some(tab) = self.active_tab() else { return; };
+        let pid = tab.focus;
+        // Include client-side selection as a chip if present
+        let _ = self.send(&Command::ContextGet { session, pane_id: Some(pid) });
+        self.compose_pending = true;
+        self.compose_pending_is_popup = is_popup;
+        self.mark_dirty();
+    }
+
+    fn on_compose_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(comp) = self.compose.as_mut() else { return Ok(()); };
+        match key.code {
+            KeyCode::Esc => {
+                self.compose = None;
+                self.mode = Mode::Normal;
+                self.mark_dirty();
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                // Assemble prompt: enabled chips + input
+                let mut prompt = String::new();
+                for (chip, enabled) in comp.chips.iter().zip(comp.enabled.iter()) {
+                    if *enabled {
+                        prompt.push_str(&format!("### {}\n{}\n\n", chip.label, chip.text));
+                    }
+                }
+                if !comp.input.trim().is_empty() {
+                    prompt.push_str(&comp.input);
+                } else if prompt.is_empty() {
+                    self.status_msg = Some(("no context or prompt to send".to_string(), Instant::now()));
+                    self.mark_dirty();
+                    return Ok(());
+                }
+                let session = comp.session.clone();
+                let pane_id = comp.pane_id;
+                // Send as AgentPrompt to focused pane
+                let _ = self.send(&Command::AgentPrompt { session: session.clone(), pane_id, text: prompt, wait: None, timeout_ms: None });
+                self.compose = None;
+                self.mode = Mode::Normal;
+                self.mark_dirty();
+                return Ok(());
+            }
+            KeyCode::Tab => {
+                // Toggle focused chip
+                if !comp.chips.is_empty() {
+                    let idx = comp.selected % comp.chips.len();
+                    comp.enabled[idx] = !comp.enabled[idx];
+                    comp.selected = (comp.selected + 1) % comp.chips.len().max(1);
+                    self.mark_dirty();
+                }
+                return Ok(());
+            }
+            KeyCode::Up => {
+                if comp.selected > 0 { comp.selected -= 1; self.mark_dirty(); }
+                return Ok(());
+            }
+            KeyCode::Down => {
+                if comp.selected + 1 < comp.chips.len() { comp.selected += 1; self.mark_dirty(); }
+                return Ok(());
+            }
+            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) || comp.selected < comp.chips.len() => {
+                // Space toggles chip when chips focused, else insert space
+                // Heuristic: if input is empty, toggle; else insert
+                if comp.input.is_empty() || comp.chips.is_empty() {
+                    if comp.selected < comp.chips.len() {
+                        comp.enabled[comp.selected] = !comp.enabled[comp.selected];
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                // fall through to char handling
+            }
+            _ => {}
+        }
+        // Toggle chip with Space when not typing? Already handled.
+        // Handle typing in input
+        match key.code {
+            KeyCode::Char(c) => {
+                comp.input.insert(comp.cursor, c);
+                comp.cursor += 1;
+                self.mark_dirty();
+            }
+            KeyCode::Backspace => {
+                if comp.cursor > 0 && !comp.input.is_empty() {
+                    comp.cursor -= 1;
+                    comp.input.remove(comp.cursor);
+                    self.mark_dirty();
+                }
+            }
+            KeyCode::Delete => {
+                if comp.cursor < comp.input.len() {
+                    comp.input.remove(comp.cursor);
+                    self.mark_dirty();
+                }
+            }
+            KeyCode::Left => {
+                if comp.cursor > 0 { comp.cursor -= 1; self.mark_dirty(); }
+            }
+            KeyCode::Right => {
+                if comp.cursor < comp.input.len() { comp.cursor += 1; self.mark_dirty(); }
+            }
+            KeyCode::Home => { comp.cursor = 0; self.mark_dirty(); }
+            KeyCode::End => { comp.cursor = comp.input.len(); self.mark_dirty(); }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -2551,7 +2708,7 @@ impl View {
                     return;
                 }
                 self.popup.open = false;
-                let _ = self.send(&Command::SessionNew { name: Some(name), workspace: None });
+                let _ = self.send(&Command::SessionNew { name: Some(name), workspace: None, is_ai: false, with_context: false });
             }
             Some(PopupTarget::NewWorktree(idx)) => {
                 let session = self
@@ -2717,7 +2874,7 @@ impl View {
                 if let CtxTarget::Pane(pid) = target {
                     let session = self.active_session().map(|s| s.name.clone());
                     if let Some(session) = session {
-                        let _ = self.send(&Command::PaneSplit { session: session.clone(), dir: SplitDir::Vertical, is_ai: false });
+                        let _ = self.send(&Command::PaneSplit { session: session.clone(), dir: SplitDir::Vertical, is_ai: false, with_context: false });
                         let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
                     }
                 }
@@ -2726,7 +2883,7 @@ impl View {
                 if let CtxTarget::Pane(pid) = target {
                     let session = self.active_session().map(|s| s.name.clone());
                     if let Some(session) = session {
-                        let _ = self.send(&Command::PaneSplit { session: session.clone(), dir: SplitDir::Horizontal, is_ai: false });
+                        let _ = self.send(&Command::PaneSplit { session: session.clone(), dir: SplitDir::Horizontal, is_ai: false, with_context: false });
                         let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
                     }
                 }
@@ -4122,6 +4279,7 @@ impl View {
         self.render_keybind_overlay(f);
         self.render_settings(f);
         self.render_worktree_picker(f);
+        self.render_compose(f);
     }
 
     fn pane_label(&self, pid: u64) -> String {
@@ -5160,6 +5318,59 @@ impl View {
         text(f, dd.x + 2, body_bottom, "j/k: move · enter: open · esc: close", footer, inner_w);
     }
 
+    fn render_compose(&self, f: &mut Frame) {
+        let Some(comp) = self.compose.as_ref() else { return; };
+        let theme = self.current_theme();
+        let area = f.area();
+        let w = 60.min(area.width.saturating_sub(4));
+        let h = (6 + comp.chips.len() as u16 + 2).min(area.height.saturating_sub(4)).max(8);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let dd = Rect::new(x, y, w, h);
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        let title_text = if comp.is_popup { "compose (popup)" } else { "compose" };
+        text(f, dd.x + 2, dd.y + 1, title_text, title, w.saturating_sub(4));
+        // Chips
+        let mut cy = dd.y + 2;
+        for (idx, chip) in comp.chips.iter().enumerate() {
+            if cy >= dd.bottom() - 3 { break; }
+            let enabled = comp.enabled.get(idx).copied().unwrap_or(false);
+            let selected = comp.selected == idx;
+            let bg = if selected { theme.accent } else { theme.panel_sep };
+            for cx in (dd.x + 1)..(dd.x + 1 + w.saturating_sub(2)) {
+                put(f, cx, cy, " ", Style::default().bg(bg));
+            }
+            let check = if enabled { "[x]" } else { "[ ]" };
+            let fg = if selected { RColor::Black } else { theme.fg };
+            text(f, dd.x + 2, cy, check, Style::default().fg(if selected { RColor::Black } else { theme.accent }).bg(bg), 3);
+            text(f, dd.x + 6, cy, &chip.label, Style::default().fg(fg).bg(bg), w.saturating_sub(8));
+            cy += 1;
+        }
+        if comp.chips.is_empty() {
+            text(f, dd.x + 2, cy, "(no context — shell may need OSC 133 snippet)", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), w.saturating_sub(4));
+            cy += 1;
+        }
+        // Input field
+        let input_y = dd.bottom() - 3;
+        let field_bg = theme.input_bg;
+        for cx in (dd.x + 2)..(dd.x + w.saturating_sub(2)) {
+            put(f, cx, input_y, " ", Style::default().bg(field_bg));
+        }
+        let prompt = "❯ ";
+        text(f, dd.x + 2, input_y, prompt, Style::default().fg(theme.accent).bg(field_bg), 2);
+        let input_x = dd.x + 4;
+        let avail = w.saturating_sub(6) as usize;
+        let cursor = comp.cursor.min(comp.input.len());
+        // Show tail if input longer than avail
+        let start = cursor.saturating_sub(avail - 1);
+        let visible: String = comp.input.chars().skip(start).take(avail).collect();
+        text(f, input_x, input_y, &visible, Style::default().fg(RColor::Black).bg(field_bg), avail as u16);
+        // Footer
+        let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.bottom() - 2, "tab/↑↓ toggle · space toggle · enter send · esc close", footer, w.saturating_sub(4));
+    }
+
     fn render_copy_overlay(&self, f: &mut Frame, pid: u64, rect: Rect) {
         let Some(cs) = self.copy.as_ref() else { return; };
         if cs.pane_id != pid { return; }
@@ -5841,6 +6052,9 @@ mod tests {
             tab_rects: Vec::new(),
             tab_scroll: 0,
             plus_rect: None,
+            compose: None,
+            compose_pending: false,
+            compose_pending_is_popup: false,
             dirty: false,
             detach_requested: false,
             status_bar: StatusBarConfig::default(),

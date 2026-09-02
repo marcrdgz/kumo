@@ -25,6 +25,11 @@ pub(crate) mod ui;
 pub(crate) mod proc;
 pub(crate) mod waits;
 
+thread_local! {
+    static PENDING_PANES: std::cell::RefCell<HashMap<u64, Pane>> = std::cell::RefCell::new(HashMap::new());
+}
+static NEXT_SPLIT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
+
 // The daemon is the only engine: it owns PTYs, the semantic layout tree, and
 // per-pane terminal content, and is driven entirely by commands. Every client
 // (TUI, desktop, mobile) draws its own chrome.
@@ -45,6 +50,10 @@ struct Session {
     tabs: Vec<Tab>,
     active_tab: usize,
     workspace: PathBuf,
+    /// Whether this session is an ephemeral AI worktree (auto-removed on close).
+    #[allow(dead_code)]
+    is_ephemeral: bool,
+    worktree_branch: Option<String>,
 }
 
 impl Session {
@@ -351,7 +360,7 @@ impl App {
                 }
             }
             let active_tab = saved.active_tab.min(tabs.len().saturating_sub(1));
-            self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace });
+            self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace, is_ephemeral: false, worktree_branch: None });
             self.active = i;
         }
         if self.sessions.is_empty() {
@@ -436,7 +445,7 @@ impl App {
                 continue;
             }
             let active_tab = saved.active_tab.min(tabs.len().saturating_sub(1));
-            self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace });
+            self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace, is_ephemeral: false, worktree_branch: None });
             self.active = i;
         }
         if self.sessions.is_empty() {
@@ -585,7 +594,7 @@ impl App {
         )?;
         self.panes.insert(pid, pane);
         let tab = Tab { id: self.next_tab_id(), name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false };
-        self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace });
+        self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace, is_ephemeral: false, worktree_branch: None });
         self.active = self.sessions.len() - 1;
         self.bump_layout_version();
         Ok(())
@@ -595,6 +604,10 @@ impl App {
     /// workspace is used verbatim (no `new-cwd` policy): this is the shared
     /// tail for worktree sessions, whose path is chosen by git, not kumo.
     fn new_session_in_workspace(&mut self, name: String, workspace: PathBuf) -> Result<()> {
+        self.new_session_in_workspace_ephemeral(name, workspace, false, None)
+    }
+
+    fn new_session_in_workspace_ephemeral(&mut self, name: String, workspace: PathBuf, is_ephemeral: bool, branch: Option<String>) -> Result<()> {
         let name = self.unique_session_name(&name);
         let sid = self.next_session_id();
         let pid = Pty::next_pane_id();
@@ -613,7 +626,7 @@ impl App {
         )?;
         self.panes.insert(pid, pane);
         let tab = Tab { id: self.next_tab_id(), name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false };
-        self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace });
+        self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace, is_ephemeral, worktree_branch: branch });
         self.active = self.sessions.len() - 1;
         self.bump_layout_version();
         Ok(())
@@ -978,6 +991,9 @@ impl App {
         if self.sessions.get(idx).is_none() {
             return;
         }
+        let is_ephemeral = self.sessions[idx].is_ephemeral;
+        let worktree_path = self.sessions[idx].workspace.clone();
+        let worktree_branch = self.sessions[idx].worktree_branch.clone();
         for tab in &self.sessions[idx].tabs {
             for pid in tab.tree.pane_ids() {
                 let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
@@ -997,6 +1013,32 @@ impl App {
             }
         }
         self.sessions.remove(idx);
+        if is_ephemeral {
+            // Best-effort cleanup of ephemeral worktree; never fail session close.
+            let path_str = worktree_path.to_string_lossy().to_string();
+            // Try via the worktree itself
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&worktree_path)
+                .args(["worktree", "remove", "--force", &path_str])
+                .output();
+            // Fallback: try via repo root discovered from path's parent
+            if let Some(parent) = worktree_path.parent() {
+                let _ = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(parent)
+                    .args(["worktree", "remove", "--force", &path_str])
+                    .output();
+            }
+            if let Some(branch) = worktree_branch {
+                let _ = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&worktree_path)
+                    .args(["branch", "-D", &branch])
+                    .output();
+                let _ = std::fs::remove_dir_all(&worktree_path);
+            }
+        }
         if self.sessions.is_empty() {
             self.quit = true;
             self.bump_layout_version();
@@ -1220,15 +1262,26 @@ impl App {
                 format!("{}\n---form---\n{}\n---footer---\n{}\n---title---\n{}", snap.screen, snap.form, snap.footer, snap.title)
             }
             kumo_protocol::AgentReadSource::Traceback => {
-                // Structured traceback: last marked prompt + output block. Falls back
+                // Structured traceback via OSC 133 semantic markers. Falls back
                 // to `form` region (text below last horizontal rule) plus visible
-                // tail, until OSC 133 semantic markers are piped from vt.
-                let snap = crate::daemon::agents::Snapshot::capture(&pane.vt);
-                if !snap.form.trim().is_empty() {
-                    snap.form
+                // tail when no markers exist yet (shell without snippet).
+                if let Some(block) = pane.vt.last_prompt_block() {
+                    // Prompt + output; trimmed to keep chip sized.
+                    let prompt = block.prompt_text.trim();
+                    let output = block.output_text.trim();
+                    if prompt.is_empty() {
+                        output.to_string()
+                    } else {
+                        format!("$ {prompt}\n{output}")
+                    }
                 } else {
-                    // Fallback: last 120 rows of screen text
-                    pane.vt.bottom_text(120)
+                    let snap = crate::daemon::agents::Snapshot::capture(&pane.vt);
+                    if !snap.form.trim().is_empty() {
+                        snap.form
+                    } else {
+                        // Fallback: last 120 rows of screen text
+                        pane.vt.bottom_text(120)
+                    }
                 }
             }
         })
@@ -1256,6 +1309,204 @@ impl App {
         };
         pane.write(payload.as_bytes());
         Ok(())
+    }
+
+    pub(crate) fn context_chips(&mut self, session: &str, pane_id: Option<u64>) -> Result<Vec<kumo_protocol::WireChip>, String> {
+        let s_idx = self.sessions.iter().position(|s| s.name == session).ok_or_else(|| format!("no session {session:?}"))?;
+        let pid = if let Some(pid) = pane_id {
+            if !self.sessions[s_idx].contains_pane(pid) {
+                return Err(format!("no pane {pid} in {session:?}"));
+            }
+            pid
+        } else {
+            self.sessions[s_idx].active_tab().tree.focus
+        };
+        let workspace = self.sessions[s_idx].workspace.clone();
+        let pane = self.panes.get_mut(&pid).ok_or_else(|| format!("no pane {pid}"))?;
+        let mut chips = Vec::new();
+        // cwd
+        if let Some(cwd) = pane.detected_cwd().or_else(|| pane.vt.pwd()).or_else(|| Some(workspace.clone())) {
+            chips.push(crate::daemon::context::collect_cwd_chip(&cwd));
+        }
+        // traceback
+        if let Some(chip) = crate::daemon::context::collect_traceback_chip(pane) {
+            chips.push(chip);
+        }
+        // git diff/status from session workspace and pane cwd
+        chips.extend(crate::daemon::context::collect_git_chips(&workspace));
+        // also try pane cwd git if different
+        if let Some(cwd) = pane.detected_cwd() {
+            if cwd != workspace {
+                let extra = crate::daemon::context::collect_git_chips(&cwd);
+                for c in extra {
+                    if !chips.iter().any(|e| e.label == c.label && e.text == c.text) {
+                        chips.push(c);
+                    }
+                }
+            }
+        }
+        Ok(chips)
+    }
+
+    pub(crate) fn layout_export(&self, session: &str, tab: Option<&str>) -> Result<kumo_protocol::LayoutSpec, String> {
+        let s_idx = self.sessions.iter().position(|s| s.name == session).ok_or_else(|| format!("no session {session:?}"))?;
+        let sess = &self.sessions[s_idx];
+        let tabs: Vec<kumo_protocol::TabSpec> = if let Some(tab_name) = tab {
+            let t_idx = sess.tab_index_by_spec(tab_name).ok_or_else(|| format!("no tab {tab_name:?} in {session:?}"))?;
+            let t = &sess.tabs[t_idx];
+            vec![Self::tab_to_spec(t, &self.panes)]
+        } else {
+            sess.tabs.iter().map(|t| Self::tab_to_spec(t, &self.panes)).collect()
+        };
+        Ok(kumo_protocol::LayoutSpec { tabs })
+    }
+
+    fn tab_to_spec(tab: &Tab, panes: &HashMap<u64, Pane>) -> kumo_protocol::TabSpec {
+        let root = tab.tree.root.as_ref().map(|node| Box::new(Self::node_to_spec(node, panes)));
+        kumo_protocol::TabSpec { name: tab.name.clone(), root, zoom: tab.zoom }
+    }
+
+    fn node_to_spec(node: &kumo_core::layout::Node, panes: &HashMap<u64, Pane>) -> kumo_protocol::LayoutNodeSpec {
+        match node {
+            kumo_core::layout::Node::Pane { id } => {
+                let pane = panes.get(id);
+                let cwd = pane.map(|p| p.detected_cwd().unwrap_or_else(|| p.cwd.clone()));
+                let is_ai = pane.map(|p| p.is_ai).unwrap_or(false);
+                let title = pane.and_then(|p| p.custom_name.clone());
+                kumo_protocol::LayoutNodeSpec::Pane(kumo_protocol::PaneSpec { cwd, command: None, is_ai, title })
+            }
+            kumo_core::layout::Node::Split { dir, ratio, a, b, .. } => {
+                let sdir = match dir {
+                    kumo_core::layout::SplitDir::V => kumo_protocol::SplitDir::Vertical,
+                    kumo_core::layout::SplitDir::H => kumo_protocol::SplitDir::Horizontal,
+                };
+                kumo_protocol::LayoutNodeSpec::Split { dir: sdir, ratio: *ratio, a: Box::new(Self::node_to_spec(a, panes)), b: Box::new(Self::node_to_spec(b, panes)) }
+            }
+        }
+    }
+
+    pub(crate) fn layout_apply(&mut self, session: &str, spec: kumo_protocol::LayoutSpec) -> Result<String, String> {
+        let s_idx = if let Some(idx) = self.sessions.iter().position(|s| s.name == session) {
+            idx
+        } else {
+            // create session if not exists
+            self.new_session_with_name(session.to_string()).map_err(|e| format!("{e:#}"))?;
+            self.sessions.iter().position(|s| s.name == session).ok_or("failed to create session")?
+        };
+        let sid = self.sessions[s_idx].id;
+        let workspace = self.sessions[s_idx].workspace.clone();
+        // Collect old pane ids to kill
+        let old_ids: Vec<u64> = self.sessions[s_idx].tabs.iter().flat_map(|t| t.tree.pane_ids()).collect();
+        // Build new tabs
+        let mut new_tabs: Vec<Tab> = Vec::new();
+        for tab_spec in spec.tabs {
+            let (node, focus) = Self::spec_to_node(&tab_spec.root, sid, &workspace, &self.shell, self.events_tx.clone(), &self.theme)?;
+            // drain stashed panes from build_node
+            PENDING_PANES.with(|c| {
+                for (pid, pane) in c.borrow_mut().drain() {
+                    self.panes.insert(pid, pane);
+                }
+            });
+            let tid = self.next_tab_id();
+            let mut tree = if let Some(n) = node {
+                kumo_core::layout::LayoutTree::from_node(n, focus.unwrap_or(0))
+            } else {
+                // empty tab: create single pane
+                let pid = crate::daemon::pty::Pty::next_pane_id();
+                let pane = Pane::spawn(sid, pid, self.shell.clone(), None, Some(workspace.clone()), 80, 24, false, self.events_tx.clone(), &self.theme).map_err(|e| format!("{e:#}"))?;
+                self.panes.insert(pid, pane);
+                kumo_core::layout::LayoutTree::new(pid)
+            };
+            // ensure focus valid
+            if !tree.contains(tree.focus) {
+                if let Some(&first) = tree.pane_ids().first() { tree.focus = first; }
+            }
+            new_tabs.push(Tab { id: tid, name: tab_spec.name.clone(), tree, zoom: tab_spec.zoom });
+        }
+        if new_tabs.is_empty() {
+            return Err("layout spec has no tabs".into());
+        }
+        // Kill old panes
+        for pid in old_ids {
+            if let Some(mut pane) = self.panes.remove(&pid) { pane.pty.kill(); }
+            self.pane_cache.remove(&pid);
+            self.pane_sizes.remove(&pid);
+            self.agent_status_cache.remove(&pid);
+            self.last_agent_status.remove(&pid);
+            self.agent_proc_cache.remove(&pid);
+            self.agent_aliases.remove(&pid);
+        }
+        self.sessions[s_idx].tabs = new_tabs;
+        self.sessions[s_idx].active_tab = 0;
+        self.bump_layout_version();
+        Ok(format!("applied layout to {session:?}"))
+    }
+
+    fn spec_to_node(
+        spec: &Option<Box<kumo_protocol::LayoutNodeSpec>>,
+        sid: u64,
+        workspace: &PathBuf,
+        shell: &str,
+        tx: std::sync::mpsc::Sender<crate::daemon::pane::PtyEvent>,
+        theme: &OwnedTheme,
+    ) -> Result<(Option<kumo_core::layout::Node>, Option<u64>), String> {
+        match spec {
+            None => Ok((None, None)),
+            Some(node) => {
+                let (n, focus) = Self::build_node(node, sid, workspace, shell, tx, theme)?;
+                Ok((Some(n), focus))
+            }
+        }
+    }
+
+    fn build_node(
+        spec: &kumo_protocol::LayoutNodeSpec,
+        sid: u64,
+        workspace: &PathBuf,
+        shell: &str,
+        tx: std::sync::mpsc::Sender<crate::daemon::pane::PtyEvent>,
+        theme: &OwnedTheme,
+    ) -> Result<(kumo_core::layout::Node, Option<u64>), String> {
+        match spec {
+            kumo_protocol::LayoutNodeSpec::Pane(pane_spec) => {
+                let pid = crate::daemon::pty::Pty::next_pane_id();
+                let cwd = pane_spec.cwd.clone().or_else(|| Some(workspace.clone()));
+                let program = pane_spec.command.as_ref().map(|cmd| {
+                    let mut parts = cmd.split_whitespace();
+                    let prog = parts.next().unwrap_or("sh").to_string();
+                    let args = parts.map(|s| s.to_string()).collect();
+                    (prog, args)
+                });
+                let is_ai = pane_spec.is_ai;
+                let mut pane = Pane::spawn(sid, pid, shell.to_string(), program, cwd, 80, 24, is_ai, tx, theme).map_err(|e| format!("{e:#}"))?;
+                if let Some(title) = &pane_spec.title { pane.custom_name = Some(title.clone()); }
+                // Insert will be done by caller; we need to return node but pane must be inserted.
+                // To avoid double borrow, we leak insert via a thread-local? Instead we insert directly via a global?
+                // We'll use a hack: return node and let caller insert? But we need pane inserted before return.
+                // So we stash pane in a temporary global and caller drains it. Simpler: insert here via unsafe global map.
+                // For now, we use a workaround: call a helper that inserts into a static.
+                Self::stash_pane(pid, pane);
+                Ok((kumo_core::layout::Node::Pane { id: pid }, Some(pid)))
+            }
+            kumo_protocol::LayoutNodeSpec::Split { dir, ratio, a, b } => {
+                let sdir = match dir {
+                    kumo_protocol::SplitDir::Vertical => kumo_core::layout::SplitDir::V,
+                    kumo_protocol::SplitDir::Horizontal => kumo_core::layout::SplitDir::H,
+                };
+                let (na, fa) = Self::build_node(a, sid, workspace, shell, tx.clone(), theme)?;
+                let (nb, fb) = Self::build_node(b, sid, workspace, shell, tx, theme)?;
+                let focus = fa.or(fb);
+                let sid_next = NEXT_SPLIT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let node = kumo_core::layout::Node::Split { id: sid_next, dir: sdir, ratio: *ratio, a: Box::new(na), b: Box::new(nb) };
+                // We'll fix split ids later via from_node seeding.
+                Ok((node, focus))
+            }
+        }
+    }
+
+    fn stash_pane(pid: u64, pane: Pane) {
+        // Use thread-local stash for layout_apply pane creation (avoids &mut self borrow across recursion).
+        PENDING_PANES.with(|c| c.borrow_mut().insert(pid, pane));
     }
 }
 

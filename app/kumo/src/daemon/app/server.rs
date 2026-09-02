@@ -350,8 +350,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let sessions = app.session_info_list();
                     let _ = send_to(&mut clients, id, &DaemonEvent::SessionList { sessions });
                 }
-                Command::SessionNew { name, workspace } => {
-                    let reply = app.new_session_command(name.as_deref(), workspace.as_ref()).unwrap_or_else(|e| format!("error: {e:#}"));
+                Command::SessionNew { name, workspace, is_ai, with_context } => {
+                    let reply = app.new_session_command(name.as_deref(), workspace.as_ref(), is_ai, with_context).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
                 Command::SessionKill { name } => {
@@ -376,8 +376,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let reply = app.rename_tab_in_session(&session, &tab, &new_name).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
-                Command::PaneSplit { session, dir, is_ai } => {
-                    let reply = app.split_in_session(&session, dir, is_ai).unwrap_or_else(|e| format!("error: {e:#}"));
+                Command::PaneSplit { session, dir, is_ai, with_context } => {
+                    let reply = app.split_in_session(&session, dir, is_ai, with_context).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
                 Command::PaneClose { session, pane_id } => {
@@ -554,6 +554,37 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         }
                         Err(e) => {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: format!("{e:#}") });
+                        }
+                    }
+                }
+                Command::ContextGet { session, pane_id } => {
+                    match app.context_chips(&session, pane_id) {
+                        Ok(chips) => {
+                            let pid = pane_id.unwrap_or_else(|| app.sessions.iter().find(|s| s.name == session).map(|s| s.active_tab().tree.focus).unwrap_or(0));
+                            let _ = send_to(&mut clients, id, &DaemonEvent::ContextChips { pane_id: pid, chips });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: e });
+                        }
+                    }
+                }
+                Command::LayoutExport { session, tab } => {
+                    match app.layout_export(&session, tab.as_deref()) {
+                        Ok(spec) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::LayoutExport { spec });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: e });
+                        }
+                    }
+                }
+                Command::LayoutApply { session, spec } => {
+                    match app.layout_apply(&session, spec) {
+                        Ok(msg) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: msg });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: e });
                         }
                     }
                 }
@@ -1177,6 +1208,8 @@ mod tests {
         protocol::write_framed(&mut stream, &Command::SessionNew {
             name: Some("two".into()),
             workspace: Some(PathBuf::from("/tmp")),
+            is_ai: false,
+            with_context: false,
         })
         .unwrap();
         let layout = loop {
@@ -1198,6 +1231,7 @@ mod tests {
             session: "two".into(),
             dir: SplitDir::Vertical,
             is_ai: false,
+            with_context: false,
         })
         .unwrap();
         let layout = loop {

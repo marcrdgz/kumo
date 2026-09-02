@@ -498,6 +498,39 @@ pub const ROW_CELLS_DATA_GRAPHEMES_UTF8: i32 = 9;
 /// Cell data id for `ghostty_cell_get`: whether the cell is part of an
 /// OSC 8 hyperlink.
 pub const CELL_DATA_HAS_HYPERLINK: i32 = 7;
+/// Cell data id for semantic content (OSC 133).
+pub const CELL_DATA_SEMANTIC_CONTENT: i32 = 9;
+/// Row data id for semantic prompt state (OSC 133).
+pub const ROW_DATA_SEMANTIC_PROMPT: i32 = 6;
+
+pub type GhosttyRow = u64;
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowSemanticPrompt {
+    None = 0,
+    Prompt = 1,
+    Continuation = 2,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellSemanticContent {
+    Output = 0,
+    Input = 1,
+    Prompt = 2,
+}
+
+/// Structured prompt block extracted from OSC 133 semantic markers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptBlock {
+    pub prompt_start: u32,
+    pub prompt_end: u32,
+    pub output_start: u32,
+    pub output_end: u32,
+    pub prompt_text: String,
+    pub output_text: String,
+}
 
 // ---------------------------------------------------------------------------
 // C function declarations
@@ -598,6 +631,9 @@ unsafe extern "C" {
         out_written: *mut usize,
     ) -> Result;
     fn ghostty_cell_get(cell: u64, data: i32, out: *mut c_void) -> Result;
+    fn ghostty_grid_ref_cell(ref_: *const GridRef, out_cell: *mut u64) -> Result;
+    fn ghostty_grid_ref_row(ref_: *const GridRef, out_row: *mut GhosttyRow) -> Result;
+    fn ghostty_row_get(row: GhosttyRow, data: i32, out: *mut c_void) -> Result;
     fn ghostty_grid_ref_hyperlink_uri(
         ref_: *const GridRef,
         buf: *mut u8,
@@ -1755,6 +1791,190 @@ impl Terminal {
             return String::new();
         };
         self.format_selection(&sel)
+    }
+
+    /// Text of an inclusive screen range `[start,end]` (viewport-independent).
+    pub fn screen_range_text(&self, start_row: u32, end_row: u32) -> String {
+        if start_row > end_row {
+            return String::new();
+        }
+        let total = self.total_rows() as u32;
+        if total == 0 || start_row >= total {
+            return String::new();
+        }
+        let end_row = end_row.min(total - 1);
+        let cols = self.cols as u32;
+        if cols == 0 {
+            return String::new();
+        }
+        let last = cols.saturating_sub(1) as u16;
+        let Some(sel) = self.build_screen_selection((0, start_row), (last, end_row)) else {
+            return String::new();
+        };
+        self.format_selection(&sel)
+    }
+
+    /// Semantic prompt state of a screen row (0 = top of scrollback) derived
+    /// from OSC 133. `None` when the terminal cannot provide the row.
+    pub fn row_semantic_prompt(&self, row: u32) -> Option<RowSemanticPrompt> {
+        let mut gref = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+        unsafe {
+            if !ghostty_terminal_grid_ref(self.term, screen_point(0, row), &mut gref).is_ok() {
+                return None;
+            }
+            let mut grow: GhosttyRow = 0;
+            if !ghostty_grid_ref_row(&gref, &mut grow as *mut GhosttyRow).is_ok() {
+                return None;
+            }
+            let mut out: i32 = 0;
+            if !ghostty_row_get(grow, ROW_DATA_SEMANTIC_PROMPT, &mut out as *mut i32 as *mut c_void).is_ok() {
+                return None;
+            }
+            match out {
+                0 => Some(RowSemanticPrompt::None),
+                1 => Some(RowSemanticPrompt::Prompt),
+                2 => Some(RowSemanticPrompt::Continuation),
+                _ => None,
+            }
+        }
+    }
+
+    /// Semantic content of a single cell (OSC 133).
+    pub fn cell_semantic_at(&self, x: u16, row: u32) -> Option<CellSemanticContent> {
+        let mut gref = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+        unsafe {
+            if !ghostty_terminal_grid_ref(self.term, screen_point(x, row), &mut gref).is_ok() {
+                return None;
+            }
+            let mut cell: u64 = 0;
+            if !ghostty_grid_ref_cell(&gref, &mut cell as *mut u64).is_ok() {
+                return None;
+            }
+            let mut out: i32 = 0;
+            if !ghostty_cell_get(cell, CELL_DATA_SEMANTIC_CONTENT, &mut out as *mut i32 as *mut c_void).is_ok() {
+                return None;
+            }
+            match out {
+                0 => Some(CellSemanticContent::Output),
+                1 => Some(CellSemanticContent::Input),
+                2 => Some(CellSemanticContent::Prompt),
+                _ => None,
+            }
+        }
+    }
+
+    /// The last completed prompt block (OSC 133). When the terminal is mid-
+    /// command (most recent prompt has no following prompt), this returns the
+    /// previous command's output (`prev prompt_end+1 .. last prompt_start-1`).
+    /// When the last command is still running (no new prompt yet), it returns
+    /// the current output (`prompt_end+1 .. bottom`). `None` when no semantic
+    /// prompt markers exist yet.
+    pub fn last_prompt_block(&self) -> Option<PromptBlock> {
+        let total = self.total_rows() as u32;
+        if total == 0 {
+            return None;
+        }
+        // Collect prompt starts
+        let mut prompts: Vec<u32> = Vec::new();
+        for r in 0..total {
+            if self.row_semantic_prompt(r) == Some(RowSemanticPrompt::Prompt) {
+                prompts.push(r);
+            }
+        }
+        if prompts.is_empty() {
+            return None;
+        }
+        // Helper to expand continuation rows
+        let prompt_end_of = |start: u32| -> u32 {
+            let mut end = start;
+            while end + 1 < total && self.row_semantic_prompt(end + 1) == Some(RowSemanticPrompt::Continuation) {
+                end += 1;
+            }
+            end
+        };
+        if prompts.len() == 1 {
+            let ps = prompts[0];
+            let pe = prompt_end_of(ps);
+            if pe + 1 >= total {
+                return None;
+            }
+            let out_start = pe + 1;
+            let out_end = total - 1;
+            let prompt_text = self.screen_range_text(ps, pe);
+            let output_text = self.screen_range_text(out_start, out_end);
+            if output_text.trim().is_empty() {
+                return None;
+            }
+            return Some(PromptBlock {
+                prompt_start: ps,
+                prompt_end: pe,
+                output_start: out_start,
+                output_end: out_end,
+                prompt_text,
+                output_text,
+            });
+        }
+        // >=2 prompts: last completed is previous prompt's output till last prompt start -1
+        let last = *prompts.last().unwrap();
+        let prev = prompts[prompts.len() - 2];
+        let pe_prev = prompt_end_of(prev);
+        // output of previous command
+        let out_start = pe_prev + 1;
+        let out_end = last.saturating_sub(1);
+        if out_start <= out_end {
+            let prompt_text = self.screen_range_text(prev, pe_prev);
+            let output_text = self.screen_range_text(out_start, out_end);
+            if !output_text.trim().is_empty() {
+                return Some(PromptBlock {
+                    prompt_start: prev,
+                    prompt_end: pe_prev,
+                    output_start: out_start,
+                    output_end: out_end,
+                    prompt_text,
+                    output_text,
+                });
+            }
+        }
+        // Fallback: current running output after last prompt
+        let pe_last = prompt_end_of(last);
+        if pe_last + 1 < total {
+            let out_start = pe_last + 1;
+            let out_end = total - 1;
+            let prompt_text = self.screen_range_text(last, pe_last);
+            let output_text = self.screen_range_text(out_start, out_end);
+            if !output_text.trim().is_empty() {
+                return Some(PromptBlock {
+                    prompt_start: last,
+                    prompt_end: pe_last,
+                    output_start: out_start,
+                    output_end: out_end,
+                    prompt_text,
+                    output_text,
+                });
+            }
+        }
+        None
+    }
+
+    /// Whether the terminal has seen any semantic prompt marker (OSC 133).
+    pub fn has_semantic_prompt(&self) -> bool {
+        let total = self.total_rows() as u32;
+        for r in (total.saturating_sub(200))..total {
+            if self.row_semantic_prompt(r) == Some(RowSemanticPrompt::Prompt) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Search the entire screen buffer for `query` (plain substring, case-
