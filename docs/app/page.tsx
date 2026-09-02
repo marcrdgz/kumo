@@ -90,6 +90,11 @@ export default function HomePage() {
               href="/docs/guides/agents"
             />
             <Card
+              title="Orchestration"
+              description="Agents drive their own web — wait, prompt, read, dev servers, and parallel workers, no polling."
+              href="/docs/guides/orchestration"
+            />
+            <Card
               title="Detach & re-attach"
               description="The daemon keeps your web alive in the background; come back from any terminal, exactly where you left it."
               href="/docs/guides/detach-and-reattach"

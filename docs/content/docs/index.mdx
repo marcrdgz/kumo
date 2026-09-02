@@ -42,12 +42,14 @@ not the multiplexer.
 - 🐣 **Plain-tty identity** — panes present as a plain `xterm-256color` (no
   mouse capabilities advertised), so apps don't hijack the mouse and
   selection always works.
+- 🕸️ **Orchestration** — `kumo agent wait/prompt/read` and `kumo pane wait-output` let agents (and you) drive any pane and wait without polling — pinned to the pane occupant, bracketed-paste aware. See [Orchestration](/docs/guides/orchestration).
 - 📂 **Workspace-aware** — kumo opens in the directory you launch it from;
   every new pane/session starts there.
 
 <Cards>
   <Card title="Installation" href="/docs/getting-started/installation" description="CLI installer, desktop app, nightly channel." />
   <Card title="Quickstart" href="/docs/getting-started/quickstart" description="Your first session, splits, and AI pane." />
+  <Card title="Orchestration" href="/docs/guides/orchestration" description="Use kumo as an ADE — wait, prompt, read, dev servers, parallel agents. AI skill included." />
   <Card title="Configuration" href="/docs/configuration" description="config.toml reference: leader keys, shells, agents." />
   <Card title="Roadmap" href="/docs/roadmap" description="Where kumo is heading — full customization by 1.0." />
 </Cards>

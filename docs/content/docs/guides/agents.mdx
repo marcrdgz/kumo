@@ -9,6 +9,10 @@ import { Callout } from 'fumadocs-ui/components/callout';
 Kumo auto-detects any AI CLI running inside a pane and lists it in the
 sidebar's AGENTS tab with its workspace and CLI name.
 
+<Callout title="New: orchestration primitives" type="info">
+Kumo 0.7.0 adds **server-owned waits** — `kumo agent wait`, `agent prompt --wait`, `agent read`, and `pane wait-output` — so agents (and you) can drive any pane and wait for the result without polling. See the full [Orchestration guide](/docs/guides/orchestration) for the ADE primitives, dev-server/test-suite patterns, and the AI skill prompt.
+</Callout>
+
 ## Spawning an agent
 
 <kbd>leader+a</kbd> spawns a dedicated AI pane running your configured CLI
@@ -20,9 +24,13 @@ inside any shell pane — kumo detects the process automatically.
 Each agent shows a status dot, detected from the live terminal buffer (not
 just the viewport), so it stays accurate even while you scroll:
 
-- 🟢 **Green** — working
+- 🟢 **Green** — working (actively producing output)
 - 🟠 **Orange** — blocked, waiting for your approval
-- ⚪ **Gray** — idle
+- ⚪ **Gray** — idle (quiet, ready)
+- 🔵 **Blue** — done (finished while you weren't looking; focusing the pane marks it seen → idle)
+- ❓ **Dim** — unknown (recognized agent whose classification failed — idle was not proven)
+
+The full five-state model is `working · blocked · idle · done · unknown`. `done` is the same transition that fires the corner toast on working→idle while unfocused; `unknown` means the daemon saw the agent process but no idle/working/blocked signal matched. Both are first-class wait targets: `kumo agent wait -p 42 --until done`.
 
 When an agent **blocks** or **finishes**, kumo raises a transient **toast** in
 the corner of every attached viewer (click it to jump to the agent's pane)
@@ -146,6 +154,17 @@ status is right — exactly what we did for the built-ins
   (`list` / `ls`) surfaces each agent's status and pane id from outside the
   TUI, so a blocked agent is noticeable even when you are not attached.
 </Callout>
+
+## Orchestration: wait, prompt, read, broadcast
+
+Agents (and you) can drive any pane over the same socket the TUI uses — no polling, pinned to the pane's `OS pid`, with bracketed-paste-aware injection. The primitives are `agent wait --until`, `agent prompt [--wait]`, `agent read --source`, `pane wait-output --regex`, `agent start/rename/broadcast`. For the complete reference, recipes (dev server, verify loop, agent-to-agent handoff, parallel workers), error codes, and the copy-paste skill prompt for AIs running inside kumo, see the [Orchestration guide](/docs/guides/orchestration).
+
+```sh
+kumo agent wait -p 42 --until idle --timeout 30s
+kumo agent prompt -p 42 "fix the test" --wait idle
+kumo agent read -p 42 --source recent
+kumo pane wait-output -p 12 --regex "passed|failed"
+```
 
 ## Debugging status: `kumo agent explain`
 
