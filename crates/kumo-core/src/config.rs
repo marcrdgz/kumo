@@ -138,7 +138,7 @@ impl BorderStyle {
     }
 }
 
-/// Sidebar layout: a two-tab toggle or two stacked panels.
+/// Sidebar layout: a two-tab toggle, two stacked panels, or the project-structured view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SidebarLayout {
     /// Two stacked panels: spaces on top, agents below (default).
@@ -146,6 +146,8 @@ pub enum SidebarLayout {
     Divided,
     /// Toggle tabs (`sessions` / `agents`), one section at a time.
     Tabs,
+    /// Projects → worktrees with inline agents (finder on `leader+f`).
+    Project,
 }
 
 impl SidebarLayout {
@@ -153,6 +155,7 @@ impl SidebarLayout {
         match s.trim().to_ascii_lowercase().as_str() {
             "divided" | "stacked" => Some(Self::Divided),
             "tabs" | "toggle" => Some(Self::Tabs),
+            "project" | "projects" | "explorer" | "navigator" => Some(Self::Project),
             _ => None,
         }
     }
@@ -192,6 +195,9 @@ pub struct SidebarConfig {
     pub borders: SidebarBorders,
     /// How sidebar sections are arranged (stacked panels or toggle tabs).
     pub layout: SidebarLayout,
+    /// Width of the sidebar in columns when `layout = "project"` (draggable; clamped 20..50).
+    /// `None` = default (28).
+    pub width: Option<u16>,
 }
 
 impl Default for SidebarConfig {
@@ -201,6 +207,7 @@ impl Default for SidebarConfig {
             sections: SidebarSections::default(),
             borders: SidebarBorders::default(),
             layout: SidebarLayout::Divided,
+            width: None,
         }
     }
 }
@@ -681,6 +688,13 @@ impl Config {
                 log::warn!("kumo: ignoring invalid sidebar.layout {layout:?}");
             }
         }
+        if let Some(w) = raw.width {
+            if (20..=50).contains(&w) {
+                self.sidebar.width = Some(w);
+            } else {
+                log::warn!("kumo: ignoring out-of-range sidebar.width {w}; expected 20..50");
+            }
+        }
         // Legacy flat keys for borders style
         // handled in from_map; toml is canonical.
     }
@@ -957,6 +971,7 @@ pub struct SidebarSectionRaw {
     pub sections: Option<SidebarSectionsRaw>,
     pub borders: Option<SidebarBordersRaw>,
     pub layout: Option<String>,
+    pub width: Option<u16>,
 }
 
 #[derive(Default, serde::Deserialize, Debug)]

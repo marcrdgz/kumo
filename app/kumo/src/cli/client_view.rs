@@ -32,6 +32,9 @@ use kumo_core::config::{SidebarLayout, StatusBarConfig, StatusWidget, ToastPosit
 
 /// Width of the left sidebar (its last column is the separator).
 const SIDEBAR_WIDTH: u16 = 25;
+const PROJECT_DEFAULT_WIDTH: u16 = 28;
+const MIN_SIDEBAR_WIDTH: u16 = 20;
+const MAX_SIDEBAR_WIDTH: u16 = 50;
 /// Height of the tab bar (row 0, above panes).
 const TAB_H: u16 = 1;
 /// Height of the status bar (last row) — dynamic via `View::status_h()`.
@@ -146,6 +149,30 @@ struct DividedPanels {
 struct SidebarDrag {
     start_y: u16,
     start_split: u16,
+}
+
+/// In-flight sidebar width drag (project layout).
+#[derive(Clone, Copy)]
+struct SidebarWidthDrag {
+    start_x: u16,
+    start_width: u16,
+}
+
+/// Finder item for the workspace finder (`leader+f`).
+#[derive(Clone, Debug)]
+enum FinderItem {
+    Session { idx: usize, name: String },
+    Tab { session_idx: usize, tab_idx: usize, session_name: String, tab_name: String },
+}
+
+struct WorkspaceFinder {
+    open: bool,
+    input: String,
+    cursor: usize,
+    items: Vec<FinderItem>,
+    filtered: Vec<usize>,
+    selected: usize,
+    scroll: usize,
 }
 
 /// Ordering style of the agent panel in the divided sidebar: state-grouped
@@ -415,6 +442,12 @@ enum SidebarRow {
     AgentDir(usize, u64, String, AgentStatus),
     AgentName(usize, u64, String, AgentStatus),
     NewSession,
+    // Project-structured layout rows
+    Search,
+    SectionLabel(String, Option<String>),
+    ProjectHeader(String),
+    Worktree(usize),
+    InlineAgent(usize, u64, String, AgentStatus),
 }
 
 pub struct View {
@@ -474,6 +507,9 @@ pub struct View {
     sidebar_drag: Option<SidebarDrag>,
     /// Sorting of the agent panel (divided layout); toggled by its label.
     agents_panel_order: AgentPanelOrder,
+    sidebar_width: u16,
+    sidebar_width_drag: Option<SidebarWidthDrag>,
+    finder: WorkspaceFinder,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -613,6 +649,9 @@ impl View {
         let now_secs = chrono::Local::now().timestamp() % 60;
         let rem = (60 - now_secs).max(1) as u64;
         let clock_next = Instant::now() + Duration::from_secs(rem);
+        let sidebar_width = kumo_core::config::sidebar().width.unwrap_or_else(|| {
+            if kumo_core::config::sidebar().layout == SidebarLayout::Project { PROJECT_DEFAULT_WIDTH } else { SIDEBAR_WIDTH }
+        }).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         let mut view = View {
             out,
             cols: cols.max(2),
@@ -654,6 +693,9 @@ impl View {
             sidebar_split: None,
             sidebar_drag: None,
             agents_panel_order: AgentPanelOrder::default(),
+            sidebar_width,
+            sidebar_width_drag: None,
+            finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -670,6 +712,10 @@ impl View {
         };
         let _ = view.send(&Command::SubscribeLayout);
         view
+    }
+
+    fn effective_sidebar_width(&self) -> u16 {
+        self.sidebar_width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH).min(self.cols.saturating_sub(1).max(MIN_SIDEBAR_WIDTH))
     }
 
     fn status_h(&self) -> u16 {
@@ -835,7 +881,12 @@ impl View {
                 self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
                 let rem = (60 - (chrono::Local::now().timestamp() % 60)).max(1) as u64;
                 self.clock_next = Instant::now() + Duration::from_secs(rem);
-                if enabled_changed {
+                let new_width = kumo_core::config::sidebar().width.unwrap_or_else(|| {
+                    if kumo_core::config::sidebar().layout == SidebarLayout::Project { PROJECT_DEFAULT_WIDTH } else { SIDEBAR_WIDTH }
+                }).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+                let width_changed = new_width != self.sidebar_width;
+                self.sidebar_width = new_width;
+                if enabled_changed || width_changed {
                     self.recompute_geometry();
                 }
                 self.mark_dirty();
@@ -936,9 +987,26 @@ impl View {
         SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
     }
 
+    fn worktree_primary_status(&self, session_idx: usize) -> Option<AgentStatus> {
+        let layout = self.layout.as_ref()?;
+        let sess = layout.sessions.get(session_idx)?;
+        let mut best: Option<(u8, AgentStatus)> = None;
+        for (_, pane) in session_panes_all(sess) {
+            if !pane.is_ai { continue; }
+            if let Some(a) = pane.agent.as_ref() {
+                let rank = Self::agent_rank(a.status);
+                if best.map(|(r, _)| rank < r).unwrap_or(true) {
+                    best = Some((rank, a.status));
+                }
+            }
+        }
+        best.map(|(_, s)| s)
+    }
+
     fn panes_area(&self) -> Rect {
+        let w = self.effective_sidebar_width();
         let x = if self.sidebar_open {
-            (SIDEBAR_WIDTH + 1).min(self.cols.saturating_sub(1))
+            (w + 1).min(self.cols.saturating_sub(1))
         } else {
             0
         };
@@ -1102,7 +1170,8 @@ impl View {
     }
 
     fn tabs_area(&self) -> Rect {
-        let x = if self.sidebar_open { (SIDEBAR_WIDTH + 1).min(self.cols.saturating_sub(1)) } else { 0 };
+        let w = self.effective_sidebar_width();
+        let x = if self.sidebar_open { (w + 1).min(self.cols.saturating_sub(1)) } else { 0 };
         Rect::new(x, 0, self.cols.saturating_sub(x), TAB_H)
     }
 
@@ -1276,6 +1345,10 @@ impl View {
             self.on_pane_number_key(key);
             return Ok(());
         }
+        if self.finder.open {
+            self.on_finder_key(key);
+            return Ok(());
+        }
 
         if self.mode == Mode::Copy {
             self.on_copy_key(key)?;
@@ -1319,6 +1392,7 @@ impl View {
             || self.keybind_overlay.open
             || self.settings.open
             || self.worktree_picker.open
+            || self.finder.open
             || self.pane_numbers.is_some()
             || self.mode == Mode::Leader
             || self.mode == Mode::Copy
@@ -1472,6 +1546,7 @@ impl View {
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
             Action::AgentInbox => self.open_inbox(),
+            Action::WorkspaceFinder => self.open_finder(),
         }
         self.mark_dirty();
         Ok(())
@@ -2093,9 +2168,11 @@ impl View {
     /// keyboard (`j`/`k` to move, `Enter` to focus the pane, `Esc` to leave).
     fn open_inbox(&mut self) {
         let cfg = kumo_core::config::sidebar();
-        let panel_ok = match cfg.layout {
+        let layout = self.sidebar_layout();
+        let panel_ok = match layout {
             SidebarLayout::Divided => cfg.sections.agents,
             SidebarLayout::Tabs => cfg.sections.agents && self.visible_sidebar_tabs().contains(&SidebarTab::Agents),
+            SidebarLayout::Project => true,
         };
         if !panel_ok {
             self.notice = Some(("the sidebar agent panel is hidden in the config".to_string(), Instant::now()));
@@ -2144,6 +2221,7 @@ impl View {
         let Some(inb) = self.inbox.as_ref() else { return };
         let Some(&(si, pid, _)) = self.inbox_actionables().get(inb.sel) else { return };
         let matches = |row: &SidebarRow| matches!(row, SidebarRow::AgentName(i, p, _, _) if *i == si && *p == pid);
+        let matches_inline = |row: &SidebarRow| matches!(row, SidebarRow::InlineAgent(i, p, _, _) if *i == si && *p == pid);
         match self.sidebar_layout() {
             SidebarLayout::Tabs => {
                 let items = self.agents_content();
@@ -2165,6 +2243,15 @@ impl View {
                 let cur = self.sidebar_scroll.1 as usize;
                 let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
                 self.sidebar_scroll.1 = target as u16;
+            }
+            SidebarLayout::Project => {
+                let items = self.project_content();
+                let shown = self.content_region_h() as usize;
+                let Some(idx) = items.iter().position(|r| matches(r) || matches_inline(r)) else { return };
+                let max = items.len().saturating_sub(shown);
+                let cur = self.sidebar_scroll.0 as usize;
+                let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
+                self.sidebar_scroll.0 = target as u16;
             }
         }
     }
@@ -2221,7 +2308,8 @@ impl View {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Clicking an agent row jumps (sidebar_hit ends the focus
                 // mode); any other click just leaves.
-                if self.sidebar_open && m.column < SIDEBAR_WIDTH && self.sidebar_hit(m.column, m.row) {
+                let w = self.effective_sidebar_width();
+                if self.sidebar_open && m.column < w && self.sidebar_hit(m.column, m.row) {
                     return Ok(());
                 }
                 self.close_inbox();
@@ -2235,6 +2323,133 @@ impl View {
             _ => {}
         }
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Workspace finder (`leader+f`)
+    // ------------------------------------------------------------------
+
+    fn open_finder(&mut self) {
+        let mut items = Vec::new();
+        if let Some(layout) = &self.layout {
+            for (i, s) in layout.sessions.iter().enumerate() {
+                items.push(FinderItem::Session { idx: i, name: s.name.clone() });
+                for (ti, tab) in s.tabs.iter().enumerate() {
+                    items.push(FinderItem::Tab { session_idx: i, tab_idx: ti, session_name: s.name.clone(), tab_name: tab.name.clone() });
+                }
+            }
+        }
+        if items.is_empty() {
+            self.notice = Some(("no workspaces to find".to_string(), Instant::now()));
+            self.mark_dirty();
+            return;
+        }
+        self.finder.items = items;
+        self.finder.input.clear();
+        self.finder.cursor = 0;
+        self.finder.selected = 0;
+        self.finder.scroll = 0;
+        self.finder.filtered = (0..self.finder.items.len()).collect();
+        self.finder.open = true;
+        self.mark_dirty();
+    }
+
+    fn close_finder(&mut self) {
+        self.finder.open = false;
+        self.mark_dirty();
+    }
+
+    fn finder_rebuild(&mut self) {
+        let q = self.finder.input.to_ascii_lowercase();
+        if q.is_empty() {
+            self.finder.filtered = (0..self.finder.items.len()).collect();
+        } else {
+            let mut scored: Vec<(usize, u8)> = Vec::new();
+            for (idx, item) in self.finder.items.iter().enumerate() {
+                let hay = match item {
+                    FinderItem::Session { name, .. } => name.clone(),
+                    FinderItem::Tab { session_name, tab_name, .. } => format!("{session_name} {tab_name} {session_name}/{tab_name}"),
+                };
+                let hay_l = hay.to_ascii_lowercase();
+                if hay_l.contains(&q) {
+                    let rank = if hay_l.starts_with(&q) { 0 } else if hay_l.contains(&format!(" {q}")) { 1 } else { 2 };
+                    scored.push((idx, rank));
+                }
+            }
+            scored.sort_by_key(|(_, r)| *r);
+            self.finder.filtered = scored.into_iter().map(|(i,_)| i).collect();
+        }
+        self.finder.selected = 0;
+        self.finder.scroll = 0;
+    }
+
+    fn finder_commit(&mut self) {
+        let fidx = self.finder.filtered.get(self.finder.selected).copied();
+        let Some(fi) = fidx.and_then(|i| self.finder.items.get(i).cloned()) else {
+            self.close_finder(); return;
+        };
+        self.close_finder();
+        match fi {
+            FinderItem::Session { name, .. } => { let _ = self.send(&Command::SessionFocus { name }); }
+            FinderItem::Tab { session_name, tab_name, .. } => { let _ = self.send(&Command::TabFocus { session: session_name, tab: tab_name }); }
+        }
+    }
+
+    fn on_finder_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            self.close_finder(); return;
+        }
+        match key.code {
+            KeyCode::Enter => { self.finder_commit(); }
+            KeyCode::Up | KeyCode::Char('k') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.finder.selected > 0 { self.finder.selected -= 1; if self.finder.selected < self.finder.scroll { self.finder.scroll = self.finder.selected; } self.mark_dirty(); }
+            }
+            KeyCode::Down | KeyCode::Char('j') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.finder.selected + 1 < self.finder.filtered.len() { self.finder.selected += 1; let max_vis = 8usize; if self.finder.selected >= self.finder.scroll + max_vis { self.finder.scroll += 1; } self.mark_dirty(); }
+            }
+            KeyCode::Backspace => {
+                if self.finder.cursor > 0 && !self.finder.input.is_empty() {
+                    let mut chars: Vec<char> = self.finder.input.chars().collect();
+                    if self.finder.cursor <= chars.len() { chars.remove(self.finder.cursor -1); self.finder.input = chars.into_iter().collect(); self.finder.cursor -=1; self.finder_rebuild(); self.mark_dirty(); }
+                }
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.finder.input.chars().collect();
+                if self.finder.cursor < chars.len() { chars.remove(self.finder.cursor); self.finder.input = chars.into_iter().collect(); self.finder_rebuild(); self.mark_dirty(); }
+            }
+            KeyCode::Left => { if self.finder.cursor>0 { self.finder.cursor-=1; self.mark_dirty(); } }
+            KeyCode::Right => { if self.finder.cursor < self.finder.input.chars().count() { self.finder.cursor+=1; self.mark_dirty(); } }
+            KeyCode::Home => { self.finder.cursor = 0; self.mark_dirty(); }
+            KeyCode::End => { self.finder.cursor = self.finder.input.chars().count(); self.mark_dirty(); }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                let mut chars: Vec<char> = self.finder.input.chars().collect();
+                chars.insert(self.finder.cursor, c);
+                self.finder.input = chars.into_iter().collect();
+                self.finder.cursor += 1;
+                self.finder_rebuild();
+                self.mark_dirty();
+            }
+            _ => {}
+        }
+    }
+
+    fn finder_rect(&self) -> Option<Rect> {
+        if !self.finder.open { return None; }
+        let w = 48.min(self.cols.saturating_sub(4)).max(30);
+        let h = 12.min(self.rows.saturating_sub(4)).max(8);
+        Some(Rect::new((self.cols - w)/2, (self.rows - h)/2, w, h))
+    }
+
+    fn finder_input_at(&self, x: u16, y: u16) -> bool {
+        self.finder_rect().map(|r| y==r.y+1 && x>=r.x+1 && x<r.x+r.width-1).unwrap_or(false)
+    }
+
+    fn finder_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let r = self.finder_rect()?;
+        if y <= r.y+2 || y >= r.y+r.height-1 { return None; }
+        if x < r.x+1 || x >= r.x+r.width-1 { return None; }
+        let idx = (y - (r.y+3)) as usize + self.finder.scroll;
+        if idx < self.finder.filtered.len() { Some(idx) } else { None }
     }
 
     fn session_index(&self, name: &str) -> Option<usize> {
@@ -2969,6 +3184,39 @@ impl View {
             }
             return Ok(());
         }
+        if self.finder.open {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(i) = self.finder_item_at(x, y) {
+                        self.finder.selected = i;
+                        self.finder_commit();
+                    } else if self.finder_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                        // click inside chrome but off a row: no-op
+                    } else {
+                        self.finder.open = false;
+                        self.mark_dirty();
+                    }
+                }
+                MouseEventKind::Moved => {
+                    if let Some(i) = self.finder_item_at(x, y) {
+                        if self.finder.selected != i { self.finder.selected = i; self.mark_dirty(); }
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if self.finder.selected + 1 < self.finder.filtered.len() {
+                        self.finder.selected += 1;
+                        let max_vis = 8usize;
+                        if self.finder.selected >= self.finder.scroll + max_vis { self.finder.scroll += 1; }
+                        self.mark_dirty();
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if self.finder.selected > 0 { self.finder.selected -= 1; if self.finder.selected < self.finder.scroll { self.finder.scroll = self.finder.selected; } self.mark_dirty(); }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.popup.open {
@@ -3069,7 +3317,12 @@ impl View {
                     }
                     return Ok(());
                 }
-                if self.sidebar_open && x < SIDEBAR_WIDTH && self.sidebar_hit(x, y) {
+                let w = self.effective_sidebar_width();
+                if self.sidebar_open && x == w && y < self.rows.saturating_sub(self.status_h()) {
+                    self.sidebar_width_drag = Some(SidebarWidthDrag { start_x: x, start_width: w });
+                    return Ok(());
+                }
+                if self.sidebar_open && x < w && self.sidebar_hit(x, y) {
                     return Ok(());
                 }
                 if let Some((split_id, dir, area)) = self.splitter_at(x, y) {
@@ -3150,6 +3403,15 @@ impl View {
                 return Ok(());
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(d) = self.sidebar_width_drag {
+                    let delta = x as i32 - d.start_x as i32;
+                    let w = (d.start_width as i32 + delta).clamp(MIN_SIDEBAR_WIDTH as i32, MAX_SIDEBAR_WIDTH as i32) as u16;
+                    let clamped = w.min(self.cols.saturating_sub(5).max(MIN_SIDEBAR_WIDTH));
+                    self.sidebar_width = clamped;
+                    self.recompute_geometry();
+                    self.mark_dirty();
+                    return Ok(());
+                }
                 if let Some(d) = self.sidebar_drag {
                     let avail = self.content_region_h() as usize;
                     let max_spaces = Self::spaces_split_max(avail);
@@ -3210,6 +3472,7 @@ impl View {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.drag = None;
                 self.sidebar_drag = None;
+                self.sidebar_width_drag = None;
                 if let Some(pc) = self.pending_click.take() {
                     let b = if m.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 0 };
                     let up = self
@@ -3360,7 +3623,11 @@ impl View {
     }
 
     fn content_region_h(&self) -> u16 {
-        self.sidebar_footer_y().saturating_sub(2)
+        if self.sidebar_layout() == SidebarLayout::Project {
+            self.sidebar_footer_y().saturating_sub(3)
+        } else {
+            self.sidebar_footer_y().saturating_sub(2)
+        }
     }
 
     fn visible_sidebar_tabs(&self) -> Vec<SidebarTab> {
@@ -3396,7 +3663,11 @@ impl View {
         if self.sidebar_layout() == SidebarLayout::Divided {
             return None;
         }
-        if y != 2 || x >= SIDEBAR_WIDTH {
+        if self.sidebar_layout() == SidebarLayout::Project {
+            return None;
+        }
+        let w = self.effective_sidebar_width();
+        if y != 2 || x >= w {
             return None;
         }
         let tabs = self.visible_sidebar_tabs();
@@ -3407,7 +3678,7 @@ impl View {
             return Some(tabs[0]);
         }
         // Ordered left→right: first in cfg.order is left half, second is right half.
-        let half = (SIDEBAR_WIDTH / 2).max(4);
+        let half = (w / 2).max(4);
         let idx = if x < half { 0 } else { 1.min(tabs.len() - 1) };
         Some(tabs[idx])
     }
@@ -3419,6 +3690,72 @@ impl View {
                 out.push(SidebarRow::Session(i));
                 if let Some(branch) = &s.branch {
                     out.push(SidebarRow::Branch(i, branch.clone()));
+                }
+            }
+        }
+        out.push(SidebarRow::NewSession);
+        out
+    }
+
+    fn project_name_for_session(&self, idx: usize) -> String {
+        self.layout
+            .as_ref()
+            .and_then(|l| l.sessions.get(idx))
+            .map(|s| short_workspace(&s.workspace))
+            .unwrap_or_else(|| format!("session-{}", idx + 1))
+    }
+
+    fn project_groups(&self) -> Vec<(String, Vec<usize>)> {
+        let mut map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        if let Some(layout) = &self.layout {
+            for (i, s) in layout.sessions.iter().enumerate() {
+                let name = short_workspace(&s.workspace);
+                let key = if name.is_empty() { s.name.clone() } else { name.clone() };
+                if !map.contains_key(&key) {
+                    order.push(key.clone());
+                }
+                map.entry(key).or_default().push(i);
+            }
+        }
+        order.into_iter().map(|k| {
+            let v = map.remove(&k).unwrap_or_default();
+            (k, v)
+        }).collect()
+    }
+
+    fn project_content(&self) -> Vec<SidebarRow> {
+        let mut out = Vec::new();
+        let groups = self.project_groups();
+        if groups.is_empty() {
+            out.push(SidebarRow::Dim("no workspaces".to_string()));
+            out.push(SidebarRow::NewSession);
+            return out;
+        }
+        for (proj, indices) in groups {
+            out.push(SidebarRow::ProjectHeader(proj));
+            for idx in indices {
+                out.push(SidebarRow::Worktree(idx));
+                if let Some(branch) = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).and_then(|s| s.branch.clone()) {
+                    out.push(SidebarRow::Branch(idx, branch));
+                }
+                // inline agents for this worktree (≤2)
+                let mut agents: Vec<(u64, String, AgentStatus)> = Vec::new();
+                if let Some(layout) = &self.layout {
+                    if let Some(sess) = layout.sessions.get(idx) {
+                        for (_, pane) in session_panes_all(sess) {
+                            if pane.is_ai {
+                                if let Some(agent) = pane.agent.as_ref() {
+                                    agents.push((pane.id, agent.name.clone(), agent.status));
+                                }
+                            }
+                        }
+                    }
+                }
+                // sort by rank so blocked/running appear first
+                agents.sort_by_key(|(_, _, st)| Self::agent_rank(*st));
+                for (pid, name, status) in agents.into_iter().take(2) {
+                    out.push(SidebarRow::InlineAgent(idx, pid, name, status));
                 }
             }
         }
@@ -3627,12 +3964,23 @@ impl View {
                     }
                 }
             }
+            SidebarLayout::Project => {
+                // y=1 is search, y=2 is section label
+                out[1] = (1, SidebarRow::Search);
+                out.push((2, SidebarRow::SectionLabel("projects".to_string(), None)));
+                let items = self.project_content();
+                let offset = (self.sidebar_scroll.0 as usize).min(items.len().saturating_sub(region_h));
+                for (i, item) in items.iter().skip(offset).take(region_h).enumerate() {
+                    out.push((3 + i as u16, item.clone()));
+                }
+            }
         }
         out
     }
 
     fn sidebar_wheel(&mut self, x: u16, y: u16, up: bool) -> bool {
-        if !self.sidebar_open || x >= SIDEBAR_WIDTH {
+        let w = self.effective_sidebar_width();
+        if !self.sidebar_open || x >= w {
             return false;
         }
         if y < 3 || y > self.sidebar_footer_y() {
@@ -3673,6 +4021,19 @@ impl View {
                 } else {
                     return false;
                 }
+                self.mark_dirty();
+                true
+            }
+            SidebarLayout::Project => {
+                let items = self.project_content();
+                let region_h = self.content_region_h() as usize;
+                let max = items.len().saturating_sub(region_h);
+                let next = if up {
+                    (self.sidebar_scroll.0 as usize).saturating_sub(STEP)
+                } else {
+                    (self.sidebar_scroll.0 as usize).saturating_add(STEP).min(max)
+                };
+                self.sidebar_scroll.0 = next as u16;
                 self.mark_dirty();
                 true
             }
@@ -3719,7 +4080,8 @@ impl View {
                     // Clicking the right-hand sort descriptor toggles the
                     // agent panel between grouped and ranked ordering.
                     let rw = right.chars().count() as u16;
-                    let max_r = SIDEBAR_WIDTH.saturating_sub(1).max(1);
+                    let w = self.effective_sidebar_width();
+                    let max_r = w.saturating_sub(1).max(1);
                     if x >= max_r.saturating_sub(rw) && x < max_r {
                         self.agents_panel_order = match self.agents_panel_order {
                             AgentPanelOrder::Grouped => AgentPanelOrder::Ranked,
@@ -3743,6 +4105,30 @@ impl View {
                     self.mark_dirty();
                     return true;
                 }
+                SidebarRow::Search => {
+                    self.open_finder();
+                    return true;
+                }
+                SidebarRow::Worktree(i) => {
+                    let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
+                    if let Some(name) = name {
+                        let _ = self.send(&Command::SessionFocus { name });
+                    }
+                    return true;
+                }
+                SidebarRow::ProjectHeader(_) => {
+                    return true;
+                }
+                SidebarRow::InlineAgent(i, pid, _, _) => {
+                    let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
+                    if let Some(name) = name {
+                        let _ = self.send(&Command::PaneFocus { session: name, pane_id: pid });
+                    }
+                    if self.mode == Mode::Inbox {
+                        self.close_inbox();
+                    }
+                    return true;
+                }
                 _ => return false,
             }
         }
@@ -3750,7 +4136,8 @@ impl View {
     }
 
     fn sidebar_session_at(&self, x: u16, y: u16) -> Option<usize> {
-        if !self.sidebar_open || x >= SIDEBAR_WIDTH {
+        let w = self.effective_sidebar_width();
+        if !self.sidebar_open || x >= w {
             return None;
         }
         self.sidebar_rows()
@@ -3758,6 +4145,8 @@ impl View {
             .find(|(ry, _)| *ry == y)
             .and_then(|(_, row)| match row {
                 SidebarRow::Session(i) => Some(i),
+                SidebarRow::Branch(i, _) => Some(i),
+                SidebarRow::Worktree(i) => Some(i),
                 _ => None,
             })
     }
@@ -4122,6 +4511,7 @@ impl View {
         self.render_keybind_overlay(f);
         self.render_settings(f);
         self.render_worktree_picker(f);
+        self.render_finder(f);
     }
 
     fn pane_label(&self, pid: u64) -> String {
@@ -4302,7 +4692,7 @@ impl View {
     }
 
     fn render_sidebar(&self, f: &mut Frame, size: Rect) {
-        let w = SIDEBAR_WIDTH.min(size.width);
+        let w = self.effective_sidebar_width().min(size.width);
         let theme = self.current_theme();
         let area = Rect::new(0, 0, w, size.height.saturating_sub(self.status_h()));
         fill(f, area, RColor::Reset);
@@ -4530,6 +4920,141 @@ impl View {
                     let style = Style::default().fg(theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD);
                     text(f, x, y, "  + NEW SESSION", style, max);
                 }
+                SidebarRow::Search => {
+                    let style = Style::default().fg(theme.panel_muted).bg(RColor::Reset);
+                    let label = "⌕ find";
+                    text(f, x + 2, y, label, style, max.saturating_sub(2));
+                    let hint = "leader+f";
+                    let rw = hint.chars().count() as u16;
+                    let max_r = w.saturating_sub(1).max(1);
+                    if rw + 4 <= max {
+                        let hs = Style::default().fg(theme.panel_muted).bg(RColor::Reset);
+                        text(f, x + max_r.saturating_sub(rw), y, hint, hs, rw);
+                    }
+                }
+                SidebarRow::SectionLabel(title, right) => {
+                    let style = Style::default().fg(theme.panel_muted).bg(RColor::Reset).add_modifier(Modifier::BOLD);
+                    text(f, x + 2, y, &title, style, max.saturating_sub(2));
+                    if let Some(right) = right {
+                        let rw = right.chars().count() as u16;
+                        let max_r = w.saturating_sub(1).max(1);
+                        if rw <= max_r.saturating_sub(2) {
+                            text(f, x + max_r.saturating_sub(rw), y, &right, style, rw);
+                        }
+                    }
+                }
+                SidebarRow::ProjectHeader(name) => {
+                    let active = {
+                        // header is active if any worktree in its group hosts the active session
+                        let mut is_active = false;
+                        if let Some(layout) = &self.layout {
+                            for (idx, s) in layout.sessions.iter().enumerate() {
+                                if short_workspace(&s.workspace) == name && layout.active.as_deref() == Some(&s.name) {
+                                    is_active = true;
+                                    break;
+                                }
+                                // fallback when workspace name equals session name
+                                if name == s.name && layout.active.as_deref() == Some(&s.name) {
+                                    is_active = true;
+                                    break;
+                                }
+                                let _ = idx;
+                            }
+                        }
+                        is_active
+                    };
+                    let bg = if active { theme.panel_sep } else { RColor::Reset };
+                    let fg = if active { theme.fg } else { theme.panel_muted };
+                    if active {
+                        fill(f, Rect::new(x, y, w, 1), bg);
+                    }
+                    // folder glyph + name, with repo hash color dot
+                    let hash = {
+                        let mut h: u32 = 0;
+                        for b in name.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
+                        h
+                    };
+                    let palette = [theme.accent, theme.secondary, theme.green, theme.orange, theme.panel_muted];
+                    let dot_col = palette[(hash as usize) % palette.len()];
+                    put(f, x + 1, y, "▸", Style::default().fg(dot_col).bg(bg));
+                    let shown = if name.chars().count() as u16 > max.saturating_sub(3) {
+                        let mut s = name.clone();
+                        while s.chars().count() as u16 > max.saturating_sub(4) && !s.is_empty() { s.pop(); }
+                        format!("{s}…")
+                    } else { name.clone() };
+                    text(f, x + 3, y, &shown, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD), max.saturating_sub(3));
+                }
+                SidebarRow::Worktree(i) => {
+                    let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
+                    let bg = if active { theme.panel_sep } else { RColor::Reset };
+                    let fg = if active { theme.fg } else { theme.panel_muted };
+                    if active {
+                        fill(f, Rect::new(x, y, w, 1), bg);
+                        put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg));
+                    }
+                    let name = self.session_name(i);
+                    // reserve 2 cols for right status dot
+                    let name_avail = max.saturating_sub(4).max(1);
+                    let shown = if name.chars().count() as u16 > name_avail {
+                        let mut s = name.clone();
+                        while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
+                        format!("{s}…")
+                    } else { name.clone() };
+                    text(f, x + 3, y, &shown, Style::default().fg(fg).bg(bg), name_avail);
+                    // right-aligned status dot for the most prominent agent in this worktree
+                    let dot_status = self.worktree_primary_status(i);
+                    if let Some(st) = dot_status {
+                        let (r,g,b) = kumo_core::theme::agent_status_color(st);
+                        let dot = match st {
+                            AgentStatus::Blocked => "◉",
+                            AgentStatus::Done => "✓",
+                            AgentStatus::Working => self.spinner_char(),
+                            AgentStatus::Idle => "●",
+                            AgentStatus::Unknown => "·",
+                        };
+                        let dot_fg = RColor::Rgb(r,g,b);
+                        put(f, x + w.saturating_sub(2), y, dot, Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD));
+                    }
+                }
+                SidebarRow::InlineAgent(i, pid, name, status) => {
+                    let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
+                    let pane_focused = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == pid).unwrap_or(false)).unwrap_or(false);
+                    let focused = (session_active && pane_focused) || self.inbox_selected(i, pid);
+                    let bg = if focused { theme.panel_sep } else { RColor::Reset };
+                    if focused { fill(f, Rect::new(x, y, w, 1), bg); }
+                    if self.inbox_selected(i, pid) {
+                        put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
+                    }
+                    let (r,g,b) = kumo_core::theme::agent_status_color(status);
+                    let dot = match status {
+                        AgentStatus::Blocked => "◉",
+                        AgentStatus::Done => "✓",
+                        AgentStatus::Working => self.spinner_char(),
+                        AgentStatus::Idle => "●",
+                        AgentStatus::Unknown => "·",
+                    };
+                    let dot_fg = RColor::Rgb(r,g,b);
+                    let dot_style = if matches!(status, AgentStatus::Idle | AgentStatus::Unknown) {
+                        Style::default().fg(theme.panel_muted).bg(bg)
+                    } else {
+                        Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
+                    };
+                    put(f, x + 4, y, dot, dot_style);
+                    let avail = max.saturating_sub(6) as usize;
+                    let label = if name.chars().count() > avail {
+                        let mut s = name.clone();
+                        while s.chars().count() > avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
+                        format!("{s}…")
+                    } else { name.clone() };
+                    let name_style = if status == AgentStatus::Blocked {
+                        Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
+                    } else if matches!(status, AgentStatus::Idle | AgentStatus::Unknown) {
+                        Style::default().fg(theme.panel_muted).bg(bg)
+                    } else {
+                        Style::default().fg(dot_fg).bg(bg)
+                    };
+                    text(f, x + 6, y, &label, name_style, avail as u16);
+                }
             }
         }
         // Scrollbars (rightmost sidebar column): one per overflowing panel.
@@ -4553,6 +5078,14 @@ impl View {
                 if p.agents_visible && p.agents_items.len() > entries_shown {
                     let off = (self.sidebar_scroll.1 as usize).min(p.agents_items.len() - entries_shown);
                     draw_scrollbar(f, scroll_x, p.agents_label_y + 1, entries_shown as u16, off, p.agents_items.len(), &theme);
+                }
+            }
+            SidebarLayout::Project => {
+                let items = self.project_content();
+                let region_h = self.content_region_h() as usize;
+                if items.len() > region_h {
+                    let off = (self.sidebar_scroll.0 as usize).min(items.len() - region_h);
+                    draw_scrollbar(f, scroll_x, 3, region_h as u16, off, items.len(), &theme);
                 }
             }
         }
@@ -5158,6 +5691,61 @@ impl View {
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         text(f, dd.x + 2, body_bottom, "j/k: move · enter: open · esc: close", footer, inner_w);
+    }
+
+    fn render_finder(&self, f: &mut Frame) {
+        if !self.finder.open { return; }
+        let theme = self.current_theme();
+        let Some(dd) = self.finder_rect() else { return };
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, dd.x + 2, dd.y + 1, "workspace finder", title, inner_w);
+        // input line
+        let input_bg = theme.input_bg;
+        let input_area = Rect::new(dd.x + 2, dd.y + 2, inner_w, 1);
+        fill(f, input_area, input_bg);
+        let cursor = self.finder.cursor.min(self.finder.input.chars().count());
+        let mut before = String::new();
+        let mut after = String::new();
+        for (i,c) in self.finder.input.chars().enumerate() {
+            if i < cursor { before.push(c); } else { after.push(c); }
+        }
+        let prompt = "⌕ ";
+        text(f, input_area.x, input_area.y, prompt, Style::default().fg(theme.panel_muted).bg(input_bg), 2);
+        text(f, input_area.x + 2, input_area.y, &before, Style::default().fg(theme.fg).bg(input_bg), inner_w.saturating_sub(3));
+        // cursor
+        let cur_x = input_area.x + 2 + before.chars().count() as u16;
+        if cur_x < input_area.x + input_area.width {
+            let ch = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".to_string());
+            let cur_style = Style::default().fg(RColor::Black).bg(theme.accent);
+            put(f, cur_x, input_area.y, &ch, cur_style);
+            if !after.is_empty() {
+                text(f, cur_x + 1, input_area.y, &after[after.chars().next().unwrap().len_utf8()..], Style::default().fg(theme.fg).bg(input_bg), inner_w.saturating_sub(3 + before.chars().count() as u16 + 1));
+            }
+        }
+        let body_top = dd.y + 3;
+        let body_bottom = dd.bottom() - 1;
+        for (i, fidx) in self.finder.filtered.iter().enumerate().skip(self.finder.scroll) {
+            let y = body_top + (i - self.finder.scroll) as u16;
+            if y >= body_bottom { break; }
+            let Some(item) = self.finder.items.get(*fidx) else { continue };
+            let sel = i == self.finder.selected;
+            let bg = if sel { theme.accent } else { theme.panel_sep };
+            for cx in (dd.x + 1)..(dd.x + 1 + inner_w + 2) { put(f, cx, y, " ", Style::default().bg(bg)); }
+            let fg = if sel { RColor::Black } else { theme.fg };
+            let marker = if sel { "▸" } else { " " };
+            put(f, dd.x + 2, y, marker, Style::default().fg(if sel { RColor::Black } else { theme.accent }).bg(bg));
+            let label = match item {
+                FinderItem::Session { name, .. } => format!("{name}"),
+                FinderItem::Tab { session_name, tab_name, .. } => format!("{session_name} / {tab_name}"),
+            };
+            text(f, dd.x + 4, y, &label, Style::default().fg(fg).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }), inner_w.saturating_sub(4));
+        }
+        if self.finder.filtered.is_empty() {
+            let st = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+            text(f, dd.x + 4, body_top, "no matches", st, inner_w);
+        }
     }
 
     fn render_copy_overlay(&self, f: &mut Frame, pid: u64, rect: Rect) {
@@ -5837,6 +6425,9 @@ mod tests {
             sidebar_split: None,
             sidebar_drag: None,
             agents_panel_order: AgentPanelOrder::default(),
+            sidebar_width: SIDEBAR_WIDTH,
+            sidebar_width_drag: None,
+            finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
