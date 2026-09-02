@@ -170,6 +170,7 @@ struct SidebarWidthDrag {
 
 /// Finder item for the workspace finder (`leader+f`).
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum FinderItem {
     Session { idx: usize, name: String },
     Tab { session_idx: usize, tab_idx: usize, session_name: String, tab_name: String },
@@ -435,6 +436,7 @@ struct SplitDrag {
 
 /// One sidebar row, shared by rendering and mouse hit-testing.
 #[derive(Clone, PartialEq, Debug)]
+#[allow(dead_code)]
 enum SidebarRow {
     Header(String),
     Spacer,
@@ -2452,6 +2454,7 @@ impl View {
         Some(Rect::new((self.cols - w)/2, (self.rows - h)/2, w, h))
     }
 
+    #[allow(dead_code)]
     fn finder_input_at(&self, x: u16, y: u16) -> bool {
         self.finder_rect().map(|r| y==r.y+1 && x>=r.x+1 && x<r.x+r.width-1).unwrap_or(false)
     }
@@ -3724,6 +3727,7 @@ impl View {
         out
     }
 
+    #[allow(dead_code)]
     fn project_name_for_session(&self, idx: usize) -> String {
         self.layout
             .as_ref()
@@ -3732,6 +3736,7 @@ impl View {
             .unwrap_or_else(|| format!("session-{}", idx + 1))
     }
 
+    #[allow(dead_code)]
     fn project_groups(&self) -> Vec<(String, Vec<usize>)> {
         let mut map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
         let mut order: Vec<String> = Vec::new();
