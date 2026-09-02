@@ -47,7 +47,10 @@ mod crossterm;
 /// v9 adds `DaemonEvent::Toast`: agent lifecycle transitions pushed as
 /// transient corner toasts to attached viewers. v10 extends `AgentStatus`
 /// with `done` (finished-but-unseen) and `unknown` (classification failed).
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11 adds agent orchestration primitives: `AgentWait`, `AgentPrompt`,
+/// `AgentRead`, `AgentStart`, `AgentRename`, `PaneWaitOutput`, `AgentBroadcast`
+/// and their result events.
+pub const PROTOCOL_VERSION: u32 = 11;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -532,6 +535,75 @@ impl AgentStatus {
     }
 }
 
+/// The `until` predicate for `Command::AgentWait` / `AgentPrompt --wait`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentWaitKind {
+    Blocked,
+    Done,
+    Idle,
+    Working,
+}
+
+impl AgentWaitKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentWaitKind::Blocked => "blocked",
+            AgentWaitKind::Done => "done",
+            AgentWaitKind::Idle => "idle",
+            AgentWaitKind::Working => "working",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "blocked" => Some(AgentWaitKind::Blocked),
+            "done" => Some(AgentWaitKind::Done),
+            "idle" => Some(AgentWaitKind::Idle),
+            "working" => Some(AgentWaitKind::Working),
+            _ => None,
+        }
+    }
+
+    pub fn matches(self, status: AgentStatus) -> bool {
+        match self {
+            AgentWaitKind::Blocked => status == AgentStatus::Blocked,
+            AgentWaitKind::Done => status == AgentStatus::Done,
+            AgentWaitKind::Idle => status == AgentStatus::Idle,
+            AgentWaitKind::Working => status == AgentStatus::Working,
+        }
+    }
+}
+
+/// Source selector for `Command::AgentRead`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentReadSource {
+    Visible,
+    Recent,
+    Detection,
+    Traceback,
+}
+
+impl AgentReadSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentReadSource::Visible => "visible",
+            AgentReadSource::Recent => "recent",
+            AgentReadSource::Detection => "detection",
+            AgentReadSource::Traceback => "traceback",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "visible" => Some(AgentReadSource::Visible),
+            "recent" => Some(AgentReadSource::Recent),
+            "detection" => Some(AgentReadSource::Detection),
+            "traceback" => Some(AgentReadSource::Traceback),
+            _ => None,
+        }
+    }
+}
+
 /// One pane inside a tab, for the `kumo pane list` / `kumo tab list` views.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct PaneInfo {
@@ -933,6 +1005,68 @@ pub enum Command {
         session: String,
         pane_id: u64,
     },
+    /// `kumo agent wait <pane> --until blocked|done|idle`: server-owned,
+    /// event-driven wait; pinned to the pane occupant so a process replacement
+    /// cannot satisfy the wait.
+    AgentWait {
+        session: String,
+        pane_id: u64,
+        until: AgentWaitKind,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// `kumo agent prompt <pane> <text>` (`--wait` / `--timeout`): bracketed-
+    /// paste aware submit; `--wait` races submit+wait into one server-owned
+    /// request.
+    AgentPrompt {
+        session: String,
+        pane_id: u64,
+        text: String,
+        #[serde(default)]
+        wait: Option<AgentWaitKind>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// `kumo agent read <pane> --source visible|recent|detection|traceback`.
+    AgentRead {
+        session: String,
+        pane_id: u64,
+        source: AgentReadSource,
+    },
+    /// `kumo agent start --kind <agent> --pane <id> [-- <args>]`: launches an
+    /// agent in an existing shell pane and returns once detection shows it ready.
+    AgentStart {
+        session: String,
+        pane_id: u64,
+        kind: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// `kumo agent rename <pane> <name>`: live alias so scripts reference agents
+    /// by name, not pane id.
+    AgentRename {
+        session: String,
+        pane_id: u64,
+        name: String,
+    },
+    /// `kumo pane wait-output <pane> --regex <pattern>`: one-shot output waiter.
+    PaneWaitOutput {
+        session: String,
+        pane_id: u64,
+        pattern: String,
+        #[serde(default)]
+        is_regex: bool,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// `kumo agent broadcast <text> [--filter status]`: fan one prompt out to
+    /// every AI pane in the session/tab over the existing send-keys path.
+    AgentBroadcast {
+        session: String,
+        text: String,
+        #[serde(default)]
+        filter: Option<AgentStatus>,
+    },
 
     // -- interactive input (attached viewers) -------------------------------
     /// A key pressed in the focused pane's terminal.
@@ -1043,6 +1177,29 @@ pub enum DaemonEvent {
         title: String,
         /// Location line (the owning session's workspace path); may be empty.
         body: String,
+    },
+    /// Reply to `AgentWait` / `AgentPrompt --wait`: the awaited status was reached.
+    AgentWaitResult {
+        pane_id: u64,
+        status: AgentStatus,
+    },
+    /// Reply to `AgentRead`: the pane's buffer slice for the requested source.
+    AgentReadResult {
+        pane_id: u64,
+        source: AgentReadSource,
+        text: String,
+        truncated: bool,
+    },
+    /// Reply to `PaneWaitOutput`: the output waiter matched.
+    PaneWaitResult {
+        pane_id: u64,
+        matched: String,
+    },
+    /// Typed error for orchestration primitives (also surfaced as `Reply` with
+    /// `error: <code>: <message>` for human CLI use).
+    Error {
+        code: String,
+        message: String,
     },
 }
 
@@ -1289,5 +1446,36 @@ mod tests {
         assert_eq!(AgentStatus::Idle.label(), "idle");
         assert_eq!(AgentStatus::Done.label(), "done");
         assert_eq!(AgentStatus::Unknown.label(), "unknown");
+    }
+
+    #[test]
+    fn orchestration_roundtrip() {
+        let cmds = vec![
+            Command::AgentWait { session: "s".into(), pane_id: 1, until: AgentWaitKind::Blocked, timeout_ms: Some(5000) },
+            Command::AgentPrompt { session: "s".into(), pane_id: 1, text: "hi".into(), wait: Some(AgentWaitKind::Idle), timeout_ms: None },
+            Command::AgentRead { session: "s".into(), pane_id: 1, source: AgentReadSource::Traceback },
+            Command::AgentStart { session: "s".into(), pane_id: 1, kind: "claude".into(), args: vec!["--help".into()] },
+            Command::AgentRename { session: "s".into(), pane_id: 1, name: "alpha".into() },
+            Command::PaneWaitOutput { session: "s".into(), pane_id: 1, pattern: "passed|failed".into(), is_regex: true, timeout_ms: Some(30000) },
+            Command::AgentBroadcast { session: "s".into(), text: "hello".into(), filter: Some(AgentStatus::Idle) },
+        ];
+        for cmd in cmds {
+            let mut buf = Vec::new();
+            write_framed(&mut buf, &cmd).unwrap();
+            let decoded: Command = read_framed(&mut &buf[..]).unwrap();
+            assert_eq!(decoded, cmd);
+        }
+        let events = vec![
+            DaemonEvent::AgentWaitResult { pane_id: 1, status: AgentStatus::Blocked },
+            DaemonEvent::AgentReadResult { pane_id: 1, source: AgentReadSource::Visible, text: "hi".into(), truncated: false },
+            DaemonEvent::PaneWaitResult { pane_id: 1, matched: "passed".into() },
+            DaemonEvent::Error { code: "agent_blocked".into(), message: "already blocked".into() },
+        ];
+        for ev in events {
+            let mut buf = Vec::new();
+            write_framed(&mut buf, &ev).unwrap();
+            let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();
+            assert_eq!(decoded, ev);
+        }
     }
 }
