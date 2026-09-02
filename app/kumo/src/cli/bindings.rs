@@ -90,6 +90,7 @@ pub(crate) enum Action {
     EnterCopyMode,
     EnterCopyModeSearch,
     AgentInbox,
+    WorkspaceFinder,
 }
 
 /// Logical group a binding belongs to, used to organize the showcase.
@@ -221,6 +222,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('y')), keys: "y", desc: "enter copy-mode (vi scroll / search / yank)", group: Group::Panes, action: Action::EnterCopyMode },
     BindingSpec { key: chord(KeyCode::Char('/')), keys: "/", desc: "search forward in scrollback (copy-mode)", group: Group::Panes, action: Action::EnterCopyModeSearch },
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
+    BindingSpec { key: chord(KeyCode::Char('f')), keys: "f", desc: "open workspace finder", group: Group::General, action: Action::WorkspaceFinder },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
     BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "focus the agent inbox (blocked · done · running)", group: Group::General, action: Action::AgentInbox },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
@@ -362,6 +364,7 @@ pub(crate) fn action_id(action: Action) -> &'static str {
             _ => unreachable!("jump-tab only supports 1-9"),
         },
         Action::ToggleSidebar => "toggle-sidebar",
+        Action::WorkspaceFinder => "workspace-finder",
         Action::Detach => "detach",
         Action::ShowKeybinds => "show-keybinds",
         Action::EnterCopyMode => "copy-mode",
@@ -418,6 +421,7 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "jump-tab-8" => Action::JumpTab(8),
         "jump-tab-9" => Action::JumpTab(9),
         "toggle-sidebar" => Action::ToggleSidebar,
+        "workspace-finder" | "finder" => Action::WorkspaceFinder,
         "detach" => Action::Detach,
         "show-keybinds" => Action::ShowKeybinds,
         "copy-mode" | "enter-copy-mode" => Action::EnterCopyMode,
@@ -451,6 +455,7 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::NextTab | Action::PrevTab => "cycle to the next / previous tab",
         Action::JumpTab(_) => "jump to the tab at that position",
         Action::ToggleSidebar => "toggle the sidebar",
+        Action::WorkspaceFinder => "open workspace finder",
         Action::Detach => "detach (daemon keeps running)",
         Action::ShowKeybinds => "show all keybindings",
         Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
@@ -473,7 +478,7 @@ pub(crate) fn action_group(action: Action) -> Group {
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
         | Action::JumpSession(_) => Group::Sessions,
         Action::ToggleSidebar => Group::Chrome,
-        Action::Detach | Action::ShowKeybinds | Action::AgentInbox => Group::General,
+        Action::Detach | Action::ShowKeybinds | Action::AgentInbox | Action::WorkspaceFinder => Group::General,
     }
 }
 

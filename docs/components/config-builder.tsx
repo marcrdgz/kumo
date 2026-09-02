@@ -21,7 +21,7 @@ interface BuilderState {
   rows: Row[];
   aiCmd: string;
   shell: string;
-  sidebarLayout: 'divided' | 'tabs';
+  sidebarLayout: 'project' | 'divided' | 'tabs';
   updateCheck: boolean;
   position: Position;
   sound: boolean;
@@ -103,6 +103,7 @@ const ACTION_GROUPS: { label: string; actions: string[] }[] = [
       'copy-mode',
       'copy-mode-search',
       'agent-inbox',
+      'workspace-finder',
     ],
   },
 ];
@@ -127,7 +128,7 @@ function initial(): BuilderState {
     rows: [{ id: 1, chord: 's', action: 'split-vertical' }],
     aiCmd: '',
     shell: '',
-    sidebarLayout: 'divided',
+    sidebarLayout: 'project',
     updateCheck: true,
     position: 'top-right',
     sound: true,
@@ -192,7 +193,7 @@ function buildToml(b: BuilderState): Seg[][] {
     !b.sound ||
     !b.blocked ||
     !b.finished;
-  const sidebarChanged = b.sidebarLayout !== 'divided';
+  const sidebarChanged = b.sidebarLayout !== 'project';
 
   const changed =
     leaderSet ||
@@ -507,6 +508,12 @@ export function ConfigBuilder() {
           <Field title="sidebar">
             <div className="flex flex-wrap gap-1.5">
               <Chip
+                active={st.sidebarLayout === 'project'}
+                onClick={() => patch({ sidebarLayout: 'project' })}
+              >
+                project
+              </Chip>
+              <Chip
                 active={st.sidebarLayout === 'divided'}
                 onClick={() => patch({ sidebarLayout: 'divided' })}
               >
@@ -520,8 +527,9 @@ export function ConfigBuilder() {
               </Chip>
             </div>
             <p className="text-xs text-fd-muted-foreground">
-              divided: stacked spaces + agent panels · tabs: classic two-tab
-              sidebar
+              project (default): worktrees with inline agents, collapses
+              inactive — branch dimmed, finder on <code>leader+f</code> · divided:
+              stacked spaces + agents · tabs: classic two-tab
             </p>
           </Field>
 
