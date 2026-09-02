@@ -254,26 +254,26 @@ drive kumo over the same JSON socket the CLI uses (`app/kumo/src/cli/cli.rs`,
 **Agent orchestration primitives** — the *wait* half of the `send-keys` story;
 waiting (not just injecting) is the actual ADE differentiator: tmux never had
 it, and it's the core of agent-to-agent work.
-- **`kumo agent wait <pane> --until blocked|done|idle`**: server-owned,
+- ✅ **`kumo agent wait <pane> --until blocked|done|idle|working`** (`--timeout`): server-owned,
   event-driven; pins the pane occupant so a process replacement can't satisfy
-  the wait; returns `agent_blocked` immediately when the pane is already
-  blocked.
-- **`kumo agent prompt <pane> <text>`** (`--wait` / `--timeout`): bracketed-paste
-  aware submit; `--wait` races submit + wait into one server-owned request
+  the wait (`agent_replaced`); returns `agent_blocked` immediately when the pane is already
+  blocked; timeout sweeps with `drain_dead_panes` (`app/kumo/src/daemon/app/waits.rs: server-owned registry`, polled after `tick()` in `server.rs`).
+- ✅ **`kumo agent prompt <pane> <text>`** (`--wait` / `--timeout`): bracketed-paste
+  aware submit (`ESC[200~` when `MODE_BRACKETED_PASTE`); `--wait` races submit + wait into one server-owned request
   (skips the two-hop race of a separate send + poll), and refuses to inject when
-  the agent is already blocked.
-- **`kumo agent read <pane> --source visible|recent|detection|traceback`**: the
+  the agent is already blocked (`app.rs: agent_prompt_inject`).
+- ✅ **`kumo agent read <pane> --source visible|recent|detection|traceback`**: the
   daemon already owns the screen buffer, and ghostty's screen buffer **holds the
   alternate screen** — full-screen agent transcripts (claude / codex) read
-  directly from the buffer, no mouse-scroll transcript scraping. With OSC 133
+  directly from the buffer, no mouse-scroll transcript scraping (`app.rs: pane_read_text`). With OSC 133
   markers the same read is **structured**: `--source traceback` returns the last
-  marked prompt + its output block (the same data the compose-popup consumes).
-- **`kumo agent start --kind <codex|…> --pane <id>`** `[-- <args>]`: launches an
+  marked prompt + its output block (the same data the compose-popup consumes; today falls back to `form`/120 rows).
+- ✅ **`kumo agent start --kind <codex|…> --pane <id>`** `[-- <args>]` + **`agent rename`**: launches an
   agent in an existing shell pane and returns once detection shows it ready
   (`agent_not_ready` when it starts blocked); `agent rename` adds live aliases
-  so scripts reference agents by name, not pane id.
-- **`kumo pane wait-output <pane> --regex`**: one-shot output waiter (no
-  polling) — what the verify loop and parallel agents wait on.
+  so scripts reference agents by name, not pane id (`commands.rs: start/rename`); `agent broadcast` fans a prompt via `send-keys` path (`--filter`).
+- ✅ **`kumo pane wait-output <pane> --regex`**: one-shot output waiter (no
+  polling, `regex` crate, `bad_regex` on compile error) — what the verify loop and parallel agents wait on; `agent read` + `wait-output` hold alt-screen intact.
 - **Verify loop** (`leader+r`) reworks its routing: run the suite into a fresh
   split, `pane wait-output` on it, and only feed the failure back to the agent
   once a `passed|failed`-shaped result is actually there.
