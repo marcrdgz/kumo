@@ -80,7 +80,13 @@ fn lighten(c: RColor, amt: u8) -> RColor {
 }
 
 fn sidebar_active_bg(theme: &OwnedTheme) -> RColor {
-    lighten(theme.panel_sep, 42)
+    // worktree selection — subtle but visible, a touch darker than before
+    lighten(theme.panel_sep, 28)
+}
+
+fn agent_active_bg(theme: &OwnedTheme) -> RColor {
+    // agent focused — slightly brighter than the worktree block so the cursor pops
+    lighten(theme.panel_sep, 40)
 }
 
 /// Blend an RGB color toward `bg` by `num/den` (indexed colors resolve through
@@ -5055,8 +5061,10 @@ impl View {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let pane_focused = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == pid).unwrap_or(false)).unwrap_or(false);
                     let focused = (session_active && pane_focused) || self.inbox_selected(i, pid);
-                    let bg = if focused { sidebar_active_bg(&theme) } else { RColor::Reset };
-                    if focused { fill(f, Rect::new(x, y, w, 1), bg); }
+                    // every agent under the active worktree shares a subtle block bg;
+                    // the actually focused agent gets a brighter pop
+                    let bg = if focused { agent_active_bg(&theme) } else if session_active { sidebar_active_bg(&theme) } else { RColor::Reset };
+                    if bg != RColor::Reset { fill(f, Rect::new(x, y, w, 1), bg); }
                     if self.inbox_selected(i, pid) {
                         put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
                     }
