@@ -64,6 +64,16 @@ Paste the result into `~/.config/kumo/config.toml` and run `kumo reload`.
         'Login shell used to spawn panes. Canonical home is `[terminal] shell`; a top-level `shell` also reads as a deprecated alias.',
       default: '`$SHELL` → `/bin/zsh`',
     },
+    'sidebar.layout': {
+      description:
+        'Sidebar arrangement: `project` (default, grouped worktrees with inline agents), `divided` (stacked spaces + agents), or `tabs` (classic two-tab). `explorer`/`navigator` are aliases of `project`.',
+      default: '`project`',
+    },
+    'sidebar.width': {
+      description:
+        'Width of the sidebar in columns when `layout = "project"` (draggable live, clamped 20..50). Honored on `kumo reload`.',
+      default: '`28` (`25` for other layouts)',
+    },
     'update-check': {
       description:
         'Whether the startup update check runs (also `KUMO_NO_UPDATE=1`).',

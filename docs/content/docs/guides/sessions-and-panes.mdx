@@ -6,7 +6,12 @@ icon: 🧩
 
 Kumo manages panes as a **binary split tree**: every split divides a pane into
 two, vertically or horizontally. Sessions are independent webs of panes, and
-the sidebar's SESSIONS tab lists them all.
+the sidebar's **project** layout (default) lists every worktree flat —
+session name with its branch dimmed and every agent inline — the active
+worktree expanded with all agents sharing its block highlight, inactive
+minimized to one line. Drag the sidebar's right edge to resize (20–50 cols).
+The classic SESSIONS/AGENTS panels remain via `[sidebar] layout = "divided" |
+"tabs"`.
 
 ## Pane operations
 

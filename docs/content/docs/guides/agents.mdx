@@ -37,18 +37,26 @@ arrows) move between the agents that need attention — **blocked · done ·
 running** — and <kbd>Enter</kbd> jumps straight to the chosen pane (switching
 session and tab as needed). <kbd>Esc</kbd> or <kbd>q</kbd> leaves the inbox.
 
-The sidebar's default layout stacks two panels with bold primary-color
-titles: **spaces** on top (sessions + branches), the **agent panel** below,
-grouped by state with counts — the grouped tail (idle · unknown) stays
-dimmed. Click the panel's right-hand `grouped` descriptor to switch it to
-the classic rank-sorted workspace rows (and back). Drag the divider between
-the panels to resize them (each side scrolls when the divider leaves less
-room than its content). The classic two-tab sidebar remains one config line
-away:
+The sidebar defaults to the **project** layout: a single `projects` list with
+`⌕ find` at the top. Each worktree shows its session name with the AI status
+dot on the left (where `▸` used to be) and `branch` dimmed underneath. The
+active worktree is expanded — branch + every agent underneath, all sharing a
+subtle block highlight — while inactive worktrees stay minimized to one line.
+Hover a worktree for a faint highlight; the focused agent gets a slightly
+brighter agent block so you always know where the cursor is. Drag the
+right-edge separator to resize the sidebar (20–50 cols, live, `kumo reload`
+honors `width`).
+
+Press **<kbd>leader+f</kbd>** (or click `⌕ find`) to open the workspace finder
+— a centered palette over sessions + tabs, `contains` filtered, `starts_with`
+ranked, `Enter` jumps (`SessionFocus`/`TabFocus`). The finder lives on the
+project layout; in other layouts `leader+f` is still bindable via
+`workspace-finder`. The classic layouts remain one config line away:
 
 ```toml
 [sidebar]
-layout = "divided" # "tabs" | "divided"
+layout = "project" # project | divided | tabs  — explorer/navigator alias project
+width = 28         # only for project, draggable live 20..50
 ```
 
 ```toml
