@@ -2344,6 +2344,11 @@ impl View {
     // ------------------------------------------------------------------
 
     fn open_finder(&mut self) {
+        if self.sidebar_layout() != SidebarLayout::Project {
+            self.notice = Some(("finder available only in project sidebar (set [sidebar] layout = \"project\")".to_string(), Instant::now()));
+            self.mark_dirty();
+            return;
+        }
         let mut items = Vec::new();
         if let Some(layout) = &self.layout {
             for (i, s) in layout.sessions.iter().enumerate() {
