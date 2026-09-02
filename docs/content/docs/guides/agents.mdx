@@ -24,10 +24,10 @@ inside any shell pane — kumo detects the process automatically.
 Each agent shows a status dot, detected from the live terminal buffer (not
 just the viewport), so it stays accurate even while you scroll:
 
-- 🟢 **Green** — working (actively producing output)
+- 🔵 **Blue** — working (actively producing output)
 - 🟠 **Orange** — blocked, waiting for your approval
 - ⚪ **Gray** — idle (quiet, ready)
-- 🔵 **Blue** — done (finished while you weren't looking; focusing the pane marks it seen → idle)
+- 🟢 **Green** — done (finished while you weren't looking; focusing the pane marks it seen → idle)
 - ❓ **Dim** — unknown (recognized agent whose classification failed — idle was not proven)
 
 The full five-state model is `working · blocked · idle · done · unknown`. `done` is the same transition that fires the corner toast on working→idle while unfocused; `unknown` means the daemon saw the agent process but no idle/working/blocked signal matched. Both are first-class wait targets: `kumo agent wait -p 42 --until done`.
