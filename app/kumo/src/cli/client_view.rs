@@ -79,6 +79,10 @@ fn lighten(c: RColor, amt: u8) -> RColor {
     }
 }
 
+fn sidebar_active_bg(theme: &OwnedTheme) -> RColor {
+    lighten(theme.panel_sep, 42)
+}
+
 /// Blend an RGB color toward `bg` by `num/den` (indexed colors resolve through
 /// the theme palette first). Used to make idle chrome recede next to accents.
 fn dim_toward(c: RColor, bg: ColorRgb, palette: &[ColorRgb; 16], num: u32, den: u32) -> RColor {
@@ -510,6 +514,7 @@ pub struct View {
     sidebar_width: u16,
     sidebar_width_drag: Option<SidebarWidthDrag>,
     finder: WorkspaceFinder,
+    sidebar_hover: Option<usize>,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -696,6 +701,7 @@ impl View {
             sidebar_width,
             sidebar_width_drag: None,
             finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
+            sidebar_hover: None,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -3112,6 +3118,21 @@ impl View {
                 self.update_tab_rects();
                 self.mark_dirty();
             }
+            // Sidebar close hover for project worktrees
+            let w = self.effective_sidebar_width();
+            let mut new_side_hover: Option<usize> = None;
+            if self.sidebar_open && self.sidebar_layout() == SidebarLayout::Project && x < w && y >= 3 && y <= self.sidebar_footer_y() {
+                for (ry, row) in self.sidebar_rows() {
+                    if ry == y {
+                        if let SidebarRow::Worktree(i) = row { new_side_hover = Some(i); }
+                        break;
+                    }
+                }
+            }
+            if new_side_hover != self.sidebar_hover {
+                self.sidebar_hover = new_side_hover;
+                self.mark_dirty();
+            }
         }
         if m.kind == MouseEventKind::Down(MouseButton::Left) && self.update_notice_close_at(x, y) {
             if let Some((key, _)) = self.update_notice.clone() {
@@ -3726,37 +3747,33 @@ impl View {
 
     fn project_content(&self) -> Vec<SidebarRow> {
         let mut out = Vec::new();
-        let groups = self.project_groups();
-        if groups.is_empty() {
-            out.push(SidebarRow::Dim("no workspaces".to_string()));
-            out.push(SidebarRow::NewSession);
-            return out;
-        }
-        for (proj, indices) in groups {
-            out.push(SidebarRow::ProjectHeader(proj));
-            for idx in indices {
-                out.push(SidebarRow::Worktree(idx));
-                if let Some(branch) = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).and_then(|s| s.branch.clone()) {
-                    out.push(SidebarRow::Branch(idx, branch));
-                }
-                // inline agents for this worktree (≤2)
-                let mut agents: Vec<(u64, String, AgentStatus)> = Vec::new();
-                if let Some(layout) = &self.layout {
-                    if let Some(sess) = layout.sessions.get(idx) {
-                        for (_, pane) in session_panes_all(sess) {
-                            if pane.is_ai {
-                                if let Some(agent) = pane.agent.as_ref() {
-                                    agents.push((pane.id, agent.name.clone(), agent.status));
-                                }
-                            }
+        let layout = match &self.layout {
+            Some(l) if !l.sessions.is_empty() => l,
+            _ => {
+                out.push(SidebarRow::Dim("no workspaces".to_string()));
+                out.push(SidebarRow::NewSession);
+                return out;
+            }
+        };
+        for idx in 0..layout.sessions.len() {
+            out.push(SidebarRow::Worktree(idx));
+            if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
+                out.push(SidebarRow::Branch(idx, branch));
+            }
+            // every agent for this worktree, sorted by rank
+            let mut agents: Vec<(u64, String, AgentStatus)> = Vec::new();
+            if let Some(sess) = layout.sessions.get(idx) {
+                for (_, pane) in session_panes_all(sess) {
+                    if pane.is_ai {
+                        if let Some(agent) = pane.agent.as_ref() {
+                            agents.push((pane.id, agent.name.clone(), agent.status));
                         }
                     }
                 }
-                // sort by rank so blocked/running appear first
-                agents.sort_by_key(|(_, _, st)| Self::agent_rank(*st));
-                for (pid, name, status) in agents.into_iter().take(2) {
-                    out.push(SidebarRow::InlineAgent(idx, pid, name, status));
-                }
+            }
+            agents.sort_by_key(|(_, _, st)| Self::agent_rank(*st));
+            for (pid, name, status) in agents {
+                out.push(SidebarRow::InlineAgent(idx, pid, name, status));
             }
         }
         out.push(SidebarRow::NewSession);
@@ -4110,6 +4127,15 @@ impl View {
                     return true;
                 }
                 SidebarRow::Worktree(i) => {
+                    let w = self.effective_sidebar_width();
+                    let close_x = w.saturating_sub(2);
+                    if x == close_x {
+                        let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
+                        if let Some(name) = name {
+                            let _ = self.send(&Command::SessionKill { name });
+                        }
+                        return true;
+                    }
                     let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
                     if let Some(name) = name {
                         let _ = self.send(&Command::SessionFocus { name });
@@ -4763,7 +4789,7 @@ impl View {
                 }
                 SidebarRow::Session(i) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
-                    let bg = if active { theme.panel_sep } else { RColor::Reset };
+                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let name = self.session_name(i);
                     if active {
                         fill(f, Rect::new(x, y, w, 1), bg);
@@ -4776,7 +4802,7 @@ impl View {
                 }
                 SidebarRow::Branch(i, b) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
-                    let bg = if active { theme.panel_sep } else { RColor::Reset };
+                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let name_color = if active { theme.fg } else { theme.panel_muted };
                     if active {
                         fill(f, Rect::new(x, y, w, 1), bg);
@@ -4791,7 +4817,8 @@ impl View {
                     let suffix_w = suffix.chars().count().min(avail);
                     let name_avail = avail.saturating_sub(suffix_w);
                     let shown = fit_branch_name(&b.name, name_avail);
-                    text(f, x + 4, y, &shown, Style::default().fg(name_color).bg(bg), avail as u16);
+                    let branch_style = Style::default().fg(name_color).bg(bg).add_modifier(Modifier::DIM);
+                    text(f, x + 4, y, &shown, branch_style, avail as u16);
                     let mut cx = x + 4 + shown.chars().count() as u16;
                     let mut remaining = (avail as u16).saturating_sub(shown.chars().count() as u16);
                     if b.ahead > 0 && remaining > 1 {
@@ -4830,7 +4857,7 @@ impl View {
                         .map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == *pid).unwrap_or(false))
                         .unwrap_or(false);
                     let focused = (session_active && pane_focused) || self.inbox_selected(*i, *pid);
-                    let bg = if focused { theme.panel_sep } else { RColor::Reset };
+                    let bg = if focused { sidebar_active_bg(&theme) } else { RColor::Reset };
                     if focused {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
@@ -4963,7 +4990,7 @@ impl View {
                         }
                         is_active
                     };
-                    let bg = if active { theme.panel_sep } else { RColor::Reset };
+                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let fg = if active { theme.fg } else { theme.panel_muted };
                     if active {
                         fill(f, Rect::new(x, y, w, 1), bg);
@@ -4986,22 +5013,28 @@ impl View {
                 }
                 SidebarRow::Worktree(i) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
-                    let bg = if active { theme.panel_sep } else { RColor::Reset };
-                    let fg = if active { theme.fg } else { theme.panel_muted };
-                    if active {
+                    let is_hover = self.sidebar_hover == Some(i);
+                    let bg = if active { sidebar_active_bg(&theme) } else if is_hover { lighten(theme.panel_sep, 18) } else { RColor::Reset };
+                    let fg = if active { theme.fg } else if is_hover { theme.fg } else { theme.panel_muted };
+                    if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
-                        put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg));
+                        if active {
+                            put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg));
+                        }
                     }
                     let name = self.session_name(i);
-                    // reserve 2 cols for right status dot
-                    let name_avail = max.saturating_sub(4).max(1);
+                    // reserve for dot + close (2 cols) + scrollbar
+                    let has_dot = self.worktree_primary_status(i).is_some();
+                    let reserve = if has_dot { 4 } else { 3 };
+                    let name_avail = max.saturating_sub(reserve).max(1);
                     let shown = if name.chars().count() as u16 > name_avail {
                         let mut s = name.clone();
                         while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
                         format!("{s}…")
                     } else { name.clone() };
-                    text(f, x + 3, y, &shown, Style::default().fg(fg).bg(bg), name_avail);
-                    // right-aligned status dot for the most prominent agent in this worktree
+                    let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
+                    text(f, x + 3, y, &shown, name_style, name_avail);
+                    // right-aligned status dot
                     let dot_status = self.worktree_primary_status(i);
                     if let Some(st) = dot_status {
                         let (r,g,b) = kumo_core::theme::agent_status_color(st);
@@ -5013,14 +5046,19 @@ impl View {
                             AgentStatus::Unknown => "·",
                         };
                         let dot_fg = RColor::Rgb(r,g,b);
-                        put(f, x + w.saturating_sub(2), y, dot, Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD));
+                        put(f, x + w.saturating_sub(3), y, dot, Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD));
                     }
+                    // close button at w-2
+                    let close_x = x + w.saturating_sub(2);
+                    let close_fg = if is_hover { theme.red } else { lighten(bg, if active { 26 } else { 24 }) };
+                    // in project mode ghost is very dim; draw anyway for discoverability
+                    put(f, close_x, y, "x", Style::default().fg(close_fg).bg(bg).add_modifier(if is_hover { Modifier::BOLD } else { Modifier::empty() }));
                 }
                 SidebarRow::InlineAgent(i, pid, name, status) => {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let pane_focused = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == pid).unwrap_or(false)).unwrap_or(false);
                     let focused = (session_active && pane_focused) || self.inbox_selected(i, pid);
-                    let bg = if focused { theme.panel_sep } else { RColor::Reset };
+                    let bg = if focused { sidebar_active_bg(&theme) } else { RColor::Reset };
                     if focused { fill(f, Rect::new(x, y, w, 1), bg); }
                     if self.inbox_selected(i, pid) {
                         put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
@@ -6428,6 +6466,7 @@ mod tests {
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_width_drag: None,
             finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
+            sidebar_hover: None,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
