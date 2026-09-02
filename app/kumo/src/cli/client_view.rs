@@ -3755,8 +3755,17 @@ impl View {
                 return out;
             }
         };
+        let active_idx = layout
+            .active
+            .as_deref()
+            .and_then(|name| layout.sessions.iter().position(|s| s.name == name));
         for idx in 0..layout.sessions.len() {
             out.push(SidebarRow::Worktree(idx));
+            // minimize non-active worktrees: only the active one shows branch + agents
+            let is_active = Some(idx) == active_idx;
+            if !is_active {
+                continue;
+            }
             if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
                 out.push(SidebarRow::Branch(idx, branch));
             }
@@ -4127,15 +4136,6 @@ impl View {
                     return true;
                 }
                 SidebarRow::Worktree(i) => {
-                    let w = self.effective_sidebar_width();
-                    let close_x = w.saturating_sub(2);
-                    if x == close_x {
-                        let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
-                        if let Some(name) = name {
-                            let _ = self.send(&Command::SessionKill { name });
-                        }
-                        return true;
-                    }
                     let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
                     if let Some(name) = name {
                         let _ = self.send(&Command::SessionFocus { name });
@@ -5018,23 +5018,8 @@ impl View {
                     let fg = if active { theme.fg } else if is_hover { theme.fg } else { theme.panel_muted };
                     if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
-                        if active {
-                            put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg));
-                        }
                     }
-                    let name = self.session_name(i);
-                    // reserve for dot + close (2 cols) + scrollbar
-                    let has_dot = self.worktree_primary_status(i).is_some();
-                    let reserve = if has_dot { 4 } else { 3 };
-                    let name_avail = max.saturating_sub(reserve).max(1);
-                    let shown = if name.chars().count() as u16 > name_avail {
-                        let mut s = name.clone();
-                        while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
-                        format!("{s}…")
-                    } else { name.clone() };
-                    let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
-                    text(f, x + 3, y, &shown, name_style, name_avail);
-                    // right-aligned status dot
+                    // AI status icon where `>` used to be (far left)
                     let dot_status = self.worktree_primary_status(i);
                     if let Some(st) = dot_status {
                         let (r,g,b) = kumo_core::theme::agent_status_color(st);
@@ -5046,13 +5031,25 @@ impl View {
                             AgentStatus::Unknown => "·",
                         };
                         let dot_fg = RColor::Rgb(r,g,b);
-                        put(f, x + w.saturating_sub(3), y, dot, Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD));
+                        let dot_style = if matches!(st, AgentStatus::Idle | AgentStatus::Unknown) {
+                            Style::default().fg(theme.panel_muted).bg(bg)
+                        } else {
+                            Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
+                        };
+                        put(f, x + 1, y, dot, dot_style);
+                    } else {
+                        // no agent — keep gutter empty
+                        put(f, x + 1, y, " ", Style::default().bg(bg));
                     }
-                    // close button at w-2
-                    let close_x = x + w.saturating_sub(2);
-                    let close_fg = if is_hover { theme.red } else { lighten(bg, if active { 26 } else { 24 }) };
-                    // in project mode ghost is very dim; draw anyway for discoverability
-                    put(f, close_x, y, "x", Style::default().fg(close_fg).bg(bg).add_modifier(if is_hover { Modifier::BOLD } else { Modifier::empty() }));
+                    let name = self.session_name(i);
+                    let name_avail = max.saturating_sub(3).max(1);
+                    let shown = if name.chars().count() as u16 > name_avail {
+                        let mut s = name.clone();
+                        while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
+                        format!("{s}…")
+                    } else { name.clone() };
+                    let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
+                    text(f, x + 3, y, &shown, name_style, name_avail);
                 }
                 SidebarRow::InlineAgent(i, pid, name, status) => {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
