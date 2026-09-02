@@ -6612,6 +6612,7 @@ mod tests {
     #[test]
     fn divided_sidebar_stacks_panels() {
         let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
         view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
         let rows = view.sidebar_rows();
         let labels: Vec<_> = rows
@@ -6648,6 +6649,7 @@ mod tests {
     #[test]
     fn divided_divider_drag_resizes_panels() {
         let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
         view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
         let down = |x, y| crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(MouseButton::Left),
@@ -6691,6 +6693,7 @@ mod tests {
     #[test]
     fn divided_sidebar_render_places_panel_rows() {
         let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
         view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
         // Short kind so the full `kind · space · pane` entry row fits the
         // sidebar budget.
@@ -6759,6 +6762,7 @@ mod tests {
     #[test]
     fn agents_panel_order_toggles_on_label_click() {
         let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
         view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
         assert_eq!(view.agents_panel_order, AgentPanelOrder::Grouped);
         assert!(view.agents_panel_items().iter().any(|r| matches!(r, SidebarRow::GroupHeader(..))));
@@ -7252,6 +7256,7 @@ mod tests {
     #[test]
     fn agent_toast_click_focuses_and_dismisses() {
         let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
         view.layout = Some(one_pane_layout());
         view.on_event(DaemonEvent::Toast {
             pane_id: 1,

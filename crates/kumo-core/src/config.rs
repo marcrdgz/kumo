@@ -141,12 +141,12 @@ impl BorderStyle {
 /// Sidebar layout: a two-tab toggle, two stacked panels, or the project-structured view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SidebarLayout {
-    /// Two stacked panels: spaces on top, agents below (default).
-    #[default]
+    /// Two stacked panels: spaces on top, agents below.
     Divided,
     /// Toggle tabs (`sessions` / `agents`), one section at a time.
     Tabs,
-    /// Projects → worktrees with inline agents (finder on `leader+f`).
+    /// Projects → worktrees with inline agents (finder on `leader+f`) (default).
+    #[default]
     Project,
 }
 
@@ -206,7 +206,7 @@ impl Default for SidebarConfig {
             order: vec![SidebarSection::Sessions, SidebarSection::Agents],
             sections: SidebarSections::default(),
             borders: SidebarBorders::default(),
-            layout: SidebarLayout::Divided,
+            layout: SidebarLayout::Project,
             width: None,
         }
     }
@@ -2319,7 +2319,7 @@ mod tests {
         assert_eq!(s.order, vec![SidebarSection::Sessions, SidebarSection::Agents]);
         assert!(s.sections.sessions && s.sections.agents);
         assert_eq!(s.borders.style, BorderStyle::Rounded);
-        assert_eq!(s.layout, SidebarLayout::Divided);
+        assert_eq!(s.layout, SidebarLayout::Project);
     }
 
     #[test]
@@ -2335,7 +2335,7 @@ mod tests {
         assert_eq!(sidebar().layout, SidebarLayout::Tabs);
         // Unknown values fall back to the default.
         write(&cfg_dir.join("config.toml"), "[sidebar]\nlayout = \"fancy\"\n");
-        assert_eq!(sidebar().layout, SidebarLayout::Divided);
+        assert_eq!(sidebar().layout, SidebarLayout::Project);
     }
 
     #[test]
