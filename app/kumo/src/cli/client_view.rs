@@ -6408,7 +6408,7 @@ impl View {
         // Footer + buttons — footer must not overlap the buttons.
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         let footer_y = dd.bottom().saturating_sub(2);
-        let footer_text = "tab: next field · ctrl+a: advanced · enter: create · esc: close";
+        let footer_text = "tab: next field · enter: create · esc: close";
         let button_start_x = self.worktree_create_button_rect(true).map(|r| r.x).unwrap_or(dd.right());
         let footer_avail = button_start_x.saturating_sub(dd.x + 3);
         text(f, dd.x + 2, footer_y, footer_text, footer, footer_avail);
