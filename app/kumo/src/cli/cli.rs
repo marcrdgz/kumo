@@ -124,6 +124,12 @@ enum CliCmd {
     AgentStart { session: Option<String>, pane: PaneRef, kind: String, args: Vec<String> },
     AgentRename { session: Option<String>, pane: PaneRef, name: String },
     AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
+    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, note: Option<String>, agent: Option<String>, is_ai: bool, name: Option<String>, json: bool },
+    WorktreeOpen { session: Option<String>, path: PathBuf },
+    WorktreeRemove { session: Option<String>, path: PathBuf, force: bool },
+    WorktreeSet { session: Option<String>, path: Option<PathBuf>, comment: Option<String>, status: Option<String>, json: bool },
+    WorktreeCurrent { session: Option<String>, path: Option<PathBuf>, json: bool },
+    WorktreeList { session: Option<String>, json: bool },
     Kill,
     Reload,
     Restart,
@@ -177,8 +183,7 @@ fn run_inner(args: &[String]) -> Result<()> {
     let cmd = parse(args)?;
     let mut stream = connect_daemon()?;
 
-    // Tab/pane list are special: they need a SessionList round trip and filter
-    // client-side (the metadata travels in SessionInfo).
+    // Tab/pane/worktree list are special: they need round trips.
     match cmd {
         CliCmd::TabList { session } => {
             let target = resolve_session(&mut stream, session)?;
@@ -219,6 +224,153 @@ fn run_inner(args: &[String]) -> Result<()> {
             };
             print_pane_list(&sessions, &target, tab_id);
             Ok(())
+        }
+        CliCmd::WorktreeList { session, json } => {
+            let sess = resolve_session(&mut stream, session)?;
+            kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeList { session: sess.clone() })?;
+            stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
+            loop {
+                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    Ok(DaemonEvent::Worktrees { items }) => {
+                        if json {
+                            let j = serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into());
+                            println!("{}", j);
+                        } else {
+                            print_worktree_list(&items);
+                        }
+                        return Ok(());
+                    }
+                    Ok(DaemonEvent::Reply { message }) if message.starts_with("error:") => {
+                        eprintln!("{}", message);
+                        return Ok(());
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_timeout(&e) => anyhow::bail!("no reply from daemon for worktree list"),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        CliCmd::WorktreeCurrent { session, path, json } => {
+            let sess = resolve_session(&mut stream, session)?;
+            kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess.clone(), path: path.clone() })?;
+            stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
+            loop {
+                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    Ok(DaemonEvent::WorktreeCurrent { info }) => {
+                        if json {
+                            let j = serde_json::to_string_pretty(&info).unwrap_or_else(|_| "null".into());
+                            println!("{}", j);
+                        } else if let Some(wt) = info {
+                            println!("{}  {}  {}  {}", wt.path.display(), wt.branch.as_deref().unwrap_or("(detached)"), wt.status.as_deref().unwrap_or("-"), wt.comment.as_deref().unwrap_or(""));
+                        } else {
+                            println!("no worktree");
+                        }
+                        return Ok(());
+                    }
+                    Ok(DaemonEvent::Reply { message }) if message.starts_with("error:") => {
+                        eprintln!("{}", message);
+                        return Ok(());
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_timeout(&e) => anyhow::bail!("no reply from daemon for worktree current"),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name, json } => {
+            let sess = resolve_session(&mut stream, session)?;
+            let br = branch.unwrap_or_default();
+            let cmd = Command::WorktreeCreate { session: sess.clone(), branch: br, from, note, agent, is_ai, name };
+            kumo_core::protocol::write_framed(&mut stream, &cmd)?;
+            if json {
+                stream.set_read_timeout(Some(Duration::from_millis(5000)))?;
+                loop {
+                    match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                        Ok(DaemonEvent::Reply { message }) => {
+                            let j = serde_json::json!({"message": message});
+                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            return Ok(());
+                        }
+                        Ok(DaemonEvent::Error { code, message }) => {
+                            let j = serde_json::json!({"error": code, "message": message});
+                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            anyhow::bail!("{code}: {message}");
+                        }
+                        Ok(_) => continue,
+                        Err(e) if is_timeout(&e) => anyhow::bail!("no reply from daemon for worktree create"),
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                read_reply(&mut stream)?;
+                return Ok(());
+            }
+        }
+        CliCmd::WorktreeOpen { session, path } => {
+            let sess = resolve_session(&mut stream, session)?;
+            let cmd = Command::WorktreeOpen { session: sess, path };
+            kumo_core::protocol::write_framed(&mut stream, &cmd)?;
+            read_reply(&mut stream)?;
+            return Ok(());
+        }
+        CliCmd::WorktreeRemove { session, path, force } => {
+            let sess = resolve_session(&mut stream, session)?;
+            let cmd = Command::WorktreeRemove { session: sess, path, force };
+            kumo_core::protocol::write_framed(&mut stream, &cmd)?;
+            read_reply(&mut stream)?;
+            return Ok(());
+        }
+        CliCmd::WorktreeSet { session, path, comment, status, json } => {
+            let sess = resolve_session(&mut stream, session)?;
+            let pbuf = if let Some(p) = path {
+                p
+            } else {
+                // Default to session workspace
+                let sessions = fetch_session_list(&mut stream)?;
+                let s = sessions.iter().find(|s| s.name == sess).ok_or_else(|| anyhow::anyhow!("no session {sess:?}"))?;
+                s.workspace.clone()
+            };
+            let cmd = Command::WorktreeSet { session: sess.clone(), path: pbuf.clone(), comment: comment.clone(), status: status.clone() };
+            kumo_core::protocol::write_framed(&mut stream, &cmd)?;
+            if json {
+                // After set, read Reply then print JSON with resulting checkpoint
+                stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
+                let reply_msg = loop {
+                    match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                        Ok(DaemonEvent::Reply { message }) => break message,
+                        Ok(DaemonEvent::Error { code, message }) => {
+                            let j = serde_json::json!({"error": code, "message": message});
+                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            anyhow::bail!("{code}: {message}");
+                        }
+                        Ok(_) => continue,
+                        Err(e) if is_timeout(&e) => break String::new(),
+                        Err(e) => return Err(e),
+                    }
+                };
+                // Fetch current for JSON surface
+                kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess, path: Some(pbuf.clone()) })?;
+                stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
+                loop {
+                    match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                        Ok(DaemonEvent::WorktreeCurrent { info }) => {
+                            let j = serde_json::json!({"message": reply_msg, "worktree": info});
+                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            return Ok(());
+                        }
+                        Ok(_) => continue,
+                        Err(e) if is_timeout(&e) => {
+                            let j = serde_json::json!({"message": reply_msg});
+                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                read_reply(&mut stream)?;
+                return Ok(());
+            }
         }
         cmd => {
             let command = match cmd {
@@ -353,6 +505,12 @@ fn run_inner(args: &[String]) -> Result<()> {
                     let session = resolve_session(&mut stream, session)?;
                     Command::AgentBroadcast { session, text, filter }
                 }
+                CliCmd::WorktreeCreate { .. } => unreachable!(),
+                CliCmd::WorktreeOpen { .. } => unreachable!(),
+                CliCmd::WorktreeRemove { .. } => unreachable!(),
+                CliCmd::WorktreeSet { .. } => unreachable!(),
+                CliCmd::WorktreeCurrent { .. } => unreachable!(),
+                CliCmd::WorktreeList { .. } => unreachable!(),
             };
 
             // Waiter commands need a long read timeout (agent wait up to 120s, output wait 30s)
@@ -394,6 +552,7 @@ fn parse(args: &[String]) -> Result<CliCmd> {
         "pane" => parse_pane(rest),
         "agent" => parse_agent(rest),
         "tab" => parse_tab(rest),
+        "worktree" => parse_worktree(rest),
         "ls" | "list" => Ok(CliCmd::List),
         "kill" => Ok(CliCmd::Kill),
         "reload" => Ok(CliCmd::Reload),
@@ -844,6 +1003,195 @@ fn parse_tab(args: &[String]) -> Result<CliCmd> {
     }
 }
 
+fn parse_worktree(args: &[String]) -> Result<CliCmd> {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        anyhow::bail!("missing worktree subcommand (see `kumo worktree -h`)");
+    };
+    // Detect --json anywhere (global for worktree subcommands)
+    let has_json = args.iter().any(|a| a == "--json");
+    let filtered_args: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
+    let sub = filtered_args.first().map(|s| s.as_str()).unwrap_or(sub);
+    // Extract -s/--session wherever present
+    let mut session: Option<String> = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < filtered_args.len() {
+        match filtered_args[i].as_str() {
+            "-s" | "--session" => {
+                if let Some(v) = filtered_args.get(i+1) { session = Some(v.clone()); }
+                i += 2;
+            }
+            _ => { rest.push(filtered_args[i].clone()); i+=1; }
+        }
+    }
+    match sub {
+        "create" => {
+            let mut is_ai = false;
+            let mut branch: Option<String> = None;
+            let mut from: Option<String> = None;
+            let mut note: Option<String> = None;
+            let mut agent: Option<String> = None;
+            let mut name: Option<String> = None;
+            let mut positional: Vec<String> = Vec::new();
+            let mut j = 0;
+            while j < rest.len() {
+                match rest[j].as_str() {
+                    "--ai" => { is_ai = true; j+=1; }
+                    "--branch" => {
+                        branch = Some(need(&rest, j+1, "a branch after --branch")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--branch=") => {
+                        branch = Some(s.strip_prefix("--branch=").unwrap().to_string());
+                        j+=1;
+                    }
+                    "--from" => {
+                        from = Some(need(&rest, j+1, "a ref after --from")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--from=") => {
+                        from = Some(s.strip_prefix("--from=").unwrap().to_string());
+                        j+=1;
+                    }
+                    "--note" | "--comment" => {
+                        note = Some(need(&rest, j+1, "a note after --note")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--note=") || s.starts_with("--comment=") => {
+                        let v = s.split_once('=').unwrap().1.to_string();
+                        note = Some(v); j+=1;
+                    }
+                    "--agent" => {
+                        agent = Some(need(&rest, j+1, "an agent after --agent")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--agent=") => {
+                        agent = Some(s.strip_prefix("--agent=").unwrap().to_string());
+                        j+=1;
+                    }
+                    s if !s.starts_with('-') => { positional.push(s.to_string()); j+=1; }
+                    _ => { anyhow::bail!("unknown worktree create flag {:?}", rest[j]); }
+                }
+            }
+            // Positional handling: for --ai, first positional is task name (Nombre); for generic, it's branch
+            if is_ai {
+                if !positional.is_empty() { name = Some(positional[0].clone()); }
+                // Also support `kumo worktree create --ai <branch>` generic fallback when no --branch but want branch directly?
+                // If name provided and branch not given, name is the derivation source; branch stays None for daemon to derive.
+            } else {
+                // Generic: treat first positional as branch if --branch not given
+                if branch.is_none() && !positional.is_empty() {
+                    branch = Some(positional[0].clone());
+                } else if !positional.is_empty() {
+                    // Both --branch and positional — positional is extra name hint? Use first positional as name for derived fallback? Keep branch as override.
+                    if positional.len() > 1 { anyhow::bail!("too many positional args for worktree create"); }
+                    if branch.is_some() && positional.len()==1 {
+                        // positional is name hint when branch override present
+                        name = Some(positional[0].clone());
+                    }
+                }
+                // Warn if --ai flags were not set but from/note/agent given
+                if from.is_some() || note.is_some() || agent.is_some() {
+                    anyhow::bail!("--from/--note/--agent require --ai (try `kumo worktree create --ai ...`)");
+                }
+            }
+            // Validation: for generic, need branch
+            if !is_ai && branch.is_none() {
+                anyhow::bail!("worktree create needs a branch (e.g. `kumo worktree create feat/x` or `kumo worktree create --ai my-task`)");
+            }
+            // For --ai with no branch and no name and no from, daemon will fallback to wt-work — allow but ensure at least one source
+            // If branch is None and name is None and from/branch empty, we still allow (derive_branch fallback).
+            Ok(CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name, json: has_json })
+        }
+        "open" => {
+            let path = rest.first().cloned().ok_or_else(|| anyhow::anyhow!("worktree open needs PATH"))?;
+            Ok(CliCmd::WorktreeOpen { session, path: PathBuf::from(path) })
+        }
+        "rm" | "remove" => {
+            let mut force = false;
+            let mut p: Option<String> = None;
+            for arg in &rest {
+                if arg == "--force" || arg == "-f" { force = true; }
+                else if !arg.starts_with('-') && p.is_none() { p = Some(arg.clone()); }
+                else { anyhow::bail!("unknown worktree rm flag {:?}", arg); }
+            }
+            let path = p.ok_or_else(|| anyhow::anyhow!("worktree rm needs PATH"))?;
+            Ok(CliCmd::WorktreeRemove { session, path: PathBuf::from(path), force })
+        }
+        "set" => {
+            let mut comment: Option<String> = None;
+            let mut status: Option<String> = None;
+            let mut path: Option<PathBuf> = None;
+            let mut comment_set = false;
+            let mut status_set = false;
+            let mut j = 0;
+            while j < rest.len() {
+                match rest[j].as_str() {
+                    "--comment" | "--note" => {
+                        comment = Some(need(&rest, j+1, "a comment after --comment")?);
+                        comment_set = true; j+=2;
+                    }
+                    s if s.starts_with("--comment=") || s.starts_with("--note=") => {
+                        comment = Some(s.split_once('=').unwrap().1.to_string());
+                        comment_set = true; j+=1;
+                    }
+                    "--status" => {
+                        status = Some(need(&rest, j+1, "a status after --status")?);
+                        status_set = true; j+=2;
+                    }
+                    s if s.starts_with("--status=") => {
+                        status = Some(s.strip_prefix("--status=").unwrap().to_string());
+                        status_set = true; j+=1;
+                    }
+                    "--path" => {
+                        path = Some(PathBuf::from(need(&rest, j+1, "a path after --path")?));
+                        j+=2;
+                    }
+                    s if s.starts_with("--path=") => {
+                        path = Some(PathBuf::from(s.strip_prefix("--path=").unwrap()));
+                        j+=1;
+                    }
+                    s if !s.starts_with('-') && path.is_none() => {
+                        path = Some(PathBuf::from(s)); j+=1;
+                    }
+                    _ => { anyhow::bail!("unknown worktree set flag {:?}", rest[j]); }
+                }
+            }
+            if !comment_set && !status_set {
+                anyhow::bail!("worktree set needs --comment and/or --status");
+            }
+            Ok(CliCmd::WorktreeSet { session, path, comment, status, json: has_json })
+        }
+        "current" => {
+            let mut path: Option<PathBuf> = None;
+            let mut j = 0;
+            while j < rest.len() {
+                match rest[j].as_str() {
+                    "--path" => {
+                        path = Some(PathBuf::from(need(&rest, j+1, "a path after --path")?));
+                        j+=2;
+                    }
+                    s if s.starts_with("--path=") => {
+                        path = Some(PathBuf::from(s.strip_prefix("--path=").unwrap()));
+                        j+=1;
+                    }
+                    s if !s.starts_with('-') && path.is_none() => { path = Some(PathBuf::from(s)); j+=1; }
+                    _ => { anyhow::bail!("unknown worktree current flag {:?}", rest[j]); }
+                }
+            }
+            Ok(CliCmd::WorktreeCurrent { session, path, json: has_json })
+        }
+        "list" | "ls" => {
+            // Optional --path filter not needed; just session filtering. Accept stray positional as session override? No, -s handles.
+            if !rest.is_empty() {
+                anyhow::bail!("worktree list takes no positional args (use -s SESSION)");
+            }
+            Ok(CliCmd::WorktreeList { session, json: has_json })
+        }
+        other => anyhow::bail!("unknown worktree subcommand {other:?}"),
+    }
+}
+
 /// Parse a timeout string like `30s`, `500ms`, `2m`, or plain `30000` (ms) into milliseconds.
 fn parse_timeout_ms(s: &str) -> Result<u64> {
     let s = s.trim();
@@ -943,6 +1291,7 @@ fn domain_help(domain: &str) -> &'static str {
         "pane" => PANE_HELP,
         "agent" => AGENT_HELP,
         "tab" => TAB_HELP,
+        "worktree" => WORKTREE_HELP,
         "server" => SERVER_HELP,
         "ls" | "list" | "kill" | "reload" => LEGACY_HELP,
         _ => "",
@@ -1051,6 +1400,36 @@ USAGE:
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
     --name NAME             name the new tab (defaults to the workspace name)
+";
+
+const WORKTREE_HELP: &str = "\
+kumo worktree — isolated worktrees for parallel agents
+
+USAGE:
+    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [-s SESSION] [--json]
+    kumo worktree open PATH [-s SESSION]
+    kumo worktree rm PATH [--force] [-s SESSION]
+    kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]
+    kumo worktree current [--path PATH] [-s SESSION] [--json]
+    kumo worktree list [-s SESSION] [--json]   (alias: ls)
+
+OPTIONS:
+    -s, --session SESSION   target session (defaults to the active one)
+    --ai                    isolated ephemeral worktree (never reuses files)
+    --branch BRANCH         explicit branch (overrides derived name)
+    --from REF              start point: branch, commit, #1234, or GitHub URL
+    --note NOTE             checkpoint note seeded on creation
+    --agent AGENT           chain `kumo agent start --kind AGENT` into new pane
+    --comment COMMENT       for `set`: free-text checkpoint
+    --status STATUS         for `set`: todo|in-progress|in-review|completed
+    --path PATH             worktree path (defaults to session workspace)
+    --force                 for `rm`: delete even with unmerged commits
+    --json                  machine-readable JSON output
+
+Branch naming (Orca-aligned, no `kumo/` prefix):
+    NAME \"fix login\" → branch \"fix-login\"
+    --from #123 → branch \"pr-123\" (or PR head branch via `gh`)
+    --branch feat/login wins over NAME
 ";
 
 const SERVER_HELP: &str = "\
@@ -1303,6 +1682,27 @@ fn print_tab_list(sessions: &[kumo_protocol::SessionInfo], target: &str) {
         let mark = if tab.active { "* " } else { "  " };
         let pw = if tab.pane_count == 1 { "pane" } else { "panes" };
         println!("{mark}{} (id {}): {} {}{}", tab.name, tab.id, tab.pane_count, pw, if tab.zoomed { " (zoomed)" } else { "" });
+    }
+}
+
+fn print_worktree_list(items: &[kumo_protocol::WireWorktree]) {
+    if items.is_empty() {
+        println!("(no worktrees)");
+        return;
+    }
+    for wt in items {
+        let branch = wt.branch.as_deref().unwrap_or("(detached)");
+        let flags = {
+            let mut f = Vec::new();
+            if wt.is_main { f.push("main"); }
+            if wt.open { f.push("open"); }
+            if wt.is_ephemeral { f.push("ephemeral"); }
+            if f.is_empty() { String::new() } else { format!(" [{}]", f.join(",")) }
+        };
+        let status = wt.status.as_deref().unwrap_or("-");
+        let comment = wt.comment.as_deref().unwrap_or("");
+        let cmt = if comment.is_empty() { String::new() } else { format!(" · {}", comment) };
+        println!("{}  {}{}  status={}{}", wt.path.display(), branch, flags, status, cmt);
     }
 }
 

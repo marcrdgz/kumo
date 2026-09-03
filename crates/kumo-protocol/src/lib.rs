@@ -49,8 +49,10 @@ mod crossterm;
 /// with `done` (finished-but-unseen) and `unknown` (classification failed).
 /// v11 adds agent orchestration primitives: `AgentWait`, `AgentPrompt`,
 /// `AgentRead`, `AgentStart`, `AgentRename`, `PaneWaitOutput`, `AgentBroadcast`
-/// and their result events.
-pub const PROTOCOL_VERSION: u32 = 11;
+/// and their result events. v12 adds isolated `--ai` worktrees: extends
+/// `WorktreeCreate` with `from`/`note`/`agent`/`is_ai` and adds `WorktreeRemove`,
+/// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
+pub const PROTOCOL_VERSION: u32 = 12;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -424,6 +426,46 @@ pub struct WireWorktree {
     pub is_main: bool,
     /// True when a kumo session is already open in this worktree.
     pub open: bool,
+    /// Free-text checkpoint comment (lightweight checkpoint). `#[serde(default)]`
+    /// keeps v11 daemons wire-compatible.
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Checkpoint status: `todo` | `in-progress` | `in-review` | `completed`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// True when created via `kumo worktree create --ai` (ephemeral, isolated).
+    #[serde(default)]
+    pub is_ephemeral: bool,
+}
+
+/// Status for lightweight worktree checkpoints.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorktreeStatus {
+    Todo,
+    InProgress,
+    InReview,
+    Completed,
+}
+
+impl WorktreeStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorktreeStatus::Todo => "todo",
+            WorktreeStatus::InProgress => "in-progress",
+            WorktreeStatus::InReview => "in-review",
+            WorktreeStatus::Completed => "completed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "todo" => Some(Self::Todo),
+            "in-progress" | "in_progress" | "inprogress" | "wip" => Some(Self::InProgress),
+            "in-review" | "in_review" | "inreview" | "review" => Some(Self::InReview),
+            "completed" | "done" => Some(Self::Completed),
+            _ => None,
+        }
+    }
 }
 
 /// A startup update notice, keyed so the client can dismiss it.
@@ -923,12 +965,53 @@ pub enum Command {
     WorktreeCreate {
         session: String,
         branch: String,
+        /// Optional start point for the new branch (`--from`): branch, commit, `#1234`, or GitHub URL.
+        #[serde(default)]
+        from: Option<String>,
+        /// Optional checkpoint note seeded on creation (`--note`).
+        #[serde(default)]
+        note: Option<String>,
+        /// Optional agent to chain via `agent start` into the new pane (`--agent`).
+        #[serde(default)]
+        agent: Option<String>,
+        /// Ephemeral isolated worktree (`--ai`).
+        #[serde(default)]
+        is_ai: bool,
+        /// Workspace/task name (Nombre tab) used when `branch` override is empty — slugified to branch.
+        #[serde(default)]
+        name: Option<String>,
     },
     /// Open the session already working in `path` (or create one) — the
     /// worktree picker's confirm.
     WorktreeOpen {
         session: String,
         path: std::path::PathBuf,
+    },
+    /// Remove a worktree directory and optionally its branch (ephemeral `--ai` worktrees).
+    WorktreeRemove {
+        session: String,
+        path: std::path::PathBuf,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Set lightweight checkpoint comment/status for a worktree.
+    WorktreeSet {
+        session: String,
+        path: std::path::PathBuf,
+        #[serde(default)]
+        comment: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+    },
+    /// Query the checkpoint for a worktree/session (reply: `WorktreeCurrent`).
+    WorktreeCurrent {
+        session: String,
+        #[serde(default)]
+        path: Option<std::path::PathBuf>,
+    },
+    /// List worktrees with checkpoint fields joined (reply: `Worktrees`).
+    WorktreeListDetailed {
+        session: String,
     },
     /// Apply theme `idx` daemon-side (the ANSI palette re-colors every pane)
     /// and push the new `Theme` event to clients.
@@ -1155,6 +1238,10 @@ pub enum DaemonEvent {
     /// Reply to `WorktreeList`.
     Worktrees {
         items: Vec<WireWorktree>,
+    },
+    /// Reply to `WorktreeCurrent` (single worktree checkpoint).
+    WorktreeCurrent {
+        info: Option<WireWorktree>,
     },
     /// Reply to `UpdateStatus`: the startup update notice, if one is active.
     UpdateNotice {

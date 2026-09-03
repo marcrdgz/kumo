@@ -57,10 +57,10 @@ fn main() -> Result<()> {
         }
     }
 
-    // Control CLI: `kumo session|pane|agent|tab ...` (and the legacy aliases
+    // Control CLI: `kumo session|pane|agent|tab|worktree ...` (and the legacy aliases
     // `ls`/`kill`/`reload`/`server restart`).
     match args.first().map(|s| s.as_str()) {
-        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("ls")
+        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("ls")
         | Some("list") | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
@@ -178,6 +178,14 @@ fn print_help() {
     println!("    kumo agent status  (aliases: list, ls)");
     println!("    kumo agent kill -p PANE [-s SESSION]");
     println!("    kumo agent explain [PANE] [-s SESSION]");
+    println!();
+    println!("WORKTREES:");
+    println!("    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [-s SESSION] [--json]");
+    println!("    kumo worktree open PATH [-s SESSION]");
+    println!("    kumo worktree rm PATH [--force] [-s SESSION]");
+    println!("    kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]");
+    println!("    kumo worktree current [--path PATH] [-s SESSION] [--json]");
+    println!("    kumo worktree list [-s SESSION] [--json]");
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");

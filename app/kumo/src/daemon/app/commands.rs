@@ -690,24 +690,30 @@ impl App {
     }
 
     /// List the git worktrees of a session's repository (main + linked), with
-    /// the kumo-side flags the picker renders (main tree, already-open).
+    /// the kumo-side flags the picker renders (main tree, already-open) plus checkpoint fields.
     pub(crate) fn worktree_list(&self, session: &str) -> Result<Vec<WireWorktree>> {
         let Some(ws) = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone()) else {
             return Ok(Vec::new());
         };
         let items = kumo_core::worktrees::list_worktrees(&ws)
             .map_err(|e| anyhow!("{e}"))?;
-        let root = kumo_core::worktrees::repo_root(&ws);
         let rows = items
             .into_iter()
-            .map(|info| {
-                let canon = std::fs::canonicalize(&info.path).ok();
-                let is_main = match (&root, &canon) {
-                    (Some(r), Some(c)) => *r == *c,
-                    _ => false,
-                };
+            .enumerate()
+            .map(|(idx, info)| {
+                // git worktree list --porcelain returns main first, so index 0 is main.
+                let is_main = idx == 0;
                 let open = self.session_for_workspace(&info.path).is_some();
-                WireWorktree { path: info.path, branch: info.branch, is_main, open }
+                let meta = kumo_core::worktree_meta::get(&info.path);
+                WireWorktree {
+                    path: info.path,
+                    branch: info.branch.clone().or_else(|| meta.as_ref().and_then(|m| m.branch.clone())),
+                    is_main,
+                    open,
+                    comment: meta.as_ref().and_then(|m| m.comment.clone()),
+                    status: meta.as_ref().and_then(|m| m.status.clone()),
+                    is_ephemeral: meta.as_ref().map(|m| m.is_ephemeral).unwrap_or(false),
+                }
             })
             .collect();
         Ok(rows)
@@ -727,6 +733,128 @@ impl App {
             Ok(()) => Ok(format!("created worktree {branch:?}")),
             Err(e) => Ok(format!("error: {e}")),
         }
+    }
+
+    /// Extended creator for isolated `--ai` worktrees (Orca-aligned, no `kumo/` prefix).
+    pub(crate) fn worktree_create_full(
+        &mut self,
+        session: &str,
+        branch: &str,
+        from: Option<&str>,
+        note: Option<&str>,
+        agent: Option<&str>,
+        is_ai: bool,
+        name: Option<&str>,
+    ) -> Result<String> {
+        let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
+            return Ok(format!("no session {session:?}"));
+        };
+        let branch_override = if branch.trim().is_empty() { None } else { Some(branch.trim()) };
+        let from = from.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let note = note.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let agent = agent.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let name = name.map(|s| s.trim()).filter(|s| !s.is_empty());
+        // Generic path (no is_ai, no from/note/agent) with explicit branch -> keep old fast path
+        let use_ext = is_ai || from.is_some() || note.is_some() || agent.is_some() || name.is_some() || branch_override.is_none();
+        let res = if use_ext {
+            self.new_worktree_session_ext(idx, branch_override, from, note, agent, is_ai, name)
+        } else {
+            let b = branch_override.unwrap().to_string();
+            self.new_worktree_session(idx, &b).map(|_| b)
+        };
+        match res {
+            Ok(b) => Ok(format!("created worktree {b:?}")),
+            Err(e) => Ok(format!("error: {e}")),
+        }
+    }
+
+    /// Remove a worktree directory and optionally its branch (ephemeral preview when `!force`).
+    pub(crate) fn worktree_remove(&mut self, session: &str, path: &std::path::Path, force: bool) -> Result<String> {
+        if !self.sessions.iter().any(|s| s.name == session) {
+            return Ok(format!("no session {session:?}"));
+        }
+        let ws = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone());
+        match self.remove_worktree_at(path, force, ws.as_deref()) {
+            Ok(msg) => Ok(msg),
+            Err(e) => Ok(format!("error: {e}")),
+        }
+    }
+
+    /// Set checkpoint comment/status for a worktree.
+    pub(crate) fn worktree_set(
+        &self,
+        session: &str,
+        path: &std::path::Path,
+        comment: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<String> {
+        if !self.sessions.iter().any(|s| s.name == session) {
+            return Ok(format!("no session {session:?}"));
+        }
+        // Validate status via protocol helper
+        let status_norm = if let Some(s) = status {
+            let trimmed = s.trim();
+            if trimmed.is_empty() { None } else {
+                if kumo_protocol::WorktreeStatus::parse(trimmed).is_none() {
+                    return Ok(format!("invalid status {trimmed:?} (use todo|in-progress|in-review|completed)"));
+                }
+                Some(Some(trimmed.to_ascii_lowercase()))
+            }
+        } else { None }; // None means no change; Some(None) means clear — caller uses Option<Option>
+        let comment_norm = comment.map(|c| { let t=c.trim(); if t.is_empty() {None} else {Some(t.to_string())} });
+        // Distinguish no-change vs clear: here comment == None means no --comment flag; Some("") means clear
+        // Our caller passes None for absent flag; empty string means clear.
+        let c_arg = if comment.is_some() { Some(comment_norm.flatten()) } else { None };
+        let s_arg = if status.is_some() { status_norm } else { None };
+        // When both flag-absent, just query
+        if c_arg.is_none() && s_arg.is_none() {
+            return Ok(format!("no change for {}", path.display()));
+        }
+        match kumo_core::worktree_meta::set(path, c_arg, s_arg, None, None) {
+            Ok(cp) => {
+                let msg = format!("set {} comment={:?} status={:?}", path.display(), cp.comment, cp.status);
+                Ok(msg)
+            }
+            Err(e) => Ok(format!("error: {e}")),
+        }
+    }
+
+    /// Query the checkpoint for a session's workspace (or explicit `path`).
+    pub(crate) fn worktree_current(&self, session: &str, path: Option<&std::path::Path>) -> Result<Option<WireWorktree>> {
+        let Some(ws) = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone()) else {
+            return Ok(None);
+        };
+        let target = path.map(|p| p.to_path_buf()).unwrap_or(ws.clone());
+        let branch = kumo_core::worktrees::list_worktrees(&target).ok().and_then(|list| {
+            let canon = std::fs::canonicalize(&target).ok();
+            list.into_iter().find(|w| {
+                let c = std::fs::canonicalize(&w.path).ok();
+                match (&c, &canon) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => w.path == target,
+                }
+            }).and_then(|w| w.branch)
+        });
+        // is_main: first entry of `git worktree list` is the main checkout
+        let list_for_main = kumo_core::worktrees::list_worktrees(&ws).ok().unwrap_or_default();
+        let main_path = list_for_main.first().map(|w| w.path.clone());
+        let canon_target = std::fs::canonicalize(&target).ok();
+        let canon_main = main_path.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let is_main = match (&canon_target, &canon_main) {
+            (Some(t), Some(m)) => t == m,
+            _ => main_path.as_ref().map(|p| p == &target).unwrap_or(false),
+        };
+        let open = self.session_for_workspace(&target).is_some();
+        let meta = kumo_core::worktree_meta::get(&target);
+        Ok(Some(WireWorktree {
+            path: target,
+            branch: branch.or_else(|| meta.as_ref().and_then(|m| m.branch.clone())),
+            is_main,
+            open,
+            comment: meta.as_ref().and_then(|m| m.comment.clone()),
+            status: meta.as_ref().and_then(|m| m.status.clone()),
+            is_ephemeral: meta.as_ref().map(|m| m.is_ephemeral).unwrap_or(false),
+        }))
     }
 
     /// Open the session already working in `path`, or create a new one there

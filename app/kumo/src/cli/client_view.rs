@@ -2796,7 +2796,7 @@ impl View {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
                 self.popup.open = false;
-                let _ = self.send(&Command::WorktreeCreate { session, branch: name });
+                let _ = self.send(&Command::WorktreeCreate { session, branch: name, from: None, note: None, agent: None, is_ai: false, name: None });
             }
             Some(PopupTarget::RenamePane(pid)) => {
                 let session = self.active_session().map(|s| s.name.clone());
@@ -5722,11 +5722,32 @@ impl View {
             if row.open {
                 put(f, dd.x + 2, y, "●", Style::default().fg(if sel { fg } else { theme.green }).bg(bg));
             }
-            let branch = row.branch.as_deref().unwrap_or("(detached)");
+            let mut branch_disp = row.branch.as_deref().unwrap_or("(detached)").to_string();
+            if row.is_ephemeral {
+                branch_disp.push_str(" ◉");
+            }
+            if let Some(st) = &row.status {
+                branch_disp.push_str(&format!(" [{}]", st));
+            }
+            if let Some(c) = &row.comment {
+                if !c.is_empty() && !sel {
+                    // show comment suffix dimmed in path column when not selected
+                }
+            }
             let branch_style = Style::default().fg(fg).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() });
-            text(f, branch_x, y, branch, branch_style, BRANCH_COL.saturating_sub(2));
+            text(f, branch_x, y, &branch_disp, branch_style, BRANCH_COL.saturating_sub(2));
             if path_w > 0 {
-                let path = fit_worktree_path(&row.path, path_w as usize);
+                let mut path = fit_worktree_path(&row.path, path_w as usize);
+                if let Some(c) = &row.comment {
+                    if sel && !c.is_empty() {
+                        // when selected, show comment tail after path if space
+                        let avail = path_w as usize;
+                        let suffix = format!(" · {}", c.lines().next().unwrap_or(""));
+                        if path.len() + suffix.len() < avail {
+                            path.push_str(&suffix);
+                        }
+                    }
+                }
                 let path_style = Style::default().fg(if row.is_main { fg } else { theme.panel_muted }).bg(bg);
                 text(f, path_x, y, &path, path_style, path_w);
             }
@@ -7169,7 +7190,7 @@ mod tests {
             view.settings.open = true;
             view.worktree_picker.open = true;
             view.worktree_picker.items = vec![
-                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false },
+                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false, comment: None, status: None, is_ephemeral: false },
             ];
             view.pane_numbers = Some(Instant::now());
             view.update_notice = Some(("key".into(), "nightly".into()));
