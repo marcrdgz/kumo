@@ -319,11 +319,11 @@ enum WorktreeCreateTab {
 impl WorktreeCreateTab {
     fn label(self) -> &'static str {
         match self {
-            WorktreeCreateTab::Inteligente => "Inteligente",
+            WorktreeCreateTab::Inteligente => "Smart",
             WorktreeCreateTab::Github => "GitHub",
             WorktreeCreateTab::Jira => "Jira",
-            WorktreeCreateTab::Rama => "Rama",
-            WorktreeCreateTab::Nombre => "Nombre",
+            WorktreeCreateTab::Rama => "Branch",
+            WorktreeCreateTab::Nombre => "Name",
         }
     }
     fn from_idx(idx: usize) -> Self {
@@ -2768,7 +2768,7 @@ impl View {
         }
         let (w, h) = (self.cols, self.rows);
         let width = 72u16.min(w.saturating_sub(4)).max(44);
-        let height = if self.worktree_create.advanced { 18 } else { 11 };
+        let height = if self.worktree_create.advanced { 16 } else { 11 };
         let height = height.min(h.saturating_sub(4)).max(10);
         if w < width || h < height {
             return None;
@@ -2787,7 +2787,6 @@ impl View {
         for tab in [
             WorktreeCreateTab::Inteligente,
             WorktreeCreateTab::Github,
-            WorktreeCreateTab::Jira,
             WorktreeCreateTab::Rama,
             WorktreeCreateTab::Nombre,
         ] {
@@ -2808,9 +2807,9 @@ impl View {
         let input_w = inner_w;
         let (x, y) = match focus {
             WorktreeCreateFocus::CreateFrom => (dd.x + 2, dd.y + 4),
-            WorktreeCreateFocus::BranchOverride => (dd.x + 2, dd.y + 7),
-            WorktreeCreateFocus::Note => (dd.x + 2, dd.y + 9),
-            WorktreeCreateFocus::Agent => (dd.x + 2, dd.y + 11),
+            WorktreeCreateFocus::BranchOverride => (dd.x + 2, dd.y + 8),
+            WorktreeCreateFocus::Note => (dd.x + 2, dd.y + 10),
+            WorktreeCreateFocus::Agent => (dd.x + 2, dd.y + 12),
         };
         // When not advanced, only CreateFrom is visible
         if !self.worktree_create.advanced && focus != WorktreeCreateFocus::CreateFrom {
@@ -3117,11 +3116,6 @@ impl View {
         let cf = self.worktree_create.create_from.trim().to_string();
         if cf.is_empty() {
             self.worktree_create.error = Some("Create from cannot be empty".to_string());
-            self.mark_dirty();
-            return;
-        }
-        if self.worktree_create.tab == WorktreeCreateTab::Jira {
-            self.worktree_create.error = Some("Jira linking is deferred — use GitHub, branch, or name".to_string());
             self.mark_dirty();
             return;
         }
@@ -6254,18 +6248,14 @@ impl View {
         for tab in [
             WorktreeCreateTab::Inteligente,
             WorktreeCreateTab::Github,
-            WorktreeCreateTab::Jira,
             WorktreeCreateTab::Rama,
             WorktreeCreateTab::Nombre,
         ] {
             let is_sel = tab == self.worktree_create.tab;
-            let is_jira = tab == WorktreeCreateTab::Jira;
             let label = tab.label();
             let w = (label.chars().count() as u16) + 2;
             let style = if is_sel {
                 Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
-            } else if is_jira {
-                Style::default().fg(theme.panel_muted).bg(theme.panel_sep)
             } else {
                 Style::default().fg(theme.fg).bg(theme.panel_sep)
             };
@@ -6291,7 +6281,7 @@ impl View {
         let placeholder = match self.worktree_create.tab {
             WorktreeCreateTab::Inteligente => "name, #1234, branch, or https://github.com/.../pull/123",
             WorktreeCreateTab::Github => "#1234 or GitHub URL",
-            WorktreeCreateTab::Jira => "Jira linking deferred",
+            WorktreeCreateTab::Jira => "Jira issue",
             WorktreeCreateTab::Rama => "branch name (e.g. feat/login)",
             WorktreeCreateTab::Nombre => "task name (e.g. fix login)",
         };
@@ -6408,15 +6398,11 @@ impl View {
             if agent_focused && agcur == aglen && agcol < ag_rect.right() {
                 put(f, agcol, ag_rect.y, " ", agstyle.add_modifier(Modifier::REVERSED));
             }
-            // Deferred rows
-            let deferred_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep).add_modifier(Modifier::DIM);
-            text(f, dd.x + 2, dd.y + 13, "Worktree padre  (deferred)", deferred_style, inner_w);
-            text(f, dd.x + 2, dd.y + 14, "Sparse checkout (deferred)", deferred_style, inner_w);
         }
         // Error
         if let Some(err) = &self.worktree_create.error {
             let err_style = Style::default().fg(theme.orange).bg(theme.panel_sep);
-            let err_y = if self.worktree_create.advanced { dd.y + 15 } else { dd.y + 7 };
+            let err_y = if self.worktree_create.advanced { dd.y + 13 } else { dd.y + 7 };
             text(f, dd.x + 2, err_y, err, err_style, inner_w);
         }
         // Footer + buttons
