@@ -119,7 +119,7 @@ persistent kumo.
   distros, fish, …) report their cwd directly, which is the only signal that
   works inside remote `ssh` panes. **ON by default**, `new-cwd = "follow"`, no
   leader binding. The one-shot **snippet installer** for shells that don't
-  emit OSC 7 is deferred to 0.7.0 (with the command traceback work).
+  emit OSC 7 is deferred to 0.8.0 (structured command boundaries).
 - ✅ **Config reload**: `kumo reload` (CLI) and the MENU `reload` item re-read
   the config and apply `shell`, `ai-cmd`, `leader`, and `keymap.bindings` live
   to panes spawned from then on. `new-cwd` and the `[notifications]` knobs
@@ -128,7 +128,7 @@ persistent kumo.
 - ✅ **MENU `config`** opens the config file in an editor pane (split) inside
   the session — `$VISUAL` → `$EDITOR` → `vi`, preferring `config.toml`.
 
-**Deferred from 0.4.0**: ~~full screen+scrollback restore after update/restart~~ landed in `v0.5.4` (inline snapshot; see 0.6.0), ~~control CLI / scripting~~ landed in 0.6.0 (`kumo session|tab|pane|agent`, `pane send-keys`/`split`); remaining deferred are OSC 133 semantic prompts (only 0.7.0's command traceback consumes them), the **OSC 7 snippet installer** (follow-workspace works without it; it only adds remote-ssh coverage — 0.7.0), and status-bar layout (lands whole with 0.6.0's widgets).
+**Deferred from 0.4.0**: ~~full screen+scrollback restore after update/restart~~ landed in `v0.5.4` (inline snapshot; see 0.6.0), ~~control CLI / scripting~~ landed in 0.6.0 (`kumo session|tab|pane|agent`, `pane send-keys`/`split`); remaining deferred are OSC 133 semantic prompts + the **OSC 7 snippet installer** (follow-workspace works without it; it only adds remote-ssh coverage — both → 0.8.0), and status-bar layout (lands whole with 0.6.0's widgets).
 
 ## 🎨 0.5.0 — Theme & chrome
 
@@ -207,15 +207,12 @@ styling; the config hot-reload file watcher rolls into 0.7.0.
   carries inline ghostty snapshots (`SavedPane.snapshot` in `app/kumo/src/daemon/state.rs:126`, `vt.rs: snapshot_encode`/`from_snapshot`, `pane.rs: finish_from_snapshot`) so `kumo update` and `daemon --resume` restore screen + scrollback exactly. Shipped in `v0.5.4` ("Preserve scrollback across restart via inline snapshot"); the earlier lossy ANSI-replay fallback is retired.
 - ✅ **Control CLI / scripting** (`kumo session|tab|pane|agent`, `kumo pane send-keys`/`split`/`close`/`focus`, `kumo reload`): client commands over the daemon socket, driven by the same keymap tables (deferred from 0.4.0; `app/kumo/src/cli/cli.rs`, `app/kumo/src/daemon/app/server.rs:409`).
 
-## 🤖 0.7.0 — ADE (AI Development Environment), AI Polish & Native Context
+## 🤖 0.7.0 — ADE (AI Development Environment), Orchestration & Isolation
 
-The ADE release. Two layers: **agent-native plumbing** (states, waits,
-reporting — the coordination surface a good host has to have) and kumo's own
-**context pipeline** (traceback + diffs +
-verify — the part that makes kumo an ADE, not just a host). The agent surface
-is **open**: any process in a pane can report its own state, and any agent can
-drive kumo over the same JSON socket the CLI uses (`app/kumo/src/cli/cli.rs`,
-`crates/kumo-protocol`).
+The ADE release. kumo becomes a reliable **host for parallel agents**:
+accurate states, event-driven waits, and isolated worktrees — with a small,
+machine-friendly control surface so agents can drive kumo themselves
+(`app/kumo/src/cli/cli.rs`, `crates/kumo-protocol`).
 
 **Agent state model v2**:
 - ✅ **Five states** — `working · blocked · idle · done · unknown`
@@ -265,28 +262,13 @@ it, and it's the core of agent-to-agent work.
 - ✅ **`kumo agent read <pane> --source visible|recent|detection|traceback`**: the
   daemon already owns the screen buffer, and ghostty's screen buffer **holds the
   alternate screen** — full-screen agent transcripts (claude / codex) read
-  directly from the buffer, no mouse-scroll transcript scraping (`app.rs: pane_read_text`). With OSC 133
-  markers the same read is **structured**: `--source traceback` returns the last
-  marked prompt + its output block (the same data the compose-popup consumes; today falls back to `form`/120 rows).
+  directly from the buffer, no mouse-scroll transcript scraping (`app.rs: pane_read_text`). `--source traceback` today falls back to `form`/120 rows; structured command-boundary reads stay deferred.
 - ✅ **`kumo agent start --kind <codex|…> --pane <id>`** `[-- <args>]` + **`agent rename`**: launches an
   agent in an existing shell pane and returns once detection shows it ready
   (`agent_not_ready` when it starts blocked); `agent rename` adds live aliases
   so scripts reference agents by name, not pane id (`commands.rs: start/rename`); `agent broadcast` fans a prompt via `send-keys` path (`--filter`).
 - ✅ **`kumo pane wait-output <pane> --regex`**: one-shot output waiter (no
   polling, `regex` crate, `bad_regex` on compile error) — what the verify loop and parallel agents wait on; `agent read` + `wait-output` hold alt-screen intact.
-- **Verify loop** (`leader+r`) reworks its routing: run the suite into a fresh
-  split, `pane wait-output` on it, and only feed the failure back to the agent
-  once a `passed|failed`-shaped result is actually there.
-
-**Open agent state reporting** — screen heuristics can't know everything:
-- **`pane.report_agent` / `pane.report_agent_session` / `pane.report_metadata`**
-  over the socket: any process, hook, or plugin declares its own
-  working/blocked/idle/done state, its native resume id (claude `--resume`,
-  codex `resume`), and display metadata (titles, state labels, scoped tokens
-  with TTLs).
-- **`KUMO_AGENT` wrapper hint** (`KUMO_AGENT=claude fence -- claude`): tell the
-  daemon which detection rules a wrapper-launched agent uses — opaque wrappers
-  no longer break detection.
 - ✅ **Per-agent detection rules** (`agent-detection/<agent>.toml`, user-dir
   override, same rule shapes as the built-ins — markers + OSC title patterns):
   third-party agents get accurate state without a kumo release. The built-in
@@ -298,38 +280,32 @@ it, and it's the core of agent-to-agent work.
   warned and skipped — detection never crashes). Deliberately **local-only** in
   0.7.0; remote manifest updates defer to 0.8.0.
 
-**JSON surface for agents** — the bincode socket stays for TUI-fast paths;
-agents get a machine layer:
-- **NDJSON** request/response over the same socket + **`kumo api schema`**
-  emitting the full JSON Schema (`--json`, `--output`) so tools / LLMs can
-  introspect the protocol; all control commands also gain `--json`.
-- **Agent skill file** (`kumo-agents.md`, installed with the binary): teaches
-  claude / codex / opencode how to orchestrate kumo natively — spawn, wait,
-  read, report. Agents stop firing keystrokes and start orchestrating. (The
-  MCP server stays post-1.0; this layer is its foundation.)
-- **CLI Environment Injection** (`KUMO_SOCKET_PATH`): expose the daemon socket
-  to spawned AI processes so they drive their own workspace layouts natively;
-  can be disabled in config.
+**Isolated worktrees for parallel agents**:
+- **`kumo worktree create --ai [--branch feature/x] [--from main|#1234|branch|url] [--note "..."] [--agent claude]`** (explicit): create an **ephemeral worktree**
+  for an agent — isolated branch + directory so parallel agents never step on
+  each other's files; `kumo worktree rm` removes the directory and branch
+  (kept branches that still hold unmerged commits surface for review, then
+  force-delete). `--branch` overrides the derived `kumo/<name>` branch,
+  `--from` resolves the start point (branch, `#1234` / GitHub URL, or commit — GitHub first, Jira later),
+  `--note` seeds the lightweight checkpoint comment, and `--agent` chains
+  `kumo agent start --kind <agent>` into the new pane. Uses the existing
+  worktree plumbing (`app/kumo/src/daemon/worktrees.rs`,
+  `crates/kumo-protocol: WorktreeCreate/Open/List`); the generic `kumo worktree create/open`
+  without `--ai` stays for normal worktrees. The same fields surface in the
+  **New workspace / New worktree TUI** (`app/kumo/src/cli/client_view.rs: WorktreePicker`,
+  `app/kumo/src/daemon/app.rs: new_worktree_session`): a single `Create from`
+  input with `Inteligente · GitHub · Jira · Rama · Nombre` tabs (type a name, `#1234`,
+  branch, or GitHub/GitLab URL — Jira deferred), plus `Branch name` override,
+  `Note`, and `Agent` picker in the advanced drawer; `Worktree padre` / `Sparse checkout`
+  stay deferred.
+- **Shared gitignored paths**: per-repo `[worktree] shared-dirs` (e.g. `node_modules`, `.cache` — symlink, APFS clone-copy on macOS when available) plus a repo-root `.worktreeinclude` for copy-on-create files (e.g. `.env`, `.vscode/settings.json` — literal paths, `#` comments, only gitignored sources). `shared-dirs` is config-owned; `.worktreeinclude` is repo-owned and committed.
 
-**Context pipeline** (kumo's own differentiator: kumo doesn't just own
-terminals, it assembles the prompt):
-- **OSC 133 traceback** + scrollback → prompt: the snippet installer lands here
-  with the traceback work; with the state model v2 and `traceback` reads this is
-  the *structured* version of context sharing, not blind scrollback parsing.
-- **Compose-prompt popup** (`leader+i`): aggregates the active selection, the
-  last failing command + traceback (via OSC 133), `git diff`, and cwd into
-  actionable chips — and **also opens as a transient popup pane** (`leader+p`,
-  tmux-popup style overlay) for inline dispatch without a new tab.
-- **Auto-attach context**: spawning a new agent pane pre-fills its prompt with
-  the error traceback and dirty file diffs from the active session.
-- **Git Worktree Isolation** (`kumo new --ai`): agents run in isolated ephemeral
-  worktrees so they analyze, patch, and test without dirtying the main
-  worktree — built on a **declarative tab layout** (`layout export`/`apply`
-  pulled forward from 1.x: the AI tab is a plain layout tree with per-pane
-  cwd/env), so 1.x declarative workspaces become a reuse, not a rewrite.
-- **Session Checkpoints & Rollback**: save state snapshots before autonomous
-  execution, enabling single-command rollbacks (`kumo rollback`); inside a
-  worktree the rollback is a branch switch, not a surgical rebase.
+**Lightweight checkpoints** (replaces heavy snapshots/rollback):
+- **`kumo worktree set --comment "..." --status todo|in-progress|in-review|completed --json`** + **`kumo worktree current --json`**: each worktree carries a free-text comment + card status visible in the UI — a status snapshot of what the worktree is doing right now. Agents update it from the CLI; `kumo worktree list --json` surfaces it. Good moments: finished a slice, confirmed/refuted a hypothesis, hit a blocker, transitioning phase. Keep the first line action-oriented; read before clobbering user-written context.
+
+**Machine surface for agents**:
+- **`--json` on all control commands** + **`KUMO_SOCKET_PATH` / `KUMO_BIN_PATH` injection**: the daemon socket is exposed to spawned panes so agents drive their own workspace layouts natively (`app/kumo/src/daemon/pty.rs`); can be disabled in config. `kumo worktree current/list/set --json` and `kumo session|pane|agent --json` make the TUI scriptable without duplicating the bincode wire.
+- **Agent skill file** (`kumo-agents.md`, installed with the binary): teaches claude / codex / opencode how to orchestrate kumo natively — spawn, wait, read, set checkpoints. Agents stop firing keystrokes and start orchestrating. (The MCP server stays post-1.0; this layer is its foundation.)
 
 - ✅ **Agent Inbox View** (on the v2 state model): one unified tab aggregating
   `blocked · done · running` with direct keyboard navigation to actionable
@@ -360,7 +336,15 @@ terminals, it assembles the prompt):
 
 **Deferred from 0.7.0**: declarative agent-view queries (→ 0.9.0 plugin
 system), remote/update-checked agent-detection manifests (→ 0.8.0),
-`sync-input` stays cut (broadcast supersedes it), `pipe-pane` stays 0.9.0.
+structured traceback / OSC 133 command boundaries + shell snippet installer (→ 0.8.0),
+compose-prompt aggregator + auto-attach context + `kumo rollback` branch-switch
+snapshots + declarative `layout export/apply` (dropped — superseded by
+`worktree --ai` + lightweight checkpoints; revisit via plugins/1.x if needed),
+`pane.report_agent` / `KUMO_AGENT` wrapper hint + NDJSON/`kumo api schema`
+(machine surface stays `--json` + `KUMO_SOCKET_PATH` in 0.7.0; fuller
+JSON/MCP lands post-1.0), `verify loop leader+r` (→ 0.8.0; `pane wait-output`
+primitive already ships), `sync-input` stays cut (broadcast supersedes it),
+`pipe-pane` stays 0.9.0.
 
 ## 🛡️ 0.8.0 — Stability
 
@@ -433,7 +417,7 @@ Beyond that, the differentiating bets:
 - **Session sharing** (tmate-style): a peer attaches to your daemon over a
   socket / SSH to pair-program; read-only observers for reviews.
 - **Remote sessions**: mosh/SSH-style remote panes with a local control pane.
-- **Deeper AI**: with 0.7.0's context pipeline landed, the remaining stretch is cross-pane context — hand one pane's traceback/diff to another pane's prompt — plus multi-agent session hygiene (restart an agent with its native resume id).
+- **Deeper AI**: with 0.7.0's orchestration + isolated worktrees landed, the remaining stretch is cross-pane context — hand one pane's diff/checkpoint to another pane's prompt — plus multi-agent session hygiene (restart an agent with its native resume id).
 
 Quality-of-life ideas that round out the editor feel (most now targeted for `0.9.0` — see above) — any leftovers stay as 1.x polish.
 
