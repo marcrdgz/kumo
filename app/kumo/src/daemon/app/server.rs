@@ -289,13 +289,47 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         }
                     }
                 }
-                Command::WorktreeCreate { session, branch } => {
-                    let reply = app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"));
+                Command::WorktreeListDetailed { session } => {
+                    match app.worktree_list(&session) {
+                        Ok(items) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items: Vec::new() });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
+                        }
+                    }
+                }
+                Command::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
+                    let reply = if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
+                        app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"))
+                    } else {
+                        app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"))
+                    };
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
                 Command::WorktreeOpen { session, path } => {
                     let reply = app.worktree_open(&session, &path).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::WorktreeRemove { session, path, force } => {
+                    let reply = app.worktree_remove(&session, &path, force).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::WorktreeSet { session, path, comment, status } => {
+                    let reply = app.worktree_set(&session, &path, comment.as_deref(), status.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                }
+                Command::WorktreeCurrent { session, path } => {
+                    match app.worktree_current(&session, path.as_deref()) {
+                        Ok(info) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::WorktreeCurrent { info });
+                        }
+                        Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::WorktreeCurrent { info: None });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
+                        }
+                    }
                 }
                 Command::SetTheme { idx } => {
                     let reply = app.set_theme(idx).unwrap_or_else(|e| format!("error: {e:#}"));

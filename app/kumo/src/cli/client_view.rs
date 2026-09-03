@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -229,6 +230,7 @@ fn border_chars(style: kumo_core::config::BorderStyle) -> (&'static str, &'stati
 #[derive(Clone, Copy, PartialEq)]
 enum PopupTarget {
     NewSession,
+    #[allow(dead_code)]
     NewWorktree(usize),
     RenamePane(u64),
     RenameSession(usize),
@@ -305,6 +307,79 @@ struct WorktreePicker {
     selected: usize,
     scroll: u16,
     error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WorktreeCreateTab {
+    Inteligente,
+    Github,
+    Jira,
+    Rama,
+    Nombre,
+}
+
+impl WorktreeCreateTab {
+    fn label(self) -> &'static str {
+        match self {
+            WorktreeCreateTab::Inteligente => "Smart",
+            WorktreeCreateTab::Github => "GitHub",
+            WorktreeCreateTab::Jira => "Jira",
+            WorktreeCreateTab::Rama => "Branch",
+            WorktreeCreateTab::Nombre => "Name",
+        }
+    }
+    #[allow(dead_code)]
+    fn from_idx(idx: usize) -> Self {
+        match idx {
+            1 => Self::Github,
+            2 => Self::Jira,
+            3 => Self::Rama,
+            4 => Self::Nombre,
+            _ => Self::Inteligente,
+        }
+    }
+    #[allow(dead_code)]
+    fn idx(self) -> usize {
+        match self {
+            WorktreeCreateTab::Inteligente => 0,
+            WorktreeCreateTab::Github => 1,
+            WorktreeCreateTab::Jira => 2,
+            WorktreeCreateTab::Rama => 3,
+            WorktreeCreateTab::Nombre => 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WorktreeCreateFocus {
+    CreateFrom,
+    BranchOverride,
+    Note,
+    Agent,
+}
+
+struct WorktreeCreateDialog {
+    open: bool,
+    session: usize,
+    tab: WorktreeCreateTab,
+    create_from: String,
+    cursor: usize,
+    branch_override: String,
+    branch_cursor: usize,
+    note: String,
+    note_cursor: usize,
+    agent: String,
+    agent_cursor: usize,
+    advanced: bool,
+    focus: WorktreeCreateFocus,
+    error: Option<String>,
+}
+
+struct SessionCloseConfirm {
+    open: bool,
+    session_idx: usize,
+    session_name: String,
+    path: PathBuf,
 }
 
 /// One agent-lifecycle corner toast pushed by the daemon (blocked / finished).
@@ -490,6 +565,8 @@ pub struct View {
     keybind_overlay: KeybindOverlay,
     settings: SettingsPanel,
     worktree_picker: WorktreePicker,
+    worktree_create: WorktreeCreateDialog,
+    session_close_confirm: SessionCloseConfirm,
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
@@ -689,6 +766,8 @@ impl View {
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
+            worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -1331,6 +1410,14 @@ impl View {
     pub fn on_key(&mut self, key: KeyEvent) -> Result<()> {
         self.flush_wheel()?;
         self.set_link_mods(key.modifiers.intersects(link_modifiers()));
+        if self.session_close_confirm.open {
+            self.on_session_close_confirm_key(key);
+            return Ok(());
+        }
+        if self.worktree_create.open {
+            self.on_worktree_create_key(key);
+            return Ok(());
+        }
         if self.popup.open {
             self.on_popup_key(key);
             return Ok(());
@@ -1400,6 +1487,13 @@ impl View {
 
     pub fn on_paste(&mut self, text: &str) {
         let _ = self.flush_wheel();
+        if self.session_close_confirm.open {
+            return;
+        }
+        if self.worktree_create.open {
+            self.worktree_create_paste(text);
+            return;
+        }
         if self.popup.open
             || self.menu.open
             || self.ctx_menu.open
@@ -2461,7 +2555,7 @@ impl View {
 
     #[allow(dead_code)]
     fn finder_input_at(&self, x: u16, y: u16) -> bool {
-        self.finder_rect().map(|r| y==r.y+1 && x>=r.x+1 && x<r.x+r.width-1).unwrap_or(false)
+        self.finder_rect().map(|r| y==r.y+1 && x>r.x && x<r.x+r.width-1).unwrap_or(false)
     }
 
     fn finder_item_at(&self, x: u16, y: u16) -> Option<usize> {
@@ -2588,12 +2682,20 @@ impl View {
             self.mark_dirty();
             return;
         }
-        self.popup.name = String::new();
-        self.popup.cursor = 0;
-        self.popup.error = None;
-        self.popup.hover = None;
-        self.popup.target = Some(PopupTarget::NewWorktree(idx));
-        self.popup.open = true;
+        self.worktree_create.open = true;
+        self.worktree_create.session = idx;
+        self.worktree_create.tab = WorktreeCreateTab::Inteligente;
+        self.worktree_create.create_from = String::new();
+        self.worktree_create.cursor = 0;
+        self.worktree_create.branch_override = String::new();
+        self.worktree_create.branch_cursor = 0;
+        self.worktree_create.note = String::new();
+        self.worktree_create.note_cursor = 0;
+        self.worktree_create.agent = String::new();
+        self.worktree_create.agent_cursor = 0;
+        self.worktree_create.advanced = false;
+        self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+        self.worktree_create.error = None;
         self.mark_dirty();
     }
 
@@ -2678,6 +2780,120 @@ impl View {
         }
         let idx = self.worktree_picker.scroll as usize + (y - body_top) as usize;
         (idx < self.worktree_picker.items.len()).then_some(idx)
+    }
+
+    fn worktree_create_rect(&self) -> Option<Rect> {
+        if !self.worktree_create.open {
+            return None;
+        }
+        let (w, h) = (self.cols, self.rows);
+        let width = 72u16.min(w.saturating_sub(4)).max(44);
+        let height = if self.worktree_create.advanced { 16 } else { 11 };
+        let height = height.min(h.saturating_sub(4)).max(10);
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    fn worktree_create_tab_at(&self, x: u16, y: u16) -> Option<WorktreeCreateTab> {
+        let dd = self.worktree_create_rect()?;
+        let tabs_y = dd.y + 2;
+        if y != tabs_y {
+            return None;
+        }
+        // Tabs row from x+2, each tab approx label len + 2
+        let mut cur = dd.x + 2;
+        for tab in [
+            WorktreeCreateTab::Inteligente,
+            WorktreeCreateTab::Github,
+            WorktreeCreateTab::Rama,
+            WorktreeCreateTab::Nombre,
+        ] {
+            let label = tab.label();
+            let w = (label.chars().count() as u16) + 2; // padded
+            let rect = Rect::new(cur, tabs_y, w, 1);
+            if rect.contains(Position::new(x, y)) {
+                return Some(tab);
+            }
+            cur += w + 1;
+        }
+        None
+    }
+
+    fn worktree_create_input_rect(&self, focus: WorktreeCreateFocus) -> Option<Rect> {
+        let dd = self.worktree_create_rect()?;
+        let inner_w = dd.width.saturating_sub(4);
+        let input_w = inner_w;
+        let (x, y) = match focus {
+            WorktreeCreateFocus::CreateFrom => (dd.x + 2, dd.y + 4),
+            WorktreeCreateFocus::BranchOverride => (dd.x + 2, dd.y + 8),
+            WorktreeCreateFocus::Note => (dd.x + 2, dd.y + 10),
+            WorktreeCreateFocus::Agent => (dd.x + 2, dd.y + 12),
+        };
+        // When not advanced, only CreateFrom is visible
+        if !self.worktree_create.advanced && focus != WorktreeCreateFocus::CreateFrom {
+            return None;
+        }
+        // When advanced closed, the y for other inputs is off-screen
+        if y >= dd.bottom() {
+            return None;
+        }
+        Some(Rect::new(x, y, input_w, 1))
+    }
+
+    fn worktree_create_advanced_toggle_rect(&self) -> Option<Rect> {
+        let dd = self.worktree_create_rect()?;
+        let y = dd.y + 6;
+        if y >= dd.bottom() {
+            return None;
+        }
+        Some(Rect::new(dd.x + 2, y, 12, 1))
+    }
+
+    fn worktree_create_button_rect(&self, is_create: bool) -> Option<Rect> {
+        let dd = self.worktree_create_rect()?;
+        let y = dd.bottom().saturating_sub(2);
+        let create_label = " create ";
+        let cancel_label = " cancel ";
+        let create_w = create_label.chars().count() as u16 + 2;
+        let cancel_w = cancel_label.chars().count() as u16 + 2;
+        let total_w = create_w + 1 + cancel_w;
+        let start_x = dd.x + dd.width.saturating_sub(total_w + 2);
+        if is_create {
+            Some(Rect::new(start_x, y, create_w, 1))
+        } else {
+            Some(Rect::new(start_x + create_w + 1, y, cancel_w, 1))
+        }
+    }
+
+    fn session_close_confirm_rect(&self) -> Option<Rect> {
+        if !self.session_close_confirm.open {
+            return None;
+        }
+        let (w, h) = (self.cols, self.rows);
+        let width = 60u16.min(w.saturating_sub(4)).max(30);
+        let height = 7u16;
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    fn session_close_confirm_button_rect(&self, is_yes: bool) -> Option<Rect> {
+        let dd = self.session_close_confirm_rect()?;
+        let y = dd.bottom().saturating_sub(2);
+        let yes_label = " Yes (y) ";
+        let no_label = " No (n) ";
+        let yes_w = yes_label.chars().count() as u16 + 2;
+        let no_w = no_label.chars().count() as u16 + 2;
+        let total_w = yes_w + 1 + no_w;
+        let start_x = dd.x + dd.width.saturating_sub(total_w + 2);
+        if is_yes {
+            Some(Rect::new(start_x, y, yes_w, 1))
+        } else {
+            Some(Rect::new(start_x + yes_w + 1, y, no_w, 1))
+        }
     }
 
     fn on_picker_key(&mut self, key: KeyEvent) {
@@ -2771,6 +2987,259 @@ impl View {
         self.popup.cursor = 0;
     }
 
+    fn on_worktree_create_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            self.worktree_create.open = false;
+            self.mark_dirty();
+            return;
+        }
+        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => self.commit_worktree_create(),
+            KeyCode::Tab => {
+                // Tab cycles focus when advanced open; otherwise no-op
+                if self.worktree_create.advanced {
+                    self.worktree_create_next_focus(1);
+                }
+            }
+            KeyCode::BackTab => {
+                if self.worktree_create.advanced {
+                    self.worktree_create_next_focus(-1);
+                }
+            }
+            KeyCode::Char('a') if ctrl => {
+                self.worktree_create.advanced = !self.worktree_create.advanced;
+                if !self.worktree_create.advanced {
+                    self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                }
+                self.mark_dirty();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() && !ctrl && self.worktree_create.focus == WorktreeCreateFocus::CreateFrom => {
+                // Number keys 1-5 select tab when focus is CreateFrom and input empty or with modifier? Use with no extra logic:
+                // Only treat as tab switch if the input field is empty and digit 1-5 pressed alone – otherwise insert digit.
+                // To avoid conflict with typing numbers (e.g. #123), only switch when digit pressed with no other char pending?
+                // Instead use Ctrl+digit for tab switch.
+                self.worktree_create_insert(c);
+            }
+            KeyCode::Backspace if key.modifiers.intersects(word_back) => self.worktree_create_delete_word_backward(),
+            KeyCode::Backspace => self.worktree_create_backspace(),
+            KeyCode::Char('h') if ctrl => self.worktree_create_backspace(),
+            KeyCode::Char('w') if ctrl => self.worktree_create_delete_word_backward(),
+            KeyCode::Char('u') if ctrl => self.worktree_create_delete_to_start(),
+            KeyCode::Delete if key.modifiers.intersects(word_back) => self.worktree_create_delete_word_forward(),
+            KeyCode::Delete => self.worktree_create_delete_forward(),
+            KeyCode::Left => self.worktree_create_move_cursor(-1),
+            KeyCode::Right => self.worktree_create_move_cursor(1),
+            KeyCode::Home => self.worktree_create_set_cursor(0),
+            KeyCode::End => {
+                let len = self.worktree_create_focused_len();
+                self.worktree_create_set_cursor(len);
+            }
+            KeyCode::Char(c) if !ctrl => self.worktree_create_insert(c),
+            _ => {}
+        }
+        self.mark_dirty();
+    }
+
+    fn worktree_create_focused_mut(&mut self) -> (&mut String, &mut usize) {
+        match self.worktree_create.focus {
+            WorktreeCreateFocus::CreateFrom => (&mut self.worktree_create.create_from, &mut self.worktree_create.cursor),
+            WorktreeCreateFocus::BranchOverride => (&mut self.worktree_create.branch_override, &mut self.worktree_create.branch_cursor),
+            WorktreeCreateFocus::Note => (&mut self.worktree_create.note, &mut self.worktree_create.note_cursor),
+            WorktreeCreateFocus::Agent => (&mut self.worktree_create.agent, &mut self.worktree_create.agent_cursor),
+        }
+    }
+
+    fn worktree_create_focused_len(&self) -> usize {
+        match self.worktree_create.focus {
+            WorktreeCreateFocus::CreateFrom => self.worktree_create.create_from.chars().count(),
+            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_override.chars().count(),
+            WorktreeCreateFocus::Note => self.worktree_create.note.chars().count(),
+            WorktreeCreateFocus::Agent => self.worktree_create.agent.chars().count(),
+        }
+    }
+
+    fn worktree_create_set_cursor(&mut self, pos: usize) {
+        let len = self.worktree_create_focused_len();
+        let clamped = pos.min(len);
+        match self.worktree_create.focus {
+            WorktreeCreateFocus::CreateFrom => self.worktree_create.cursor = clamped,
+            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor = clamped,
+            WorktreeCreateFocus::Note => self.worktree_create.note_cursor = clamped,
+            WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor = clamped,
+        }
+    }
+
+    fn worktree_create_move_cursor(&mut self, delta: isize) {
+        let len = self.worktree_create_focused_len();
+        let cur = match self.worktree_create.focus {
+            WorktreeCreateFocus::CreateFrom => self.worktree_create.cursor,
+            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor,
+            WorktreeCreateFocus::Note => self.worktree_create.note_cursor,
+            WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor,
+        } as isize;
+        let next = (cur + delta).clamp(0, len as isize) as usize;
+        self.worktree_create_set_cursor(next);
+    }
+
+    fn worktree_create_insert(&mut self, ch: char) {
+        let (s, cursor) = self.worktree_create_focused_mut();
+        let b = char_idx_to_byte(s, *cursor);
+        s.insert(b, ch);
+        *cursor += 1;
+    }
+
+    fn worktree_create_backspace(&mut self) {
+        let (s, cursor) = self.worktree_create_focused_mut();
+        if *cursor == 0 {
+            return;
+        }
+        let b = char_idx_to_byte(s, *cursor);
+        let prev_len = s[..b].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0);
+        let start = b - prev_len;
+        s.replace_range(start..b, "");
+        *cursor -= 1;
+    }
+
+    fn worktree_create_delete_word_backward(&mut self) {
+        let focus = self.worktree_create.focus;
+        let (s, cursor) = self.worktree_create_focused_mut();
+        let (new_s, new_c) = delete_word_backward(s, *cursor);
+        *s = new_s;
+        *cursor = new_c;
+        // Keep focus sync (delete_word handles)
+        let _ = focus;
+    }
+
+    fn worktree_create_delete_word_forward(&mut self) {
+        let (s, cursor) = self.worktree_create_focused_mut();
+        let new_s = delete_word_forward(s, *cursor);
+        *s = new_s;
+    }
+
+    fn worktree_create_delete_forward(&mut self) {
+        let (s, cursor) = self.worktree_create_focused_mut();
+        let len = s.chars().count();
+        if *cursor >= len {
+            return;
+        }
+        let b = char_idx_to_byte(s, *cursor);
+        let next_len = s[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+        s.replace_range(b..b + next_len, "");
+    }
+
+    fn worktree_create_delete_to_start(&mut self) {
+        let (s, cursor) = self.worktree_create_focused_mut();
+        let b = char_idx_to_byte(s, *cursor);
+        s.replace_range(..b, "");
+        *cursor = 0;
+    }
+
+    fn worktree_create_paste(&mut self, text: &str) {
+        // Paste sanitizes newlines to spaces for these fields
+        let clean = text.replace(['\n', '\r'], " ");
+        let (s, cursor) = self.worktree_create_focused_mut();
+        let b = char_idx_to_byte(s, *cursor);
+        s.insert_str(b, &clean);
+        *cursor += clean.chars().count();
+        self.mark_dirty();
+    }
+
+    fn worktree_create_next_focus(&mut self, delta: isize) {
+        if !self.worktree_create.advanced {
+            return;
+        }
+        let order = [
+            WorktreeCreateFocus::CreateFrom,
+            WorktreeCreateFocus::BranchOverride,
+            WorktreeCreateFocus::Note,
+            WorktreeCreateFocus::Agent,
+        ];
+        let idx = order.iter().position(|f| *f == self.worktree_create.focus).unwrap_or(0) as isize;
+        let next = (idx + delta).rem_euclid(order.len() as isize) as usize;
+        self.worktree_create.focus = order[next];
+    }
+
+    fn commit_worktree_create(&mut self) {
+        let cf = self.worktree_create.create_from.trim().to_string();
+        if cf.is_empty() {
+            self.worktree_create.error = Some("Create from cannot be empty".to_string());
+            self.mark_dirty();
+            return;
+        }
+        let session = self.layout.as_ref().and_then(|l| l.sessions.get(self.worktree_create.session)).map(|s| s.name.clone()).unwrap_or_default();
+        let branch_override = self.worktree_create.branch_override.trim().to_string();
+        let branch = if branch_override.is_empty() { String::new() } else { branch_override };
+        let note = self.worktree_create.note.trim().to_string();
+        let note_opt = if note.is_empty() { None } else { Some(note) };
+        let agent = self.worktree_create.agent.trim().to_string();
+        let agent_opt = if agent.is_empty() { None } else { Some(agent) };
+        // Determine name/from based on tab and content
+        let (name_opt, from_opt) = match self.worktree_create.tab {
+            WorktreeCreateTab::Inteligente => {
+                if kumo_core::worktrees::parse_pr_number(&cf).is_some() || cf.contains("://") {
+                    (None, Some(cf.clone()))
+                } else {
+                    (Some(cf.clone()), None)
+                }
+            }
+            WorktreeCreateTab::Github => (None, Some(cf.clone())),
+            WorktreeCreateTab::Jira => (None, Some(cf.clone())),
+            WorktreeCreateTab::Rama => (None, Some(cf.clone())),
+            WorktreeCreateTab::Nombre => (Some(cf.clone()), None),
+        };
+        // Validate branch override early (daemon will also validate)
+        if !branch.is_empty() {
+            if let Err(e) = kumo_core::worktrees::validate_branch_name(&branch) {
+                self.worktree_create.error = Some(e);
+                self.mark_dirty();
+                return;
+            }
+        }
+        self.worktree_create.open = false;
+        let is_ai = true;
+        let _ = self.send(&Command::WorktreeCreate { session, branch, from: from_opt, note: note_opt, agent: agent_opt, is_ai, name: name_opt });
+        self.mark_dirty();
+    }
+
+    fn on_session_close_confirm_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            // Cancel — don't close session at all
+            self.session_close_confirm.open = false;
+            self.mark_dirty();
+            return;
+        }
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let path = self.session_close_confirm.path.clone();
+                let name = self.session_close_confirm.session_name.clone();
+                // Need session name for WorktreeRemove: use active session? Use stored name's session? The command needs a session name for routing; use the session being closed.
+                let session = name.clone();
+                self.session_close_confirm.open = false;
+                // Remove worktree (also closes session)
+                let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                self.mark_dirty();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                let name = self.session_close_confirm.session_name.clone();
+                self.session_close_confirm.open = false;
+                let _ = self.send(&Command::SessionKill { name });
+                self.mark_dirty();
+            }
+            KeyCode::Enter => {
+                // Default to Yes (remove worktree)
+                let path = self.session_close_confirm.path.clone();
+                let name = self.session_close_confirm.session_name.clone();
+                let session = name.clone();
+                self.session_close_confirm.open = false;
+                let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                self.mark_dirty();
+            }
+            _ => {}
+        }
+    }
+
     fn commit_name(&mut self) {
         let name = self.popup.name.trim().to_string();
         if name.is_empty() {
@@ -2796,7 +3265,7 @@ impl View {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
                 self.popup.open = false;
-                let _ = self.send(&Command::WorktreeCreate { session, branch: name });
+                let _ = self.send(&Command::WorktreeCreate { session, branch: name, from: None, note: None, agent: None, is_ai: false, name: None });
             }
             Some(PopupTarget::RenamePane(pid)) => {
                 let session = self.active_session().map(|s| s.name.clone());
@@ -2989,13 +3458,19 @@ impl View {
                     }
                 }
                 CtxTarget::Session(idx) => {
-                    let name = self
-                        .layout
-                        .as_ref()
-                        .and_then(|l| l.sessions.get(idx))
-                        .map(|s| s.name.clone());
-                    if let Some(name) = name {
-                        let _ = self.send(&Command::SessionKill { name });
+                    let sess = self.layout.as_ref().and_then(|l| l.sessions.get(idx));
+                    if let Some(s) = sess {
+                        let name = s.name.clone();
+                        let ws = s.workspace.clone();
+                        let is_worktree = std::fs::metadata(ws.join(".git")).map(|m| m.is_file()).unwrap_or(false);
+                        if is_worktree {
+                            self.session_close_confirm.open = true;
+                            self.session_close_confirm.session_idx = idx;
+                            self.session_close_confirm.session_name = name;
+                            self.session_close_confirm.path = ws;
+                        } else {
+                            let _ = self.send(&Command::SessionKill { name });
+                        }
                     }
                 }
                 CtxTarget::Tab(s_idx, t_idx) => {
@@ -3164,6 +3639,111 @@ impl View {
             }
             return Ok(());
         }
+        if self.session_close_confirm.open {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let Some(rect) = self.session_close_confirm_button_rect(true) {
+                    if rect.contains(Position::new(x, y)) {
+                        let path = self.session_close_confirm.path.clone();
+                        let name = self.session_close_confirm.session_name.clone();
+                        let session = name.clone();
+                        self.session_close_confirm.open = false;
+                        let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.session_close_confirm_button_rect(false) {
+                    if rect.contains(Position::new(x, y)) {
+                        let name = self.session_close_confirm.session_name.clone();
+                        self.session_close_confirm.open = false;
+                        let _ = self.send(&Command::SessionKill { name });
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.session_close_confirm_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                    return Ok(());
+                }
+                self.session_close_confirm.open = false;
+                self.mark_dirty();
+            }
+            return Ok(());
+        }
+        if self.worktree_create.open {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let Some(tab) = self.worktree_create_tab_at(x, y) {
+                    if tab != WorktreeCreateTab::Jira {
+                        self.worktree_create.tab = tab;
+                        self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                        self.mark_dirty();
+                    }
+                    return Ok(());
+                }
+                if let Some(rect) = self.worktree_create_input_rect(WorktreeCreateFocus::CreateFrom) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                        let len = self.worktree_create.create_from.chars().count();
+                        let col = (x.saturating_sub(rect.x)) as usize;
+                        self.worktree_create.cursor = col.min(len);
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.worktree_create.advanced {
+                    for focus in [WorktreeCreateFocus::BranchOverride, WorktreeCreateFocus::Note, WorktreeCreateFocus::Agent] {
+                        if let Some(rect) = self.worktree_create_input_rect(focus) {
+                            if rect.contains(Position::new(x, y)) {
+                                self.worktree_create.focus = focus;
+                                let len = match focus {
+                                    WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_override.chars().count(),
+                                    WorktreeCreateFocus::Note => self.worktree_create.note.chars().count(),
+                                    WorktreeCreateFocus::Agent => self.worktree_create.agent.chars().count(),
+                                    _ => 0,
+                                };
+                                let col = (x.saturating_sub(rect.x)) as usize;
+                                match focus {
+                                    WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor = col.min(len),
+                                    WorktreeCreateFocus::Note => self.worktree_create.note_cursor = col.min(len),
+                                    WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor = col.min(len),
+                                    _ => {}
+                                }
+                                self.mark_dirty();
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                if let Some(rect) = self.worktree_create_advanced_toggle_rect() {
+                    if rect.contains(Position::new(x, y)) {
+                        self.worktree_create.advanced = !self.worktree_create.advanced;
+                        if !self.worktree_create.advanced {
+                            self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                        }
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.worktree_create_button_rect(true) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.commit_worktree_create();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.worktree_create_button_rect(false) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.worktree_create.open = false;
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.worktree_create_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                    return Ok(());
+                }
+                self.worktree_create.open = false;
+                self.mark_dirty();
+            }
+            return Ok(());
+        }
         if self.worktree_picker.open {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -3245,8 +3825,10 @@ impl View {
                         self.mark_dirty();
                     }
                 }
-                MouseEventKind::ScrollUp => {
-                    if self.finder.selected > 0 { self.finder.selected -= 1; if self.finder.selected < self.finder.scroll { self.finder.scroll = self.finder.selected; } self.mark_dirty(); }
+                MouseEventKind::ScrollUp if self.finder.selected > 0 => {
+                    self.finder.selected -= 1;
+                    if self.finder.selected < self.finder.scroll { self.finder.scroll = self.finder.selected; }
+                    self.mark_dirty();
                 }
                 _ => {}
             }
@@ -4553,6 +5135,8 @@ impl View {
         self.render_keybind_overlay(f);
         self.render_settings(f);
         self.render_worktree_picker(f);
+        self.render_worktree_create(f);
+        self.render_session_close_confirm(f);
         self.render_finder(f);
     }
 
@@ -5031,7 +5615,7 @@ impl View {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let is_hover = self.sidebar_hover == Some(i);
                     let bg = if active { sidebar_active_bg(&theme) } else if is_hover { lighten(theme.panel_sep, 18) } else { RColor::Reset };
-                    let fg = if active { theme.fg } else if is_hover { theme.fg } else { theme.panel_muted };
+                    let fg = if active || is_hover { theme.fg } else { theme.panel_muted };
                     if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
@@ -5720,11 +6304,32 @@ impl View {
             if row.open {
                 put(f, dd.x + 2, y, "●", Style::default().fg(if sel { fg } else { theme.green }).bg(bg));
             }
-            let branch = row.branch.as_deref().unwrap_or("(detached)");
+            let mut branch_disp = row.branch.as_deref().unwrap_or("(detached)").to_string();
+            if row.is_ephemeral {
+                branch_disp.push_str(" ◉");
+            }
+            if let Some(st) = &row.status {
+                branch_disp.push_str(&format!(" [{}]", st));
+            }
+            if let Some(c) = &row.comment {
+                if !c.is_empty() && !sel {
+                    // show comment suffix dimmed in path column when not selected
+                }
+            }
             let branch_style = Style::default().fg(fg).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() });
-            text(f, branch_x, y, branch, branch_style, BRANCH_COL.saturating_sub(2));
+            text(f, branch_x, y, &branch_disp, branch_style, BRANCH_COL.saturating_sub(2));
             if path_w > 0 {
-                let path = fit_worktree_path(&row.path, path_w as usize);
+                let mut path = fit_worktree_path(&row.path, path_w as usize);
+                if let Some(c) = &row.comment {
+                    if sel && !c.is_empty() {
+                        // when selected, show comment tail after path if space
+                        let avail = path_w as usize;
+                        let suffix = format!(" · {}", c.lines().next().unwrap_or(""));
+                        if path.len() + suffix.len() < avail {
+                            path.push_str(&suffix);
+                        }
+                    }
+                }
                 let path_style = Style::default().fg(if row.is_main { fg } else { theme.panel_muted }).bg(bg);
                 text(f, path_x, y, &path, path_style, path_w);
             }
@@ -5744,6 +6349,232 @@ impl View {
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         text(f, dd.x + 2, body_bottom, "j/k: move · enter: open · esc: close", footer, inner_w);
+    }
+
+    fn render_worktree_create(&self, f: &mut Frame) {
+        if !self.worktree_create.open {
+            return;
+        }
+        let theme = self.current_theme();
+        let Some(dd) = self.worktree_create_rect() else { return };
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let inner_w = dd.width.saturating_sub(4);
+        // Title
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, dd.x + 2, dd.y + 1, "new worktree", title, inner_w);
+        // Tabs row
+        let tabs_y = dd.y + 2;
+        let mut cur_x = dd.x + 2;
+        for tab in [
+            WorktreeCreateTab::Inteligente,
+            WorktreeCreateTab::Github,
+            WorktreeCreateTab::Rama,
+            WorktreeCreateTab::Nombre,
+        ] {
+            let is_sel = tab == self.worktree_create.tab;
+            let label = tab.label();
+            let w = (label.chars().count() as u16) + 2;
+            let style = if is_sel {
+                Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg).bg(theme.panel_sep)
+            };
+            // Add separator dot between tabs
+            text(f, cur_x, tabs_y, &format!(" {} ", label), style, w);
+            cur_x += w + 1;
+            if cur_x >= dd.right() - 2 {
+                break;
+            }
+        }
+        // Create from label + input
+        let input_label_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        let focus = self.worktree_create.focus;
+        let is_create_focused = focus == WorktreeCreateFocus::CreateFrom;
+        text(f, dd.x + 2, dd.y + 3, "Create from", input_label_style, inner_w);
+        let input_rect = Rect::new(dd.x + 2, dd.y + 4, inner_w, 1);
+        let input_bg = if is_create_focused { theme.accent } else { theme.input_bg };
+        let input_fg = if is_create_focused { RColor::Black } else { theme.fg };
+        fill(f, input_rect, input_bg);
+        // Placeholder / content
+        let cf = &self.worktree_create.create_from;
+        let cursor = self.worktree_create.cursor;
+        let placeholder = match self.worktree_create.tab {
+            WorktreeCreateTab::Inteligente => "name, #1234, branch, or https://github.com/.../pull/123",
+            WorktreeCreateTab::Github => "#1234 or GitHub URL",
+            WorktreeCreateTab::Jira => "Jira issue",
+            WorktreeCreateTab::Rama => "branch name (e.g. feat/login)",
+            WorktreeCreateTab::Nombre => "task name (e.g. fix login)",
+        };
+        let display = if cf.is_empty() && !is_create_focused { placeholder } else { cf.as_str() };
+        let text_style = if cf.is_empty() && !is_create_focused {
+            Style::default().fg(theme.panel_muted).bg(input_bg)
+        } else {
+            Style::default().fg(input_fg).bg(input_bg)
+        };
+        // Render with cursor handling (scroll if needed)
+        let field_w = inner_w as usize;
+        let len = display.chars().count();
+        let cur = cursor.min(len);
+        // Simple: render substring window around cursor
+        let start = if len <= field_w { 0 } else { cur.saturating_sub(field_w / 2).min(len - field_w) };
+        let mut col = input_rect.x;
+        for (i, ch) in display.chars().enumerate().skip(start).take(field_w) {
+            let is_cursor = is_create_focused && i == cur;
+            let mut st = text_style;
+            if is_cursor {
+                st = st.add_modifier(Modifier::REVERSED);
+            }
+            put(f, col, input_rect.y, &ch.to_string(), st);
+            col += 1;
+        }
+        if is_create_focused && cur == len && col < input_rect.right() {
+            put(f, col, input_rect.y, " ", text_style.add_modifier(Modifier::REVERSED));
+        }
+        // Advanced toggle row
+        let adv_y = dd.y + 6;
+        let adv_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        let adv_label = if self.worktree_create.advanced { "▼ Advanced" } else { "▶ Advanced (branch, note, agent)" };
+        let adv_focused = false; // not focusable via Tab, but clickable
+        let adv_text_style = if adv_focused { Style::default().fg(RColor::Black).bg(theme.accent) } else { adv_style };
+        text(f, dd.x + 2, adv_y, adv_label, adv_text_style, inner_w);
+        let hint = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2 + adv_label.chars().count() as u16 + 2, adv_y, "· ctrl+a", hint, inner_w);
+        if self.worktree_create.advanced {
+            // Branch override
+            let branch_focused = focus == WorktreeCreateFocus::BranchOverride;
+            text(f, dd.x + 2, dd.y + 7, "Branch name override", input_label_style, inner_w);
+            let br_rect = Rect::new(dd.x + 2, dd.y + 8, inner_w, 1);
+            let bg = if branch_focused { theme.accent } else { theme.input_bg };
+            let fg = if branch_focused { RColor::Black } else { theme.fg };
+            fill(f, br_rect, bg);
+            let b = &self.worktree_create.branch_override;
+            let bc = self.worktree_create.branch_cursor;
+            let bph = "e.g. feat/login (leave empty to derive)";
+            let bdisplay = if b.is_empty() && !branch_focused { bph } else { b.as_str() };
+            let bstyle = if b.is_empty() && !branch_focused { Style::default().fg(theme.panel_muted).bg(bg) } else { Style::default().fg(fg).bg(bg) };
+            let blen = bdisplay.chars().count();
+            let bcur = bc.min(blen);
+            let bstart = if blen <= inner_w as usize { 0 } else { bcur.saturating_sub(inner_w as usize / 2).min(blen - inner_w as usize) };
+            let mut bcol = br_rect.x;
+            for (i, ch) in bdisplay.chars().enumerate().skip(bstart).take(inner_w as usize) {
+                let is_cur = branch_focused && i == bcur;
+                let mut st = bstyle;
+                if is_cur { st = st.add_modifier(Modifier::REVERSED); }
+                put(f, bcol, br_rect.y, &ch.to_string(), st);
+                bcol += 1;
+            }
+            if branch_focused && bcur == blen && bcol < br_rect.right() {
+                put(f, bcol, br_rect.y, " ", bstyle.add_modifier(Modifier::REVERSED));
+            }
+            // Note
+            let note_focused = focus == WorktreeCreateFocus::Note;
+            text(f, dd.x + 2, dd.y + 9, "Note", input_label_style, inner_w);
+            let note_rect = Rect::new(dd.x + 2, dd.y + 10, inner_w, 1);
+            let nbg = if note_focused { theme.accent } else { theme.input_bg };
+            let nfg = if note_focused { RColor::Black } else { theme.fg };
+            fill(f, note_rect, nbg);
+            let n = &self.worktree_create.note;
+            let nc = self.worktree_create.note_cursor;
+            let nph = "optional checkpoint note";
+            let ndisp = if n.is_empty() && !note_focused { nph } else { n.as_str() };
+            let nstyle = if n.is_empty() && !note_focused { Style::default().fg(theme.panel_muted).bg(nbg) } else { Style::default().fg(nfg).bg(nbg) };
+            let nlen = ndisp.chars().count();
+            let ncur = nc.min(nlen);
+            let nstart = if nlen <= inner_w as usize { 0 } else { ncur.saturating_sub(inner_w as usize / 2).min(nlen - inner_w as usize) };
+            let mut ncol = note_rect.x;
+            for (i, ch) in ndisp.chars().enumerate().skip(nstart).take(inner_w as usize) {
+                let is_cur = note_focused && i == ncur;
+                let mut st = nstyle;
+                if is_cur { st = st.add_modifier(Modifier::REVERSED); }
+                put(f, ncol, note_rect.y, &ch.to_string(), st);
+                ncol += 1;
+            }
+            if note_focused && ncur == nlen && ncol < note_rect.right() {
+                put(f, ncol, note_rect.y, " ", nstyle.add_modifier(Modifier::REVERSED));
+            }
+            // Agent
+            let agent_focused = focus == WorktreeCreateFocus::Agent;
+            text(f, dd.x + 2, dd.y + 11, "Agent", input_label_style, inner_w);
+            let ag_rect = Rect::new(dd.x + 2, dd.y + 12, inner_w, 1);
+            let abg = if agent_focused { theme.accent } else { theme.input_bg };
+            let afg = if agent_focused { RColor::Black } else { theme.fg };
+            fill(f, ag_rect, abg);
+            let ag = &self.worktree_create.agent;
+            let agc = self.worktree_create.agent_cursor;
+            let agph = "e.g. claude, codex, opencode (leave empty for none)";
+            let agdisp = if ag.is_empty() && !agent_focused { agph } else { ag.as_str() };
+            let agstyle = if ag.is_empty() && !agent_focused { Style::default().fg(theme.panel_muted).bg(abg) } else { Style::default().fg(afg).bg(abg) };
+            let aglen = agdisp.chars().count();
+            let agcur = agc.min(aglen);
+            let agstart = if aglen <= inner_w as usize { 0 } else { agcur.saturating_sub(inner_w as usize / 2).min(aglen - inner_w as usize) };
+            let mut agcol = ag_rect.x;
+            for (i, ch) in agdisp.chars().enumerate().skip(agstart).take(inner_w as usize) {
+                let is_cur = agent_focused && i == agcur;
+                let mut st = agstyle;
+                if is_cur { st = st.add_modifier(Modifier::REVERSED); }
+                put(f, agcol, ag_rect.y, &ch.to_string(), st);
+                agcol += 1;
+            }
+            if agent_focused && agcur == aglen && agcol < ag_rect.right() {
+                put(f, agcol, ag_rect.y, " ", agstyle.add_modifier(Modifier::REVERSED));
+            }
+        }
+        // Error
+        if let Some(err) = &self.worktree_create.error {
+            let err_style = Style::default().fg(theme.orange).bg(theme.panel_sep);
+            let err_y = if self.worktree_create.advanced { dd.y + 13 } else { dd.y + 7 };
+            text(f, dd.x + 2, err_y, err, err_style, inner_w);
+        }
+        // Footer + buttons — footer must not overlap the buttons.
+        let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        let footer_y = dd.bottom().saturating_sub(2);
+        let footer_text = "tab: next field · enter: create · esc: close";
+        let button_start_x = self.worktree_create_button_rect(true).map(|r| r.x).unwrap_or(dd.right());
+        let footer_avail = button_start_x.saturating_sub(dd.x + 3);
+        text(f, dd.x + 2, footer_y, footer_text, footer, footer_avail);
+        for (is_create, label) in [(true, " create "), (false, " cancel ")] {
+            if let Some(rect) = self.worktree_create_button_rect(is_create) {
+                let is_hover = false;
+                let st = if is_create {
+                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                } else if is_hover {
+                    Style::default().fg(RColor::Black).bg(theme.secondary)
+                } else {
+                    Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
+                };
+                text(f, rect.x, rect.y, label, st, rect.width);
+            }
+        }
+    }
+
+    fn render_session_close_confirm(&self, f: &mut Frame) {
+        if !self.session_close_confirm.open {
+            return;
+        }
+        let theme = self.current_theme();
+        let Some(dd) = self.session_close_confirm_rect() else { return };
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, dd.x + 2, dd.y + 1, "close session", title, inner_w);
+        let msg = "Do you want to remove the worktree? Yes(y) / No(n)".to_string();
+        let msg_style = Style::default().fg(theme.fg).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 2, &msg, msg_style, inner_w);
+        let path = self.session_close_confirm.path.display().to_string();
+        let path_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 3, &path, path_style, inner_w);
+        let hint = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 4, "Yes removes the worktree folder and branch · No keeps it", hint, inner_w);
+        for (is_yes, label) in [(true, " Yes (y) "), (false, " No (n) ")] {
+            if let Some(rect) = self.session_close_confirm_button_rect(is_yes) {
+                let st = if is_yes {
+                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
+                };
+                text(f, rect.x, rect.y, label, st, rect.width);
+            }
+        }
     }
 
     fn render_finder(&self, f: &mut Frame) {
@@ -5790,7 +6621,7 @@ impl View {
             let marker = if sel { "▸" } else { " " };
             put(f, dd.x + 2, y, marker, Style::default().fg(if sel { RColor::Black } else { theme.accent }).bg(bg));
             let label = match item {
-                FinderItem::Session { name, .. } => format!("{name}"),
+                FinderItem::Session { name, .. } => name.clone(),
                 FinderItem::Tab { session_name, tab_name, .. } => format!("{session_name} / {tab_name}"),
             };
             text(f, dd.x + 4, y, &label, Style::default().fg(fg).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }), inner_w.saturating_sub(4));
@@ -6461,6 +7292,8 @@ mod tests {
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
+            worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -7167,7 +8000,7 @@ mod tests {
             view.settings.open = true;
             view.worktree_picker.open = true;
             view.worktree_picker.items = vec![
-                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false },
+                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false, comment: None, status: None, is_ephemeral: false },
             ];
             view.pane_numbers = Some(Instant::now());
             view.update_notice = Some(("key".into(), "nightly".into()));

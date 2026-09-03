@@ -640,16 +640,68 @@ impl App {
     /// a displayable error (kept in the popup) when the workspace is not a git
     /// repository or git rejects the branch/path.
     fn new_worktree_session(&mut self, idx: usize, branch: &str) -> Result<(), String> {
+        self.new_worktree_session_ext(idx, Some(branch), None, None, None, false, None)
+            .map(|_| ())
+    }
+
+    /// Extended creator for isolated `--ai` worktrees (Orca-aligned naming, no `kumo/` prefix).
+    /// `branch_override` is `--branch`, `name_hint` is the Nombre task name, `from` is `--from`,
+    /// `note` is `--note`, `agent` is `--agent`, `is_ai` marks ephemeral checkout.
+    #[allow(clippy::too_many_arguments)]
+    fn new_worktree_session_ext(
+        &mut self,
+        idx: usize,
+        branch_override: Option<&str>,
+        from: Option<&str>,
+        note: Option<&str>,
+        agent: Option<&str>,
+        is_ai: bool,
+        name_hint: Option<&str>,
+    ) -> Result<String, String> {
         let Some(session) = self.sessions.get(idx) else {
             return Err("no such session".to_string());
         };
         let Some(root) = kumo_core::worktrees::repo_root(&session.workspace) else {
             return Err(format!("{} is not a git repository", session.workspace.display()));
         };
-        let path = kumo_core::worktrees::worktree_path(&root, branch);
-        kumo_core::worktrees::add_worktree(&root, &path, branch)?;
-        self.new_session_in_workspace(branch.to_string(), path)
-            .map_err(|e| format!("{e:#}"))
+        // Orca-aligned branch derivation (no `kumo/` prefix)
+        let branch = kumo_core::worktrees::derive_branch(name_hint, from, branch_override)?;
+        if branch.trim().is_empty() { return Err("branch name cannot be empty".into()); }
+        let path = kumo_core::worktrees::worktree_path(&root, &branch);
+        if path.exists() {
+            return Err(format!("worktree path already exists: {}", path.display()));
+        }
+        // Resolve --from to a commit-ish (Jira deferred returns Err)
+        let resolved_from = if let Some(f) = from.filter(|s| !s.trim().is_empty()) {
+            Some(kumo_core::worktrees::resolve_from(&root, f)?)
+        } else { None };
+        kumo_core::worktrees::add_worktree_from(&root, &path, &branch, resolved_from.as_deref())?;
+        // Shared gitignored dirs (symlink / APFS clone)
+        let shared = kumo_core::config::worktree_shared_dirs();
+        for w in kumo_core::worktrees::wire_shared_dirs(&root, &path, &shared) {
+            log::warn!("kumo: {w}");
+        }
+        for w in kumo_core::worktrees::copy_worktreeinclude(&root, &path) {
+            log::warn!("kumo: {w}");
+        }
+        self.new_session_in_workspace(branch.clone(), path.clone())
+            .map_err(|e| format!("{e:#}"))?;
+        // Lightweight checkpoint seed
+        let _ = kumo_core::worktree_meta::seed(&path, Some(branch.clone()), note.map(|s| s.to_string()), is_ai);
+        // Chain agent start into the new pane (non-fatal)
+        if let Some(kind) = agent.filter(|s| !s.trim().is_empty()) {
+            // New session is the last one after new_session_in_workspace
+            if let Some(new_sess) = self.sessions.last() {
+                let pane_id = new_sess.active_tab().tree.focus;
+                let sess_name = new_sess.name.clone();
+                match self.agent_start(&sess_name, pane_id, kind, &[]) {
+                    Ok(msg) if msg.starts_with("error:") => log::warn!("kumo: agent start in new worktree: {msg}"),
+                    Err(e) => log::warn!("kumo: agent start failed: {e:#}"),
+                    _ => {}
+                }
+            }
+        }
+        Ok(branch)
     }
 
     /// Open the session already working in `path` (matching the exact path or
@@ -685,6 +737,58 @@ impl App {
                 _ => false,
             }
         })
+    }
+
+    /// Remove a worktree at `path` (and optionally its branch). Finds the repo
+    /// root from `path` or the given `repo_hint`, surfaces unmerged-branch
+    /// preview when `!force`, and closes any session using the worktree.
+    pub(super) fn remove_worktree_at(
+        &mut self,
+        path: &std::path::Path,
+        force: bool,
+        repo_hint: Option<&std::path::Path>,
+    ) -> Result<String, String> {
+        // Determine branch for this worktree (for delete / preview)
+        let branch = kumo_core::worktrees::list_worktrees(path)
+            .ok()
+            .and_then(|list| list.into_iter().find(|w| {
+                let canon = std::fs::canonicalize(&w.path).ok();
+                let target = std::fs::canonicalize(path).ok().unwrap_or_else(|| path.to_path_buf());
+                canon.as_ref().map(|c| c == &target).unwrap_or(w.path == path)
+            }).and_then(|w| w.branch))
+            .or_else(|| kumo_core::worktree_meta::get(path).and_then(|m| m.branch))
+            .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()));
+        // Find the main worktree's path (common repo root) — `repo_root` on a linked worktree returns its own top, not main
+        let repo_root = repo_hint.and_then(kumo_core::worktrees::main_worktree_path)
+            .or_else(|| kumo_core::worktrees::main_worktree_path(path))
+            .or_else(|| self.sessions.iter().find_map(|s| kumo_core::worktrees::main_worktree_path(&s.workspace)))
+            .or_else(|| repo_hint.and_then(kumo_core::worktrees::repo_root))
+            .or_else(|| kumo_core::worktrees::repo_root(path));
+        let Some(root) = repo_root else { return Err("not a git repository".to_string()); };
+        // Close session using this worktree, if any (keep path for removal)
+        let session_idx = self.session_for_workspace(path);
+        if let Some(idx) = session_idx {
+            self.close_session(idx);
+        }
+        // Remove the worktree directory (fails if dirty and !force — surface git's message)
+        kumo_core::worktrees::remove_worktree(&root, path, force)?;
+        if let Some(br) = branch {
+            let still_used = kumo_core::worktrees::list_worktrees(&root).map(|list| list.iter().any(|w| w.branch.as_deref() == Some(&br))).unwrap_or(false);
+            if !still_used {
+                if !force {
+                    if let Ok(cnt) = kumo_core::worktrees::branch_unmerged_count(&root, &br) {
+                        if cnt > 0 {
+                            let kept_msg = format!(" (branch {br:?} kept — {cnt} commits not in origin/main; `git log --oneline {br} ^origin/main` to review, `kumo worktree rm --force {}` to delete)", path.display());
+                            let _ = kumo_core::worktree_meta::remove(path);
+                            return Ok(format!("removed worktree {}{}", path.display(), kept_msg));
+                        }
+                    }
+                }
+                let _ = kumo_core::worktrees::delete_branch(&root, &br, force);
+            }
+        }
+        let _ = kumo_core::worktree_meta::remove(path);
+        Ok(format!("removed worktree {}", path.display()))
     }
 
     /// Re-apply the config to live state (`kumo reload` / client MENU `reload`).

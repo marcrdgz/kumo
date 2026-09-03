@@ -459,6 +459,21 @@ impl Default for StatusBarConfig {
     }
 }
 
+/// Worktree configuration (`[worktree]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeConfig {
+    /// Gitignored directories to symlink/clone-copy into each new worktree.
+    pub shared_dirs: Vec<PathBuf>,
+    /// Expose `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH` to spawned panes.
+    pub expose_socket: bool,
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self { shared_dirs: Vec::new(), expose_socket: true }
+    }
+}
+
 /// Parsed user configuration. Mirrors the flat `key = value` config file;
 /// future knobs (theme, leader, keymaps, status bar) will extend this struct.
 #[derive(Clone)]
@@ -492,6 +507,8 @@ pub struct Config {
     /// Agent notifications for lifecycle transitions: transient corner
     /// toasts in attached viewers (`[notifications]`).
     pub notifications: NotificationsConfig,
+    /// Worktree isolation (`[worktree]`).
+    pub worktree: WorktreeConfig,
 }
 
 impl Default for Config {
@@ -509,6 +526,7 @@ impl Default for Config {
             sidebar: SidebarConfig::default(),
             status_bar: StatusBarConfig::default(),
             notifications: NotificationsConfig::default(),
+            worktree: WorktreeConfig::default(),
         }
     }
 }
@@ -960,6 +978,29 @@ impl Config {
                 self.notifications.sound = v;
             }
         }
+        if let Some(wt) = toml.worktree {
+            if let Some(dirs) = wt.shared_dirs.or(wt._shared_dirs_camel) {
+                let mut out = Vec::new();
+                for raw in dirs {
+                    let trimmed = raw.trim().to_string();
+                    if trimmed.is_empty() { continue; }
+                    let p = PathBuf::from(&trimmed);
+                    if p.is_absolute() {
+                        log::warn!("kumo: ignoring absolute worktree.shared-dirs entry {trimmed:?}");
+                        continue;
+                    }
+                    if trimmed.contains("..") {
+                        log::warn!("kumo: ignoring worktree.shared-dirs entry with '..' {trimmed:?}");
+                        continue;
+                    }
+                    out.push(p);
+                }
+                self.worktree.shared_dirs = out;
+            }
+            if let Some(v) = wt.expose_socket {
+                self.worktree.expose_socket = v;
+            }
+        }
         self.normalize_new_cwd();
     }
 }
@@ -1120,6 +1161,17 @@ enum ThemeValue {
     Table(Box<ThemeSection>),
 }
 
+/// Raw TOML for `[worktree]` — per-repo shared dirs etc.
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct WorktreeRaw {
+    #[serde(rename = "shared-dirs", alias = "shared_dirs")]
+    pub shared_dirs: Option<Vec<String>>,
+    #[serde(rename = "sharedDirs", alias = "sharedDirs")]
+    _shared_dirs_camel: Option<Vec<String>>,
+    #[serde(rename = "expose-socket", alias = "expose_socket")]
+    pub expose_socket: Option<bool>,
+}
+
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
 /// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
 #[derive(Default, serde::Deserialize)]
@@ -1147,6 +1199,8 @@ struct TomlConfig {
     status_bar: Option<StatusBarRaw>,
     #[serde(rename = "notifications")]
     notifications: Option<NotificationsRaw>,
+    #[serde(rename = "worktree")]
+    worktree: Option<WorktreeRaw>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -1453,6 +1507,16 @@ pub fn status_bar() -> StatusBarConfig {
 /// Whether the status bar is enabled.
 pub fn status_bar_enabled() -> bool {
     cached_config().status_bar.enabled
+}
+
+/// Worktree shared-dirs (gitignored symlinks/clone-copies).
+pub fn worktree_shared_dirs() -> Vec<PathBuf> {
+    cached_config().worktree.shared_dirs
+}
+
+/// Whether spawned panes receive `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH`.
+pub fn worktree_expose_socket() -> bool {
+    cached_config().worktree.expose_socket
 }
 
 /// Split a command line string into program + args (space separated).
