@@ -2461,7 +2461,7 @@ impl View {
 
     #[allow(dead_code)]
     fn finder_input_at(&self, x: u16, y: u16) -> bool {
-        self.finder_rect().map(|r| y==r.y+1 && x>=r.x+1 && x<r.x+r.width-1).unwrap_or(false)
+        self.finder_rect().map(|r| y==r.y+1 && x>r.x && x<r.x+r.width-1).unwrap_or(false)
     }
 
     fn finder_item_at(&self, x: u16, y: u16) -> Option<usize> {
@@ -3245,8 +3245,10 @@ impl View {
                         self.mark_dirty();
                     }
                 }
-                MouseEventKind::ScrollUp => {
-                    if self.finder.selected > 0 { self.finder.selected -= 1; if self.finder.selected < self.finder.scroll { self.finder.scroll = self.finder.selected; } self.mark_dirty(); }
+                MouseEventKind::ScrollUp if self.finder.selected > 0 => {
+                    self.finder.selected -= 1;
+                    if self.finder.selected < self.finder.scroll { self.finder.scroll = self.finder.selected; }
+                    self.mark_dirty();
                 }
                 _ => {}
             }
@@ -5031,7 +5033,7 @@ impl View {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let is_hover = self.sidebar_hover == Some(i);
                     let bg = if active { sidebar_active_bg(&theme) } else if is_hover { lighten(theme.panel_sep, 18) } else { RColor::Reset };
-                    let fg = if active { theme.fg } else if is_hover { theme.fg } else { theme.panel_muted };
+                    let fg = if active || is_hover { theme.fg } else { theme.panel_muted };
                     if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
@@ -5790,7 +5792,7 @@ impl View {
             let marker = if sel { "▸" } else { " " };
             put(f, dd.x + 2, y, marker, Style::default().fg(if sel { RColor::Black } else { theme.accent }).bg(bg));
             let label = match item {
-                FinderItem::Session { name, .. } => format!("{name}"),
+                FinderItem::Session { name, .. } => name.clone(),
                 FinderItem::Tab { session_name, tab_name, .. } => format!("{session_name} / {tab_name}"),
             };
             text(f, dd.x + 4, y, &label, Style::default().fg(fg).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }), inner_w.saturating_sub(4));

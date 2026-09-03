@@ -486,7 +486,7 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
                 .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
                 .ok_or_else(|| anyhow::anyhow!("pane wait-output needs a PANE (see `kumo pane -h`)"))?;
             // Remaining positional after pane (if pane was positional)
-            let mut rest = if pane_id.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let rest = if pane_id.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
             // Flags: --regex, --timeout, and positional pattern
             let mut is_regex = false;
             let mut timeout_ms: Option<u64> = None;
@@ -563,7 +563,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             let pane = pane_opt.clone()
                 .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
                 .ok_or_else(|| anyhow::anyhow!("agent wait needs a PANE (see `kumo agent -h`)"))?;
-            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
             let mut until: Option<AgentWaitKind> = None;
             let mut timeout_ms: Option<u64> = None;
             let mut i = 0;
@@ -600,7 +600,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             let pane = pane_opt.clone()
                 .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
                 .ok_or_else(|| anyhow::anyhow!("agent prompt needs a PANE"))?;
-            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
             let mut wait: Option<AgentWaitKind> = None;
             let mut timeout_ms: Option<u64> = None;
             let mut text_parts: Vec<String> = Vec::new();
@@ -659,7 +659,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             let pane = pane_opt.clone()
                 .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
                 .ok_or_else(|| anyhow::anyhow!("agent read needs a PANE"))?;
-            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
             let mut source: Option<AgentReadSource> = None;
             let mut i = 0;
             while i < rest.len() {
@@ -723,7 +723,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             let pane = pane_opt.clone()
                 .or_else(|| positional.first().and_then(|s| parse_pane_ref(s)))
                 .ok_or_else(|| anyhow::anyhow!("agent rename needs a PANE"))?;
-            let mut rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
+            let rest = if pane_opt.is_some() { positional.clone() } else { positional.iter().skip(1).cloned().collect::<Vec<_>>() };
             let name = rest.iter().find(|s| !s.starts_with('-')).cloned().ok_or_else(|| anyhow::anyhow!("agent rename needs a NAME"))?;
             // also accept name as second positional even if pane was via -p
             let name = if rest.len() >= 2 && pane_opt.is_some() {
@@ -737,7 +737,7 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
             // Better: if command is `kumo agent rename 123 myname` rest = ["myname"], we have name.
             // If `kumo agent rename -p 123 myname` rest = ["myname"], same.
             // If `kumo agent rename --pane 123 --name myname`, not handled; but we treat last non-flag as name.
-            let name = rest.into_iter().filter(|s| !s.starts_with('-')).next_back().unwrap_or(name);
+            let name = rest.into_iter().rfind(|s| !s.starts_with('-')).unwrap_or(name);
             Ok(CliCmd::AgentRename { session: session_opt, pane, name })
         }
         "broadcast" => {
