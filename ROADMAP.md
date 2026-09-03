@@ -344,28 +344,16 @@ agents get a machine layer:
 system), remote/update-checked agent-detection manifests (→ 0.8.0),
 `sync-input` stays cut (broadcast supersedes it), `pipe-pane` stays 0.9.0.
 
-> Context pipeline dropped — see revised 0.7.1–0.7.3 below. Only `vt.rs:last_prompt_block` + `pane_read_text:Traceback` remain as fallback.
+> Context pipeline dropped — superseded by Orca-native scope below (all in 0.7.0). Only `vt.rs:last_prompt_block` + `pane_read_text:Traceback` remain as fallback.
 
-### 🔭 Revised 0.7.1–0.7.3 — Orca-native, daemon-owned (replaces context pipeline)
+**Revised 0.7.0 scope — Orca-native, daemon-owned (`binary, not an app`, `AGENTS.md:4` `libghostty-vt`, `PLAN.md:68` dumb viewport, `protocol v12:54`)**
+*Why superseded:* chips were speculative (`DIFF_CAP 8K` dump, `bottom_text(80)` heuristic), `OSC133`-gated, and duplicated `agent read` + `wait` that `tmux` never had. Orca wins by *waiting* and *remembering*, not pasting. All three below ship in **0.7.0** in this PR.
 
-**Why superseded:** chips were speculative (`DIFF_CAP 8K` dump, `bottom_text(80)` heuristic), `OSC133`-gated, and duplicated `agent read` + `wait` that `tmux` never had. Orca wins by *waiting* and *remembering*, not pasting. These three land `binary, not an app` (`AGENTS.md:4` daemon+`libghostty-vt`, `PLAN.md:68` dumb viewport) using existing `LayoutTree:33`, `worktrees.rs:48`, `waits.rs:42`, `protocol v12:54`.
+- **Supervisor Inbox v2 + Socket-MCP `KUMO_SOCKET_PATH`:** `leader+I` queue `Blocked→Done→Working` with evidence preview (`agent read --source detection`, not dump) and one-key `a`pprove/`d`eny/`s`kip/`v`erify. `v` spawns harness split (`layout.rs:50` `V|H` 0.05) → `PaneWaitOutput --regex passed|failed` (`waits.rs:89`) → `AgentPrompt --wait`. Demand-driven via `tasks.rs:215` `should_alert` → `DaemonEvent::Toast:519`, survives `AGENT_TOAST_TIMEOUT 5s`. Socket injects `KUMO_SOCKET_PATH`+`KUMO_BIN_PATH` (+`KUMO_SESSION/PANE_ID`) into every `PtySpec` (`pty.rs:15`, `pane.rs:18`), gated by `config.toml [agent] env_injection=true`, speaks `NDJSON` on same `UnixSocket 0o600` (`server.rs:897` `SO_PEERCRED`), `kumo api schema --json` (`schemars`) so `claude/codex/opencode` self-drive over `ssh -L`. `ClientKind::Agent` (`protocol.rs:66`). Drops `leader+i/P` compose (`context.rs`, `ComposeState:128`) — freed `i/P`.
 
-#### 0.7.1 — Supervisor Inbox v2 + Socket-MCP `KUMO_SOCKET_PATH` (week 1, S 2-3d)
-- **Supervisor:** `leader+I` queue `Blocked→Done→Working` with evidence preview (`agent read --source detection`, not dump) and one-key `a`pprove/`d`eny/`s`kip/`v`erify. `v` spawns harness split (`layout.rs:50` `V|H` 0.05) → `PaneWaitOutput --regex passed|failed` (`waits.rs:89`) → `AgentPrompt --wait`. Demand-driven via `tasks.rs:215` `should_alert` → `DaemonEvent::Toast:519`, survives `AGENT_TOAST_TIMEOUT 5s`.
-- **Socket:** inject `KUMO_SOCKET_PATH`+`KUMO_BIN_PATH` (+`KUMO_SESSION/PANE_ID`) into every `PtySpec` (`pty.rs:15`, `pane.rs:18` `Pane::spawn`, gated by `config.toml [agent] env_injection=true`), speak `NDJSON` on same `UnixSocket 0o600` (`server.rs:897` `SO_PEERCRED`), `kumo api schema --json` (`schemars`) so `claude/codex/opencode` self-drive over `ssh -L`. `ClientKind::Agent` (`protocol.rs:66`), `cargo clippy/test` green, no TUI change.
-- **Drop:** `leader+i/P` compose (`context.rs`, `ComposeState:128`) kept only as `kumo timeline diff` helper; frees `i/P`.
+- **Semantic Timeline Vault:** per-pane ring `VecDeque<Record{prompt,output,exit_code,cwd via vt.rs:1327 pwd, git_rev,ts}>` (200/pane, `16K` cap) pushed on `on_pty_event:1125` when `vt.last_prompt_block:1823` completes (`has_semantic_prompt:1969`). `git_rev` async like `tasks.rs:62` branch cache. TUI `leader+;` fuzzy picker (reuses `WorktreePicker:272` rect + `Grid:295` preview) filter `/`, `Enter` jump (`CopyScrollTo:932`), `y` yank, `r` rerun (`AgentPrompt`). Persist in `state.rs:57` `STATE_VERSION 2→3` tolerant load (`state.rs:134`). CLI `kumo timeline list [--grep] | show <id> | rerun <id> -p <pane>`. Structured `exit_code` vs `lower.contains("error")` (`context.rs:84`).
 
-#### 0.7.2 — Semantic Timeline Vault (week 2, M 1w)
-- **Vault:** per-pane ring `VecDeque<Record{prompt,output,exit_code,cwd via vt.rs:1327 pwd, git_rev,ts}>` (200/pane, `16K` cap) pushed on `on_pty_event:1125` when `vt.last_prompt_block:1823` completes (`has_semantic_prompt:1969`). `git_rev` async like `tasks.rs:62` branch cache.
-- **TUI:** `leader+;` fuzzy picker (reuses `WorktreePicker:272` rect + `Grid:295` preview) filter `/`, `Enter` jump (`CopyScrollTo:932`), `y` yank (`util::copy_to_clipboard`), `r` rerun (`AgentPrompt`). Persist in `state.rs:57` `STATE_VERSION 2→3` tolerant load (`state.rs:134`).
-- **CLI:** `kumo timeline list [--grep]`, `show <id>`, `rerun <id> -p <pane>`. Structured `exit_code` vs `lower.contains("error|warning|failed")` (`context.rs:84`) heuristic.
-
-#### 0.7.3 — Declarative Workspaces & Checkpoints (week 3-4, M 4-5d)
-- **Spec:** promote `LayoutSpec{TabSpec{LayoutNodeSpec{PaneSpec{cwd,command,is_ai,title,env}}}}` (`protocol.rs:621`) from CLI util to `kumo workspace save <file.toml>` + `apply` (transactional kill only that session via `PENDING_PANES:29`), `git_rev` meta.
-- **Checkpoints:** `kumo checkpoint save <name> | list | restore | diff` as `git worktree add -b` + `git stash` (`worktrees.rs:62`, `context.rs:19` pattern), rollback = `branch switch` not rebase. Replace imperative `kumo new --ai --context` (`commands.rs:320` `/tmp/kumo-worktrees`) random branch.
-- **TUI:** `MENU` `workspace save/apply`, tab rename already (`RenameTab:197`).
-
-*Effort:* -450 lines (compose) +600 (vault+supervisor+workspace+JSON), same binary, `cargo clippy --workspace` clean per `AGENTS.md:5`.
+- **Declarative Workspaces & Checkpoints:** promote `LayoutSpec` (`protocol.rs:621`) to `kumo workspace save <file.toml>` + `apply` (transactional via `PENDING_PANES:29`), `git_rev` meta, plus `kumo checkpoint save <name> | list | restore | diff` as `git worktree add -b` + `git stash` (`worktrees.rs:62`), rollback = `branch switch`. Replaces imperative `kumo new --ai --context` (`commands.rs:320`). TUI `MENU` `workspace save/apply`.
 
 ## 🛡️ 0.8.0 — Stability
 
@@ -419,26 +407,20 @@ cross-platform CI, and a Windows release build.
 
 Beyond that, the differentiating bets:
 
-- **Semantic session timeline / time-travel scrollback**: with OSC 133
-  boundaries, the cwd signal from follow-workspace, and git, the scrollback
-  becomes a structured, queryable timeline — "rewind a pane to just before the
-  last command", jump to a command's output, search commands across every pane.
+- **Semantic session timeline / time-travel scrollback** (shipped in 0.7.0 as Timeline Vault): extends the vault to "rewind a pane to just before the last command", jump to a command's output, search commands across every pane.
 - **Kumo as an MCP server**: expose panes, sessions, and scrollback over MCP so
   *any* agent can drive kumo (split, send-keys, read output) — the natural
   evolution of the 0.6.0 control CLI. Agents stop just living inside the
   terminal and start orchestrating it.
-- **Multi-agent supervisor**: not just detecting agents but coordinating them —
-  an inbox that routes blocked approvals, a status summary across all agents,
-  and a pane that watches another agent's output and reacts.
+- **Multi-agent supervisor** (shipped in 0.7.0 as Inbox v2): extends to auto-routing, status summary across all agents, and a pane that watches another agent's output and reacts.
 - **Session migration across machines**: extend the resume mechanism
   (`resume.json` + `daemon --resume`) into `kumo migrate`, moving a live
   session between hosts.
-- **Declarative workspaces**: define a project's layout as TOML (panes +
-  commands + cwd) and have kumo restore it on demand.
+- **Declarative workspaces** (shipped in 0.7.0): hardened TOML/env + `git_rev` round-trip and `kumo workspace apply` over `ssh`.
 - **Session sharing** (tmate-style): a peer attaches to your daemon over a
   socket / SSH to pair-program; read-only observers for reviews.
 - **Remote sessions**: mosh/SSH-style remote panes with a local control pane.
-- **Deeper AI**: with 0.7.0's context pipeline landed, the remaining stretch is cross-pane context — hand one pane's traceback/diff to another pane's prompt — plus multi-agent session hygiene (restart an agent with its native resume id).
+- **Deeper AI**: with 0.7.0's supervisor/timeline/workspace landed, the remaining stretch is cross-pane context via `MCP`/`KUMO_SOCKET_PATH` — plus multi-agent session hygiene (restart an agent with its native resume id).
 
 Quality-of-life ideas that round out the editor feel (most now targeted for `0.9.0` — see above) — any leftovers stay as 1.x polish.
 
