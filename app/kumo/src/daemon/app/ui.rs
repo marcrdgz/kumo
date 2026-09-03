@@ -6,6 +6,8 @@
 //! It never draws chrome — no borders, box-drawing characters, sidebar, or
 //! status bar. Every client computes its own geometry and draws all chrome.
 
+use std::time::Instant;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -25,6 +27,13 @@ impl App {
         self.refresh_ai_cli();
         self.refresh_agent_statuses();
         self.check_updates();
+        // GC lightweight checkpoint entries for worktrees that no longer exist on disk (throttled).
+        if self.last_worktree_prune.elapsed() > std::time::Duration::from_secs(60) {
+            if kumo_core::worktree_meta::prune_missing() > 0 {
+                self.bump_layout_version();
+            }
+            self.last_worktree_prune = Instant::now();
+        }
 
         let mut changed = Vec::new();
         let ids: Vec<u64> = self.panes.keys().copied().collect();
@@ -109,12 +118,24 @@ impl App {
                     root: t.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
                 }).collect();
                 let active = tabs.get(s.active_tab).cloned();
+                let checkpoint = kumo_core::worktree_meta::get(&s.workspace).and_then(|cp| {
+                    if cp.comment.is_none() && cp.status.is_none() && !cp.is_ephemeral {
+                        None
+                    } else {
+                        Some(kumo_protocol::WireCheckpoint {
+                            comment: cp.comment,
+                            status: cp.status,
+                            is_ephemeral: cp.is_ephemeral,
+                        })
+                    }
+                });
                 kumo_protocol::SessionLayout {
                     name: s.name.clone(),
                     workspace: s.workspace.clone(),
                     active_tab: s.active_tab,
                     tabs,
                     branch: self.session_branch(i).map(Into::into),
+                    checkpoint,
                     focus: active.as_ref().map(|t| t.focus).unwrap_or(0),
                     zoom: active.as_ref().map(|t| t.zoom).unwrap_or(false),
                     root: active.as_ref().and_then(|t| t.root.clone()),

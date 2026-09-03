@@ -534,6 +534,8 @@ enum SidebarRow {
     SectionLabel(String, Option<String>),
     ProjectHeader(String),
     Worktree(usize),
+    /// Lightweight checkpoint comment line under a worktree (Project layout 2-line card).
+    Checkpoint(usize),
     InlineAgent(usize, u64, String, AgentStatus),
 }
 
@@ -4359,8 +4361,16 @@ impl View {
             .and_then(|name| layout.sessions.iter().position(|s| s.name == name));
         for idx in 0..layout.sessions.len() {
             out.push(SidebarRow::Worktree(idx));
-            // minimize non-active worktrees: only the active one shows branch + agents
+            // Project 2-line card: show checkpoint comment under active worktree when present
             let is_active = Some(idx) == active_idx;
+            if is_active {
+                if let Some(cp) = layout.sessions.get(idx).and_then(|s| s.checkpoint.as_ref()) {
+                    if cp.comment.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false) {
+                        out.push(SidebarRow::Checkpoint(idx));
+                    }
+                }
+            }
+            // minimize non-active worktrees: only the active one shows branch + agents
             if !is_active {
                 continue;
             }
@@ -4394,6 +4404,23 @@ impl View {
             AgentStatus::Working => 2,
             AgentStatus::Idle => 3,
             AgentStatus::Unknown => 4,
+        }
+    }
+
+    fn checkpoint_for_session(&self, idx: usize) -> Option<kumo_protocol::WireCheckpoint> {
+        self.layout
+            .as_ref()
+            .and_then(|l| l.sessions.get(idx))
+            .and_then(|s| s.checkpoint.clone())
+    }
+
+    fn checkpoint_status_fg(status: &str) -> Option<RColor> {
+        match status {
+            "todo" => Some(RColor::Rgb(0x6b, 0x72, 0x80)),
+            "in-progress" => Some(RColor::Rgb(0x3b, 0x82, 0xf6)),
+            "in-review" => Some(RColor::Rgb(0xf5, 0x9e, 0x0b)),
+            "completed" => Some(RColor::Rgb(0x10, 0xb9, 0x81)),
+            _ => None,
         }
     }
 
@@ -5391,13 +5418,69 @@ impl View {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let name = self.session_name(i);
+                    let cp = self.checkpoint_for_session(i);
+                    // build status pill "[in-progress]" and optional ephemeral " ◉"
+                    let mut pill: Option<(String, RColor)> = None;
+                    if let Some(cp) = &cp {
+                        if let Some(st) = cp.status.as_deref() {
+                            if let Some(col) = Self::checkpoint_status_fg(st) {
+                                pill = Some((format!("[{st}]"), col));
+                            }
+                        }
+                    }
+                    let ephemeral = cp.as_ref().map(|c| c.is_ephemeral).unwrap_or(false);
+                    // Tabs/Divided 1-line badge: name + pill + ephemeral
+                    let name_avail = max.saturating_sub(3).max(1) as usize;
+                    // compute avail after pill
+                    let pill_w = pill.as_ref().map(|(s,_)| s.chars().count() + 1).unwrap_or(0) + if ephemeral { 2 } else { 0 };
+                    let shown_len = if pill_w > 0 && name.chars().count() + pill_w > name_avail {
+                        name_avail.saturating_sub(pill_w + 1)
+                    } else { name_avail };
+                    let shown = if name.chars().count() > shown_len {
+                        let mut s = name.clone();
+                        while s.chars().count() > shown_len.saturating_sub(1) && !s.is_empty() { s.pop(); }
+                        format!("{s}…")
+                    } else { name.clone() };
                     if active {
                         fill(f, Rect::new(x, y, w, 1), bg);
                         put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg));
-                        text(f, x + 3, y, &name, Style::default().fg(theme.fg).bg(bg), max.saturating_sub(3));
+                        let mut cx = x + 3;
+                        let name_style = Style::default().fg(theme.fg).bg(bg);
+                        let nw = shown.chars().count() as u16;
+                        text(f, cx, y, &shown, name_style, nw);
+                        cx += nw;
+                        if let Some((pill_text, col)) = pill {
+                            if cx + 1 + pill_text.chars().count() as u16 <= x + w.saturating_sub(1) {
+                                put(f, cx, y, " ", Style::default().bg(bg));
+                                cx += 1;
+                                text(f, cx, y, &pill_text, Style::default().fg(col).bg(bg), pill_text.chars().count() as u16);
+                                cx += pill_text.chars().count() as u16;
+                            }
+                        }
+                        if ephemeral && cx + 2 <= x + w.saturating_sub(1) {
+                            put(f, cx, y, " ", Style::default().bg(bg));
+                            cx += 1;
+                            text(f, cx, y, "◉", Style::default().fg(theme.secondary).bg(bg), 1);
+                        }
                     } else {
                         put(f, x + 1, y, " ", Style::default().bg(bg));
-                        text(f, x + 3, y, &name, Style::default().fg(theme.panel_muted).bg(bg), max.saturating_sub(3));
+                        let mut cx = x + 3;
+                        let name_style = Style::default().fg(theme.panel_muted).bg(bg);
+                        let nw = shown.chars().count() as u16;
+                        text(f, cx, y, &shown, name_style, nw);
+                        cx += nw;
+                        if let Some((pill_text, col)) = pill {
+                            if cx + 1 + pill_text.chars().count() as u16 <= x + w.saturating_sub(1) {
+                                put(f, cx, y, " ", Style::default().bg(bg));
+                                cx += 1;
+                                text(f, cx, y, &pill_text, Style::default().fg(col).bg(bg).add_modifier(Modifier::DIM), pill_text.chars().count() as u16);
+                            }
+                        }
+                        if ephemeral && cx + 2 <= x + w.saturating_sub(1) {
+                            put(f, cx, y, " ", Style::default().bg(bg));
+                            cx += 1;
+                            text(f, cx, y, "◉", Style::default().fg(theme.panel_muted).bg(bg).add_modifier(Modifier::DIM), 1);
+                        }
                     }
                 }
                 SidebarRow::Branch(i, b) => {
@@ -5642,14 +5725,60 @@ impl View {
                         put(f, x + 1, y, " ", Style::default().bg(bg));
                     }
                     let name = self.session_name(i);
-                    let name_avail = max.saturating_sub(3).max(1);
-                    let shown = if name.chars().count() as u16 > name_avail {
+                    let cp = self.checkpoint_for_session(i);
+                    let mut pill: Option<(String, RColor)> = None;
+                    if let Some(cp) = &cp {
+                        if let Some(st) = cp.status.as_deref() {
+                            if let Some(col) = Self::checkpoint_status_fg(st) { pill = Some((format!("[{st}]"), col)); }
+                        }
+                    }
+                    let ephemeral = cp.as_ref().map(|c| c.is_ephemeral).unwrap_or(false);
+                    // Worktree 1-line badge: name + [status] + ◉ (ephemeral) when space permits
+                    let pill_w = pill.as_ref().map(|(s,_)| s.chars().count() + 1).unwrap_or(0) + if ephemeral { 2 } else { 0 };
+                    let name_avail_total = max.saturating_sub(3).max(1) as usize;
+                    let shown_len = if pill_w > 0 && name.chars().count() + pill_w > name_avail_total {
+                        name_avail_total.saturating_sub(pill_w + 1)
+                    } else { name_avail_total };
+                    let shown = if name.chars().count() > shown_len {
                         let mut s = name.clone();
-                        while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
+                        while s.chars().count() > shown_len.saturating_sub(1) && !s.is_empty() { s.pop(); }
                         format!("{s}…")
                     } else { name.clone() };
                     let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
-                    text(f, x + 3, y, &shown, name_style, name_avail);
+                    let mut cx = x + 3;
+                    let nw = shown.chars().count() as u16;
+                    text(f, cx, y, &shown, name_style, nw);
+                    cx += nw;
+                    if let Some((pill_text, col)) = pill {
+                        if cx + 1 + pill_text.chars().count() as u16 <= x + w.saturating_sub(1) {
+                            put(f, cx, y, " ", Style::default().bg(bg));
+                            cx += 1;
+                            let pill_style = if active { Style::default().fg(col).bg(bg) } else { Style::default().fg(col).bg(bg).add_modifier(Modifier::DIM) };
+                            text(f, cx, y, &pill_text, pill_style, pill_text.chars().count() as u16);
+                            cx += pill_text.chars().count() as u16;
+                        }
+                    }
+                    if ephemeral && cx + 2 <= x + w.saturating_sub(1) {
+                        put(f, cx, y, " ", Style::default().bg(bg));
+                        cx += 1;
+                        let eph_col = if active { theme.secondary } else { theme.panel_muted };
+                        text(f, cx, y, "◉", Style::default().fg(eph_col).bg(bg).add_modifier(Modifier::DIM), 1);
+                    }
+                }
+                SidebarRow::Checkpoint(i) => {
+                    let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
+                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
+                    if bg != RColor::Reset { fill(f, Rect::new(x, y, w, 1), bg); }
+                    let comment = self.checkpoint_for_session(i).and_then(|c| c.comment).unwrap_or_default();
+                    // first line only, dimmed, indented under the worktree name
+                    let first = comment.lines().next().unwrap_or(&comment).trim();
+                    let avail = max.saturating_sub(4).max(1) as usize;
+                    let shown = if first.chars().count() > avail {
+                        let mut s = first.chars().take(avail.saturating_sub(1)).collect::<String>();
+                        s.push('…');
+                        s
+                    } else { first.to_string() };
+                    text(f, x + 4, y, &shown, Style::default().fg(theme.panel_muted).bg(bg).add_modifier(Modifier::DIM), avail as u16);
                 }
                 SidebarRow::InlineAgent(i, pid, name, status) => {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
@@ -7384,6 +7513,7 @@ mod tests {
                 focus,
                 zoom: false,
                 branch: None,
+                checkpoint: None,
                 root: None,
             }],
         }
@@ -7800,6 +7930,7 @@ mod tests {
                 focus: 1,
                 zoom: false,
                 branch: None,
+                checkpoint: None,
                 root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
                     id: 1,
                     title: " shell ".into(),
@@ -7851,6 +7982,7 @@ mod tests {
                 focus: 1,
                 zoom: false,
                 branch: None,
+                checkpoint: None,
                 root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
                     id: 1,
                     title: " shell ".into(),
@@ -7892,6 +8024,7 @@ mod tests {
                 focus: 1,
                 zoom: false,
                 branch: None,
+                checkpoint: None,
                 root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
                     id: 1,
                     title: " shell ".into(),
@@ -7949,6 +8082,7 @@ mod tests {
                 focus: 1,
                 zoom: false,
                 branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
+                checkpoint: None,
                 root: Some(Box::new(LayoutNode::Split {
                     id: 1,
                     dir: SplitDir::Vertical,
@@ -8198,6 +8332,7 @@ mod tests {
                 focus: 1,
                 zoom: false,
                 branch: None,
+                checkpoint: None,
                 root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
                     id: 1,
                     title: " shell ".into(),

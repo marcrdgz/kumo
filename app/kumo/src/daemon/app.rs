@@ -164,6 +164,8 @@ pub struct App {
     /// Live aliases for agent panes (`kumo agent rename`), so scripts can
     /// reference agents by name. Not persisted — ephemeral per daemon.
     agent_aliases: HashMap<u64, String>,
+    /// Last time `worktree_meta::prune_missing` ran (throttled to 60s).
+    last_worktree_prune: Instant,
 }
 
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
@@ -247,6 +249,7 @@ impl App {
             cached_layout: None,
             cached_layout_version: 0,
             agent_aliases: HashMap::new(),
+            last_worktree_prune: Instant::now(),
         };
 
         match launch {

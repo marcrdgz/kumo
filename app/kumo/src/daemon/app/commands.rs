@@ -783,7 +783,7 @@ impl App {
 
     /// Set checkpoint comment/status for a worktree.
     pub(crate) fn worktree_set(
-        &self,
+        &mut self,
         session: &str,
         path: &std::path::Path,
         comment: Option<&str>,
@@ -813,6 +813,7 @@ impl App {
         }
         match kumo_core::worktree_meta::set(path, c_arg, s_arg, None, None) {
             Ok(cp) => {
+                self.bump_layout_version();
                 let msg = format!("set {} comment={:?} status={:?}", path.display(), cp.comment, cp.status);
                 Ok(msg)
             }

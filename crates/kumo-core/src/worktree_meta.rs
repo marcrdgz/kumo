@@ -129,10 +129,9 @@ pub fn set(
         entry.status = match s {
             Some(raw) => {
                 let trimmed = raw.trim().to_string();
-                if trimmed.is_empty() { None } else {
-                    let parsed = crate::worktrees::validate_branch_name; // placeholder to avoid unused; real validation via WorktreeStatus::parse
-                    let _ = parsed;
-                    // Validate via protocol helper if available; otherwise accept normalized lowercased value
+                if trimmed.is_empty() {
+                    None
+                } else {
                     let lower = trimmed.to_ascii_lowercase();
                     if kumo_protocol::WorktreeStatus::parse(&lower).is_some() {
                         Some(lower)

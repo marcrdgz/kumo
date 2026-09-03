@@ -52,7 +52,9 @@ mod crossterm;
 /// and their result events. v12 adds isolated `--ai` worktrees: extends
 /// `WorktreeCreate` with `from`/`note`/`agent`/`is_ai` and adds `WorktreeRemove`,
 /// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
-pub const PROTOCOL_VERSION: u32 = 12;
+/// v13 surfaces lightweight checkpoint `comment`/`status`/`is_ephemeral` on
+/// `SessionLayout` so the sidebar card stays live without polling `WorktreeList`.
+pub const PROTOCOL_VERSION: u32 = 13;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -386,6 +388,22 @@ pub struct TabLayout {
     pub root: Option<Box<LayoutNode>>,
 }
 
+/// Lightweight checkpoint surfaced on each session row (free-text comment +
+/// `todo`/`in-progress`/`in-review`/`completed` pill). `#[serde(default)]` so
+/// v12 daemons stay wire-compatible; missing → `None`/false.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct WireCheckpoint {
+    /// First-line-oriented free-text comment (`kumo worktree set --comment`).
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Canonical status `todo` | `in-progress` | `in-review` | `completed`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Whether the worktree was created via `kumo worktree create --ai`.
+    #[serde(default)]
+    pub is_ephemeral: bool,
+}
+
 /// One session's semantic tree, as pushed to layout subscribers.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SessionLayout {
@@ -397,6 +415,10 @@ pub struct SessionLayout {
     /// Git branch of the session's workspace (name + ahead/behind), for the
     /// client's sidebar.
     pub branch: Option<WireBranch>,
+    /// Lightweight checkpoint for the session's worktree. `#[serde(default)]`
+    /// keeps v12 daemons wire-compatible.
+    #[serde(default)]
+    pub checkpoint: Option<WireCheckpoint>,
     // Deprecated mirrors of the active tab — kept for desktop compat and smooth upgrade.
     #[serde(default)]
     pub focus: u64,
@@ -1010,6 +1032,8 @@ pub enum Command {
         path: Option<std::path::PathBuf>,
     },
     /// List worktrees with checkpoint fields joined (reply: `Worktrees`).
+    /// Deprecated alias for `WorktreeList` — both now surface checkpoint data;
+    /// kept for wire compat, may be removed after 1.0.
     WorktreeListDetailed {
         session: String,
     },
@@ -1459,6 +1483,7 @@ mod tests {
                 active_tab: 0,
                 tabs: vec![TabLayout { id: 1, name: "1".into(), focus: 11, zoom: false, root: root.clone() }],
                 branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
+                checkpoint: None,
                 focus: 11,
                 zoom: false,
                 root,

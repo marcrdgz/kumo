@@ -289,6 +289,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         }
                     }
                 }
+                // Deprecated alias: identical to WorktreeList (checkpoint now live on Layout too).
                 Command::WorktreeListDetailed { session } => {
                     match app.worktree_list(&session) {
                         Ok(items) => {
