@@ -112,7 +112,6 @@ impl App {
         session: &str,
         dir: SplitDir,
         is_ai: bool,
-        with_context: bool,
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
@@ -121,45 +120,11 @@ impl App {
             SplitDir::Vertical => layout::SplitDir::V,
             SplitDir::Horizontal => layout::SplitDir::H,
         };
-        // Capture context chips from focused pane before split if requested
-        let context_text = if with_context && is_ai {
-            let focused_pid = self.sessions[idx].active_tab().tree.focus;
-            self.context_chips(session, Some(focused_pid))
-                .ok()
-                .and_then(|chips| {
-                    if chips.is_empty() { return None; }
-                    let mut out = String::new();
-                    for chip in &chips {
-                        out.push_str(&format!("### {}\n{}\n\n", chip.label, chip.text));
-                    }
-                    Some(out)
-                })
-        } else {
-            None
-        };
         let prev = self.active;
         self.active = idx;
         let result = self.split_active(dir, is_ai);
         self.active = prev;
         result?;
-        if let Some(text) = context_text {
-            // New pane is the one just created; find it as the max pane id (last spawned)
-            // split_active inserts a new pane with next_pane_id; retrieve the newest pane in this session
-            let new_pid = self.sessions[idx].tabs.iter().flat_map(|t| t.tree.pane_ids()).max();
-            if let Some(pid) = new_pid {
-                // Prefill without submitting: write directly without \r
-                if let Some(pane) = self.panes.get_mut(&pid) {
-                    // Use bracketed paste if available
-                    let bracketed = pane.vt.mode_get(crate::daemon::vt::MODE_BRACKETED_PASTE);
-                    let payload = if bracketed {
-                        format!("\x1b[200~{}\x1b[201~", text)
-                    } else {
-                        text.clone()
-                    };
-                    pane.write(payload.as_bytes());
-                }
-            }
-        }
         Ok(format!("split {session:?}"))
     }
 
@@ -321,49 +286,7 @@ impl App {
         &mut self,
         name: Option<&str>,
         workspace: Option<&PathBuf>,
-        is_ai: bool,
-        with_context: bool,
     ) -> Result<String> {
-        // --ai with git repo => ephemeral worktree isolation
-        if is_ai {
-            let ws = workspace.cloned().or_else(|| Some(self.workspace.clone()));
-            if let Some(ws_path) = ws.as_ref() {
-                if let Some(root) = kumo_core::worktrees::repo_root(ws_path) {
-                    // Capture context from current focused pane before switching
-                    let ctx = if with_context {
-                        let cur_session = self.sessions.get(self.active).map(|s| s.name.clone());
-                        let cur_pid = self.sessions.get(self.active).map(|s| s.active_tab().tree.focus);
-                        match (cur_session, cur_pid) {
-                            (Some(sess), Some(pid)) => self.context_chips(&sess, Some(pid)).ok().and_then(|chips| {
-                                if chips.is_empty() { None } else {
-                                    let mut out = String::new();
-                                    for chip in &chips { out.push_str(&format!("### {}\n{}\n\n", chip.label, chip.text)); }
-                                    Some(out)
-                                }
-                            }),
-                            _ => None,
-                        }
-                    } else { None };
-                    let branch = format!("kumo/ai/{}-{}", name.unwrap_or("ai"), Self::uuid_simple());
-                    let path = Self::ephemeral_worktree_path(&root, &branch);
-                    // create worktree
-                    kumo_core::worktrees::add_worktree(&root, &path, &branch).map_err(|e| anyhow::anyhow!(e))?;
-                    let sess_name = name.map(|s| s.to_string()).unwrap_or_else(|| branch.clone());
-                    self.new_session_in_workspace_ephemeral(sess_name.clone(), path, true, Some(branch))?;
-                    // If context requested, prefill the new AI pane
-                    if let Some(text) = ctx {
-                        let idx = self.sessions.iter().position(|s| s.name == sess_name).unwrap();
-                        let pid = self.sessions[idx].active_tab().tree.focus;
-                        if let Some(pane) = self.panes.get_mut(&pid) {
-                            let bracketed = pane.vt.mode_get(crate::daemon::vt::MODE_BRACKETED_PASTE);
-                            let payload = if bracketed { format!("\x1b[200~{}\x1b[201~", text) } else { text };
-                            pane.write(payload.as_bytes());
-                        }
-                    }
-                    return Ok(format!("created ephemeral AI session {sess_name:?}"));
-                }
-            }
-        }
         let name = name
             .map(|n| n.to_string())
             .unwrap_or_else(|| self.default_session_name());
@@ -372,47 +295,17 @@ impl App {
             Some(ws) => self.new_session_in_workspace(name.clone(), ws.clone())?,
             None => self.new_session_with_name(name.clone())?,
         }
-        // Handle --ai without worktree (non-git): split AI pane in new session
-        if is_ai {
-            let idx = self.sessions.iter().position(|s| s.name == name).unwrap();
-            let prev = self.active;
-            self.active = idx;
-            // capture context if requested
-            let ctx = if with_context {
-                // context from the previous active session before switch (prev)
-                let src_sess = if prev < self.sessions.len() { Some(self.sessions[prev].name.clone()) } else { None };
-                let src_pid = if prev < self.sessions.len() { Some(self.sessions[prev].active_tab().tree.focus) } else { None };
-                match (src_sess, src_pid) {
-                    (Some(s), Some(p)) => self.context_chips(&s, Some(p)).ok().and_then(|chips| {
-                        if chips.is_empty() { None } else {
-                            let mut out = String::new();
-                            for chip in &chips { out.push_str(&format!("### {}\n{}\n\n", chip.label, chip.text)); }
-                            Some(out)
-                        }
-                    }),
-                    _ => None,
-                }
-            } else { None };
-            let _ = self.split_active(layout::SplitDir::V, true);
-            if let Some(text) = ctx {
-                let pid = self.sessions[idx].active_tab().tree.focus;
-                if let Some(pane) = self.panes.get_mut(&pid) {
-                    let bracketed = pane.vt.mode_get(crate::daemon::vt::MODE_BRACKETED_PASTE);
-                    let payload = if bracketed { format!("\x1b[200~{}\x1b[201~", text) } else { text };
-                    pane.write(payload.as_bytes());
-                }
-            }
-            self.active = self.sessions.len() -1;
-        }
         Ok(format!("created session {name:?}"))
     }
 
+    #[allow(dead_code)]
     fn uuid_simple() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         format!("{:x}", nanos & 0xffffffffff)
     }
 
+    #[allow(dead_code)]
     fn ephemeral_worktree_path(root: &std::path::Path, branch: &str) -> PathBuf {
         let sanitized = branch.replace('/', "-");
         let base = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");

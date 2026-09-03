@@ -49,8 +49,8 @@ mod crossterm;
 /// with `done` (finished-but-unseen) and `unknown` (classification failed).
 /// v11 adds agent orchestration primitives: `AgentWait`, `AgentPrompt`,
 /// `AgentRead`, `AgentStart`, `AgentRename`, `PaneWaitOutput`, `AgentBroadcast`
-/// and their result events. v12 adds context pipeline: `ContextGet` and
-/// `LayoutExport/Apply` for ephemeral worktree isolation.
+/// and their result events. v12 adds declarative layout: `LayoutExport/Apply`
+/// for workspaces and checkpoints.
 pub const PROTOCOL_VERSION: u32 = 12;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
@@ -584,40 +584,6 @@ pub enum AgentReadSource {
     Traceback,
 }
 
-/// Context chip kind for the compose prompt (selection, traceback, diff, cwd).
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ChipKind {
-    Selection,
-    Traceback,
-    GitDiff,
-    Cwd,
-    GitStatus,
-}
-
-impl ChipKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            ChipKind::Selection => "selection",
-            ChipKind::Traceback => "traceback",
-            ChipKind::GitDiff => "git diff",
-            ChipKind::Cwd => "cwd",
-            ChipKind::GitStatus => "git status",
-        }
-    }
-}
-
-/// One context chip for the compose prompt.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct WireChip {
-    pub kind: ChipKind,
-    /// Short label shown in the chip list (e.g. cwd path, diff summary).
-    pub label: String,
-    /// Full text content of the chip (inserted into the prompt).
-    pub text: String,
-    /// Whether `text` was truncated to fit the frame.
-    pub truncated: bool,
-}
-
 /// Declarative pane spec for `layout export/apply` (per-pane cwd/env/cmd).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PaneSpec {
@@ -892,10 +858,6 @@ pub enum Command {
     SessionNew {
         name: Option<String>,
         workspace: Option<std::path::PathBuf>,
-        #[serde(default)]
-        is_ai: bool,
-        #[serde(default)]
-        with_context: bool,
     },
     /// `kumo session kill NAME`: close a session (and its panes).
     SessionKill {
@@ -936,8 +898,6 @@ pub enum Command {
         session: String,
         dir: SplitDir,
         is_ai: bool,
-        #[serde(default)]
-        with_context: bool,
     },
     /// Close a pane (default: the focused one in `session`).
     PaneClose {
@@ -1154,13 +1114,6 @@ pub enum Command {
         filter: Option<AgentStatus>,
     },
 
-    // -- context pipeline ----------------------------------------------------
-    /// `kumo context chips <pane>`: collect context chips (traceback, diff, cwd).
-    ContextGet {
-        session: String,
-        #[serde(default)]
-        pane_id: Option<u64>,
-    },
     /// `kumo layout export`: export a session/tab layout as a declarative spec.
     LayoutExport {
         session: String,
@@ -1305,11 +1258,6 @@ pub enum DaemonEvent {
     Error {
         code: String,
         message: String,
-    },
-    /// Reply to `ContextGet`: the assembled context chips for a pane.
-    ContextChips {
-        pane_id: u64,
-        chips: Vec<WireChip>,
     },
     /// Reply to `LayoutExport`: the declarative layout spec.
     LayoutExport {
@@ -1501,8 +1449,8 @@ mod tests {
     fn commands_roundtrip() {
         let cmds = vec![
             Command::SessionList,
-            Command::SessionNew { name: Some("session-2".into()), workspace: None, is_ai: false, with_context: false },
-            Command::PaneSplit { session: "session-1".into(), dir: SplitDir::Vertical, is_ai: false, with_context: false },
+            Command::SessionNew { name: Some("session-2".into()), workspace: None },
+            Command::PaneSplit { session: "session-1".into(), dir: SplitDir::Vertical, is_ai: false },
             Command::PaneSendKeys {
                 session: "session-1".into(),
                 pane_id: None,

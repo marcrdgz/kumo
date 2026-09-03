@@ -6,7 +6,6 @@
 pub mod agents;
 pub mod alert;
 pub mod app;
-pub mod context;
 pub mod frames;
 pub mod keys;
 pub mod pane;

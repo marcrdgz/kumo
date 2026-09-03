@@ -100,7 +100,7 @@ impl CompositeSpec {
 /// One parsed CLI invocation.
 enum CliCmd {
     List,
-    SessionNew { name: Option<String>, workspace: Option<PathBuf>, is_ai: bool, with_context: bool },
+    SessionNew { name: Option<String>, workspace: Option<PathBuf> },
     SessionKill { name: String },
     SessionAttach { name: String },
     TabList { session: Option<String> },
@@ -108,7 +108,7 @@ enum CliCmd {
     TabClose { session: Option<String>, tab: String },
     TabFocus { session: Option<String>, tab: String },
     TabRename { session: Option<String>, tab: String, new_name: String },
-    PaneSplit { session: Option<String>, dir: SplitDir, ai: bool, with_context: bool },
+    PaneSplit { session: Option<String>, dir: SplitDir, ai: bool },
     PaneClose { session: Option<String>, pane: Option<PaneRef> },
     PaneFocus { session: Option<String>, pane: PaneRef },
     PaneSendKeys { session: Option<String>, pane: Option<PaneRef>, keys: String },
@@ -124,7 +124,6 @@ enum CliCmd {
     AgentStart { session: Option<String>, pane: PaneRef, kind: String, args: Vec<String> },
     AgentRename { session: Option<String>, pane: PaneRef, name: String },
     AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
-    ContextGet { session: Option<String>, pane: Option<PaneRef> },
     LayoutExport { session: Option<String>, tab: Option<String> },
     LayoutApply { session: Option<String>, file: PathBuf },
     Kill,
@@ -223,46 +222,6 @@ fn run_inner(args: &[String]) -> Result<()> {
             print_pane_list(&sessions, &target, tab_id);
             Ok(())
         }
-        CliCmd::ContextGet { session, pane } => {
-            let session = resolve_session(&mut stream, session)?;
-            let pane_id = match pane {
-                Some(p) => Some(resolve_pane_ref(&mut stream, &session, &p)?),
-                None => None,
-            };
-            let command = Command::ContextGet { session: session.clone(), pane_id };
-            kumo_core::protocol::write_framed(&mut stream, &command)?;
-            stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
-            loop {
-                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
-                    Ok(DaemonEvent::ContextChips { pane_id, chips }) => {
-                        println!("context for pane {pane_id}:");
-                        for chip in &chips {
-                            println!("- {} [{}]{}:", chip.kind.label(), chip.label, if chip.truncated { " (truncated)" } else { "" });
-                            for line in chip.text.lines().take(20) {
-                                println!("  {}", line);
-                            }
-                            if chip.text.lines().count() > 20 {
-                                println!("  …");
-                            }
-                        }
-                        if chips.is_empty() {
-                            println!("(no context)");
-                        }
-                        return Ok(());
-                    }
-                    Ok(DaemonEvent::Error { code, message }) => {
-                        eprintln!("error {code}: {message}");
-                        return Ok(());
-                    }
-                    Ok(_) => continue,
-                    Err(e) if is_timeout(&e) => {
-                        eprintln!("timed out waiting for context");
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
         CliCmd::LayoutExport { session, tab } => {
             let session = resolve_session(&mut stream, session)?;
             let command = Command::LayoutExport { session, tab };
@@ -294,8 +253,8 @@ fn run_inner(args: &[String]) -> Result<()> {
                 CliCmd::Kill => Command::KillServer,
                 CliCmd::Reload => Command::ReloadConfig,
                 CliCmd::Restart => Command::Restart,
-                CliCmd::SessionNew { name, workspace, is_ai, with_context } => {
-                    Command::SessionNew { name, workspace, is_ai, with_context }
+                CliCmd::SessionNew { name, workspace } => {
+                    Command::SessionNew { name, workspace }
                 }
                 CliCmd::SessionKill { name } => Command::SessionKill { name },
                 CliCmd::SessionAttach { name } => Command::SessionFocus { name },
@@ -318,11 +277,10 @@ fn run_inner(args: &[String]) -> Result<()> {
                     tab,
                     new_name,
                 },
-                CliCmd::PaneSplit { session, dir, ai, with_context } => Command::PaneSplit {
+                CliCmd::PaneSplit { session, dir, ai } => Command::PaneSplit {
                     session: resolve_session(&mut stream, session)?,
                     dir,
                     is_ai: ai,
-                    with_context,
                 },
                 CliCmd::PaneClose { session, pane } => {
                     let session = resolve_session(&mut stream, session)?;
@@ -422,14 +380,6 @@ fn run_inner(args: &[String]) -> Result<()> {
                     let session = resolve_session(&mut stream, session)?;
                     Command::AgentBroadcast { session, text, filter }
                 }
-                CliCmd::ContextGet { session, pane } => {
-                    let session = resolve_session(&mut stream, session)?;
-                    let pane_id = match pane {
-                        Some(p) => Some(resolve_pane_ref(&mut stream, &session, &p)?),
-                        None => None,
-                    };
-                    Command::ContextGet { session, pane_id }
-                }
                 CliCmd::LayoutExport { session, tab } => {
                     let session = resolve_session(&mut stream, session)?;
                     Command::LayoutExport { session, tab }
@@ -481,7 +431,6 @@ fn parse(args: &[String]) -> Result<CliCmd> {
         "pane" => parse_pane(rest),
         "agent" => parse_agent(rest),
         "tab" => parse_tab(rest),
-        "context" => parse_context(rest),
         "layout" => parse_layout(rest),
         "ls" | "list" => Ok(CliCmd::List),
         "kill" => Ok(CliCmd::Kill),
@@ -500,8 +449,6 @@ fn parse_session(args: &[String]) -> Result<CliCmd> {
         "new" => {
             let mut name = None;
             let mut workspace = None;
-            let mut is_ai = false;
-            let mut with_context = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -509,22 +456,13 @@ fn parse_session(args: &[String]) -> Result<CliCmd> {
                         name = Some(need(args, i + 1, "a name after --name")?);
                         i += 2;
                     }
-                    "--ai" => {
-                        is_ai = true;
-                        i += 1;
-                    }
-                    "--context" => {
-                        with_context = true;
-                        i += 1;
-                    }
-                    arg if arg.starts_with("--") => anyhow::bail!("unknown flag {arg:?} for session new"),
                     arg => {
                         workspace = Some(PathBuf::from(arg));
                         i += 1;
                     }
                 }
             }
-            Ok(CliCmd::SessionNew { name, workspace, is_ai, with_context })
+            Ok(CliCmd::SessionNew { name, workspace })
         }
         "kill" => Ok(CliCmd::SessionKill { name: need(args, 1, "a session name")? }),
         "attach" => Ok(CliCmd::SessionAttach { name: need(args, 1, "a session name")? }),
@@ -541,13 +479,12 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
     match sub {
         "split" => {
             let ai = positional.iter().any(|a| a == "--ai");
-            let with_context = positional.iter().any(|a| a == "--context");
             let dir = if positional.iter().any(|a| a == "--horizontal") {
                 SplitDir::Horizontal
             } else {
                 SplitDir::Vertical
             };
-            Ok(CliCmd::PaneSplit { session, dir, ai, with_context })
+            Ok(CliCmd::PaneSplit { session, dir, ai })
         }
         "close" => Ok(CliCmd::PaneClose { session, pane: pane_id }),
         "focus" => Ok(CliCmd::PaneFocus {
@@ -942,17 +879,6 @@ fn parse_tab(args: &[String]) -> Result<CliCmd> {
             Ok(CliCmd::TabRename { session, tab, new_name })
         }
         other => anyhow::bail!("unknown tab subcommand {other:?}"),
-    }
-}
-
-fn parse_context(args: &[String]) -> Result<CliCmd> {
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("chips");
-    match sub {
-        "chips" | "get" => {
-            let (session, pane, _) = split_options(args);
-            Ok(CliCmd::ContextGet { session, pane })
-        }
-        other => anyhow::bail!("unknown context subcommand {other:?} (try `kumo context chips`)"),
     }
 }
 
