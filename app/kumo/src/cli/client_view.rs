@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -371,6 +372,13 @@ struct WorktreeCreateDialog {
     error: Option<String>,
 }
 
+struct SessionCloseConfirm {
+    open: bool,
+    session_idx: usize,
+    session_name: String,
+    path: PathBuf,
+}
+
 /// One agent-lifecycle corner toast pushed by the daemon (blocked / finished).
 #[derive(Clone)]
 struct AgentToast {
@@ -555,6 +563,7 @@ pub struct View {
     settings: SettingsPanel,
     worktree_picker: WorktreePicker,
     worktree_create: WorktreeCreateDialog,
+    session_close_confirm: SessionCloseConfirm,
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
@@ -755,6 +764,7 @@ impl View {
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -1397,6 +1407,10 @@ impl View {
     pub fn on_key(&mut self, key: KeyEvent) -> Result<()> {
         self.flush_wheel()?;
         self.set_link_mods(key.modifiers.intersects(link_modifiers()));
+        if self.session_close_confirm.open {
+            self.on_session_close_confirm_key(key);
+            return Ok(());
+        }
         if self.worktree_create.open {
             self.on_worktree_create_key(key);
             return Ok(());
@@ -1470,6 +1484,9 @@ impl View {
 
     pub fn on_paste(&mut self, text: &str) {
         let _ = self.flush_wheel();
+        if self.session_close_confirm.open {
+            return;
+        }
         if self.worktree_create.open {
             self.worktree_create_paste(text);
             return;
@@ -2847,6 +2864,35 @@ impl View {
         }
     }
 
+    fn session_close_confirm_rect(&self) -> Option<Rect> {
+        if !self.session_close_confirm.open {
+            return None;
+        }
+        let (w, h) = (self.cols, self.rows);
+        let width = 60u16.min(w.saturating_sub(4)).max(30);
+        let height = 7u16.min(h.saturating_sub(4)).max(7);
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    fn session_close_confirm_button_rect(&self, is_yes: bool) -> Option<Rect> {
+        let dd = self.session_close_confirm_rect()?;
+        let y = dd.bottom().saturating_sub(2);
+        let yes_label = " Yes (y) ";
+        let no_label = " No (n) ";
+        let yes_w = yes_label.chars().count() as u16 + 2;
+        let no_w = no_label.chars().count() as u16 + 2;
+        let total_w = yes_w + 1 + no_w;
+        let start_x = dd.x + dd.width.saturating_sub(total_w + 2);
+        if is_yes {
+            Some(Rect::new(start_x, y, yes_w, 1))
+        } else {
+            Some(Rect::new(start_x + yes_w + 1, y, no_w, 1))
+        }
+    }
+
     fn on_picker_key(&mut self, key: KeyEvent) {
         if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.worktree_picker.open = false;
@@ -3154,6 +3200,43 @@ impl View {
         self.mark_dirty();
     }
 
+    fn on_session_close_confirm_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            // Cancel — don't close session at all
+            self.session_close_confirm.open = false;
+            self.mark_dirty();
+            return;
+        }
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let path = self.session_close_confirm.path.clone();
+                let name = self.session_close_confirm.session_name.clone();
+                // Need session name for WorktreeRemove: use active session? Use stored name's session? The command needs a session name for routing; use the session being closed.
+                let session = name.clone();
+                self.session_close_confirm.open = false;
+                // Remove worktree (also closes session)
+                let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                self.mark_dirty();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                let name = self.session_close_confirm.session_name.clone();
+                self.session_close_confirm.open = false;
+                let _ = self.send(&Command::SessionKill { name });
+                self.mark_dirty();
+            }
+            KeyCode::Enter => {
+                // Default to Yes (remove worktree)
+                let path = self.session_close_confirm.path.clone();
+                let name = self.session_close_confirm.session_name.clone();
+                let session = name.clone();
+                self.session_close_confirm.open = false;
+                let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                self.mark_dirty();
+            }
+            _ => {}
+        }
+    }
+
     fn commit_name(&mut self) {
         let name = self.popup.name.trim().to_string();
         if name.is_empty() {
@@ -3372,13 +3455,19 @@ impl View {
                     }
                 }
                 CtxTarget::Session(idx) => {
-                    let name = self
-                        .layout
-                        .as_ref()
-                        .and_then(|l| l.sessions.get(idx))
-                        .map(|s| s.name.clone());
-                    if let Some(name) = name {
-                        let _ = self.send(&Command::SessionKill { name });
+                    let sess = self.layout.as_ref().and_then(|l| l.sessions.get(idx));
+                    if let Some(s) = sess {
+                        let name = s.name.clone();
+                        let ws = s.workspace.clone();
+                        let is_worktree = std::fs::metadata(ws.join(".git")).map(|m| m.is_file()).unwrap_or(false);
+                        if is_worktree {
+                            self.session_close_confirm.open = true;
+                            self.session_close_confirm.session_idx = idx;
+                            self.session_close_confirm.session_name = name;
+                            self.session_close_confirm.path = ws;
+                        } else {
+                            let _ = self.send(&Command::SessionKill { name });
+                        }
                     }
                 }
                 CtxTarget::Tab(s_idx, t_idx) => {
@@ -3544,6 +3633,39 @@ impl View {
                 MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
             ) {
                 self.keybind_overlay.open = false;
+            }
+            return Ok(());
+        }
+        if self.session_close_confirm.open {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(rect) = self.session_close_confirm_button_rect(true) {
+                        if rect.contains(Position::new(x, y)) {
+                            let path = self.session_close_confirm.path.clone();
+                            let name = self.session_close_confirm.session_name.clone();
+                            let session = name.clone();
+                            self.session_close_confirm.open = false;
+                            let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                            self.mark_dirty();
+                            return Ok(());
+                        }
+                    }
+                    if let Some(rect) = self.session_close_confirm_button_rect(false) {
+                        if rect.contains(Position::new(x, y)) {
+                            let name = self.session_close_confirm.session_name.clone();
+                            self.session_close_confirm.open = false;
+                            let _ = self.send(&Command::SessionKill { name });
+                            self.mark_dirty();
+                            return Ok(());
+                        }
+                    }
+                    if self.session_close_confirm_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                        return Ok(());
+                    }
+                    self.session_close_confirm.open = false;
+                    self.mark_dirty();
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -5017,6 +5139,7 @@ impl View {
         self.render_settings(f);
         self.render_worktree_picker(f);
         self.render_worktree_create(f);
+        self.render_session_close_confirm(f);
         self.render_finder(f);
     }
 
@@ -6427,6 +6550,36 @@ impl View {
         }
     }
 
+    fn render_session_close_confirm(&self, f: &mut Frame) {
+        if !self.session_close_confirm.open {
+            return;
+        }
+        let theme = self.current_theme();
+        let Some(dd) = self.session_close_confirm_rect() else { return };
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, dd.x + 2, dd.y + 1, "close session", title, inner_w);
+        let msg = format!("Do you want to remove the worktree? Yes(y) / No(n)");
+        let msg_style = Style::default().fg(theme.fg).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 2, &msg, msg_style, inner_w);
+        let path = self.session_close_confirm.path.display().to_string();
+        let path_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 3, &path, path_style, inner_w);
+        let hint = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 4, "Yes removes the worktree folder and branch · No keeps it", hint, inner_w);
+        for (is_yes, label) in [(true, " Yes (y) "), (false, " No (n) ")] {
+            if let Some(rect) = self.session_close_confirm_button_rect(is_yes) {
+                let st = if is_yes {
+                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
+                };
+                text(f, rect.x, rect.y, label, st, rect.width);
+            }
+        }
+    }
+
     fn render_finder(&self, f: &mut Frame) {
         if !self.finder.open { return; }
         let theme = self.current_theme();
@@ -7143,6 +7296,7 @@ mod tests {
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
             notice: None,
