@@ -173,6 +173,7 @@ pub struct App {
     /// Live aliases for agent panes (`kumo agent rename`), so scripts can
     /// reference agents by name. Not persisted — ephemeral per daemon.
     agent_aliases: HashMap<u64, String>,
+    timeline: crate::daemon::timeline::Timeline,
 }
 
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
@@ -256,6 +257,7 @@ impl App {
             cached_layout: None,
             cached_layout_version: 0,
             agent_aliases: HashMap::new(),
+            timeline: crate::daemon::timeline::Timeline::default(),
         };
 
         match launch {
@@ -1124,8 +1126,14 @@ impl App {
 
     fn on_pty_event(&mut self, ev: PtyEvent) {
         let PtyEvent::Output { pane_id, data } = ev;
+        let mut pending_timeline: Option<(String, String, PathBuf, String)> = None;
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             pane.feed(&data);
+            if let Some(block) = pane.vt.last_prompt_block() {
+                let cwd = pane.detected_cwd().or_else(|| pane.vt.pwd()).unwrap_or_else(|| PathBuf::from("/"));
+                let session = self.sessions.iter().find(|s| s.id == pane.session_id).map(|s| s.name.clone()).unwrap_or_default();
+                pending_timeline = Some((block.prompt_text.clone(), block.output_text.clone(), cwd, session));
+            }
             // Check if the terminal bell was rung and trigger an alert
             if pane.vt.take_bell_count() > 0 {
                 crate::daemon::alert::play(crate::daemon::alert::AlertKind::Finished);
@@ -1166,6 +1174,9 @@ impl App {
                     }
                 }
             }
+        }
+        if let Some((prompt, output, cwd, session)) = pending_timeline {
+            self.timeline.push_if_new(pane_id, session, prompt, output, cwd);
         }
     }
 

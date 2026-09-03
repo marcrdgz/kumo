@@ -577,6 +577,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         }
                     }
                 }
+                Command::TimelineList { session, pane_id, query } => {
+                    let records = app.timeline.list(session.as_deref(), pane_id, query.as_deref());
+                    let _ = send_to(&mut clients, id, &DaemonEvent::TimelineList { records });
+                }
             }
         }
 

@@ -133,6 +133,10 @@ impl Pty {
         // selection.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        cmd.env("KUMO_SOCKET_PATH", kumo_core::config::ipc_socket_path());
+        if let Ok(exe) = std::env::current_exe() {
+            cmd.env("KUMO_BIN_PATH", exe);
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);

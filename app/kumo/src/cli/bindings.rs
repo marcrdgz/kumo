@@ -90,6 +90,7 @@ pub(crate) enum Action {
     EnterCopyMode,
     EnterCopyModeSearch,
     AgentInbox,
+    Timeline,
 }
 
 /// Logical group a binding belongs to, used to organize the showcase.
@@ -223,6 +224,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
     BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "focus the agent inbox (blocked · done · running)", group: Group::General, action: Action::AgentInbox },
+    BindingSpec { key: chord(KeyCode::Char(';')), keys: ";", desc: "open timeline vault (recent prompts)", group: Group::General, action: Action::Timeline },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
 ];
 
@@ -367,6 +369,7 @@ pub(crate) fn action_id(action: Action) -> &'static str {
         Action::EnterCopyMode => "copy-mode",
         Action::EnterCopyModeSearch => "copy-mode-search",
         Action::AgentInbox => "agent-inbox",
+        Action::Timeline => "timeline",
     }
 }
 
@@ -423,6 +426,7 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "copy-mode" | "enter-copy-mode" => Action::EnterCopyMode,
         "copy-mode-search" | "copy-search" => Action::EnterCopyModeSearch,
         "agent-inbox" | "focus-agent-inbox" => Action::AgentInbox,
+        "timeline" => Action::Timeline,
         _ => return None,
     })
 }
@@ -456,6 +460,7 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
         Action::EnterCopyModeSearch => "search forward (enter copy-mode)",
         Action::AgentInbox => "focus the agent inbox (blocked · done · running)",
+        Action::Timeline => "open timeline vault (recent prompts)",
     }
 }
 
@@ -473,7 +478,7 @@ pub(crate) fn action_group(action: Action) -> Group {
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
         | Action::JumpSession(_) => Group::Sessions,
         Action::ToggleSidebar => Group::Chrome,
-        Action::Detach | Action::ShowKeybinds | Action::AgentInbox => Group::General,
+        Action::Detach | Action::ShowKeybinds | Action::AgentInbox | Action::Timeline => Group::General,
     }
 }
 

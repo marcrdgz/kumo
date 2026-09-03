@@ -126,6 +126,7 @@ enum CliCmd {
     AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
     LayoutExport { session: Option<String>, tab: Option<String> },
     LayoutApply { session: Option<String>, file: PathBuf },
+    TimelineList { session: Option<String>, pane: Option<PaneRef>, query: Option<String> },
     Kill,
     Reload,
     Restart,
@@ -241,6 +242,50 @@ fn run_inner(args: &[String]) -> Result<()> {
                     Ok(_) => continue,
                     Err(e) if is_timeout(&e) => {
                         eprintln!("timed out waiting for layout");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        CliCmd::TimelineList { session, pane, query } => {
+            let session = match session {
+                Some(s) => Some(resolve_session(&mut stream, Some(s))?),
+                None => None,
+            };
+            let pane_id = match pane {
+                Some(p) => Some(resolve_pane_ref(&mut stream, &session.clone().unwrap_or_default(), &p)?),
+                None => None,
+            };
+            let command = Command::TimelineList { session, pane_id, query };
+            kumo_core::protocol::write_framed(&mut stream, &command)?;
+            stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
+            loop {
+                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    Ok(DaemonEvent::TimelineList { records }) => {
+                        if records.is_empty() {
+                            println!("(no records)");
+                        } else {
+                            for rec in &records {
+                                println!("{} [{}] {} — {}", rec.session, rec.pane_id, rec.cwd.display(), rec.prompt.lines().next().unwrap_or("").chars().take(60).collect::<String>());
+                                for line in rec.output.lines().take(5) {
+                                    println!("  {}", line);
+                                }
+                                if rec.output.lines().count() > 5 {
+                                    println!("  …");
+                                }
+                                println!();
+                            }
+                        }
+                        return Ok(());
+                    }
+                    Ok(DaemonEvent::Error { code, message }) => {
+                        eprintln!("error {code}: {message}");
+                        return Ok(());
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_timeout(&e) => {
+                        eprintln!("timed out");
                         return Ok(());
                     }
                     Err(e) => return Err(e),
@@ -390,8 +435,21 @@ fn run_inner(args: &[String]) -> Result<()> {
                     let spec: kumo_protocol::LayoutSpec = serde_json::from_str(&data).map_err(|e| anyhow::anyhow!("invalid layout spec: {e}"))?;
                     Command::LayoutApply { session, spec }
                 }
+                CliCmd::TimelineList { session, pane, query } => {
+                    let session = match session {
+                        Some(s) => Some(resolve_session(&mut stream, Some(s))?),
+                        None => None,
+                    };
+                    let pane_id = match pane {
+                        Some(p) => {
+                            let sess = session.clone().unwrap_or_default();
+                            Some(resolve_pane_ref(&mut stream, &sess, &p)?)
+                        }
+                        None => None,
+                    };
+                    Command::TimelineList { session, pane_id, query }
+                }
             };
-
             // Waiter commands need a long read timeout (agent wait up to 120s, output wait 30s)
             let is_waiter = matches!(command, Command::AgentWait{..} | Command::AgentPrompt{wait: Some(_), ..} | Command::PaneWaitOutput{..});
             let timeout_ms = match &command {
@@ -432,6 +490,8 @@ fn parse(args: &[String]) -> Result<CliCmd> {
         "agent" => parse_agent(rest),
         "tab" => parse_tab(rest),
         "layout" => parse_layout(rest),
+        "workspace" => parse_layout(rest),
+        "timeline" => parse_timeline(rest),
         "ls" | "list" => Ok(CliCmd::List),
         "kill" => Ok(CliCmd::Kill),
         "reload" => Ok(CliCmd::Reload),
@@ -927,6 +987,40 @@ fn parse_layout(args: &[String]) -> Result<CliCmd> {
             Ok(CliCmd::LayoutApply { session, file })
         }
         other => anyhow::bail!("unknown layout subcommand {other:?}"),
+    }
+}
+
+fn parse_timeline(args: &[String]) -> Result<CliCmd> {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        anyhow::bail!("missing timeline subcommand (list)");
+    };
+    match sub {
+        "list" => {
+            let mut session: Option<String> = None;
+            let mut pane: Option<PaneRef> = None;
+            let mut query: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-s" | "--session" => {
+                        session = Some(args.get(i+1).cloned().ok_or_else(|| anyhow::anyhow!("missing session"))?);
+                        i += 2;
+                    }
+                    "-p" | "--pane" => {
+                        let v = args.get(i+1).cloned().ok_or_else(|| anyhow::anyhow!("missing pane"))?;
+                        pane = Some(parse_pane_ref(&v).ok_or_else(|| anyhow::anyhow!("bad pane {v:?}"))?);
+                        i += 2;
+                    }
+                    "--grep" | "--query" => {
+                        query = Some(args.get(i+1).cloned().ok_or_else(|| anyhow::anyhow!("missing query"))?);
+                        i += 2;
+                    }
+                    other => anyhow::bail!("unknown timeline flag {other:?}"),
+                }
+            }
+            Ok(CliCmd::TimelineList { session, pane, query })
+        }
+        other => anyhow::bail!("unknown timeline subcommand {other:?}"),
     }
 }
 

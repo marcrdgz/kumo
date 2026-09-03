@@ -50,8 +50,8 @@ mod crossterm;
 /// v11 adds agent orchestration primitives: `AgentWait`, `AgentPrompt`,
 /// `AgentRead`, `AgentStart`, `AgentRename`, `PaneWaitOutput`, `AgentBroadcast`
 /// and their result events. v12 adds declarative layout: `LayoutExport/Apply`
-/// for workspaces and checkpoints.
-pub const PROTOCOL_VERSION: u32 = 12;
+/// for workspaces and checkpoints. v13 adds timeline vault: `TimelineList`.
+pub const PROTOCOL_VERSION: u32 = 13;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -650,6 +650,17 @@ impl AgentReadSource {
     }
 }
 
+/// One vault record: prompt + output + exit cwd + timestamp.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct TimelineRecord {
+    pub pane_id: u64,
+    pub session: String,
+    pub prompt: String,
+    pub output: String,
+    pub cwd: std::path::PathBuf,
+    pub ts_ms: u64,
+}
+
 /// One pane inside a tab, for the `kumo pane list` / `kumo tab list` views.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct PaneInfo {
@@ -1125,6 +1136,15 @@ pub enum Command {
         session: String,
         spec: LayoutSpec,
     },
+    /// `kumo timeline list`: query vault.
+    TimelineList {
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default)]
+        pane_id: Option<u64>,
+        #[serde(default)]
+        query: Option<String>,
+    },
 
     // -- interactive input (attached viewers) -------------------------------
     /// A key pressed in the focused pane's terminal.
@@ -1262,6 +1282,10 @@ pub enum DaemonEvent {
     /// Reply to `LayoutExport`: the declarative layout spec.
     LayoutExport {
         spec: LayoutSpec,
+    },
+    /// Reply to `TimelineList`: vault records.
+    TimelineList {
+        records: Vec<TimelineRecord>,
     },
 }
 

@@ -279,6 +279,15 @@ struct AgentToast {
     born: Instant,
 }
 
+#[allow(dead_code)]
+struct TimelinePicker {
+    open: bool,
+    items: Vec<kumo_protocol::TimelineRecord>,
+    selected: usize,
+    scroll: usize,
+    query: String,
+}
+
 /// One pane's client-side grid, rebuilt from `PaneFrame`s.
 #[derive(Clone)]
 struct Grid {
@@ -445,6 +454,7 @@ pub struct View {
     keybind_overlay: KeybindOverlay,
     settings: SettingsPanel,
     worktree_picker: WorktreePicker,
+    timeline_picker: TimelinePicker,
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
@@ -637,6 +647,7 @@ impl View {
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
+            timeline_picker: TimelinePicker { open: false, items: Vec::new(), selected: 0, scroll: 0, query: String::new() },
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -880,6 +891,13 @@ impl View {
             }
             DaemonEvent::LayoutExport { spec: _ } => {
                 // Handled via CLI path; TUI ignores
+            }
+            DaemonEvent::TimelineList { records } => {
+                self.timeline_picker.items = records;
+                self.timeline_picker.selected = 0;
+                self.timeline_picker.scroll = 0;
+                self.timeline_picker.open = true;
+                self.mark_dirty();
             }
             _ => {}
         }
@@ -1275,6 +1293,10 @@ impl View {
             self.on_picker_key(key);
             return Ok(());
         }
+        if self.timeline_picker.open {
+            self.on_timeline_key(key);
+            return Ok(());
+        }
         if self.pane_numbers.is_some() {
             self.on_pane_number_key(key);
             return Ok(());
@@ -1475,6 +1497,7 @@ impl View {
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
             Action::AgentInbox => self.open_inbox(),
+            Action::Timeline => self.open_timeline(),
         }
         self.mark_dirty();
         Ok(())
@@ -2123,6 +2146,54 @@ impl View {
         self.mark_dirty();
     }
 
+    fn open_timeline(&mut self) {
+        let session = self.active_session().map(|s| s.name.clone());
+        let _ = self.send(&Command::TimelineList { session, pane_id: None, query: None });
+        // Will open on reply
+    }
+
+    fn on_timeline_key(&mut self, key: KeyEvent) {
+        if !self.timeline_picker.open {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.timeline_picker.open = false;
+                self.mark_dirty();
+            }
+            KeyCode::Char('q') => {
+                self.timeline_picker.open = false;
+                self.mark_dirty();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.timeline_picker.selected > 0 {
+                    self.timeline_picker.selected -= 1;
+                    if self.timeline_picker.selected < self.timeline_picker.scroll {
+                        self.timeline_picker.scroll = self.timeline_picker.selected;
+                    }
+                    self.mark_dirty();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.timeline_picker.selected + 1 < self.timeline_picker.items.len() {
+                    self.timeline_picker.selected += 1;
+                    let visible = 10;
+                    if self.timeline_picker.selected >= self.timeline_picker.scroll + visible {
+                        self.timeline_picker.scroll += 1;
+                    }
+                    self.mark_dirty();
+                }
+            }
+            KeyCode::Enter => {
+                // For now, just close and maybe yank? Close
+                self.timeline_picker.open = false;
+                self.mark_dirty();
+            }
+            _ => {}
+        }
+    }
+
+
     fn close_inbox(&mut self) {
         self.mode = Mode::Normal;
         self.inbox = None;
@@ -2436,6 +2507,16 @@ impl View {
         }
         Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
     }
+
+    fn timeline_picker_rect(&self) -> Option<Rect> {
+        let area = Rect::new(0, 0, self.cols, self.rows);
+        let w = 60.min(area.width.saturating_sub(4));
+        let h = 20.min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(w))/2;
+        let y = area.y + (area.height.saturating_sub(h))/2;
+        Some(Rect::new(x, y, w, h))
+    }
+
 
     fn worktree_picker_item_at(&self, x: u16, y: u16) -> Option<usize> {
         let dd = self.worktree_picker_rect()?;
@@ -4125,6 +4206,7 @@ impl View {
         self.render_keybind_overlay(f);
         self.render_settings(f);
         self.render_worktree_picker(f);
+        self.render_timeline_picker(f);
     }
 
     fn pane_label(&self, pid: u64) -> String {
@@ -5163,6 +5245,35 @@ impl View {
         text(f, dd.x + 2, body_bottom, "j/k: move · enter: open · esc: close", footer, inner_w);
     }
 
+    fn render_timeline_picker(&self, f: &mut Frame) {
+        if !self.timeline_picker.open {
+            return;
+        }
+        let theme = self.current_theme();
+        let Some(dd) = self.timeline_picker_rect() else { return; };
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, dd.x + 2, dd.y + 1, "timeline", title, inner_w);
+        let body_top = dd.y + 2;
+        let body_bottom = dd.bottom() - 2;
+        let scroll = self.timeline_picker.scroll;
+        for (i, rec) in self.timeline_picker.items.iter().enumerate().skip(scroll) {
+            let y = body_top + (i - scroll) as u16;
+            if y >= body_bottom { break; }
+            let sel = i == self.timeline_picker.selected;
+            let bg = if sel { theme.accent } else { theme.panel_sep };
+            for cx in (dd.x + 1)..(dd.x + 1 + inner_w) {
+                put(f, cx, y, " ", Style::default().bg(bg));
+            }
+            let fg = if sel { RColor::Black } else { theme.fg };
+            let prompt = rec.prompt.lines().next().unwrap_or("").chars().take(30).collect::<String>();
+            text(f, dd.x + 2, y, &prompt, Style::default().fg(fg).bg(bg), inner_w.saturating_sub(2));
+        }
+        let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, body_bottom, "j/k move · enter close · esc/q close", footer, inner_w);
+    }
+
     fn render_copy_overlay(&self, f: &mut Frame, pid: u64, rect: Rect) {
         let Some(cs) = self.copy.as_ref() else { return; };
         if cs.pane_id != pid { return; }
@@ -5823,6 +5934,7 @@ mod tests {
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
+            timeline_picker: TimelinePicker { open: false, items: Vec::new(), selected: 0, scroll: 0, query: String::new() },
             pane_numbers: None,
             status_msg: None,
             notice: None,

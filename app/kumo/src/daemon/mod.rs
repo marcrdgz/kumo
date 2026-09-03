@@ -11,6 +11,7 @@ pub mod keys;
 pub mod pane;
 pub mod pty;
 pub mod state;
+pub mod timeline;
 pub mod vt;
 pub mod xtgettcap;
 
