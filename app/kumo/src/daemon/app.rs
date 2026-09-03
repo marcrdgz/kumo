@@ -1322,20 +1322,49 @@ impl App {
             self.sessions[s_idx].active_tab().tree.focus
         };
         let workspace = self.sessions[s_idx].workspace.clone();
-        let pane = self.panes.get_mut(&pid).ok_or_else(|| format!("no pane {pid}"))?;
+        // cwd from focused pane
         let mut chips = Vec::new();
-        // cwd
-        if let Some(cwd) = pane.detected_cwd().or_else(|| pane.vt.pwd()).or_else(|| Some(workspace.clone())) {
-            chips.push(crate::daemon::context::collect_cwd_chip(&cwd));
+        {
+            let pane = self.panes.get_mut(&pid).ok_or_else(|| format!("no pane {pid}"))?;
+            if let Some(cwd) = pane.detected_cwd().or_else(|| pane.vt.pwd()).or_else(|| Some(workspace.clone())) {
+                chips.push(crate::daemon::context::collect_cwd_chip(&cwd));
+            }
         }
-        // traceback
-        if let Some(chip) = crate::daemon::context::collect_traceback_chip(pane) {
-            chips.push(chip);
+        // traceback: collect from focused pane first, then other panes in session (so
+        // `cargo clippy` in another pane still surfaces)
+        let mut pane_ids: Vec<u64> = self.sessions[s_idx].tabs.iter().flat_map(|t| t.tree.pane_ids()).collect();
+        // prioritize focused pane
+        pane_ids.sort_by_key(|id| if *id == pid { 0 } else { 1 });
+        let mut seen_texts = std::collections::HashSet::new();
+        for other_pid in pane_ids {
+            // Avoid double mutable borrow by scoping
+            let chip_opt = {
+                let pane = match self.panes.get_mut(&other_pid) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                crate::daemon::context::collect_traceback_chip(pane)
+            };
+            if let Some(mut chip) = chip_opt {
+                if seen_texts.contains(&chip.text) {
+                    continue;
+                }
+                if other_pid != pid {
+                    chip.label = format!("{} (pane {})", chip.label, other_pid);
+                }
+                seen_texts.insert(chip.text.clone());
+                chips.push(chip);
+                // Cap to 3 traceback chips to avoid overwhelming
+                if chips.iter().filter(|c| c.kind == kumo_protocol::ChipKind::Traceback).count() >= 3 {
+                    break;
+                }
+            }
         }
         // git diff/status from session workspace and pane cwd
         chips.extend(crate::daemon::context::collect_git_chips(&workspace));
         // also try pane cwd git if different
-        if let Some(cwd) = pane.detected_cwd() {
+        let cwd_opt = self.panes.get(&pid).and_then(|p| p.detected_cwd());
+        if let Some(cwd) = cwd_opt {
             if cwd != workspace {
                 let extra = crate::daemon::context::collect_git_chips(&cwd);
                 for c in extra {

@@ -45,25 +45,58 @@ pub fn collect_cwd_chip(cwd: &Path) -> WireChip {
 }
 
 pub fn collect_traceback_chip(pane: &mut crate::daemon::pane::Pane) -> Option<WireChip> {
-    let block = pane.vt.last_prompt_block()?;
-    let prompt = block.prompt_text.trim();
-    let output = block.output_text.trim();
-    if output.is_empty() && prompt.is_empty() {
+    if let Some(block) = pane.vt.last_prompt_block() {
+        let prompt = block.prompt_text.trim();
+        let output = block.output_text.trim();
+        if !(output.is_empty() && prompt.is_empty()) {
+            let raw = if prompt.is_empty() {
+                output.to_string()
+            } else {
+                format!("$ {prompt}\n{output}")
+            };
+            let (text, truncated) = cap_text(raw, TRACEBACK_CAP);
+            return Some(WireChip {
+                kind: ChipKind::Traceback,
+                label: if prompt.is_empty() {
+                    "traceback".to_string()
+                } else {
+                    format!("traceback: {}", prompt.lines().next().unwrap_or("").chars().take(40).collect::<String>())
+                },
+                text,
+                truncated,
+            });
+        }
+    }
+    // Fallback when OSC 133 markers are absent (shell without snippet) or prompt block empty:
+    // use bottom_text tail and recent stripped text. Prefer the richer recent_text_tail which
+    // already stripped ANSI, then fall back to bottom_text. Only return if it looks like
+    // a failure (contains error/warning/failed) or is non-empty recent output for clippy.
+    let fallback = pane.vt.bottom_text(80);
+    let trimmed = fallback.trim();
+    if trimmed.is_empty() {
         return None;
     }
-    let raw = if prompt.is_empty() {
-        output.to_string()
-    } else {
-        format!("$ {prompt}\n{output}")
-    };
-    let (text, truncated) = cap_text(raw, TRACEBACK_CAP);
+    // Heuristic: if the pane recently produced output containing error/warning/failed, surface it.
+    // For `cargo clippy` the output is typically warning/error lines. If we return every bottom_text
+    // we'd be noisy, so gate on at least one failure marker, but still allow large recent output
+    // when the user explicitly invoked compose after a command.
+    let lower = trimmed.to_ascii_lowercase();
+    let looks_like_failure = lower.contains("error")
+        || lower.contains("warning")
+        || lower.contains("failed")
+        || lower.contains("clippy")
+        || lower.contains("cargo");
+    // If it doesn't look like failure, still return recent output but label as recent output
+    // and only if it's not just the prompt itself (more than 2 lines or > 50 chars).
+    if !looks_like_failure && trimmed.lines().count() <= 2 && trimmed.len() < 80 {
+        // Likely just a prompt with no real output — skip to avoid noise.
+        return None;
+    }
+    let (text, truncated) = cap_text(trimmed.to_string(), TRACEBACK_CAP);
+    let label = if looks_like_failure { "recent output (failure)".to_string() } else { "recent output".to_string() };
     Some(WireChip {
         kind: ChipKind::Traceback,
-        label: if prompt.is_empty() {
-            "traceback".to_string()
-        } else {
-            format!("traceback: {}", prompt.lines().next().unwrap_or("").chars().take(40).collect::<String>())
-        },
+        label,
         text,
         truncated,
     })
