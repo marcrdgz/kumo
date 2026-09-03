@@ -757,32 +757,33 @@ impl App {
             }).and_then(|w| w.branch))
             .or_else(|| kumo_core::worktree_meta::get(path).and_then(|m| m.branch))
             .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()));
-        let repo_root = repo_hint.and_then(kumo_core::worktrees::repo_root)
-            .or_else(|| kumo_core::worktrees::repo_root(path))
-            .or_else(|| {
-                // Fallback: use any session's repo if it contains the path
-                self.sessions.iter().find_map(|s| kumo_core::worktrees::repo_root(&s.workspace))
-            });
+        // Find the main worktree's path (common repo root) — `repo_root` on a linked worktree returns its own top, not main
+        let repo_root = repo_hint.and_then(kumo_core::worktrees::main_worktree_path)
+            .or_else(|| kumo_core::worktrees::main_worktree_path(path))
+            .or_else(|| self.sessions.iter().find_map(|s| kumo_core::worktrees::main_worktree_path(&s.workspace)))
+            .or_else(|| repo_hint.and_then(kumo_core::worktrees::repo_root))
+            .or_else(|| kumo_core::worktrees::repo_root(path));
         let Some(root) = repo_root else { return Err("not a git repository".to_string()); };
-        // Preview unmerged when not forced
-        if !force {
-            if let Some(br) = branch.as_deref() {
-                if let Ok(cnt) = kumo_core::worktrees::branch_unmerged_count(&root, br) {
-                    if cnt > 0 {
-                        return Err(format!("branch {br:?} has {cnt} unmerged commit(s) — review, then `kumo worktree rm --force {}`", path.display()));
-                    }
-                }
-            }
-        }
-        // Close session using this worktree, if any
-        if let Some(idx) = self.session_for_workspace(path) {
+        // Close session using this worktree, if any (keep path for removal)
+        let session_idx = self.session_for_workspace(path);
+        if let Some(idx) = session_idx {
             self.close_session(idx);
         }
+        // Remove the worktree directory (fails if dirty and !force — surface git's message)
         kumo_core::worktrees::remove_worktree(&root, path, force)?;
+        let mut branch_kept_msg = String::new();
         if let Some(br) = branch {
-            // Delete branch if no other worktree uses it
             let still_used = kumo_core::worktrees::list_worktrees(&root).map(|list| list.iter().any(|w| w.branch.as_deref() == Some(&br))).unwrap_or(false);
             if !still_used {
+                if !force {
+                    if let Ok(cnt) = kumo_core::worktrees::branch_unmerged_count(&root, &br) {
+                        if cnt > 0 {
+                            branch_kept_msg = format!(" (branch {br:?} kept — {cnt} commits not in origin/main; `git log --oneline {br} ^origin/main` to review, `kumo worktree rm --force {}` to delete)", path.display());
+                            let _ = kumo_core::worktree_meta::remove(path);
+                            return Ok(format!("removed worktree {}{}", path.display(), branch_kept_msg));
+                        }
+                    }
+                }
                 let _ = kumo_core::worktrees::delete_branch(&root, &br, force);
             }
         }

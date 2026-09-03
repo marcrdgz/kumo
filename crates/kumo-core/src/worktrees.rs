@@ -87,6 +87,11 @@ pub fn list_worktrees(ws: &Path) -> Result<Vec<WorktreeInfo>, String> {
     Ok(parse_worktrees(&out))
 }
 
+/// The main (first) worktree of the repository containing `ws`, if any.
+pub fn main_worktree_path(ws: &Path) -> Option<PathBuf> {
+    list_worktrees(ws).ok()?.first().map(|w| w.path.clone())
+}
+
 /// Parse `git worktree list --porcelain`: one blank-line-separated block per
 /// worktree, `worktree <path>` plus an optional `branch refs/heads/<name>`
 /// (absent for a detached HEAD). `bare`/`locked`/`prunable` markers are
