@@ -311,25 +311,7 @@ agents get a machine layer:
   to spawned AI processes so they drive their own workspace layouts natively;
   can be disabled in config.
 
-**Context pipeline** (kumo's own differentiator: kumo doesn't just own
-terminals, it assembles the prompt):
-- **OSC 133 traceback** + scrollback → prompt: the snippet installer lands here
-  with the traceback work; with the state model v2 and `traceback` reads this is
-  the *structured* version of context sharing, not blind scrollback parsing.
-- **Compose-prompt popup** (`leader+i`): aggregates the active selection, the
-  last failing command + traceback (via OSC 133), `git diff`, and cwd into
-  actionable chips — and **also opens as a transient popup pane** (`leader+p`,
-  tmux-popup style overlay) for inline dispatch without a new tab.
-- **Auto-attach context**: spawning a new agent pane pre-fills its prompt with
-  the error traceback and dirty file diffs from the active session.
-- **Git Worktree Isolation** (`kumo new --ai`): agents run in isolated ephemeral
-  worktrees so they analyze, patch, and test without dirtying the main
-  worktree — built on a **declarative tab layout** (`layout export`/`apply`
-  pulled forward from 1.x: the AI tab is a plain layout tree with per-pane
-  cwd/env), so 1.x declarative workspaces become a reuse, not a rewrite.
-- **Session Checkpoints & Rollback**: save state snapshots before autonomous
-  execution, enabling single-command rollbacks (`kumo rollback`); inside a
-  worktree the rollback is a branch switch, not a surgical rebase.
+**Context pipeline** — ⏸ **Dropped** (kept only `vt.rs:last_prompt_block` + `pane_read_text:Traceback` as fallback): chip aggregation (`leader+i`/`P` compose, `context.rs` diff dump) was speculative, `OSC133`-gated and noisy, and duplicated `agent read` + `wait` that `tmux` never had. Orca ADE wins by *waiting*, not pasting. See revised 0.7.1–0.8.0 below (terminal-owned, daemon-wait reuse).
 
 - ✅ **Agent Inbox View** (on the v2 state model): one unified tab aggregating
   `blocked · done · running` with direct keyboard navigation to actionable
@@ -361,6 +343,29 @@ terminals, it assembles the prompt):
 **Deferred from 0.7.0**: declarative agent-view queries (→ 0.9.0 plugin
 system), remote/update-checked agent-detection manifests (→ 0.8.0),
 `sync-input` stays cut (broadcast supersedes it), `pipe-pane` stays 0.9.0.
+
+> Context pipeline dropped — see revised 0.7.1–0.7.3 below. Only `vt.rs:last_prompt_block` + `pane_read_text:Traceback` remain as fallback.
+
+### 🔭 Revised 0.7.1–0.7.3 — Orca-native, daemon-owned (replaces context pipeline)
+
+**Why superseded:** chips were speculative (`DIFF_CAP 8K` dump, `bottom_text(80)` heuristic), `OSC133`-gated, and duplicated `agent read` + `wait` that `tmux` never had. Orca wins by *waiting* and *remembering*, not pasting. These three land `binary, not an app` (`AGENTS.md:4` daemon+`libghostty-vt`, `PLAN.md:68` dumb viewport) using existing `LayoutTree:33`, `worktrees.rs:48`, `waits.rs:42`, `protocol v12:54`.
+
+#### 0.7.1 — Supervisor Inbox v2 + Socket-MCP `KUMO_SOCKET_PATH` (week 1, S 2-3d)
+- **Supervisor:** `leader+I` queue `Blocked→Done→Working` with evidence preview (`agent read --source detection`, not dump) and one-key `a`pprove/`d`eny/`s`kip/`v`erify. `v` spawns harness split (`layout.rs:50` `V|H` 0.05) → `PaneWaitOutput --regex passed|failed` (`waits.rs:89`) → `AgentPrompt --wait`. Demand-driven via `tasks.rs:215` `should_alert` → `DaemonEvent::Toast:519`, survives `AGENT_TOAST_TIMEOUT 5s`.
+- **Socket:** inject `KUMO_SOCKET_PATH`+`KUMO_BIN_PATH` (+`KUMO_SESSION/PANE_ID`) into every `PtySpec` (`pty.rs:15`, `pane.rs:18` `Pane::spawn`, gated by `config.toml [agent] env_injection=true`), speak `NDJSON` on same `UnixSocket 0o600` (`server.rs:897` `SO_PEERCRED`), `kumo api schema --json` (`schemars`) so `claude/codex/opencode` self-drive over `ssh -L`. `ClientKind::Agent` (`protocol.rs:66`), `cargo clippy/test` green, no TUI change.
+- **Drop:** `leader+i/P` compose (`context.rs`, `ComposeState:128`) kept only as `kumo timeline diff` helper; frees `i/P`.
+
+#### 0.7.2 — Semantic Timeline Vault (week 2, M 1w)
+- **Vault:** per-pane ring `VecDeque<Record{prompt,output,exit_code,cwd via vt.rs:1327 pwd, git_rev,ts}>` (200/pane, `16K` cap) pushed on `on_pty_event:1125` when `vt.last_prompt_block:1823` completes (`has_semantic_prompt:1969`). `git_rev` async like `tasks.rs:62` branch cache.
+- **TUI:** `leader+;` fuzzy picker (reuses `WorktreePicker:272` rect + `Grid:295` preview) filter `/`, `Enter` jump (`CopyScrollTo:932`), `y` yank (`util::copy_to_clipboard`), `r` rerun (`AgentPrompt`). Persist in `state.rs:57` `STATE_VERSION 2→3` tolerant load (`state.rs:134`).
+- **CLI:** `kumo timeline list [--grep]`, `show <id>`, `rerun <id> -p <pane>`. Structured `exit_code` vs `lower.contains("error|warning|failed")` (`context.rs:84`) heuristic.
+
+#### 0.7.3 — Declarative Workspaces & Checkpoints (week 3-4, M 4-5d)
+- **Spec:** promote `LayoutSpec{TabSpec{LayoutNodeSpec{PaneSpec{cwd,command,is_ai,title,env}}}}` (`protocol.rs:621`) from CLI util to `kumo workspace save <file.toml>` + `apply` (transactional kill only that session via `PENDING_PANES:29`), `git_rev` meta.
+- **Checkpoints:** `kumo checkpoint save <name> | list | restore | diff` as `git worktree add -b` + `git stash` (`worktrees.rs:62`, `context.rs:19` pattern), rollback = `branch switch` not rebase. Replace imperative `kumo new --ai --context` (`commands.rs:320` `/tmp/kumo-worktrees`) random branch.
+- **TUI:** `MENU` `workspace save/apply`, tab rename already (`RenameTab:197`).
+
+*Effort:* -450 lines (compose) +600 (vault+supervisor+workspace+JSON), same binary, `cargo clippy --workspace` clean per `AGENTS.md:5`.
 
 ## 🛡️ 0.8.0 — Stability
 
