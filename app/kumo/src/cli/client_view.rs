@@ -1586,17 +1586,10 @@ impl View {
                 if comp.selected + 1 < comp.chips.len() { comp.selected += 1; self.mark_dirty(); }
                 return Ok(());
             }
-            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) || comp.selected < comp.chips.len() => {
-                // Space toggles chip when chips focused, else insert space
-                // Heuristic: if input is empty, toggle; else insert
-                if comp.input.is_empty() || comp.chips.is_empty() {
-                    if comp.selected < comp.chips.len() {
-                        comp.enabled[comp.selected] = !comp.enabled[comp.selected];
-                        self.mark_dirty();
-                        return Ok(());
-                    }
-                }
-                // fall through to char handling
+            KeyCode::Char(' ') if comp.selected < comp.chips.len() && (comp.input.is_empty() || comp.chips.is_empty()) => {
+                comp.enabled[comp.selected] = !comp.enabled[comp.selected];
+                self.mark_dirty();
+                return Ok(());
             }
             _ => {}
         }
@@ -5349,7 +5342,6 @@ impl View {
         }
         if comp.chips.is_empty() {
             text(f, dd.x + 2, cy, "(no context — shell may need OSC 133 snippet)", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), w.saturating_sub(4));
-            cy += 1;
         }
         // Input field
         let input_y = dd.bottom() - 3;

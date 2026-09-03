@@ -344,7 +344,7 @@ impl App {
                             _ => None,
                         }
                     } else { None };
-                    let branch = format!("kumo/ai/{}-{}", name.as_deref().unwrap_or("ai"), &Self::uuid_simple());
+                    let branch = format!("kumo/ai/{}-{}", name.unwrap_or("ai"), Self::uuid_simple());
                     let path = Self::ephemeral_worktree_path(&root, &branch);
                     // create worktree
                     kumo_core::worktrees::add_worktree(&root, &path, &branch).map_err(|e| anyhow::anyhow!(e))?;
@@ -413,7 +413,7 @@ impl App {
         format!("{:x}", nanos & 0xffffffffff)
     }
 
-    fn ephemeral_worktree_path(root: &PathBuf, branch: &str) -> PathBuf {
+    fn ephemeral_worktree_path(root: &std::path::Path, branch: &str) -> PathBuf {
         let sanitized = branch.replace('/', "-");
         let base = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         std::env::temp_dir().join(format!("kumo-worktrees/{base}-{sanitized}"))
