@@ -84,9 +84,7 @@ fn save_store(store: &Store) -> Result<(), String> {
     std::fs::rename(&tmp, &p).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), p.display()))?;
     Ok(())
 }
-
 /// Isolated worktree checkpoint getters/setters (daemon-side, synchronous).
-
 pub fn get(path: &Path) -> Option<Checkpoint> {
     let store = load_store();
     let k = key_for_path(path);

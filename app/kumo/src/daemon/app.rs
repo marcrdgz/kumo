@@ -647,6 +647,7 @@ impl App {
     /// Extended creator for isolated `--ai` worktrees (Orca-aligned naming, no `kumo/` prefix).
     /// `branch_override` is `--branch`, `name_hint` is the Nombre task name, `from` is `--from`,
     /// `note` is `--note`, `agent` is `--agent`, `is_ai` marks ephemeral checkout.
+    #[allow(clippy::too_many_arguments)]
     fn new_worktree_session_ext(
         &mut self,
         idx: usize,
@@ -771,16 +772,15 @@ impl App {
         }
         // Remove the worktree directory (fails if dirty and !force — surface git's message)
         kumo_core::worktrees::remove_worktree(&root, path, force)?;
-        let mut branch_kept_msg = String::new();
         if let Some(br) = branch {
             let still_used = kumo_core::worktrees::list_worktrees(&root).map(|list| list.iter().any(|w| w.branch.as_deref() == Some(&br))).unwrap_or(false);
             if !still_used {
                 if !force {
                     if let Ok(cnt) = kumo_core::worktrees::branch_unmerged_count(&root, &br) {
                         if cnt > 0 {
-                            branch_kept_msg = format!(" (branch {br:?} kept — {cnt} commits not in origin/main; `git log --oneline {br} ^origin/main` to review, `kumo worktree rm --force {}` to delete)", path.display());
+                            let kept_msg = format!(" (branch {br:?} kept — {cnt} commits not in origin/main; `git log --oneline {br} ^origin/main` to review, `kumo worktree rm --force {}` to delete)", path.display());
                             let _ = kumo_core::worktree_meta::remove(path);
-                            return Ok(format!("removed worktree {}{}", path.display(), branch_kept_msg));
+                            return Ok(format!("removed worktree {}{}", path.display(), kept_msg));
                         }
                     }
                 }

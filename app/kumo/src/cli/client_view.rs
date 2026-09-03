@@ -230,6 +230,7 @@ fn border_chars(style: kumo_core::config::BorderStyle) -> (&'static str, &'stati
 #[derive(Clone, Copy, PartialEq)]
 enum PopupTarget {
     NewSession,
+    #[allow(dead_code)]
     NewWorktree(usize),
     RenamePane(u64),
     RenameSession(usize),
@@ -327,6 +328,7 @@ impl WorktreeCreateTab {
             WorktreeCreateTab::Nombre => "Name",
         }
     }
+    #[allow(dead_code)]
     fn from_idx(idx: usize) -> Self {
         match idx {
             1 => Self::Github,
@@ -336,6 +338,7 @@ impl WorktreeCreateTab {
             _ => Self::Inteligente,
         }
     }
+    #[allow(dead_code)]
     fn idx(self) -> usize {
         match self {
             WorktreeCreateTab::Inteligente => 0,
@@ -2870,7 +2873,7 @@ impl View {
         }
         let (w, h) = (self.cols, self.rows);
         let width = 60u16.min(w.saturating_sub(4)).max(30);
-        let height = 7u16.min(h.saturating_sub(4)).max(7);
+        let height = 7u16;
         if w < width || h < height {
             return None;
         }
@@ -3637,113 +3640,107 @@ impl View {
             return Ok(());
         }
         if self.session_close_confirm.open {
-            match m.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = self.session_close_confirm_button_rect(true) {
-                        if rect.contains(Position::new(x, y)) {
-                            let path = self.session_close_confirm.path.clone();
-                            let name = self.session_close_confirm.session_name.clone();
-                            let session = name.clone();
-                            self.session_close_confirm.open = false;
-                            let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
-                            self.mark_dirty();
-                            return Ok(());
-                        }
-                    }
-                    if let Some(rect) = self.session_close_confirm_button_rect(false) {
-                        if rect.contains(Position::new(x, y)) {
-                            let name = self.session_close_confirm.session_name.clone();
-                            self.session_close_confirm.open = false;
-                            let _ = self.send(&Command::SessionKill { name });
-                            self.mark_dirty();
-                            return Ok(());
-                        }
-                    }
-                    if self.session_close_confirm_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let Some(rect) = self.session_close_confirm_button_rect(true) {
+                    if rect.contains(Position::new(x, y)) {
+                        let path = self.session_close_confirm.path.clone();
+                        let name = self.session_close_confirm.session_name.clone();
+                        let session = name.clone();
+                        self.session_close_confirm.open = false;
+                        let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                        self.mark_dirty();
                         return Ok(());
                     }
-                    self.session_close_confirm.open = false;
-                    self.mark_dirty();
                 }
-                _ => {}
+                if let Some(rect) = self.session_close_confirm_button_rect(false) {
+                    if rect.contains(Position::new(x, y)) {
+                        let name = self.session_close_confirm.session_name.clone();
+                        self.session_close_confirm.open = false;
+                        let _ = self.send(&Command::SessionKill { name });
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.session_close_confirm_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                    return Ok(());
+                }
+                self.session_close_confirm.open = false;
+                self.mark_dirty();
             }
             return Ok(());
         }
         if self.worktree_create.open {
-            match m.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(tab) = self.worktree_create_tab_at(x, y) {
-                        if tab != WorktreeCreateTab::Jira {
-                            self.worktree_create.tab = tab;
-                            self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
-                            self.mark_dirty();
-                        }
-                        return Ok(());
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let Some(tab) = self.worktree_create_tab_at(x, y) {
+                    if tab != WorktreeCreateTab::Jira {
+                        self.worktree_create.tab = tab;
+                        self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                        self.mark_dirty();
                     }
-                    if let Some(rect) = self.worktree_create_input_rect(WorktreeCreateFocus::CreateFrom) {
-                        if rect.contains(Position::new(x, y)) {
-                            self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
-                            let len = self.worktree_create.create_from.chars().count();
-                            let col = (x.saturating_sub(rect.x)) as usize;
-                            self.worktree_create.cursor = col.min(len);
-                            self.mark_dirty();
-                            return Ok(());
-                        }
-                    }
-                    if self.worktree_create.advanced {
-                        for focus in [WorktreeCreateFocus::BranchOverride, WorktreeCreateFocus::Note, WorktreeCreateFocus::Agent] {
-                            if let Some(rect) = self.worktree_create_input_rect(focus) {
-                                if rect.contains(Position::new(x, y)) {
-                                    self.worktree_create.focus = focus;
-                                    let len = match focus {
-                                        WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_override.chars().count(),
-                                        WorktreeCreateFocus::Note => self.worktree_create.note.chars().count(),
-                                        WorktreeCreateFocus::Agent => self.worktree_create.agent.chars().count(),
-                                        _ => 0,
-                                    };
-                                    let col = (x.saturating_sub(rect.x)) as usize;
-                                    match focus {
-                                        WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor = col.min(len),
-                                        WorktreeCreateFocus::Note => self.worktree_create.note_cursor = col.min(len),
-                                        WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor = col.min(len),
-                                        _ => {}
-                                    }
-                                    self.mark_dirty();
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                    if let Some(rect) = self.worktree_create_advanced_toggle_rect() {
-                        if rect.contains(Position::new(x, y)) {
-                            self.worktree_create.advanced = !self.worktree_create.advanced;
-                            if !self.worktree_create.advanced {
-                                self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
-                            }
-                            self.mark_dirty();
-                            return Ok(());
-                        }
-                    }
-                    if let Some(rect) = self.worktree_create_button_rect(true) {
-                        if rect.contains(Position::new(x, y)) {
-                            self.commit_worktree_create();
-                            return Ok(());
-                        }
-                    }
-                    if let Some(rect) = self.worktree_create_button_rect(false) {
-                        if rect.contains(Position::new(x, y)) {
-                            self.worktree_create.open = false;
-                            self.mark_dirty();
-                            return Ok(());
-                        }
-                    }
-                    if self.worktree_create_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
-                        return Ok(());
-                    }
-                    self.worktree_create.open = false;
-                    self.mark_dirty();
+                    return Ok(());
                 }
-                _ => {}
+                if let Some(rect) = self.worktree_create_input_rect(WorktreeCreateFocus::CreateFrom) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                        let len = self.worktree_create.create_from.chars().count();
+                        let col = (x.saturating_sub(rect.x)) as usize;
+                        self.worktree_create.cursor = col.min(len);
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.worktree_create.advanced {
+                    for focus in [WorktreeCreateFocus::BranchOverride, WorktreeCreateFocus::Note, WorktreeCreateFocus::Agent] {
+                        if let Some(rect) = self.worktree_create_input_rect(focus) {
+                            if rect.contains(Position::new(x, y)) {
+                                self.worktree_create.focus = focus;
+                                let len = match focus {
+                                    WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_override.chars().count(),
+                                    WorktreeCreateFocus::Note => self.worktree_create.note.chars().count(),
+                                    WorktreeCreateFocus::Agent => self.worktree_create.agent.chars().count(),
+                                    _ => 0,
+                                };
+                                let col = (x.saturating_sub(rect.x)) as usize;
+                                match focus {
+                                    WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor = col.min(len),
+                                    WorktreeCreateFocus::Note => self.worktree_create.note_cursor = col.min(len),
+                                    WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor = col.min(len),
+                                    _ => {}
+                                }
+                                self.mark_dirty();
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                if let Some(rect) = self.worktree_create_advanced_toggle_rect() {
+                    if rect.contains(Position::new(x, y)) {
+                        self.worktree_create.advanced = !self.worktree_create.advanced;
+                        if !self.worktree_create.advanced {
+                            self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                        }
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.worktree_create_button_rect(true) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.commit_worktree_create();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.worktree_create_button_rect(false) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.worktree_create.open = false;
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.worktree_create_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                    return Ok(());
+                }
+                self.worktree_create.open = false;
+                self.mark_dirty();
             }
             return Ok(());
         }
@@ -6560,7 +6557,7 @@ impl View {
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, "close session", title, inner_w);
-        let msg = format!("Do you want to remove the worktree? Yes(y) / No(n)");
+        let msg = "Do you want to remove the worktree? Yes(y) / No(n)".to_string();
         let msg_style = Style::default().fg(theme.fg).bg(theme.panel_sep);
         text(f, dd.x + 2, dd.y + 2, &msg, msg_style, inner_w);
         let path = self.session_close_confirm.path.display().to_string();

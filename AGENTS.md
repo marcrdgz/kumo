@@ -57,7 +57,7 @@ The client and desktop launch the daemon via `kumo daemon` (sibling binary or
 1. **Never Guess Logic or File Structures**: Inspect authoritative source files before referencing Rust/C bindings.
 2. **Clean Abstractions**: Keep PTY/process management (`app/kumo/src/daemon/pty.rs`), the terminal emulator FFI (`app/kumo/src/daemon/vt.rs`), layout tree management (`crates/kumo-core/src/layout.rs`), and Claude AI integration modular and loosely coupled.
 3. **No Superficial Fixes**: Always verify PTY process lifecycle, file descriptor cleanup, and signal handling (`SIGWINCH`, `SIGCHLD`) thoroughly.
-4. **Verification**: Always run build/test commands after editing code to verify compilation and execution success.
+4. **Verification (mandatory)**: After every code change, run `cargo build --workspace`, `cargo test --workspace`, **and** `cargo clippy --workspace` and fix **all** warnings/errors before committing or pushing. Never push with clippy failures; treat clippy as a required gate (see Build & Test Commands).
 5. **Never commit without asking**: Do not run `git commit` (or amend/push) unless the user explicitly asks. Stage nothing on your own; leave commits to the user.
 
 ---
@@ -67,7 +67,8 @@ The client and desktop launch the daemon via `kumo daemon` (sibling binary or
 - **Run**: `cargo run -p kumo` (or `make run`) — the client; the daemon is the same
   binary: `target/debug/kumo daemon` (or `cargo run -p kumo -- daemon`)
 - **Tests**: `cargo test --workspace`
-- **Lint**: `cargo clippy --workspace`
+- **Lint**: `cargo clippy --workspace` — must be **clean** (zero warnings/errors) before commit/push
+- **Gate**: `cargo build --workspace && cargo test --workspace && cargo clippy --workspace` must all pass
 - **Note**: building `kumo` requires a `zig` toolchain on `PATH` to compile the
   vendored `libghostty-vt` (the `build.rs` lives in `app/kumo`). The vendored
   build pins zig `0.15.x` (it rejects `0.16+`). On macOS with Xcode ≥ 26.5,

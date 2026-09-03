@@ -736,6 +736,7 @@ impl App {
     }
 
     /// Extended creator for isolated `--ai` worktrees (Orca-aligned, no `kumo/` prefix).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn worktree_create_full(
         &mut self,
         session: &str,

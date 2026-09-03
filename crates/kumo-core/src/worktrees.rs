@@ -141,12 +141,7 @@ pub fn slug_branch_name(name: &str) -> String {
     for c in s.chars() {
         if c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '-' {
             // Normalize underscore/space runs later; keep char as-is lowercased
-            if c == '_' {
-                if !last_dash {
-                    out.push('-');
-                    last_dash = true;
-                }
-            } else if c == '-' {
+            if c == '_' || c == '-' {
                 if !last_dash {
                     out.push('-');
                     last_dash = true;
@@ -203,6 +198,7 @@ pub fn validate_branch_name(branch: &str) -> Result<(), String> {
 /// - `name` (Nombre tab / CLI positional) → slug(name)
 /// - `from` is `#1234`/GitHub URL → `pr-1234` or headRefName when gh resolves it (caller should have attempted resolve)
 /// - fallback → `wt-<short>`
+///
 /// Callers that already resolved a PR's headRefName should pass it as `name` instead of relying on this.
 pub fn derive_branch(
     name: Option<&str>,

@@ -303,7 +303,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 }
             } else {
                 read_reply(&mut stream)?;
-                return Ok(());
+                Ok(())
             }
         }
         CliCmd::WorktreeOpen { session, path } => {
@@ -311,14 +311,14 @@ fn run_inner(args: &[String]) -> Result<()> {
             let cmd = Command::WorktreeOpen { session: sess, path };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
             read_reply(&mut stream)?;
-            return Ok(());
+            Ok(())
         }
         CliCmd::WorktreeRemove { session, path, force } => {
             let sess = resolve_session(&mut stream, session)?;
             let cmd = Command::WorktreeRemove { session: sess, path, force };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
             read_reply(&mut stream)?;
-            return Ok(());
+            Ok(())
         }
         CliCmd::WorktreeSet { session, path, comment, status, json } => {
             let sess = resolve_session(&mut stream, session)?;
@@ -369,7 +369,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 }
             } else {
                 read_reply(&mut stream)?;
-                return Ok(());
+                Ok(())
             }
         }
         cmd => {
