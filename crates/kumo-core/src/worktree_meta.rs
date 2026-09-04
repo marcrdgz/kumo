@@ -122,14 +122,18 @@ pub fn set(
     let mut store = load_store();
     let k = key_for_path(path);
     let mut entry = store.entries.get(&k).cloned().unwrap_or_default();
+    fn is_clear_marker(s: &str) -> bool {
+        let t = s.trim();
+        t.is_empty() || t == "—" || t == "–" || t == "-"
+    }
     if let Some(c) = comment {
-        entry.comment = c.filter(|s| !s.trim().is_empty());
+        entry.comment = c.filter(|s| !is_clear_marker(s));
     }
     if let Some(s) = status {
         entry.status = match s {
             Some(raw) => {
                 let trimmed = raw.trim().to_string();
-                if trimmed.is_empty() {
+                if is_clear_marker(&trimmed) {
                     None
                 } else {
                     let lower = trimmed.to_ascii_lowercase();
@@ -144,7 +148,7 @@ pub fn set(
         };
     }
     if let Some(b) = branch {
-        entry.branch = b.filter(|s| !s.trim().is_empty());
+        entry.branch = b.filter(|s| !is_clear_marker(s));
     }
     if let Some(e) = is_ephemeral {
         entry.is_ephemeral = e;

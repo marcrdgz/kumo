@@ -402,6 +402,9 @@ pub struct WireCheckpoint {
     /// Whether the worktree was created via `kumo worktree create --ai`.
     #[serde(default)]
     pub is_ephemeral: bool,
+    /// Persisted git branch when `SessionLayout.branch` cannot be resolved (detached).
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// One session's semantic tree, as pushed to layout subscribers.

@@ -119,22 +119,33 @@ impl App {
                 }).collect();
                 let active = tabs.get(s.active_tab).cloned();
                 let checkpoint = kumo_core::worktree_meta::get(&s.workspace).and_then(|cp| {
-                    if cp.comment.is_none() && cp.status.is_none() && !cp.is_ephemeral {
+                    if cp.comment.is_none() && cp.status.is_none() && !cp.is_ephemeral && cp.branch.is_none() {
                         None
                     } else {
                         Some(kumo_protocol::WireCheckpoint {
-                            comment: cp.comment,
-                            status: cp.status,
+                            comment: cp.comment.clone(),
+                            status: cp.status.clone(),
                             is_ephemeral: cp.is_ephemeral,
+                            branch: cp.branch.clone(),
                         })
                     }
+                });
+                // Fallback to persisted checkpoint branch when git is detached
+                let branch = self.session_branch(i).map(Into::into).or_else(|| {
+                    checkpoint.as_ref().and_then(|cp| {
+                        cp.branch.as_ref().map(|name| kumo_protocol::WireBranch {
+                            name: name.clone(),
+                            ahead: 0,
+                            behind: 0,
+                        })
+                    })
                 });
                 kumo_protocol::SessionLayout {
                     name: s.name.clone(),
                     workspace: s.workspace.clone(),
                     active_tab: s.active_tab,
                     tabs,
-                    branch: self.session_branch(i).map(Into::into),
+                    branch,
                     checkpoint,
                     focus: active.as_ref().map(|t| t.focus).unwrap_or(0),
                     zoom: active.as_ref().map(|t| t.zoom).unwrap_or(false),

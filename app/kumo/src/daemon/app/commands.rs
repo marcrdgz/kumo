@@ -792,17 +792,18 @@ impl App {
         if !self.sessions.iter().any(|s| s.name == session) {
             return Ok(format!("no session {session:?}"));
         }
-        // Validate status via protocol helper
+        // Validate status via protocol helper — "—", "–", "-" and empty all mean clear
+        let is_clear = |t: &str| t.is_empty() || t == "—" || t == "–" || t == "-";
         let status_norm = if let Some(s) = status {
             let trimmed = s.trim();
-            if trimmed.is_empty() { Some(None) } else {
+            if is_clear(trimmed) { Some(None) } else {
                 if kumo_protocol::WorktreeStatus::parse(trimmed).is_none() {
                     return Ok(format!("invalid status {trimmed:?} (use todo|in-progress|in-review|completed)"));
                 }
                 Some(Some(trimmed.to_ascii_lowercase()))
             }
         } else { None }; // None means no change; Some(None) means clear — caller uses Option<Option>
-        let comment_norm = comment.map(|c| { let t=c.trim(); if t.is_empty() {None} else {Some(t.to_string())} });
+        let comment_norm = comment.map(|c| { let t=c.trim(); if is_clear(t) {None} else {Some(t.to_string())} });
         // Distinguish no-change vs clear: here comment == None means no --comment flag; Some("") means clear
         // Our caller passes None for absent flag; empty string means clear.
         let c_arg = if comment.is_some() { Some(comment_norm.flatten()) } else { None };

@@ -35,6 +35,63 @@ pub fn installed_path() -> std::path::PathBuf {
     crate::config::config_dir().join("kumo-agents.md")
 }
 
+fn strip_jsonc_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_block = false;
+    let mut in_line = false;
+    while let Some(c) = chars.next() {
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
+        if in_line {
+            if c == '\n' {
+                in_line = false;
+                out.push(c);
+            }
+            continue;
+        }
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+        if c == '/' {
+            if let Some(&next) = chars.peek() {
+                if next == '/' {
+                    chars.next();
+                    in_line = true;
+                    continue;
+                }
+                if next == '*' {
+                    chars.next();
+                    in_block = true;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Ensure the skill is installed at `installed_path()` and also mirrored to
 /// well-known agent global skill dirs so `opencode` / `claude` / `codex` pick
 /// it up without extra steps. For `npx skills add` managers we install the
@@ -167,7 +224,10 @@ pub fn ensure_installed() -> Option<std::path::PathBuf> {
                         continue;
                     }
                     // Try to parse as JSON and inject instructions if missing.
-                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    // First try direct JSON, then jsonc (strip // and /* */ comments outside strings).
+                    let mut parsed: Option<serde_json::Value> = serde_json::from_str(&content).ok()
+                        .or_else(|| serde_json::from_str(&strip_jsonc_comments(&content)).ok());
+                    if let Some(mut v) = parsed.take() {
                         if let Some(obj) = v.as_object_mut() {
                             let entry = obj.entry("instructions").or_insert(serde_json::Value::Array(vec![]));
                             if let Some(arr) = entry.as_array_mut() {
@@ -180,9 +240,6 @@ pub fn ensure_installed() -> Option<std::path::PathBuf> {
                                 }
                             }
                         }
-                    } else {
-                        // jsonc with comments or invalid JSON: append simple string if not present
-                        // We avoid corrupting file, so just leave AGENTS.md path (already handles auto).
                     }
                 }
             } else if cfg_name == "opencode.json" {
