@@ -1,0 +1,112 @@
+---
+title: Checkpoints
+description: Lightweight worktree checkpoints — keep humans in the loop without heavy snapshots.
+icon: 📍
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Every worktree carries a lightweight **checkpoint**: a free-text `comment` + a `status` (`todo` / `in-progress` / `in-review` / `completed`). It is visible in the sidebar card, `kumo worktree list --json`, and the worktree picker. Unlike heavy snapshots, it is just metadata in `~/.local/state/kumo/worktrees.json` — it survives daemon restarts and `kumo update --resume`.
+
+The TUI no longer edits checkpoints directly. **Only agents (and you via `kumo worktree set`) write them** — humans read them at a glance in the sidebar, agents keep them fresh automatically.
+
+## Statuses
+
+| Status | Meaning | Aliases |
+| --- | --- | --- |
+| `todo` | queued, not started |  |
+| `in-progress` | actively working | `wip` |
+| `in-review` | fix implemented, awaiting review | `review` |
+| `completed` | verified, ready | `done` |
+
+Use `—` or empty string to clear. All values are lower-cased and validated on write.
+
+## Agent pattern (automatic)
+
+Agents must keep the checkpoint fresh without being asked. The instruction lives in `kumo-agents.md` (installed with the binary and auto-loaded in every AI pane).
+
+```sh
+# 1. Read before you clobber — preserves human context
+kumo worktree current --json
+# or: kumo worktree current --json | jq .comment
+
+# 2. Write as you make progress
+kumo worktree set --comment "reproduced auth failure; testing credential-chain fix (src/auth.ts)" --status in-progress --json
+kumo worktree set --comment "fix implemented; running integration tests" --status in-review --json
+kumo worktree set --comment "verified — ready for review, goal: reduce API calls per #298" --status completed --json
+```
+
+**First line is action-oriented** — what just happened, where, and next step. Add a second line for goal/context if needed. Don't dump full logs into the comment (use `kumo agent read` for that).
+
+<Callout title="Read before you write">
+Always `kumo worktree current --json` before overwriting — you will clobber a human-written goal otherwise.
+</Callout>
+
+### Good moments to update
+
+- Finished a meaningful slice
+- Confirmed or refuted a hypothesis
+- Hit a blocker (waiting on input, upstream bug, missing access)
+- Transitioning phase (investigation → fix → verify)
+
+## Seeding on creation
+
+Seed the comment when you create the worktree:
+
+```sh
+kumo worktree create --ai "my task" --note "starting on the login flow" --json
+kumo worktree create --branch feat/login --from main --note "auth fix" --agent opencode --json
+```
+
+`--note` writes the initial `comment`. `--branch` / `--from` control the git branch (`parse_pr_number` and branch validation apply). Created via `kumo worktree create --ai` the worktree is marked ephemeral (`◉` in older TUI).
+
+## CLI reference
+
+```sh
+# read
+kumo worktree current --json                      # active worktree's checkpoint
+kumo worktree current --path /path/to/wt --json  # explicit worktree
+kumo worktree list --json                         # all worktrees, includes comment/status/is_ephemeral
+
+# write (agent-only path — TUI does not edit checkpoints)
+kumo worktree set --comment "new goal" --status todo --json
+kumo worktree set --comment "" --status "" --json   # clear (dash/empty)
+kumo worktree set --status in-progress --json       # status only
+kumo worktree set --comment "fix typo" --json       # comment only
+
+```
+
+All writes are validated: invalid status returns `invalid status "..." (use todo|in-progress|in-review|completed)`. Empty comment/status clears the field; an entry with every field cleared is GC'd on next `prune_missing()`.
+
+## Where it is stored
+
+`worktrees.json` under `state_dir()` (`~/.local/state/kumo/worktrees.json` by default, `$KUMO_STATE_DIR` or `$XDG_STATE_HOME/kumo` if set). Written atomically (`json.tmp` → `rename`). Keyed by canonicalized worktree path, with GC for worktrees that no longer exist on disk (throttled in `app/kumo/src/daemon/app/ui.rs`).
+
+## For humans
+
+You don't need to write checkpoints — watch the sidebar. Each project card shows the active worktree's branch and agents; the checkpoint comment is not rendered in the TUI by design (it is meant for agents to keep `worktree list --json` and the skill prompt in sync). If you want to set one manually, use the CLI above.
+
+## Troubleshooting: opencode not updating checkpoints
+
+`opencode` learns the checkpoint pattern **automatically** from `kumo-agents.md` — no manual `skill({name:"kumo"})` needed after the fix below.
+
+1. **Install the skill globally (now automatic):**
+
+   ```sh
+   kumo skills install --global      # writes ~/.config/kumo/kumo-agents.md + mirrors to ~/.config/opencode/AGENTS.md (auto-loaded every opencode session) + skills/kumo/SKILL.md for on-demand `skill` tool
+   ```
+
+   Since the fix, `kumo skills install --global` **always** creates `~/.config/opencode/AGENTS.md` (global AGENTS, auto-loaded per `/docs/rules` — project `AGENTS.md` + global `AGENTS.md` are loaded on every session) and `~/.config/opencode/skills/kumo/SKILL.md` + `~/.agents/skills/kumo/SKILL.md` unconditionally (old versions gated on `parent.is_dir()` and silently skipped when `skills/` didn't exist). The stub at `skills/kumo/SKILL.md` now contains the full checkpoint pattern with `automatically keep worktree checkpoints fresh via kumo worktree set` so the model triggers even when using the `skill` tool.
+
+2. **Restart the agent session** after install — `AGENTS.md` and skills are loaded at session start. Or run `kumo skills get kumo --full` inside the pane to verify (`cat ~/.config/opencode/AGENTS.md` should contain `kumo worktree set --comment`).
+
+3. **Verify inside the pane** (where `KUMO_SOCKET_PATH` / `KUMO_BIN_PATH` are injected):
+
+   ```sh
+   kumo worktree current --json | jq .comment
+   kumo worktree set --comment "probe" --status todo --json && kumo worktree current --json
+   ```
+
+   If `KUMO_SOCKET_PATH` is empty you are outside a Kumo pane — launch via `kumo pane split --ai` or `kumo` so the daemon socket is available (`[worktree] expose-socket = false` disables this).
+
+See also [Orchestration](/docs/guides/orchestration) for `agent wait / prompt / read` and [AI Agents](/docs/guides/agents) for status detection.
