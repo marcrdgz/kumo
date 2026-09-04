@@ -1135,20 +1135,22 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                         comment = Some(s.split_once('=').unwrap().1.to_string());
                         comment_set = true; j+=1;
                     }
-                    "--status" => {
+                    "--status" | "--workspace-status" | "--workspace_status" => {
                         status = Some(need(&rest, j+1, "a status after --status")?);
                         status_set = true; j+=2;
                     }
-                    s if s.starts_with("--status=") => {
-                        status = Some(s.strip_prefix("--status=").unwrap().to_string());
-                        status_set = true; j+=1;
+                    s if s.starts_with("--status=") || s.starts_with("--workspace-status=") || s.starts_with("--workspace_status=") => {
+                        let v = s.split_once('=').unwrap().1.to_string();
+                        status = Some(v); status_set = true; j+=1;
                     }
-                    "--path" => {
-                        path = Some(PathBuf::from(need(&rest, j+1, "a path after --path")?));
+                    "--path" | "--worktree" => {
+                        let v = need(&rest, j+1, "a path after --path")?;
+                        if v != "active" { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=2;
                     }
-                    s if s.starts_with("--path=") => {
-                        path = Some(PathBuf::from(s.strip_prefix("--path=").unwrap()));
+                    s if s.starts_with("--path=") || s.starts_with("--worktree=") => {
+                        let v = s.split_once('=').unwrap().1;
+                        if v != "active" && !v.is_empty() { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=1;
                     }
                     s if !s.starts_with('-') && path.is_none() => {
@@ -1167,12 +1169,14 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             let mut j = 0;
             while j < rest.len() {
                 match rest[j].as_str() {
-                    "--path" => {
-                        path = Some(PathBuf::from(need(&rest, j+1, "a path after --path")?));
+                    "--path" | "--worktree" => {
+                        let v = need(&rest, j+1, "a path after --path")?;
+                        if v != "active" { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=2;
                     }
-                    s if s.starts_with("--path=") => {
-                        path = Some(PathBuf::from(s.strip_prefix("--path=").unwrap()));
+                    s if s.starts_with("--path=") || s.starts_with("--worktree=") => {
+                        let v = s.split_once('=').unwrap().1;
+                        if v != "active" && !v.is_empty() { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=1;
                     }
                     s if !s.starts_with('-') && path.is_none() => { path = Some(PathBuf::from(s)); j+=1; }
