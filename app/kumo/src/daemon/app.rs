@@ -1494,7 +1494,7 @@ mod tests {
         assert_eq!(app.active, 1, "the new worktree session is focused");
         assert_eq!(app.sessions[1].name, "feat/test");
         let wt_path = app.sessions[1].workspace.clone();
-        assert!(wt_path.to_string_lossy().ends_with("feat/test"), "sibling path: {wt_path:?}");
+        assert!(wt_path.to_string_lossy().ends_with("feat-test"), "sibling path: {wt_path:?}");
 
         // Re-opening the same worktree reuses the existing session instead of
         // duplicating it, and refocuses it from any other session.
