@@ -84,7 +84,7 @@ All writes are validated: invalid status returns `invalid status "..." (use todo
 
 ## For humans
 
-You don't need to write checkpoints — watch the sidebar. Each project card shows the active worktree's branch and agents; the checkpoint comment is not rendered in the TUI by design (it is meant for agents to keep `worktree list --json` and the skill prompt in sync). If you want to set one manually, use the CLI above.
+You don't need to write checkpoints — watch the sidebar. Each worktree shows its status as a colored pill `[todo]` / `[in-progress]` / `[in-review]` / `[completed]` + `◉` if ephemeral, and the active worktree shows the first line of its comment underneath (dimmed, indented). The picker shows `branch [status] ◉` and `path · comment` when selected — agents write, humans read at a glance. If you want to set one manually, use the CLI above.
 
 ## Troubleshooting: opencode not updating checkpoints
 
