@@ -3988,16 +3988,22 @@ impl View {
                     if rect.contains(Position::new(x, y)) {
                         self.checkpoint_edit.focus = CheckpointFocus::Status;
                         // Click on a pill: map x to status index (must match render's dd.x+2 origin)
+                        // Make hit-testing lenient: gaps between pills count toward the pill on the left
                         let statuses = ["—", "todo", "in-progress", "in-review", "completed"];
                         let mut cx = rect.x;
+                        let mut selected = None;
                         for (i, label) in statuses.iter().enumerate() {
                             let w = label.chars().count() as u16 + 2;
-                            let pill = Rect::new(cx, rect.y, w, 1);
-                            if pill.contains(Position::new(x, y)) {
-                                self.checkpoint_edit.status_idx = i;
+                            // pill covers [cx, cx+w) and the 1-cell gap after it belongs to this pill (except last)
+                            let hit_w = if i + 1 < statuses.len() { w + 1 } else { w };
+                            if x >= cx && x < cx + hit_w && y == rect.y {
+                                selected = Some(i);
                                 break;
                             }
                             cx += w + 1;
+                        }
+                        if let Some(i) = selected {
+                            self.checkpoint_edit.status_idx = i;
                         }
                         self.mark_dirty();
                         return Ok(());
