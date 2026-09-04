@@ -9,6 +9,8 @@ use kumo_core::Launch;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Ensure the agent skill is present for every install (idempotent).
+    let _ = kumo_core::skill::ensure_installed();
     // Top-level flags only (per-command help lives in each command's parser).
     if args.first().map(|s| s.as_str()) == Some("-h")
         || args.first().map(|s| s.as_str()) == Some("--help")

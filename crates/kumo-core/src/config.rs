@@ -1533,7 +1533,7 @@ fn env_nonempty(name: &str) -> Option<String> {
 }
 
 /// `$HOME`.
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 

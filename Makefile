@@ -25,6 +25,12 @@ run:
 
 install:
 	cargo install --path app/kumo --locked
+	@mkdir -p ~/.config/kumo
+	@cp kumo-agents.md ~/.config/kumo/kumo-agents.md 2>/dev/null || true
+	@for d in ~/.config/opencode ~/.opencode ~/.claude ~/.codex; do \
+		if [ -d "$$d" ]; then cp kumo-agents.md "$$d/kumo-agents.md" 2>/dev/null || true; fi; \
+	done
+	@echo "kumo installed — skill at ~/.config/kumo/kumo-agents.md (mirrored to opencode/claude/codex if present)"
 
 docs:
 	npm run dev --prefix docs
