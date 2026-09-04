@@ -794,20 +794,24 @@ impl App {
         }
         // Validate status via protocol helper — "—", "–", "-" and empty all mean clear
         let is_clear = |t: &str| t.is_empty() || t == "—" || t == "–" || t == "-";
-        let status_norm = if let Some(s) = status {
-            let trimmed = s.trim();
-            if is_clear(trimmed) { Some(None) } else {
-                if kumo_protocol::WorktreeStatus::parse(trimmed).is_none() {
+        let status_norm: Option<Option<String>> = match status {
+            None => None,
+            Some(s) => {
+                let trimmed = s.trim();
+                if is_clear(trimmed) {
+                    Some(None)
+                } else if kumo_protocol::WorktreeStatus::parse(trimmed).is_none() {
                     return Ok(format!("invalid status {trimmed:?} (use todo|in-progress|in-review|completed)"));
+                } else {
+                    Some(Some(trimmed.to_ascii_lowercase()))
                 }
-                Some(Some(trimmed.to_ascii_lowercase()))
             }
-        } else { None }; // None means no change; Some(None) means clear — caller uses Option<Option>
+        }; // None means no change; Some(None) means clear
         let comment_norm = comment.map(|c| { let t=c.trim(); if is_clear(t) {None} else {Some(t.to_string())} });
         // Distinguish no-change vs clear: here comment == None means no --comment flag; Some("") means clear
         // Our caller passes None for absent flag; empty string means clear.
-        let c_arg = if comment.is_some() { Some(comment_norm.flatten()) } else { None };
-        let s_arg = if status.is_some() { status_norm } else { None };
+        let c_arg = comment_norm;
+        let s_arg = status_norm;
         // When both flag-absent, just query
         if c_arg.is_none() && s_arg.is_none() {
             return Ok(format!("no change for {}", path.display()));

@@ -46,14 +46,15 @@ pub fn repo_root(ws: &Path) -> Option<PathBuf> {
 }
 
 /// Git's default sibling location for a new worktree: `<parent>/<basename>-<branch>`
-/// (e.g. `~/dev/kumo` + `feat/foo` → `~/dev/kumo-feat/foo`).
+/// (e.g. `~/dev/kumo` + `feat/foo` → `~/dev/kumo-feat-foo`).
 pub fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
     let base = repo_root
         .file_name()
         .map(|b| b.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".to_string());
     let parent = repo_root.parent().unwrap_or_else(|| Path::new("/"));
-    parent.join(format!("{base}-{branch}"))
+    let sanitized = branch.replace(['/', '\\'], "-");
+    parent.join(format!("{base}-{sanitized}"))
 }
 
 /// Create a new worktree checking out a fresh branch from the current HEAD:
@@ -589,8 +590,13 @@ mod tests {
         let root = PathBuf::from("/home/user/dev/kumo");
         assert_eq!(
             worktree_path(&root, "feat/foo"),
-            PathBuf::from("/home/user/dev/kumo-feat/foo"),
-            "branch slash becomes a nested dir under the sibling prefix"
+            PathBuf::from("/home/user/dev/kumo-feat-foo"),
+            "branch slash is flattened to dash in sibling directory"
+        );
+        assert_eq!(
+            worktree_path(&root, "feat/a/b"),
+            PathBuf::from("/home/user/dev/kumo-feat-a-b"),
+            "multiple slashes are flattened"
         );
         assert_eq!(
             worktree_path(&root, "fix-typo"),

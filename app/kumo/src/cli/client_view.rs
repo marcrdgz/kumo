@@ -2911,8 +2911,40 @@ impl View {
             KeyCode::Char('j') | KeyCode::Down => self.worktree_picker_move(1),
             KeyCode::Char('k') | KeyCode::Up => self.worktree_picker_move(-1),
             KeyCode::Enter => self.pick_worktree(self.worktree_picker.selected),
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('x') | KeyCode::Char('X') => self.clear_worktree_checkpoint(),
+            KeyCode::Delete | KeyCode::Backspace => self.clear_worktree_checkpoint(),
             _ => {}
         }
+    }
+
+    fn clear_worktree_checkpoint(&mut self) {
+        if self.worktree_picker.items.is_empty() {
+            return;
+        }
+        let idx = self.worktree_picker.selected;
+        let Some(row) = self.worktree_picker.items.get(idx).cloned() else { return };
+        if row.comment.is_none() && row.status.is_none() {
+            return;
+        }
+        let session = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.sessions.get(self.worktree_picker.session))
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let path = row.path.clone();
+        let _ = self.send(&Command::WorktreeSet {
+            session: session.clone(),
+            path: path.clone(),
+            comment: Some(String::new()),
+            status: Some(String::new()),
+        });
+        if let Some(item) = self.worktree_picker.items.get_mut(idx) {
+            item.comment = None;
+            item.status = None;
+        }
+        self.mark_dirty();
+        let _ = self.send(&Command::WorktreeList { session });
     }
 
     fn on_popup_key(&mut self, key: KeyEvent) {
@@ -6472,7 +6504,7 @@ impl View {
             }
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        text(f, dd.x + 2, body_bottom, "j/k: move · enter: open · esc: close", footer, inner_w);
+        text(f, dd.x + 2, body_bottom, "j/k: move · enter: open · x: clear checkpoint · esc: close", footer, inner_w);
     }
 
     fn render_worktree_create(&self, f: &mut Frame) {
