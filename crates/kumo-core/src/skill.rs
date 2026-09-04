@@ -8,6 +8,28 @@
 /// Embedded skill content — always the crate's `kumo-agents.md` (mirrored from repo root).
 pub const SKILL: &str = include_str!("../kumo-agents.md");
 
+/// Orca-style stub — the short discovery file at `skills/kumo/SKILL.md`.
+pub const STUB: &str = include_str!("../../../skills/kumo/SKILL.md");
+
+/// Registry of installable skills (Orca-style `npx skills add`).
+#[derive(Clone, Copy, Debug)]
+pub struct SkillMeta {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub content: &'static str,
+    pub stub: &'static str,
+}
+
+pub const SKILLS: &[SkillMeta] = &[
+    SkillMeta { name: "kumo", description: "Kumo terminal multiplexer — worktrees, checkpoints, orchestration", content: SKILL, stub: STUB },
+];
+
+/// Find a skill by name (accepts `kumo` / `kumo-agents`).
+pub fn find(name: &str) -> Option<&'static SkillMeta> {
+    let n = name.trim().to_ascii_lowercase();
+    SKILLS.iter().find(|s| s.name == n || format!("{}-agents", s.name) == n || n == "kumo-agents")
+}
+
 /// Where the skill should live for the human (`~/.config/kumo/kumo-agents.md`).
 pub fn installed_path() -> std::path::PathBuf {
     crate::config::config_dir().join("kumo-agents.md")

@@ -180,6 +180,12 @@ fn run_inner(args: &[String]) -> Result<()> {
             return Ok(());
         }
     }
+    // Orca-style skills are local — no daemon needed.
+    if let Some(domain) = args.first().map(|s| s.as_str()) {
+        if domain == "skills" || domain == "skill" {
+            return handle_skills(&args[1..]);
+        }
+    }
     let cmd = parse(args)?;
     let mut stream = connect_daemon()?;
 
@@ -1296,6 +1302,7 @@ fn domain_help(domain: &str) -> &'static str {
         "agent" => AGENT_HELP,
         "tab" => TAB_HELP,
         "worktree" => WORKTREE_HELP,
+        "skills" | "skill" => SKILLS_HELP,
         "server" => SERVER_HELP,
         "ls" | "list" | "kill" | "reload" => LEGACY_HELP,
         _ => "",
@@ -1445,6 +1452,22 @@ USAGE:
 `kumo server restart` restarts the daemon in place; panes stay alive.
 ";
 
+const SKILLS_HELP: &str = "\
+kumo skills — agent skills (Orca-style `npx skills add` compatible)
+
+USAGE:
+    kumo skills list [--json]
+    kumo skills get <skill> [--full] [--json]   (alias: show)
+    kumo skills install [--skill <name>] [--global] [--dry-run] [--json]
+    kumo skills update [--skill <name>] [--global] [--dry-run] [--json]
+
+SKILLS:
+    kumo        Kumo multiplexer — worktrees, checkpoints, orchestration (from kumo-agents.md)
+
+The stub at `skills/kumo/SKILL.md` is for `npx skills add https://github.com/marcrdgz/kumo --skill kumo --global`.
+The full guide is versioned with the binary: `kumo skills get kumo`.
+";
+
 const LEGACY_HELP: &str = "\
 kumo ls | list / kill / reload — legacy aliases
 
@@ -1455,6 +1478,103 @@ USAGE:
 
 Prefer the namespaced commands (`kumo session`, `kumo pane`, `kumo agent`).
 ";
+
+fn handle_skills(args: &[String]) -> Result<()> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
+    let has_json = args.iter().any(|a| a == "--json");
+    let has_full = args.iter().any(|a| a == "--full");
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    // --skill <name> or positional name for get/install
+    let mut skill_name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--skill" => {
+                if let Some(v) = args.get(i + 1) { skill_name = Some(v.clone()); }
+                i += 2;
+            }
+            s if s.starts_with("--skill=") => {
+                skill_name = Some(s.strip_prefix("--skill=").unwrap().to_string());
+                i += 1;
+            }
+            s if !s.starts_with('-') && s != "list" && s != "get" && s != "show" && s != "install" && s != "update" && s != "installed" => {
+                if skill_name.is_none() { skill_name = Some(s.to_string()); }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    match sub {
+        "list" | "ls" => {
+            let skills = kumo_core::skill::SKILLS;
+            if has_json {
+                let arr: Vec<serde_json::Value> = skills.iter().map(|s| serde_json::json!({"name": s.name, "description": s.description})).collect();
+                println!("{}", serde_json::to_string_pretty(&arr).unwrap());
+            } else {
+                for s in skills {
+                    println!("{} — {}", s.name, s.description);
+                }
+            }
+            Ok(())
+        }
+        "get" | "show" => {
+            let name = skill_name.as_deref().unwrap_or("kumo");
+            let Some(skill) = kumo_core::skill::find(name) else {
+                anyhow::bail!("unknown skill {name:?} (try `kumo skills list`)");
+            };
+            // Orca: stub without --full, full with --full; for automation --json always wants full
+            let content = if has_full || has_json { skill.content } else { skill.stub };
+            if has_json {
+                let j = serde_json::json!({"name": skill.name, "description": skill.description, "content": content});
+                println!("{}", serde_json::to_string_pretty(&j).unwrap());
+            } else {
+                print!("{}", content);
+                if !content.ends_with('\n') { println!(); }
+            }
+            Ok(())
+        }
+        "install" | "update" | "installed" => {
+            if dry_run {
+                let skills = kumo_core::skill::SKILLS;
+                let names: Vec<&str> = if let Some(n) = skill_name.as_deref() { vec![n] } else { skills.iter().map(|s| s.name).collect() };
+                if has_json {
+                    let j = serde_json::json!({"dry_run": true, "skills": names, "targets": ["~/.config/kumo/kumo-agents.md", "~/.config/opencode/kumo-agents.md if dir exists"]});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    println!("would install skills: {} (dry-run)", names.join(", "));
+                    println!("targets: ~/.config/kumo/kumo-agents.md (+ opencode/claude/codex if present)");
+                }
+                return Ok(());
+            }
+            let path = kumo_core::skill::ensure_installed();
+            if has_json {
+                let j = serde_json::json!({"installed": path.as_ref().map(|p| p.display().to_string()), "skills": skill_name.as_deref().unwrap_or("kumo")});
+                println!("{}", serde_json::to_string_pretty(&j).unwrap());
+            } else if let Some(p) = path {
+                println!("installed skill at {}", p.display());
+            } else {
+                println!("skill already up to date");
+            }
+            Ok(())
+        }
+        _ => {
+            // `kumo skills get kumo` without sub defaults to get
+            if kumo_core::skill::find(sub).is_some() {
+                let skill = kumo_core::skill::find(sub).unwrap();
+                let content = if has_full || has_json { skill.content } else { skill.stub };
+                if has_json {
+                    let j = serde_json::json!({"name": skill.name, "description": skill.description, "content": content});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    print!("{}", content);
+                    if !content.ends_with('\n') { println!(); }
+                }
+                return Ok(());
+            }
+            anyhow::bail!("unknown skills subcommand {sub:?} (try `kumo skills -h`)")
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Socket plumbing

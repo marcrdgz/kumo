@@ -59,10 +59,10 @@ fn main() -> Result<()> {
         }
     }
 
-    // Control CLI: `kumo session|pane|agent|tab|worktree ...` (and the legacy aliases
+    // Control CLI: `kumo session|pane|agent|tab|worktree|skills ...` (and the legacy aliases
     // `ls`/`kill`/`reload`/`server restart`).
     match args.first().map(|s| s.as_str()) {
-        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("ls")
+        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("skills") | Some("skill") | Some("ls")
         | Some("list") | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
@@ -188,6 +188,11 @@ fn print_help() {
     println!("    kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]");
     println!("    kumo worktree current [--path PATH] [-s SESSION] [--json]");
     println!("    kumo worktree list [-s SESSION] [--json]");
+    println!();
+    println!("SKILLS (Orca-style `npx skills add` compatible):");
+    println!("    kumo skills list [--json]");
+    println!("    kumo skills get <skill> [--full] [--json]   (stub at skills/kumo/SKILL.md)");
+    println!("    kumo skills install [--skill <name>] [--global] [--dry-run] [--json]");
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");
