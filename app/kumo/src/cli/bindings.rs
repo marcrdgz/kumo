@@ -91,6 +91,7 @@ pub(crate) enum Action {
     EnterCopyModeSearch,
     AgentInbox,
     WorkspaceFinder,
+    EditCheckpoint,
 }
 
 /// Logical group a binding belongs to, used to organize the showcase.
@@ -225,6 +226,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('f')), keys: "f", desc: "open workspace finder", group: Group::General, action: Action::WorkspaceFinder },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
     BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "focus the agent inbox (blocked · done · running)", group: Group::General, action: Action::AgentInbox },
+    BindingSpec { key: chord(KeyCode::Char('e')), keys: "e", desc: "edit checkpoint (comment + status)", group: Group::Sessions, action: Action::EditCheckpoint },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
 ];
 
@@ -370,6 +372,7 @@ pub(crate) fn action_id(action: Action) -> &'static str {
         Action::EnterCopyMode => "copy-mode",
         Action::EnterCopyModeSearch => "copy-mode-search",
         Action::AgentInbox => "agent-inbox",
+        Action::EditCheckpoint => "edit-checkpoint",
     }
 }
 
@@ -427,6 +430,7 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "copy-mode" | "enter-copy-mode" => Action::EnterCopyMode,
         "copy-mode-search" | "copy-search" => Action::EnterCopyModeSearch,
         "agent-inbox" | "focus-agent-inbox" => Action::AgentInbox,
+        "edit-checkpoint" | "checkpoint" | "edit_checkpoint" => Action::EditCheckpoint,
         _ => return None,
     })
 }
@@ -461,6 +465,7 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
         Action::EnterCopyModeSearch => "search forward (enter copy-mode)",
         Action::AgentInbox => "focus the agent inbox (blocked · done · running)",
+        Action::EditCheckpoint => "edit checkpoint (comment + status)",
     }
 }
 
@@ -476,7 +481,7 @@ pub(crate) fn action_group(action: Action) -> Group {
         | Action::RotateLayout | Action::ShowPaneNumbers | Action::EnterCopyMode | Action::EnterCopyModeSearch => Group::Panes,
         Action::NewTab | Action::CloseTab | Action::RenameTab | Action::NextTab | Action::PrevTab | Action::JumpTab(_) => Group::Tabs,
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
-        | Action::JumpSession(_) => Group::Sessions,
+        | Action::JumpSession(_) | Action::EditCheckpoint => Group::Sessions,
         Action::ToggleSidebar => Group::Chrome,
         Action::Detach | Action::ShowKeybinds | Action::AgentInbox | Action::WorkspaceFinder => Group::General,
     }

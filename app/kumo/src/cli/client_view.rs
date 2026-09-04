@@ -382,6 +382,34 @@ struct SessionCloseConfirm {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CheckpointFocus {
+    Comment,
+    Status,
+}
+
+struct CheckpointEditDialog {
+    open: bool,
+    session: usize,
+    comment: String,
+    cursor: usize,
+    status_idx: usize, // 0 = — (clear), 1=todo,2=in-progress,3=in-review,4=completed
+    focus: CheckpointFocus,
+    error: Option<String>,
+}
+
+impl CheckpointEditDialog {
+    fn status_value(&self) -> Option<String> {
+        match self.status_idx {
+            1 => Some("todo".to_string()),
+            2 => Some("in-progress".to_string()),
+            3 => Some("in-review".to_string()),
+            4 => Some("completed".to_string()),
+            _ => None,
+        }
+    }
+}
+
 /// One agent-lifecycle corner toast pushed by the daemon (blocked / finished).
 #[derive(Clone)]
 struct AgentToast {
@@ -568,6 +596,7 @@ pub struct View {
     settings: SettingsPanel,
     worktree_picker: WorktreePicker,
     worktree_create: WorktreeCreateDialog,
+    checkpoint_edit: CheckpointEditDialog,
     session_close_confirm: SessionCloseConfirm,
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
@@ -769,6 +798,7 @@ impl View {
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            checkpoint_edit: CheckpointEditDialog { open: false, session: 0, comment: String::new(), cursor: 0, status_idx: 0, focus: CheckpointFocus::Comment, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
@@ -1416,6 +1446,10 @@ impl View {
             self.on_session_close_confirm_key(key);
             return Ok(());
         }
+        if self.checkpoint_edit.open {
+            self.on_checkpoint_edit_key(key);
+            return Ok(());
+        }
         if self.worktree_create.open {
             self.on_worktree_create_key(key);
             return Ok(());
@@ -1490,6 +1524,10 @@ impl View {
     pub fn on_paste(&mut self, text: &str) {
         let _ = self.flush_wheel();
         if self.session_close_confirm.open {
+            return;
+        }
+        if self.checkpoint_edit.open {
+            self.checkpoint_edit_paste(text);
             return;
         }
         if self.worktree_create.open {
@@ -1657,6 +1695,12 @@ impl View {
             Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
             Action::AgentInbox => self.open_inbox(),
             Action::WorkspaceFinder => self.open_finder(),
+            Action::EditCheckpoint => {
+                if let Some(idx) = self.layout.as_ref()
+                    .and_then(|l| l.active.as_deref().and_then(|name| l.sessions.iter().position(|s| s.name == name))) {
+                    self.open_edit_checkpoint_dialog(idx);
+                }
+            }
         }
         self.mark_dirty();
         Ok(())
@@ -2869,6 +2913,45 @@ impl View {
         }
     }
 
+    fn checkpoint_edit_rect(&self) -> Option<Rect> {
+        if !self.checkpoint_edit.open {
+            return None;
+        }
+        let (w, h) = (self.cols, self.rows);
+        let width = 60u16.min(w.saturating_sub(4)).max(44);
+        let height = 9u16;
+        if w < width || h < height {
+            return None;
+        }
+        Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    fn checkpoint_edit_input_rect(&self) -> Option<Rect> {
+        let dd = self.checkpoint_edit_rect()?;
+        Some(Rect::new(dd.x + 2, dd.y + 3, dd.width.saturating_sub(4), 1))
+    }
+
+    fn checkpoint_edit_status_rect(&self) -> Option<Rect> {
+        let dd = self.checkpoint_edit_rect()?;
+        Some(Rect::new(dd.x + 2, dd.y + 5, dd.width.saturating_sub(4), 1))
+    }
+
+    fn checkpoint_edit_button_rect(&self, is_save: bool) -> Option<Rect> {
+        let dd = self.checkpoint_edit_rect()?;
+        let y = dd.bottom().saturating_sub(2);
+        let save_label = " save ";
+        let cancel_label = " cancel ";
+        let save_w = save_label.chars().count() as u16 + 2;
+        let cancel_w = cancel_label.chars().count() as u16 + 2;
+        let total_w = save_w + 1 + cancel_w;
+        let start_x = dd.x + dd.width.saturating_sub(total_w + 2);
+        if is_save {
+            Some(Rect::new(start_x, y, save_w, 1))
+        } else {
+            Some(Rect::new(start_x + save_w + 1, y, cancel_w, 1))
+        }
+    }
+
     fn session_close_confirm_rect(&self) -> Option<Rect> {
         if !self.session_close_confirm.open {
             return None;
@@ -2911,6 +2994,7 @@ impl View {
             KeyCode::Char('j') | KeyCode::Down => self.worktree_picker_move(1),
             KeyCode::Char('k') | KeyCode::Up => self.worktree_picker_move(-1),
             KeyCode::Enter => self.pick_worktree(self.worktree_picker.selected),
+            KeyCode::Char('e') => self.open_edit_checkpoint_for_picker_selection(),
             _ => {}
         }
     }
@@ -3205,6 +3289,190 @@ impl View {
         self.mark_dirty();
     }
 
+    fn open_edit_checkpoint_dialog(&mut self, idx: usize) {
+        if self.layout.as_ref().and_then(|l| l.sessions.get(idx)).is_none() { return; }
+        let cp = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).and_then(|s| s.checkpoint.clone());
+        self.checkpoint_edit.session = idx;
+        self.checkpoint_edit.comment = cp.as_ref().and_then(|c| c.comment.clone()).unwrap_or_default();
+        self.checkpoint_edit.cursor = self.checkpoint_edit.comment.chars().count();
+        self.checkpoint_edit.status_idx = match cp.as_ref().and_then(|c| c.status.as_deref()) {
+            Some("todo") => 1,
+            Some("in-progress") => 2,
+            Some("in-review") => 3,
+            Some("completed") => 4,
+            _ => 0,
+        };
+        self.checkpoint_edit.focus = CheckpointFocus::Comment;
+        self.checkpoint_edit.error = None;
+        self.checkpoint_edit.open = true;
+        self.ctx_menu.open = false;
+        self.mark_dirty();
+    }
+
+    fn open_edit_checkpoint_for_picker_selection(&mut self) {
+        if !self.worktree_picker.open { return; }
+        let Some(item) = self.worktree_picker.items.get(self.worktree_picker.selected).cloned() else { return; };
+        // Try to find session whose workspace matches the picker's worktree path
+        let idx = self.layout.as_ref()
+            .and_then(|l| l.sessions.iter().position(|s| {
+                let a = std::fs::canonicalize(&s.workspace).unwrap_or(s.workspace.clone());
+                let b = std::fs::canonicalize(&item.path).unwrap_or(item.path.clone());
+                a == b
+            }));
+        if let Some(i) = idx {
+            self.worktree_picker.open = false;
+            self.open_edit_checkpoint_dialog(i);
+        } else if let Some(s_idx) = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|s| s.name == self.layout.as_ref().and_then(|x| x.active.clone()).unwrap_or_default())) {
+            // fallback to active session's worktree if not found — edit current
+            self.worktree_picker.open = false;
+            self.open_edit_checkpoint_dialog(s_idx);
+        }
+    }
+
+    fn commit_checkpoint_edit(&mut self) {
+        let idx = self.checkpoint_edit.session;
+        let Some(sess) = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).cloned() else {
+            self.checkpoint_edit.error = Some("no such session".to_string());
+            self.mark_dirty();
+            return;
+        };
+        let comment = self.checkpoint_edit.comment.clone();
+        let status = self.checkpoint_edit.status_value();
+        // Validate status if present (daemon will also validate)
+        if let Some(s) = &status {
+            if kumo_protocol::WorktreeStatus::parse(s).is_none() {
+                self.checkpoint_edit.error = Some(format!("invalid status {s:?}"));
+                self.mark_dirty();
+                return;
+            }
+        }
+        self.checkpoint_edit.open = false;
+        let comment_opt = Some(comment.clone());
+        let status_opt = Some(status.clone().unwrap_or_default());
+        // Send WorktreeSet for the session's workspace path
+        let _ = self.send(&Command::WorktreeSet { session: sess.name.clone(), path: sess.workspace.clone(), comment: comment_opt, status: status_opt });
+        self.mark_dirty();
+    }
+
+    fn on_checkpoint_edit_key(&mut self, key: KeyEvent) {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
+            self.checkpoint_edit.open = false;
+            self.mark_dirty();
+            return;
+        }
+        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => self.commit_checkpoint_edit(),
+            KeyCode::Tab => {
+                self.checkpoint_edit.focus = match self.checkpoint_edit.focus {
+                    CheckpointFocus::Comment => CheckpointFocus::Status,
+                    CheckpointFocus::Status => CheckpointFocus::Comment,
+                };
+            }
+            KeyCode::BackTab => {
+                self.checkpoint_edit.focus = match self.checkpoint_edit.focus {
+                    CheckpointFocus::Comment => CheckpointFocus::Status,
+                    CheckpointFocus::Status => CheckpointFocus::Comment,
+                };
+            }
+            KeyCode::Left => match self.checkpoint_edit.focus {
+                CheckpointFocus::Comment => self.checkpoint_edit.cursor = self.checkpoint_edit.cursor.saturating_sub(1),
+                CheckpointFocus::Status => {
+                    if self.checkpoint_edit.status_idx > 0 { self.checkpoint_edit.status_idx -= 1; }
+                }
+            },
+            KeyCode::Right => match self.checkpoint_edit.focus {
+                CheckpointFocus::Comment => {
+                    let len = self.checkpoint_edit.comment.chars().count();
+                    self.checkpoint_edit.cursor = (self.checkpoint_edit.cursor + 1).min(len);
+                }
+                CheckpointFocus::Status => {
+                    if self.checkpoint_edit.status_idx < 4 { self.checkpoint_edit.status_idx += 1; }
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') if self.checkpoint_edit.focus == CheckpointFocus::Status => {
+                if self.checkpoint_edit.status_idx > 0 { self.checkpoint_edit.status_idx -= 1; }
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.checkpoint_edit.focus == CheckpointFocus::Status => {
+                if self.checkpoint_edit.status_idx < 4 { self.checkpoint_edit.status_idx += 1; }
+            }
+            KeyCode::Home if self.checkpoint_edit.focus == CheckpointFocus::Comment => self.checkpoint_edit.cursor = 0,
+            KeyCode::End if self.checkpoint_edit.focus == CheckpointFocus::Comment => self.checkpoint_edit.cursor = self.checkpoint_edit.comment.chars().count(),
+            KeyCode::Backspace if self.checkpoint_edit.focus == CheckpointFocus::Comment => {
+                if key.modifiers.intersects(word_back) { self.checkpoint_delete_word_backward(); } else { self.checkpoint_backspace(); }
+            }
+            KeyCode::Char('h') if ctrl && self.checkpoint_edit.focus == CheckpointFocus::Comment => self.checkpoint_backspace(),
+            KeyCode::Char('w') if ctrl && self.checkpoint_edit.focus == CheckpointFocus::Comment => self.checkpoint_delete_word_backward(),
+            KeyCode::Char('u') if ctrl && self.checkpoint_edit.focus == CheckpointFocus::Comment => self.checkpoint_delete_to_start(),
+            KeyCode::Delete if self.checkpoint_edit.focus == CheckpointFocus::Comment => {
+                if key.modifiers.intersects(word_back) { self.checkpoint_delete_word_forward(); } else { self.checkpoint_delete_forward(); }
+            }
+            KeyCode::Char(c) if !ctrl && self.checkpoint_edit.focus == CheckpointFocus::Comment => self.checkpoint_insert(c),
+            _ => {}
+        }
+        self.mark_dirty();
+    }
+
+    fn checkpoint_insert(&mut self, ch: char) {
+        let cur = self.checkpoint_edit.cursor.min(self.checkpoint_edit.comment.chars().count());
+        let byte = char_idx_to_byte(&self.checkpoint_edit.comment, cur);
+        self.checkpoint_edit.comment.insert(byte, ch);
+        self.checkpoint_edit.cursor = cur + 1;
+    }
+    fn checkpoint_backspace(&mut self) {
+        if self.checkpoint_edit.cursor == 0 { return; }
+        let cur = self.checkpoint_edit.cursor;
+        let start = char_idx_to_byte(&self.checkpoint_edit.comment, cur - 1);
+        let end = char_idx_to_byte(&self.checkpoint_edit.comment, cur);
+        self.checkpoint_edit.comment.drain(start..end);
+        self.checkpoint_edit.cursor -= 1;
+    }
+    fn checkpoint_delete_forward(&mut self) {
+        let cur = self.checkpoint_edit.cursor;
+        if cur >= self.checkpoint_edit.comment.chars().count() { return; }
+        let start = char_idx_to_byte(&self.checkpoint_edit.comment, cur);
+        let end = char_idx_to_byte(&self.checkpoint_edit.comment, cur + 1);
+        self.checkpoint_edit.comment.drain(start..end);
+    }
+    fn checkpoint_delete_word_backward(&mut self) {
+        let cur = self.checkpoint_edit.cursor;
+        if cur == 0 { return; }
+        let s = &self.checkpoint_edit.comment;
+        let byte_cur = char_idx_to_byte(s, cur);
+        let prefix = &s[..byte_cur];
+        let (rest, _) = delete_word_backward(prefix, cur);
+        let new_len = rest.chars().count();
+        self.checkpoint_edit.comment = format!("{}{}", rest, &s[byte_cur..]);
+        self.checkpoint_edit.cursor = new_len;
+    }
+    fn checkpoint_delete_word_forward(&mut self) {
+        let cur = self.checkpoint_edit.cursor;
+        let s = &self.checkpoint_edit.comment;
+        if cur >= s.chars().count() { return; }
+        let byte_cur = char_idx_to_byte(s, cur);
+        let suffix = &s[byte_cur..];
+        let rest = delete_word_forward(suffix, 0);
+        self.checkpoint_edit.comment = format!("{}{}", &s[..byte_cur], rest);
+    }
+    fn checkpoint_delete_to_start(&mut self) {
+        let cur = self.checkpoint_edit.cursor;
+        if cur == 0 { return; }
+        let byte_cur = char_idx_to_byte(&self.checkpoint_edit.comment, cur);
+        self.checkpoint_edit.comment.drain(0..byte_cur);
+        self.checkpoint_edit.cursor = 0;
+    }
+    fn checkpoint_edit_paste(&mut self, text: &str) {
+        if self.checkpoint_edit.focus != CheckpointFocus::Comment { return; }
+        let filtered: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        if filtered.is_empty() { return; }
+        let cur = self.checkpoint_edit.cursor.min(self.checkpoint_edit.comment.chars().count());
+        let byte = char_idx_to_byte(&self.checkpoint_edit.comment, cur);
+        self.checkpoint_edit.comment.insert_str(byte, &filtered);
+        self.checkpoint_edit.cursor = cur + filtered.chars().count();
+        self.mark_dirty();
+    }
+
     fn on_session_close_confirm_key(&mut self, key: KeyEvent) {
         if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             // Cancel — don't close session at all
@@ -3354,7 +3622,7 @@ impl View {
                 &["rename", "unzoom", "split vertical", "split horizontal", "close"]
             }
             CtxTarget::Pane(_) => &["rename", "zoom", "split vertical", "split horizontal", "close"],
-            CtxTarget::Session(_) => &["rename", "new worktree", "open worktree", "close"],
+            CtxTarget::Session(_) => &["rename", "edit checkpoint", "new worktree", "open worktree", "close"],
             CtxTarget::Tab(_, _) => &["new tab", "rename", "close"],
         }
     }
@@ -3400,6 +3668,11 @@ impl View {
                 CtxTarget::Session(idx) => self.open_rename_session_popup(idx),
                 CtxTarget::Tab(s_idx, t_idx) => self.open_rename_tab_popup_for(s_idx, t_idx),
             },
+            "edit checkpoint" => {
+                if let CtxTarget::Session(idx) = target {
+                    self.open_edit_checkpoint_dialog(idx);
+                }
+            }
             "new tab" => {
                 if let CtxTarget::Tab(s_idx, _) = target {
                     if let Some(name) = self.layout.as_ref().and_then(|l| l.sessions.get(s_idx)).map(|s| s.name.clone()) {
@@ -3668,6 +3941,60 @@ impl View {
                 }
                 self.session_close_confirm.open = false;
                 self.mark_dirty();
+            }
+            return Ok(());
+        }
+        if self.checkpoint_edit.open {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let Some(rect) = self.checkpoint_edit_input_rect() {
+                    if rect.contains(Position::new(x, y)) {
+                        self.checkpoint_edit.focus = CheckpointFocus::Comment;
+                        let len = self.checkpoint_edit.comment.chars().count();
+                        let col = (x.saturating_sub(rect.x)) as usize;
+                        self.checkpoint_edit.cursor = col.min(len);
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.checkpoint_edit_status_rect() {
+                    if rect.contains(Position::new(x, y)) {
+                        self.checkpoint_edit.focus = CheckpointFocus::Status;
+                        // Click on a pill: map x to status index
+                        let statuses = ["—", "todo", "in-progress", "in-review", "completed"];
+                        let mut cx = rect.x + 1;
+                        for (i, label) in statuses.iter().enumerate() {
+                            let w = label.chars().count() as u16 + 2;
+                            let pill = Rect::new(cx, rect.y, w, 1);
+                            if pill.contains(Position::new(x, y)) {
+                                self.checkpoint_edit.status_idx = i;
+                                break;
+                            }
+                            cx += w + 1;
+                        }
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.checkpoint_edit_button_rect(true) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.commit_checkpoint_edit();
+                        return Ok(());
+                    }
+                }
+                if let Some(rect) = self.checkpoint_edit_button_rect(false) {
+                    if rect.contains(Position::new(x, y)) {
+                        self.checkpoint_edit.open = false;
+                        self.mark_dirty();
+                        return Ok(());
+                    }
+                }
+                if self.checkpoint_edit_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                    return Ok(());
+                }
+                self.checkpoint_edit.open = false;
+                self.mark_dirty();
+            } else if let MouseEventKind::Moved = m.kind {
+                // Hover could be tracked but not needed
             }
             return Ok(());
         }
@@ -5163,6 +5490,7 @@ impl View {
         self.render_settings(f);
         self.render_worktree_picker(f);
         self.render_worktree_create(f);
+        self.render_checkpoint_edit(f);
         self.render_session_close_confirm(f);
         self.render_finder(f);
     }
@@ -6676,6 +7004,105 @@ impl View {
         }
     }
 
+    fn render_checkpoint_edit(&self, f: &mut Frame) {
+        if !self.checkpoint_edit.open {
+            return;
+        }
+        let theme = self.current_theme();
+        let Some(dd) = self.checkpoint_edit_rect() else { return };
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        let inner_w = dd.width.saturating_sub(4);
+        let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, dd.x + 2, dd.y + 1, "edit checkpoint", title, inner_w);
+        let label_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        // Comment label + input
+        text(f, dd.x + 2, dd.y + 2, "Comment", label_style, inner_w);
+        let input_rect = self.checkpoint_edit_input_rect().unwrap_or(Rect::new(dd.x + 2, dd.y + 3, inner_w, 1));
+        let is_comment_focused = self.checkpoint_edit.focus == CheckpointFocus::Comment;
+        let input_bg = if is_comment_focused { theme.accent } else { theme.input_bg };
+        let input_fg = if is_comment_focused { RColor::Black } else { theme.fg };
+        fill(f, input_rect, input_bg);
+        let c = &self.checkpoint_edit.comment;
+        let cur = self.checkpoint_edit.cursor;
+        let placeholder = "first line is shown in the sidebar (empty to clear)";
+        let display = if c.is_empty() && !is_comment_focused { placeholder } else { c.as_str() };
+        let disp_style = if c.is_empty() && !is_comment_focused {
+            Style::default().fg(theme.panel_muted).bg(input_bg)
+        } else {
+            Style::default().fg(input_fg).bg(input_bg)
+        };
+        let len = display.chars().count();
+        let cur_clamped = cur.min(len);
+        let start = if len <= inner_w as usize { 0 } else { cur_clamped.saturating_sub(inner_w as usize / 2).min(len - inner_w as usize) };
+        let mut col = input_rect.x;
+        for (i, ch) in display.chars().enumerate().skip(start).take(inner_w as usize) {
+            let is_cur = is_comment_focused && i == cur_clamped;
+            let mut st = disp_style;
+            if is_cur { st = st.add_modifier(Modifier::REVERSED); }
+            put(f, col, input_rect.y, &ch.to_string(), st);
+            col += 1;
+        }
+        if is_comment_focused && cur_clamped == len && col < input_rect.right() {
+            put(f, col, input_rect.y, " ", disp_style.add_modifier(Modifier::REVERSED));
+        }
+        // Status label + pills
+        text(f, dd.x + 2, dd.y + 4, "Status", label_style, inner_w);
+        let statuses = ["—", "todo", "in-progress", "in-review", "completed"];
+        let status_y = dd.y + 5;
+        let mut cx = dd.x + 2;
+        let is_status_focused = self.checkpoint_edit.focus == CheckpointFocus::Status;
+        for (i, label) in statuses.iter().enumerate() {
+            let is_sel = self.checkpoint_edit.status_idx == i;
+            let pill = format!(" {label} ");
+            let w = pill.chars().count() as u16;
+            if cx + w > dd.right().saturating_sub(2) { break; }
+            let base = if is_sel {
+                if is_status_focused {
+                    // focused selection pops with theme.accent or status color
+                    if i == 0 {
+                        Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+                    } else if let Some(col) = Self::checkpoint_status_fg(label) {
+                        Style::default().fg(RColor::Black).bg(col).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(RColor::Black).bg(theme.accent)
+                    }
+                } else {
+                    // unfocused but selected - muted
+                    if i == 0 {
+                        Style::default().fg(theme.panel_muted).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
+                    } else if let Some(col) = Self::checkpoint_status_fg(label) {
+                        Style::default().fg(col).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.panel_muted).bg(theme.panel_sep)
+                    }
+                }
+            } else {
+                Style::default().fg(theme.panel_muted).bg(theme.panel_sep)
+            };
+            text(f, cx, status_y, &pill, base, w);
+            cx += w + 1;
+        }
+        // Hint under status
+        let hint_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 6, "tab: next field · ←/→: pick status · empty clears", hint_style, inner_w);
+        if let Some(err) = &self.checkpoint_edit.error {
+            text(f, dd.x + 2, dd.y + 6, err, Style::default().fg(theme.orange).bg(theme.panel_sep), inner_w);
+        }
+        // Buttons
+        let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.bottom().saturating_sub(2), "enter: save · esc: close", footer, inner_w);
+        for (is_save, label) in [(true, " save "), (false, " cancel ")] {
+            if let Some(rect) = self.checkpoint_edit_button_rect(is_save) {
+                let st = if is_save {
+                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
+                };
+                text(f, rect.x, rect.y, label, st, rect.width);
+            }
+        }
+    }
+
     fn render_session_close_confirm(&self, f: &mut Frame) {
         if !self.session_close_confirm.open {
             return;
@@ -7422,6 +7849,7 @@ mod tests {
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            checkpoint_edit: CheckpointEditDialog { open: false, session: 0, comment: String::new(), cursor: 0, status_idx: 0, focus: CheckpointFocus::Comment, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
