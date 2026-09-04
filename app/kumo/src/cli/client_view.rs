@@ -391,6 +391,7 @@ enum CheckpointFocus {
 struct CheckpointEditDialog {
     open: bool,
     session: usize,
+    path: PathBuf,
     comment: String,
     cursor: usize,
     status_idx: usize, // 0 = — (clear), 1=todo,2=in-progress,3=in-review,4=completed
@@ -798,7 +799,7 @@ impl View {
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
-            checkpoint_edit: CheckpointEditDialog { open: false, session: 0, comment: String::new(), cursor: 0, status_idx: 0, focus: CheckpointFocus::Comment, error: None },
+            checkpoint_edit: CheckpointEditDialog { open: false, session: 0, path: PathBuf::new(), comment: String::new(), cursor: 0, status_idx: 0, focus: CheckpointFocus::Comment, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
@@ -3290,9 +3291,10 @@ impl View {
     }
 
     fn open_edit_checkpoint_dialog(&mut self, idx: usize) {
-        if self.layout.as_ref().and_then(|l| l.sessions.get(idx)).is_none() { return; }
-        let cp = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).and_then(|s| s.checkpoint.clone());
+        let Some(sess) = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).cloned() else { return; };
+        let cp = sess.checkpoint.clone();
         self.checkpoint_edit.session = idx;
+        self.checkpoint_edit.path = sess.workspace.clone();
         self.checkpoint_edit.comment = cp.as_ref().and_then(|c| c.comment.clone()).unwrap_or_default();
         self.checkpoint_edit.cursor = self.checkpoint_edit.comment.chars().count();
         self.checkpoint_edit.status_idx = match cp.as_ref().and_then(|c| c.status.as_deref()) {
@@ -3312,6 +3314,7 @@ impl View {
     fn open_edit_checkpoint_for_picker_selection(&mut self) {
         if !self.worktree_picker.open { return; }
         let Some(item) = self.worktree_picker.items.get(self.worktree_picker.selected).cloned() else { return; };
+        let picker_session_idx = self.worktree_picker.session;
         // Try to find session whose workspace matches the picker's worktree path
         let idx = self.layout.as_ref()
             .and_then(|l| l.sessions.iter().position(|s| {
@@ -3322,10 +3325,34 @@ impl View {
         if let Some(i) = idx {
             self.worktree_picker.open = false;
             self.open_edit_checkpoint_dialog(i);
-        } else if let Some(s_idx) = self.layout.as_ref().and_then(|l| l.sessions.iter().position(|s| s.name == self.layout.as_ref().and_then(|x| x.active.clone()).unwrap_or_default())) {
-            // fallback to active session's worktree if not found — edit current
+        } else {
+            // No session for this worktree yet — edit its checkpoint via the picker session as routing session
+            let sess_idx = picker_session_idx.min(self.layout.as_ref().map(|l| l.sessions.len()).unwrap_or(1).saturating_sub(1));
+            let cp = kumo_core::worktree_meta::get(&item.path);
+            // Fallback meta fetch for worktrees not yet open as session
+            let (comment, status_idx) = if let Some(c) = cp {
+                let comment = c.comment.unwrap_or_default();
+                let status_idx = match c.status.as_deref() {
+                    Some("todo") => 1,
+                    Some("in-progress") => 2,
+                    Some("in-review") => 3,
+                    Some("completed") => 4,
+                    _ => 0,
+                };
+                (comment, status_idx)
+            } else {
+                (String::new(), 0)
+            };
             self.worktree_picker.open = false;
-            self.open_edit_checkpoint_dialog(s_idx);
+            self.checkpoint_edit.session = sess_idx;
+            self.checkpoint_edit.path = item.path.clone();
+            self.checkpoint_edit.comment = comment;
+            self.checkpoint_edit.cursor = self.checkpoint_edit.comment.chars().count();
+            self.checkpoint_edit.status_idx = status_idx;
+            self.checkpoint_edit.focus = CheckpointFocus::Comment;
+            self.checkpoint_edit.error = None;
+            self.checkpoint_edit.open = true;
+            self.mark_dirty();
         }
     }
 
@@ -3349,8 +3376,9 @@ impl View {
         self.checkpoint_edit.open = false;
         let comment_opt = Some(comment.clone());
         let status_opt = Some(status.clone().unwrap_or_default());
-        // Send WorktreeSet for the session's workspace path
-        let _ = self.send(&Command::WorktreeSet { session: sess.name.clone(), path: sess.workspace.clone(), comment: comment_opt, status: status_opt });
+        // Send WorktreeSet for the stored path (may differ from session workspace when editing via picker)
+        let path = if self.checkpoint_edit.path.as_os_str().is_empty() { sess.workspace.clone() } else { self.checkpoint_edit.path.clone() };
+        let _ = self.send(&Command::WorktreeSet { session: sess.name.clone(), path, comment: comment_opt, status: status_opt });
         self.mark_dirty();
     }
 
@@ -3959,9 +3987,9 @@ impl View {
                 if let Some(rect) = self.checkpoint_edit_status_rect() {
                     if rect.contains(Position::new(x, y)) {
                         self.checkpoint_edit.focus = CheckpointFocus::Status;
-                        // Click on a pill: map x to status index
+                        // Click on a pill: map x to status index (must match render's dd.x+2 origin)
                         let statuses = ["—", "todo", "in-progress", "in-review", "completed"];
-                        let mut cx = rect.x + 1;
+                        let mut cx = rect.x;
                         for (i, label) in statuses.iter().enumerate() {
                             let w = label.chars().count() as u16 + 2;
                             let pill = Rect::new(cx, rect.y, w, 1);
@@ -7849,7 +7877,7 @@ mod tests {
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
-            checkpoint_edit: CheckpointEditDialog { open: false, session: 0, comment: String::new(), cursor: 0, status_idx: 0, focus: CheckpointFocus::Comment, error: None },
+            checkpoint_edit: CheckpointEditDialog { open: false, session: 0, path: PathBuf::new(), comment: String::new(), cursor: 0, status_idx: 0, focus: CheckpointFocus::Comment, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
             status_msg: None,
