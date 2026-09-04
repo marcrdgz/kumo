@@ -4,19 +4,19 @@ Kumo is a terminal multiplexer where the daemon owns your worktrees, panes, and 
 
 This file is auto-loaded in every AI pane so you orchestrate natively instead of sending keystrokes.
 
-## Worktree checkpoints — keep humans in the loop (automatic)
+## Worktree checkpoints — KEEP FRESH AUTOMATICALLY (MANDATORY)
 
-Every worktree carries a lightweight **comment** (free-text) + **status** visible in the sidebar card. Update it as you go — humans and other agents see it instantly in the TUI, `kumo worktree list --json`, and the picker.
+Every worktree carries a lightweight **comment** (free-text) + **status** (`todo` / `in-progress` / `in-review` / `completed`). You **must** keep it fresh without being asked — humans and other agents see it instantly in the TUI, `kumo worktree list --json`, and the picker. This is **automatic, not optional**.
 
 **Statuses:** `todo` · `in-progress` · `in-review` · `completed` (aliases: `wip`→`in-progress`, `review`→`in-review`, `done`→`completed`). Use `—` or empty to clear.
 
-**Pattern (do this automatically):**
+**Pattern (do this automatically, every time):**
 ```sh
 # 1. Read before you clobber — preserves human context
 kumo worktree current --json
 # or: kumo worktree current --json | jq .comment
 
-# 2. Write as you make progress
+# 2. Write as you make progress (run this without asking)
 kumo worktree set --comment "reproduced auth failure; testing credential-chain fix (src/auth.ts)" --status in-progress --json
 kumo worktree set --comment "fix implemented; running integration tests" --status in-review --json
 kumo worktree set --comment "verified — ready for review, goal: reduce API calls per #298" --status completed --json

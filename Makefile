@@ -27,10 +27,17 @@ install:
 	cargo install --path app/kumo --locked
 	@mkdir -p ~/.config/kumo
 	@cp kumo-agents.md ~/.config/kumo/kumo-agents.md 2>/dev/null || true
+	@mkdir -p ~/.config/opencode ~/.opencode ~/.claude ~/.codex
 	@for d in ~/.config/opencode ~/.opencode ~/.claude ~/.codex; do \
-		if [ -d "$$d" ]; then cp kumo-agents.md "$$d/kumo-agents.md" 2>/dev/null || true; fi; \
+		cp kumo-agents.md "$$d/kumo-agents.md" 2>/dev/null || true; \
 	done
-	@echo "kumo installed — skill at ~/.config/kumo/kumo-agents.md (mirrored to opencode/claude/codex if present)"
+	@mkdir -p ~/.config/opencode/skills/kumo ~/.agents/skills/kumo ~/.claude/skills/kumo ~/.codex/skills/kumo
+	@cp skills/kumo/SKILL.md ~/.config/opencode/skills/kumo/SKILL.md 2>/dev/null || true
+	@cp skills/kumo/SKILL.md ~/.agents/skills/kumo/SKILL.md 2>/dev/null || true
+	@cp skills/kumo/SKILL.md ~/.claude/skills/kumo/SKILL.md 2>/dev/null || true
+	@cp skills/kumo/SKILL.md ~/.codex/skills/kumo/SKILL.md 2>/dev/null || true
+	@echo "kumo installed — skill at ~/.config/kumo/kumo-agents.md (mirrored to opencode/claude/codex + skills/kumo/SKILL.md)"
+	@echo "hint: restart agent sessions after install so opencode picks up the new skill"
 
 docs:
 	npm run dev --prefix docs

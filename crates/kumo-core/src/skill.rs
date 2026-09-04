@@ -35,9 +35,12 @@ pub fn installed_path() -> std::path::PathBuf {
     crate::config::config_dir().join("kumo-agents.md")
 }
 
-/// Ensure the skill is installed at `installed_path()` and, when those
-/// directories exist, also mirrored to well-known agent global skill dirs
-/// so `opencode` / `claude` / `codex` pick it up without extra steps.
+/// Ensure the skill is installed at `installed_path()` and also mirrored to
+/// well-known agent global skill dirs so `opencode` / `claude` / `codex` pick
+/// it up without extra steps. For Orca-compatible managers (`npx skills add`)
+/// we install the discoverable stub at `skills/kumo/SKILL.md` (agent runs
+/// `kumo skills get kumo --full` to fetch the versioned guide). For legacy
+/// direct file loads we also mirror the full guide as `kumo-agents.md`.
 /// Returns the primary path written (if any) for logging.
 pub fn ensure_installed() -> Option<std::path::PathBuf> {
     let primary = installed_path();
@@ -59,26 +62,140 @@ pub fn ensure_installed() -> Option<std::path::PathBuf> {
         written_primary = Some(primary.clone());
     }
 
-    // Opportunistically mirror to agent-specific global skill dirs if they exist.
-    // We never create those dirs from scratch — we only write if the user already
-    // uses that agent (dir exists), to avoid cluttering home.
     let home = crate::config::home_dir();
     if let Some(home) = home {
-        let candidates = [
+        // Legacy flat mirrors (read by older agent configs that load a single file).
+        // Created unconditionally so `kumo skills install --global` always visibly
+        // updates opencode/claude/codex even if the user never created the skills
+        // subdir. Old behaviour gated on `parent.is_dir()` left `opencode` silently
+        // unwired after `make install`.
+        let flat_candidates = [
             home.join(".config").join("opencode").join("kumo-agents.md"),
-            home.join(".config").join("opencode").join("skills").join("kumo-agents.md"),
             home.join(".opencode").join("kumo-agents.md"),
             home.join(".claude").join("kumo-agents.md"),
             home.join(".codex").join("kumo-agents.md"),
         ];
-        for path in candidates {
+        for path in flat_candidates {
             if let Some(parent) = path.parent() {
-                if parent.is_dir() {
-                    let needs = std::fs::read_to_string(&path)
-                        .map(|e| e != SKILL)
-                        .unwrap_or(true);
-                    if needs {
-                        let _ = std::fs::write(&path, SKILL);
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let needs = std::fs::read_to_string(&path)
+                .map(|e| e != SKILL)
+                .unwrap_or(true);
+            if needs {
+                let _ = std::fs::write(&path, SKILL);
+            }
+        }
+
+        // Orca / `npx skills add` discoverable stub: `skills/kumo/SKILL.md`.
+        // `opencode` 1.18+ also scans `~/.config/opencode/skills/` for skills.
+        // Always create the directory and write the stub so the skill is
+        // discoverable immediately after `make install` / `kumo skills install`.
+        let stub_candidates = [
+            home.join(".config").join("opencode").join("skills").join("kumo").join("SKILL.md"),
+            home.join(".agents").join("skills").join("kumo").join("SKILL.md"),
+            home.join(".claude").join("skills").join("kumo").join("SKILL.md"),
+            home.join(".codex").join("skills").join("kumo").join("SKILL.md"),
+        ];
+        for path in stub_candidates {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let needs = std::fs::read_to_string(&path)
+                .map(|e| e != STUB)
+                .unwrap_or(true);
+            if needs {
+                let _ = std::fs::write(&path, STUB);
+            }
+        }
+
+        // `~/.opencode/skills` is a legacy variant some setups use.
+        let legacy_skill = home.join(".opencode").join("skills").join("kumo-agents.md");
+        if let Some(parent) = legacy_skill.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            let needs = std::fs::read_to_string(&legacy_skill)
+                .map(|e| e != SKILL)
+                .unwrap_or(true);
+            if needs {
+                let _ = std::fs::write(&legacy_skill, SKILL);
+            }
+        }
+
+        // Ensure opencode's global AGENTS.md always contains checkpoint instructions
+        // so the agent uses them automatically without needing to call `skill({name:"kumo"})`.
+        // opencode loads `~/.config/opencode/AGENTS.md` on every session (see /docs/rules).
+        let global_agents = home.join(".config").join("opencode").join("AGENTS.md");
+        if let Some(parent) = global_agents.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Marker to identify our auto-injected block; we update it when SKILL changes.
+        let header = "<!-- kumo-checkpoints: auto-installed by `kumo skills install --global` — do not edit manually, re-run install to update -->";
+        let block = format!("{header}\n{}", SKILL);
+        let needs_agents = std::fs::read_to_string(&global_agents)
+            .map(|existing| !existing.contains(header) || !existing.contains(SKILL))
+            .unwrap_or(true);
+        if needs_agents {
+            // If file exists, preserve user content and append/replace our block.
+            let mut existing = std::fs::read_to_string(&global_agents).unwrap_or_default();
+            if existing.contains(header) {
+                // Replace old block between header and next `<!--` or end.
+                if let Some(start) = existing.find(header) {
+                    let before = &existing[..start];
+                    // Our block is header + SKILL; replace from header to end with fresh block.
+                    existing = format!("{}\n\n{block}\n", before.trim_end());
+                } else {
+                    existing = format!("{existing}\n\n{block}\n");
+                }
+            } else if existing.trim().is_empty() {
+                existing = format!("{block}\n");
+            } else {
+                existing = format!("{existing}\n\n{block}\n");
+            }
+            let _ = std::fs::write(&global_agents, existing);
+        }
+
+        // Also ensure opencode config `instructions` points at kumo-agents.md for projects
+        // that rely on instruction files rather than AGENTS.md. We handle both
+        // `opencode.json` and `opencode.jsonc` (jsonc may contain comments, so we
+        // fall back to string check if JSON parse fails). We do not overwrite
+        // existing instructions, we just ensure kumo is present.
+        for cfg_name in ["opencode.json", "opencode.jsonc"] {
+            let opencode_cfg = home.join(".config").join("opencode").join(cfg_name);
+            if opencode_cfg.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&opencode_cfg) {
+                    if content.contains("kumo-agents.md") {
+                        continue;
+                    }
+                    // Try to parse as JSON and inject instructions if missing.
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(obj) = v.as_object_mut() {
+                            let entry = obj.entry("instructions").or_insert(serde_json::Value::Array(vec![]));
+                            if let Some(arr) = entry.as_array_mut() {
+                                let candidate = "~/.config/kumo/kumo-agents.md";
+                                if !arr.iter().any(|x| x.as_str() == Some(candidate)) {
+                                    arr.push(serde_json::Value::String(candidate.to_string()));
+                                    if let Ok(out) = serde_json::to_string_pretty(&v) {
+                                        let _ = std::fs::write(&opencode_cfg, out);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // jsonc with comments or invalid JSON: append simple string if not present
+                        // We avoid corrupting file, so just leave AGENTS.md path (already handles auto).
+                    }
+                }
+            } else if cfg_name == "opencode.json" {
+                // Create minimal opencode.json with instructions if none exists and its
+                // jsonc counterpart also doesn't exist. We only do this if ~/.config/opencode exists.
+                let jsonc = home.join(".config").join("opencode").join("opencode.jsonc");
+                if !jsonc.is_file() && home.join(".config").join("opencode").is_dir() {
+                    let v = serde_json::json!({
+                        "$schema": "https://opencode.ai/config.json",
+                        "instructions": ["~/.config/kumo/kumo-agents.md"]
+                    });
+                    if let Ok(out) = serde_json::to_string_pretty(&v) {
+                        let _ = std::fs::write(&opencode_cfg, out);
                     }
                 }
             }

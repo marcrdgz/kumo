@@ -1538,11 +1538,12 @@ fn handle_skills(args: &[String]) -> Result<()> {
                 let skills = kumo_core::skill::SKILLS;
                 let names: Vec<&str> = if let Some(n) = skill_name.as_deref() { vec![n] } else { skills.iter().map(|s| s.name).collect() };
                 if has_json {
-                    let j = serde_json::json!({"dry_run": true, "skills": names, "targets": ["~/.config/kumo/kumo-agents.md", "~/.config/opencode/kumo-agents.md if dir exists"]});
+                    let j = serde_json::json!({"dry_run": true, "skills": names, "targets": ["~/.config/kumo/kumo-agents.md", "~/.config/opencode/kumo-agents.md", "~/.config/opencode/skills/kumo/SKILL.md", "~/.agents/skills/kumo/SKILL.md", "~/.opencode/kumo-agents.md", "~/.claude/kumo-agents.md", "~/.codex/kumo-agents.md"]});
                     println!("{}", serde_json::to_string_pretty(&j).unwrap());
                 } else {
                     println!("would install skills: {} (dry-run)", names.join(", "));
-                    println!("targets: ~/.config/kumo/kumo-agents.md (+ opencode/claude/codex if present)");
+                    println!("targets: ~/.config/kumo/kumo-agents.md, ~/.config/opencode/kumo-agents.md, ~/.config/opencode/skills/kumo/SKILL.md (opencode), ~/.agents/skills/kumo/SKILL.md, ~/.opencode/kumo-agents.md, ~/.claude/kumo-agents.md, ~/.codex/kumo-agents.md");
+                    println!("hint: restart the agent session after install so it picks up the new skill");
                 }
                 return Ok(());
             }
@@ -1552,6 +1553,7 @@ fn handle_skills(args: &[String]) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&j).unwrap());
             } else if let Some(p) = path {
                 println!("installed skill at {}", p.display());
+                println!("also mirrored to opencode (~/.config/opencode/kumo-agents.md + skills/kumo/SKILL.md) and claude/codex if present — restart the agent session to pick it up");
             } else {
                 println!("skill already up to date");
             }
