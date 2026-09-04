@@ -1460,12 +1460,14 @@ USAGE:
     kumo skills get <skill> [--full] [--json]   (alias: show)
     kumo skills install [--skill <name>] [--global] [--dry-run] [--json]
     kumo skills update [--skill <name>] [--global] [--dry-run] [--json]
+    kumo skills remove [--skill <name>] [--global] [--dry-run] [--json]   (alias: uninstall, rm)
 
 SKILLS:
     kumo        Kumo multiplexer — worktrees, checkpoints, orchestration (from kumo-agents.md)
 
 The stub at `skills/kumo/SKILL.md` is for `npx skills add https://github.com/marcrdgz/kumo --skill kumo --global`.
 The full guide is versioned with the binary: `kumo skills get kumo`.
+To disable auto-install persistently, set `[checkpoints] enabled = false` in ~/.config/kumo/config.toml.
 ";
 
 const LEGACY_HELP: &str = "\
@@ -1497,7 +1499,7 @@ fn handle_skills(args: &[String]) -> Result<()> {
                 skill_name = Some(s.strip_prefix("--skill=").unwrap().to_string());
                 i += 1;
             }
-            s if !s.starts_with('-') && s != "list" && s != "get" && s != "show" && s != "install" && s != "update" && s != "installed" => {
+            s if !s.starts_with('-') && s != "list" && s != "get" && s != "show" && s != "install" && s != "update" && s != "installed" && s != "uninstall" && s != "remove" && s != "rm" => {
                 if skill_name.is_none() { skill_name = Some(s.to_string()); }
                 i += 1;
             }
@@ -1547,6 +1549,15 @@ fn handle_skills(args: &[String]) -> Result<()> {
                 }
                 return Ok(());
             }
+            if !kumo_core::config::checkpoints_enabled() {
+                if has_json {
+                    let j = serde_json::json!({"installed": null, "skills": skill_name.as_deref().unwrap_or("kumo"), "note": "skipped — [checkpoints] enabled = false"});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    println!("skipped — [checkpoints] enabled = false in config.toml");
+                }
+                return Ok(());
+            }
             let path = kumo_core::skill::ensure_installed();
             if has_json {
                 let j = serde_json::json!({"installed": path.as_ref().map(|p| p.display().to_string()), "skills": skill_name.as_deref().unwrap_or("kumo")});
@@ -1556,6 +1567,47 @@ fn handle_skills(args: &[String]) -> Result<()> {
                 println!("also mirrored to opencode (~/.config/opencode/kumo-agents.md + skills/kumo/SKILL.md) and claude/codex if present — restart the agent session to pick it up");
             } else {
                 println!("skill already up to date");
+            }
+            Ok(())
+        }
+        "uninstall" | "remove" | "rm" => {
+            if dry_run {
+                let names: Vec<&str> = if let Some(n) = skill_name.as_deref() { vec![n] } else { vec!["kumo"] };
+                let targets = [
+                    "~/.config/kumo/kumo-agents.md",
+                    "~/.config/opencode/kumo-agents.md",
+                    "~/.config/opencode/skills/kumo/SKILL.md",
+                    "~/.agents/skills/kumo/SKILL.md",
+                    "~/.claude/skills/kumo/SKILL.md",
+                    "~/.codex/skills/kumo/SKILL.md",
+                    "~/.opencode/kumo-agents.md",
+                    "~/.claude/kumo-agents.md",
+                    "~/.codex/kumo-agents.md",
+                    "~/.config/opencode/AGENTS.md (block)",
+                    "~/.config/opencode/opencode.json[c] (instructions)",
+                ];
+                if has_json {
+                    let j = serde_json::json!({"dry_run": true, "skills": names, "targets": targets});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    println!("would uninstall skills: {} (dry-run)", names.join(", "));
+                    println!("targets: {}", targets.join(", "));
+                    println!("hint: set [checkpoints] enabled = false in ~/.config/kumo/config.toml to prevent re-install on next kumo run");
+                }
+                return Ok(());
+            }
+            let removed = kumo_core::skill::remove_installed();
+            if has_json {
+                let j = serde_json::json!({"removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "skills": skill_name.as_deref().unwrap_or("kumo")});
+                println!("{}", serde_json::to_string_pretty(&j).unwrap());
+            } else if removed.is_empty() {
+                println!("no kumo skill files found to remove");
+                println!("hint: set [checkpoints] enabled = false in ~/.config/kumo/config.toml to prevent auto-install");
+            } else {
+                for p in &removed {
+                    println!("removed {}", p.display());
+                }
+                println!("hint: set [checkpoints] enabled = false in ~/.config/kumo/config.toml to prevent re-install on next kumo run");
             }
             Ok(())
         }

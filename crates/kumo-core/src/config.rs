@@ -474,6 +474,19 @@ impl Default for WorktreeConfig {
     }
 }
 
+/// Checkpoint skill configuration (`[checkpoints]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointsConfig {
+    /// Whether the checkpoint skill is auto-installed (default: true).
+    pub enabled: bool,
+}
+
+impl Default for CheckpointsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Parsed user configuration. Mirrors the flat `key = value` config file;
 /// future knobs (theme, leader, keymaps, status bar) will extend this struct.
 #[derive(Clone)]
@@ -509,6 +522,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     /// Worktree isolation (`[worktree]`).
     pub worktree: WorktreeConfig,
+    /// Checkpoint skill (`[checkpoints]`).
+    pub checkpoints: CheckpointsConfig,
 }
 
 impl Default for Config {
@@ -527,6 +542,7 @@ impl Default for Config {
             status_bar: StatusBarConfig::default(),
             notifications: NotificationsConfig::default(),
             worktree: WorktreeConfig::default(),
+            checkpoints: CheckpointsConfig::default(),
         }
     }
 }
@@ -1001,6 +1017,11 @@ impl Config {
                 self.worktree.expose_socket = v;
             }
         }
+        if let Some(cp) = toml.checkpoints {
+            if let Some(v) = cp.enabled {
+                self.checkpoints.enabled = v;
+            }
+        }
         self.normalize_new_cwd();
     }
 }
@@ -1172,6 +1193,12 @@ pub struct WorktreeRaw {
     pub expose_socket: Option<bool>,
 }
 
+/// Raw TOML for `[checkpoints]` — skill auto-install toggle.
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct CheckpointsRaw {
+    pub enabled: Option<bool>,
+}
+
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
 /// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
 #[derive(Default, serde::Deserialize)]
@@ -1201,6 +1228,8 @@ struct TomlConfig {
     notifications: Option<NotificationsRaw>,
     #[serde(rename = "worktree")]
     worktree: Option<WorktreeRaw>,
+    #[serde(rename = "checkpoints")]
+    checkpoints: Option<CheckpointsRaw>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -1517,6 +1546,11 @@ pub fn worktree_shared_dirs() -> Vec<PathBuf> {
 /// Whether spawned panes receive `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH`.
 pub fn worktree_expose_socket() -> bool {
     cached_config().worktree.expose_socket
+}
+
+/// Whether the checkpoint skill is auto-installed (default: true).
+pub fn checkpoints_enabled() -> bool {
+    cached_config().checkpoints.enabled
 }
 
 /// Split a command line string into program + args (space separated).

@@ -92,6 +92,11 @@ fn strip_jsonc_comments(s: &str) -> String {
     out
 }
 
+/// Whether checkpoints are enabled via `[checkpoints] enabled` (default true).
+fn checkpoints_enabled() -> bool {
+    crate::config::checkpoints_enabled()
+}
+
 /// Ensure the skill is installed at `installed_path()` and also mirrored to
 /// well-known agent global skill dirs so `opencode` / `claude` / `codex` pick
 /// it up without extra steps. For `npx skills add` managers we install the
@@ -99,7 +104,11 @@ fn strip_jsonc_comments(s: &str) -> String {
 /// to fetch the versioned guide). For legacy direct file loads we also mirror the full
 /// guide as `kumo-agents.md`.
 /// Returns the primary path written (if any) for logging.
+/// No-ops when `[checkpoints] enabled = false` in `config.toml`.
 pub fn ensure_installed() -> Option<std::path::PathBuf> {
+    if !checkpoints_enabled() {
+        return None;
+    }
     let primary = installed_path();
     let mut written_primary = None;
 
@@ -260,4 +269,136 @@ pub fn ensure_installed() -> Option<std::path::PathBuf> {
     }
 
     written_primary
+}
+
+/// Remove the skill from all well-known locations (mirrors `ensure_installed`).
+/// Cleans: primary `~/.config/kumo/kumo-agents.md`, flat mirrors, stubs,
+/// legacy variant, the auto-injected block in `~/.config/opencode/AGENTS.md`,
+/// and the `instructions` entry in `opencode.json[c]`. Does not touch
+/// `worktrees.json` (checkpoint history) — pass `prune` to also clear it.
+/// Returns the list of paths/files that were actually removed or modified.
+pub fn remove_installed() -> Vec<std::path::PathBuf> {
+    let mut removed = Vec::new();
+    let header = "<!-- kumo-checkpoints: auto-installed by `kumo skills install --global` — do not edit manually, re-run install to update -->";
+
+    // Primary
+    let primary = installed_path();
+    if primary.is_file() {
+        let _ = std::fs::remove_file(&primary);
+        removed.push(primary);
+    }
+
+    let Some(home) = crate::config::home_dir() else {
+        return removed;
+    };
+
+    // Flat mirrors
+    for path in [
+        home.join(".config").join("opencode").join("kumo-agents.md"),
+        home.join(".opencode").join("kumo-agents.md"),
+        home.join(".claude").join("kumo-agents.md"),
+        home.join(".codex").join("kumo-agents.md"),
+    ] {
+        if path.is_file() {
+            // Only remove if it matches our SKILL (avoid deleting user-edited files with other content)
+            let is_ours = std::fs::read_to_string(&path).map(|c| c == SKILL).unwrap_or(false);
+            if is_ours {
+                let _ = std::fs::remove_file(&path);
+                removed.push(path);
+            } else if path.is_file() {
+                // If header present but content diverged, still remove if it contains header
+                if let Ok(c) = std::fs::read_to_string(&path) {
+                    if c.contains(header) || c.contains("kumo worktree set --comment") {
+                        let _ = std::fs::remove_file(&path);
+                        removed.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Stubs
+    for path in [
+        home.join(".config").join("opencode").join("skills").join("kumo").join("SKILL.md"),
+        home.join(".agents").join("skills").join("kumo").join("SKILL.md"),
+        home.join(".claude").join("skills").join("kumo").join("SKILL.md"),
+        home.join(".codex").join("skills").join("kumo").join("SKILL.md"),
+    ] {
+        if path.is_file() {
+            let is_ours = std::fs::read_to_string(&path).map(|c| c == STUB).unwrap_or(false);
+            if is_ours {
+                let _ = std::fs::remove_file(&path);
+                removed.push(path.clone());
+                // Try to remove empty parent `kumo` dir
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+    }
+
+    // Legacy variant
+    let legacy_skill = home.join(".opencode").join("skills").join("kumo-agents.md");
+    if legacy_skill.is_file() {
+        let is_ours = std::fs::read_to_string(&legacy_skill).map(|c| c == SKILL).unwrap_or(false);
+        if is_ours {
+            let _ = std::fs::remove_file(&legacy_skill);
+            removed.push(legacy_skill);
+        }
+    }
+
+    // Global AGENTS.md block
+    let global_agents = home.join(".config").join("opencode").join("AGENTS.md");
+    if global_agents.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&global_agents) {
+            if content.contains(header) {
+                if let Some(start) = content.find(header) {
+                    let before = content[..start].trim_end().to_string();
+                    let new_content = if before.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{before}\n")
+                    };
+                    if new_content.is_empty() {
+                        let _ = std::fs::remove_file(&global_agents);
+                    } else {
+                        let _ = std::fs::write(&global_agents, &new_content);
+                    }
+                    removed.push(global_agents.clone());
+                }
+            }
+        }
+    }
+
+    // opencode.json[c] instructions
+    for cfg_name in ["opencode.json", "opencode.jsonc"] {
+        let opencode_cfg = home.join(".config").join("opencode").join(cfg_name);
+        if opencode_cfg.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&opencode_cfg) {
+                if content.contains("kumo-agents.md") {
+                    let raw = strip_jsonc_comments(&content);
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(obj) = v.as_object_mut() {
+                            let mut changed = false;
+                            if let Some(arr) = obj.get_mut("instructions").and_then(|x| x.as_array_mut()) {
+                                let before = arr.len();
+                                arr.retain(|x| x.as_str() != Some("~/.config/kumo/kumo-agents.md"));
+                                if arr.len() != before {
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                if let Ok(out) = serde_json::to_string_pretty(&v) {
+                                    let _ = std::fs::write(&opencode_cfg, out);
+                                    removed.push(opencode_cfg.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    removed
 }
