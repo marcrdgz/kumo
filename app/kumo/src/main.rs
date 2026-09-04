@@ -189,7 +189,7 @@ fn print_help() {
     println!("    kumo worktree current [--path PATH] [-s SESSION] [--json]");
     println!("    kumo worktree list [-s SESSION] [--json]");
     println!();
-    println!("SKILLS (Orca-style `npx skills add` compatible):");
+    println!("SKILLS (`npx skills add` compatible):");
     println!("    kumo skills list [--json]");
     println!("    kumo skills get <skill> [--full] [--json]   (stub at skills/kumo/SKILL.md)");
     println!("    kumo skills install [--skill <name>] [--global] [--dry-run] [--json]");

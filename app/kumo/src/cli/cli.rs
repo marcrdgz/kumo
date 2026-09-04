@@ -180,7 +180,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             return Ok(());
         }
     }
-    // Orca-style skills are local — no daemon needed.
+    // Skills are local — no daemon needed.
     if let Some(domain) = args.first().map(|s| s.as_str()) {
         if domain == "skills" || domain == "skill" {
             return handle_skills(&args[1..]);
@@ -1437,7 +1437,7 @@ OPTIONS:
     --force                 for `rm`: delete even with unmerged commits
     --json                  machine-readable JSON output
 
-Branch naming (Orca-aligned, no `kumo/` prefix):
+Branch naming (no `kumo/` prefix):
     NAME \"fix login\" → branch \"fix-login\"
     --from #123 → branch \"pr-123\" (or PR head branch via `gh`)
     --branch feat/login wins over NAME
@@ -1453,7 +1453,7 @@ USAGE:
 ";
 
 const SKILLS_HELP: &str = "\
-kumo skills — agent skills (Orca-style `npx skills add` compatible)
+kumo skills — agent skills (`npx skills add` compatible)
 
 USAGE:
     kumo skills list [--json]
@@ -1522,7 +1522,7 @@ fn handle_skills(args: &[String]) -> Result<()> {
             let Some(skill) = kumo_core::skill::find(name) else {
                 anyhow::bail!("unknown skill {name:?} (try `kumo skills list`)");
             };
-            // Orca: stub without --full, full with --full; for automation --json always wants full
+            // stub without --full, full with --full; for automation --json always wants full
             let content = if has_full || has_json { skill.content } else { skill.stub };
             if has_json {
                 let j = serde_json::json!({"name": skill.name, "description": skill.description, "content": content});

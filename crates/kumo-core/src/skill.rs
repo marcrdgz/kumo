@@ -8,10 +8,10 @@
 /// Embedded skill content — always the crate's `kumo-agents.md` (mirrored from repo root).
 pub const SKILL: &str = include_str!("../kumo-agents.md");
 
-/// Orca-style stub — the short discovery file at `skills/kumo/SKILL.md`.
+/// Discovery stub — the short file at `skills/kumo/SKILL.md`.
 pub const STUB: &str = include_str!("../../../skills/kumo/SKILL.md");
 
-/// Registry of installable skills (Orca-style `npx skills add`).
+/// Registry of installable skills (`npx skills add`).
 #[derive(Clone, Copy, Debug)]
 pub struct SkillMeta {
     pub name: &'static str,
@@ -37,10 +37,10 @@ pub fn installed_path() -> std::path::PathBuf {
 
 /// Ensure the skill is installed at `installed_path()` and also mirrored to
 /// well-known agent global skill dirs so `opencode` / `claude` / `codex` pick
-/// it up without extra steps. For Orca-compatible managers (`npx skills add`)
-/// we install the discoverable stub at `skills/kumo/SKILL.md` (agent runs
-/// `kumo skills get kumo --full` to fetch the versioned guide). For legacy
-/// direct file loads we also mirror the full guide as `kumo-agents.md`.
+/// it up without extra steps. For `npx skills add` managers we install the
+/// discoverable stub at `skills/kumo/SKILL.md` (agent runs `kumo skills get kumo --full`
+/// to fetch the versioned guide). For legacy direct file loads we also mirror the full
+/// guide as `kumo-agents.md`.
 /// Returns the primary path written (if any) for logging.
 pub fn ensure_installed() -> Option<std::path::PathBuf> {
     let primary = installed_path();
@@ -87,7 +87,7 @@ pub fn ensure_installed() -> Option<std::path::PathBuf> {
             }
         }
 
-        // Orca / `npx skills add` discoverable stub: `skills/kumo/SKILL.md`.
+        // `npx skills add` discoverable stub: `skills/kumo/SKILL.md`.
         // `opencode` 1.18+ also scans `~/.config/opencode/skills/` for skills.
         // Always create the directory and write the stub so the skill is
         // discoverable immediately after `make install` / `kumo skills install`.

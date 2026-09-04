@@ -25,7 +25,7 @@ kumo worktree set --comment "fix implemented; running integration tests" --statu
 kumo worktree set --comment "verified — ready for review, goal: reduce API calls per #298" --status completed --json
 ```
 
-**Orca-compatible aliases (if you're trained on Orca):**
+**Aliases:**
 ```sh
 kumo worktree set --worktree active --comment "..." --workspace-status in-progress --json  # same as --status
 kumo worktree current --worktree active --json  # same as --path active

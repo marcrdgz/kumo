@@ -62,7 +62,7 @@ Quick pattern (do this without being asked):
 kumo worktree current --json          # read before you clobber
 kumo worktree set --comment "reproduced auth failure; testing fix (src/auth.ts)" --status in-progress --json
 ```
-Good moments: finished a slice, confirmed/refuted a hypothesis, hit a blocker, transitioning phase. First line is action-oriented. Orca aliases also work: `--workspace-status` for `--status`, `--worktree active` for the active worktree.
+Good moments: finished a slice, confirmed/refuted a hypothesis, hit a blocker, transitioning phase. First line is action-oriented. Aliases: `--workspace-status` for `--status`, `--worktree active` for the active worktree.
 
 ## Codebase Principles & Rules
 1. **Never Guess Logic or File Structures**: Inspect authoritative source files before referencing Rust/C bindings.
