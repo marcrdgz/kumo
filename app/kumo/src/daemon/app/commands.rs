@@ -735,7 +735,7 @@ impl App {
         }
     }
 
-    /// Extended creator for isolated `--ai` worktrees (Orca-aligned, no `kumo/` prefix).
+    /// Extended creator for isolated `--ai` worktrees (no `kumo/` prefix).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn worktree_create_full(
         &mut self,
@@ -783,7 +783,7 @@ impl App {
 
     /// Set checkpoint comment/status for a worktree.
     pub(crate) fn worktree_set(
-        &self,
+        &mut self,
         session: &str,
         path: &std::path::Path,
         comment: Option<&str>,
@@ -792,12 +792,13 @@ impl App {
         if !self.sessions.iter().any(|s| s.name == session) {
             return Ok(format!("no session {session:?}"));
         }
-        // Validate status via protocol helper
+        // Validate status via protocol helper — "—", "–", "-" and empty all mean clear
+        let is_clear = |t: &str| t.is_empty() || t == "—" || t == "–" || t == "-";
         let status_norm: Option<Option<String>> = match status {
             None => None,
             Some(s) => {
                 let trimmed = s.trim();
-                if trimmed.is_empty() {
+                if is_clear(trimmed) {
                     Some(None)
                 } else if kumo_protocol::WorktreeStatus::parse(trimmed).is_none() {
                     return Ok(format!("invalid status {trimmed:?} (use todo|in-progress|in-review|completed)"));
@@ -806,7 +807,7 @@ impl App {
                 }
             }
         }; // None means no change; Some(None) means clear
-        let comment_norm = comment.map(|c| { let t=c.trim(); if t.is_empty() {None} else {Some(t.to_string())} });
+        let comment_norm = comment.map(|c| { let t=c.trim(); if is_clear(t) {None} else {Some(t.to_string())} });
         // Distinguish no-change vs clear: here comment == None means no --comment flag; Some("") means clear
         // Our caller passes None for absent flag; empty string means clear.
         let c_arg = comment_norm;
@@ -817,6 +818,7 @@ impl App {
         }
         match kumo_core::worktree_meta::set(path, c_arg, s_arg, None, None) {
             Ok(cp) => {
+                self.bump_layout_version();
                 let msg = format!("set {} comment={:?} status={:?}", path.display(), cp.comment, cp.status);
                 Ok(msg)
             }

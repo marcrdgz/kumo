@@ -53,6 +53,17 @@ The client and desktop launch the daemon via `kumo daemon` (sibling binary or
 
 ---
 
+## Worktree Checkpoints (for AI agents — automatic)
+
+Every worktree carries a lightweight `comment` + `status` (`todo`/`in-progress`/`in-review`/`completed`) visible in the sidebar and `kumo worktree list --json`. **You must keep it fresh automatically** — see `kumo-agents.md` for the full pattern.
+
+Quick pattern (do this without being asked):
+```sh
+kumo worktree current --json          # read before you clobber
+kumo worktree set --comment "reproduced auth failure; testing fix (src/auth.ts)" --status in-progress --json
+```
+Good moments: finished a slice, confirmed/refuted a hypothesis, hit a blocker, transitioning phase. First line is action-oriented. Aliases: `--workspace-status` for `--status`, `--worktree active` for the active worktree.
+
 ## Codebase Principles & Rules
 1. **Never Guess Logic or File Structures**: Inspect authoritative source files before referencing Rust/C bindings.
 2. **Clean Abstractions**: Keep PTY/process management (`app/kumo/src/daemon/pty.rs`), the terminal emulator FFI (`app/kumo/src/daemon/vt.rs`), layout tree management (`crates/kumo-core/src/layout.rs`), and Claude AI integration modular and loosely coupled.

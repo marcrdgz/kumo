@@ -47,6 +47,20 @@ icon: 🛠️
 | `kumo agent rename <PANE> <NAME> [-s SESSION]` | Live alias for a pane so scripts can reference agents by name |
 | `kumo agent broadcast "TEXT" [-s SESSION] [--filter STATUS]` | Fan one prompt out to every AI pane (optionally filtered by status) |
 
+### Worktrees & checkpoints
+
+| Command | Description |
+| --- | --- |
+| `kumo worktree create --ai [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [-s SESSION] [--json]` | Create an isolated git worktree in a new session (branch validated, shared dirs symlinked) |
+| `kumo worktree open PATH [-s SESSION]` | Open an existing worktree as a session |
+| `kumo worktree rm PATH [--force] [-s SESSION]` | Remove worktree folder + branch (prompts in TUI) |
+| `kumo worktree list [-s SESSION] [--json]` | List worktrees with checkpoint `comment`/`status`/`is_ephemeral` |
+| `kumo worktree current [--path PATH] [-s SESSION] [--json]` | Read this worktree's checkpoint (`--worktree active` / `--path active` aliases) |
+| `kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]` | Write checkpoint — agents only (aliases: `--workspace-status` for `--status`, `--worktree` for `--path`) |
+| `kumo skills install --global` | Install `kumo-agents.md` + stub to opencode/claude/codex (restart agent) |
+
+Checkpoints are `comment` (free-text) + `status` (`todo`/`in-progress`/`in-review`/`completed`, aliases `wip`→`in-progress`, `review`→`in-review`, `done`→`completed`). Empty clears. Stored in `~/.local/state/kumo/worktrees.json`, survives `kumo update --resume`. See [Checkpoints](/docs/guides/checkpoints).
+
 **PANE addressing** — a stable numeric pane id, or a composite position
 (`1-based` indexes, session may be a name):
 `s1:t2:p3` · `kumo:t2:p1` · `t2:p1` (session from `-s`). Composites are

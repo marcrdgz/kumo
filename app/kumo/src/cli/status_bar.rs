@@ -552,6 +552,7 @@ mod tests {
                 }))),
             }],
             branch: None,
+            checkpoint: None,
             focus: 7,
             zoom: false,
             root: None,

@@ -9,6 +9,14 @@ use kumo_core::Launch;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Ensure the agent skill is present for every install (idempotent).
+    // Skip for `kumo skills uninstall` so the command can actually remove files,
+    // and respect `[checkpoints] enabled = false`.
+    let is_uninstall = args.first().map(|s| s == "skills" || s == "skill").unwrap_or(false)
+        && args.iter().any(|a| a == "uninstall" || a == "remove" || a == "rm");
+    if !is_uninstall {
+        let _ = kumo_core::skill::ensure_installed();
+    }
     // Top-level flags only (per-command help lives in each command's parser).
     if args.first().map(|s| s.as_str()) == Some("-h")
         || args.first().map(|s| s.as_str()) == Some("--help")
@@ -57,10 +65,10 @@ fn main() -> Result<()> {
         }
     }
 
-    // Control CLI: `kumo session|pane|agent|tab|worktree ...` (and the legacy aliases
+    // Control CLI: `kumo session|pane|agent|tab|worktree|skills ...` (and the legacy aliases
     // `ls`/`kill`/`reload`/`server restart`).
     match args.first().map(|s| s.as_str()) {
-        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("ls")
+        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("skills") | Some("skill") | Some("ls")
         | Some("list") | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
@@ -186,6 +194,12 @@ fn print_help() {
     println!("    kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]");
     println!("    kumo worktree current [--path PATH] [-s SESSION] [--json]");
     println!("    kumo worktree list [-s SESSION] [--json]");
+    println!();
+    println!("SKILLS (`npx skills add` compatible):");
+    println!("    kumo skills list [--json]");
+    println!("    kumo skills get <skill> [--full] [--json]   (stub at skills/kumo/SKILL.md)");
+    println!("    kumo skills install [--skill <name>] [--global] [--dry-run] [--json]");
+    println!("    kumo skills remove [--skill <name>] [--global] [--dry-run] [--json]   (alias: uninstall, rm)");
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");

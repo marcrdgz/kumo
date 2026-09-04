@@ -57,6 +57,9 @@ Desktop.ini
 *~
 \#*\#
 
+# --- opencode (agent sessions) ---
+.opencode/
+
 # --- Environment & API Keys ---
 .env
 .env.*

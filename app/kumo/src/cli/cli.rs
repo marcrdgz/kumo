@@ -180,6 +180,12 @@ fn run_inner(args: &[String]) -> Result<()> {
             return Ok(());
         }
     }
+    // Skills are local — no daemon needed.
+    if let Some(domain) = args.first().map(|s| s.as_str()) {
+        if domain == "skills" || domain == "skill" {
+            return handle_skills(&args[1..]);
+        }
+    }
     let cmd = parse(args)?;
     let mut stream = connect_daemon()?;
 
@@ -1135,20 +1141,22 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                         comment = Some(s.split_once('=').unwrap().1.to_string());
                         comment_set = true; j+=1;
                     }
-                    "--status" => {
+                    "--status" | "--workspace-status" | "--workspace_status" => {
                         status = Some(need(&rest, j+1, "a status after --status")?);
                         status_set = true; j+=2;
                     }
-                    s if s.starts_with("--status=") => {
-                        status = Some(s.strip_prefix("--status=").unwrap().to_string());
-                        status_set = true; j+=1;
+                    s if s.starts_with("--status=") || s.starts_with("--workspace-status=") || s.starts_with("--workspace_status=") => {
+                        let v = s.split_once('=').unwrap().1.to_string();
+                        status = Some(v); status_set = true; j+=1;
                     }
-                    "--path" => {
-                        path = Some(PathBuf::from(need(&rest, j+1, "a path after --path")?));
+                    "--path" | "--worktree" => {
+                        let v = need(&rest, j+1, "a path after --path")?;
+                        if v != "active" { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=2;
                     }
-                    s if s.starts_with("--path=") => {
-                        path = Some(PathBuf::from(s.strip_prefix("--path=").unwrap()));
+                    s if s.starts_with("--path=") || s.starts_with("--worktree=") => {
+                        let v = s.split_once('=').unwrap().1;
+                        if v != "active" && !v.is_empty() { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=1;
                     }
                     s if !s.starts_with('-') && path.is_none() => {
@@ -1167,12 +1175,14 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             let mut j = 0;
             while j < rest.len() {
                 match rest[j].as_str() {
-                    "--path" => {
-                        path = Some(PathBuf::from(need(&rest, j+1, "a path after --path")?));
+                    "--path" | "--worktree" => {
+                        let v = need(&rest, j+1, "a path after --path")?;
+                        if v != "active" { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=2;
                     }
-                    s if s.starts_with("--path=") => {
-                        path = Some(PathBuf::from(s.strip_prefix("--path=").unwrap()));
+                    s if s.starts_with("--path=") || s.starts_with("--worktree=") => {
+                        let v = s.split_once('=').unwrap().1;
+                        if v != "active" && !v.is_empty() { path = Some(PathBuf::from(v)); } else { path = None; }
                         j+=1;
                     }
                     s if !s.starts_with('-') && path.is_none() => { path = Some(PathBuf::from(s)); j+=1; }
@@ -1292,6 +1302,7 @@ fn domain_help(domain: &str) -> &'static str {
         "agent" => AGENT_HELP,
         "tab" => TAB_HELP,
         "worktree" => WORKTREE_HELP,
+        "skills" | "skill" => SKILLS_HELP,
         "server" => SERVER_HELP,
         "ls" | "list" | "kill" | "reload" => LEGACY_HELP,
         _ => "",
@@ -1426,7 +1437,7 @@ OPTIONS:
     --force                 for `rm`: delete even with unmerged commits
     --json                  machine-readable JSON output
 
-Branch naming (Orca-aligned, no `kumo/` prefix):
+Branch naming (no `kumo/` prefix):
     NAME \"fix login\" → branch \"fix-login\"
     --from #123 → branch \"pr-123\" (or PR head branch via `gh`)
     --branch feat/login wins over NAME
@@ -1441,6 +1452,24 @@ USAGE:
 `kumo server restart` restarts the daemon in place; panes stay alive.
 ";
 
+const SKILLS_HELP: &str = "\
+kumo skills — agent skills (`npx skills add` compatible)
+
+USAGE:
+    kumo skills list [--json]
+    kumo skills get <skill> [--full] [--json]   (alias: show)
+    kumo skills install [--skill <name>] [--global] [--dry-run] [--json]
+    kumo skills update [--skill <name>] [--global] [--dry-run] [--json]
+    kumo skills remove [--skill <name>] [--global] [--dry-run] [--json]   (alias: uninstall, rm)
+
+SKILLS:
+    kumo        Kumo multiplexer — worktrees, checkpoints, orchestration (from kumo-agents.md)
+
+The stub at `skills/kumo/SKILL.md` is for `npx skills add https://github.com/marcrdgz/kumo --skill kumo --global`.
+The full guide is versioned with the binary: `kumo skills get kumo`.
+To disable auto-install persistently, set `[checkpoints] enabled = false` in ~/.config/kumo/config.toml.
+";
+
 const LEGACY_HELP: &str = "\
 kumo ls | list / kill / reload — legacy aliases
 
@@ -1451,6 +1480,155 @@ USAGE:
 
 Prefer the namespaced commands (`kumo session`, `kumo pane`, `kumo agent`).
 ";
+
+fn handle_skills(args: &[String]) -> Result<()> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
+    let has_json = args.iter().any(|a| a == "--json");
+    let has_full = args.iter().any(|a| a == "--full");
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    // --skill <name> or positional name for get/install
+    let mut skill_name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--skill" => {
+                if let Some(v) = args.get(i + 1) { skill_name = Some(v.clone()); }
+                i += 2;
+            }
+            s if s.starts_with("--skill=") => {
+                skill_name = Some(s.strip_prefix("--skill=").unwrap().to_string());
+                i += 1;
+            }
+            s if !s.starts_with('-') && s != "list" && s != "get" && s != "show" && s != "install" && s != "update" && s != "installed" && s != "uninstall" && s != "remove" && s != "rm" => {
+                if skill_name.is_none() { skill_name = Some(s.to_string()); }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    match sub {
+        "list" | "ls" => {
+            let skills = kumo_core::skill::SKILLS;
+            if has_json {
+                let arr: Vec<serde_json::Value> = skills.iter().map(|s| serde_json::json!({"name": s.name, "description": s.description})).collect();
+                println!("{}", serde_json::to_string_pretty(&arr).unwrap());
+            } else {
+                for s in skills {
+                    println!("{} — {}", s.name, s.description);
+                }
+            }
+            Ok(())
+        }
+        "get" | "show" => {
+            let name = skill_name.as_deref().unwrap_or("kumo");
+            let Some(skill) = kumo_core::skill::find(name) else {
+                anyhow::bail!("unknown skill {name:?} (try `kumo skills list`)");
+            };
+            // stub without --full, full with --full; for automation --json always wants full
+            let content = if has_full || has_json { skill.content } else { skill.stub };
+            if has_json {
+                let j = serde_json::json!({"name": skill.name, "description": skill.description, "content": content});
+                println!("{}", serde_json::to_string_pretty(&j).unwrap());
+            } else {
+                print!("{}", content);
+                if !content.ends_with('\n') { println!(); }
+            }
+            Ok(())
+        }
+        "install" | "update" | "installed" => {
+            if dry_run {
+                let skills = kumo_core::skill::SKILLS;
+                let names: Vec<&str> = if let Some(n) = skill_name.as_deref() { vec![n] } else { skills.iter().map(|s| s.name).collect() };
+                if has_json {
+                    let j = serde_json::json!({"dry_run": true, "skills": names, "targets": ["~/.config/kumo/kumo-agents.md", "~/.config/opencode/kumo-agents.md", "~/.config/opencode/skills/kumo/SKILL.md", "~/.agents/skills/kumo/SKILL.md", "~/.opencode/kumo-agents.md", "~/.claude/kumo-agents.md", "~/.codex/kumo-agents.md"]});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    println!("would install skills: {} (dry-run)", names.join(", "));
+                    println!("targets: ~/.config/kumo/kumo-agents.md, ~/.config/opencode/kumo-agents.md, ~/.config/opencode/skills/kumo/SKILL.md (opencode), ~/.agents/skills/kumo/SKILL.md, ~/.opencode/kumo-agents.md, ~/.claude/kumo-agents.md, ~/.codex/kumo-agents.md");
+                    println!("hint: restart the agent session after install so it picks up the new skill");
+                }
+                return Ok(());
+            }
+            if !kumo_core::config::checkpoints_enabled() {
+                if has_json {
+                    let j = serde_json::json!({"installed": null, "skills": skill_name.as_deref().unwrap_or("kumo"), "note": "skipped — [checkpoints] enabled = false"});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    println!("skipped — [checkpoints] enabled = false in config.toml");
+                }
+                return Ok(());
+            }
+            let path = kumo_core::skill::ensure_installed();
+            if has_json {
+                let j = serde_json::json!({"installed": path.as_ref().map(|p| p.display().to_string()), "skills": skill_name.as_deref().unwrap_or("kumo")});
+                println!("{}", serde_json::to_string_pretty(&j).unwrap());
+            } else if let Some(p) = path {
+                println!("installed skill at {}", p.display());
+                println!("also mirrored to opencode (~/.config/opencode/kumo-agents.md + skills/kumo/SKILL.md) and claude/codex if present — restart the agent session to pick it up");
+            } else {
+                println!("skill already up to date");
+            }
+            Ok(())
+        }
+        "uninstall" | "remove" | "rm" => {
+            if dry_run {
+                let names: Vec<&str> = if let Some(n) = skill_name.as_deref() { vec![n] } else { vec!["kumo"] };
+                let targets = [
+                    "~/.config/kumo/kumo-agents.md",
+                    "~/.config/opencode/kumo-agents.md",
+                    "~/.config/opencode/skills/kumo/SKILL.md",
+                    "~/.agents/skills/kumo/SKILL.md",
+                    "~/.claude/skills/kumo/SKILL.md",
+                    "~/.codex/skills/kumo/SKILL.md",
+                    "~/.opencode/kumo-agents.md",
+                    "~/.claude/kumo-agents.md",
+                    "~/.codex/kumo-agents.md",
+                    "~/.config/opencode/AGENTS.md (block)",
+                    "~/.config/opencode/opencode.json[c] (instructions)",
+                ];
+                if has_json {
+                    let j = serde_json::json!({"dry_run": true, "skills": names, "targets": targets});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    println!("would uninstall skills: {} (dry-run)", names.join(", "));
+                    println!("targets: {}", targets.join(", "));
+                    println!("hint: set [checkpoints] enabled = false in ~/.config/kumo/config.toml to prevent re-install on next kumo run");
+                }
+                return Ok(());
+            }
+            let removed = kumo_core::skill::remove_installed();
+            if has_json {
+                let j = serde_json::json!({"removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "skills": skill_name.as_deref().unwrap_or("kumo")});
+                println!("{}", serde_json::to_string_pretty(&j).unwrap());
+            } else if removed.is_empty() {
+                println!("no kumo skill files found to remove");
+                println!("hint: set [checkpoints] enabled = false in ~/.config/kumo/config.toml to prevent auto-install");
+            } else {
+                for p in &removed {
+                    println!("removed {}", p.display());
+                }
+                println!("hint: set [checkpoints] enabled = false in ~/.config/kumo/config.toml to prevent re-install on next kumo run");
+            }
+            Ok(())
+        }
+        _ => {
+            // `kumo skills get kumo` without sub defaults to get
+            if kumo_core::skill::find(sub).is_some() {
+                let skill = kumo_core::skill::find(sub).unwrap();
+                let content = if has_full || has_json { skill.content } else { skill.stub };
+                if has_json {
+                    let j = serde_json::json!({"name": skill.name, "description": skill.description, "content": content});
+                    println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                } else {
+                    print!("{}", content);
+                    if !content.ends_with('\n') { println!(); }
+                }
+                return Ok(());
+            }
+            anyhow::bail!("unknown skills subcommand {sub:?} (try `kumo skills -h`)")
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Socket plumbing

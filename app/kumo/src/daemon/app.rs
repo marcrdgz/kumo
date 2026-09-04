@@ -164,6 +164,8 @@ pub struct App {
     /// Live aliases for agent panes (`kumo agent rename`), so scripts can
     /// reference agents by name. Not persisted — ephemeral per daemon.
     agent_aliases: HashMap<u64, String>,
+    /// Last time `worktree_meta::prune_missing` ran (throttled to 60s).
+    last_worktree_prune: Instant,
 }
 
 /// Foreground TUI loop, used only on non-unix (fallback until daemon parity
@@ -247,6 +249,7 @@ impl App {
             cached_layout: None,
             cached_layout_version: 0,
             agent_aliases: HashMap::new(),
+            last_worktree_prune: Instant::now(),
         };
 
         match launch {
@@ -644,7 +647,7 @@ impl App {
             .map(|_| ())
     }
 
-    /// Extended creator for isolated `--ai` worktrees (Orca-aligned naming, no `kumo/` prefix).
+    /// Extended creator for isolated `--ai` worktrees (no `kumo/` prefix).
     /// `branch_override` is `--branch`, `name_hint` is the Nombre task name, `from` is `--from`,
     /// `note` is `--note`, `agent` is `--agent`, `is_ai` marks ephemeral checkout.
     #[allow(clippy::too_many_arguments)]
@@ -664,7 +667,7 @@ impl App {
         let Some(root) = kumo_core::worktrees::repo_root(&session.workspace) else {
             return Err(format!("{} is not a git repository", session.workspace.display()));
         };
-        // Orca-aligned branch derivation (no `kumo/` prefix)
+        // Branch derivation (no `kumo/` prefix)
         let branch = kumo_core::worktrees::derive_branch(name_hint, from, branch_override)?;
         if branch.trim().is_empty() { return Err("branch name cannot be empty".into()); }
         let path = kumo_core::worktrees::worktree_path(&root, &branch);

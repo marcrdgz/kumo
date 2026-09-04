@@ -15,6 +15,7 @@ pub mod protocol;
 pub mod theme;
 pub mod update;
 pub mod updater;
+pub mod skill;
 pub mod worktree_meta;
 pub mod worktrees;
 

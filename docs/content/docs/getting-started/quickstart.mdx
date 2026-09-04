@@ -40,6 +40,23 @@ process and weaves it into the sidebar's **AGENTS** tab with a live status
 dot: 🟢 working, 🟠 blocked (waiting for your approval), ⚪ idle. When an
 agent blocks or finishes, kumo chimes so you notice without watching.
 
+## Checkpoints — keep humans in the loop
+
+Every worktree carries a lightweight checkpoint: a free-text `comment` + a
+`status` (`todo` / `in-progress` / `in-review` / `completed`). Humans read it
+in `kumo worktree list --json`; agents keep it fresh **automatically** on every
+slice — the TUI does not edit checkpoints, only agents (via `kumo worktree set`) write them.
+
+After `kumo skills install --global`, `opencode` loads `~/.config/opencode/AGENTS.md` on **every** session, so checkpoints are automatic — no `skill({name:"kumo"})` call needed. Just run `opencode` inside a Kumo pane (`leader+a`) and it will:
+
+```sh
+kumo worktree current --json
+kumo worktree set --comment "reproduced auth failure; testing fix (src/auth.ts)" --status in-progress --json
+```
+
+See [Checkpoints](/docs/guides/checkpoints) for the full pattern and
+troubleshooting when `opencode` doesn't update.
+
 ## Sessions
 
 - <kbd>leader+c</kbd> — create a named session

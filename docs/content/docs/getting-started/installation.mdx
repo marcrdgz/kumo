@@ -47,6 +47,16 @@ kumo update --nightly
     # or: make install
     ```
   </Step>
+  <Step>
+    Install the agent skill so `opencode`/`claude`/`codex` **automatically** learn checkpoints:
+
+    ```sh
+    kumo skills install --global   # writes ~/.config/kumo/kumo-agents.md + mirrors to ~/.config/opencode/AGENTS.md (auto-loaded every session) + skills/kumo/SKILL.md
+    ```
+
+    No manual `skill({name:"kumo"})` call needed — `opencode` loads `~/.config/opencode/AGENTS.md` on every session, so checkpoints are applied automatically inside any Kumo pane (`KUMO_SOCKET_PATH` set). Restart agent sessions after install. Verify with `kumo skills get kumo --full` or `cat ~/.config/opencode/AGENTS.md` inside a pane.
+    If `opencode` still doesn't update checkpoints, see [Checkpoints → Troubleshooting](/docs/guides/checkpoints#troubleshooting-opencode-not-updating-checkpoints).
+  </Step>
 </Steps>
 
 <Callout title="macOS with Xcode ≥ 26.5">
