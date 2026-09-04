@@ -795,7 +795,7 @@ impl App {
         // Validate status via protocol helper
         let status_norm = if let Some(s) = status {
             let trimmed = s.trim();
-            if trimmed.is_empty() { None } else {
+            if trimmed.is_empty() { Some(None) } else {
                 if kumo_protocol::WorktreeStatus::parse(trimmed).is_none() {
                     return Ok(format!("invalid status {trimmed:?} (use todo|in-progress|in-review|completed)"));
                 }
