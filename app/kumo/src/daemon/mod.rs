@@ -4,6 +4,7 @@
 //! masters inherited from a `kumo update` restart.
 
 pub mod agents;
+pub(crate) mod ade;
 pub mod alert;
 pub mod app;
 pub mod frames;

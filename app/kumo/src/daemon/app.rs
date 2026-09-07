@@ -18,6 +18,7 @@ use crate::daemon::state::{self, SavedState};
 use self::tasks::BranchInfo;
 
 mod commands;
+mod ade;
 #[cfg(unix)]
 pub(super) mod server;
 mod tasks;
@@ -84,6 +85,10 @@ type AiScanResult = (Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Opt
 
 #[allow(dead_code)]
 pub struct App {
+    ade: super::ade::AdeRuntime,
+    ade_runs: HashMap<u64, u64>,
+    ade_workspaces: HashMap<PathBuf, (String, u64)>,
+    last_ade_scan: Instant,
     sessions: Vec<Session>,
     active: usize,
     panes: HashMap<u64, Pane>,
@@ -198,6 +203,10 @@ impl App {
                 let _ = startup_update_tx.send(notice);
             });
         let mut app = App {
+            ade: super::ade::AdeRuntime::load(kumo_core::config::ade_file(), false)?,
+            ade_runs: HashMap::new(),
+            ade_workspaces: HashMap::new(),
+            last_ade_scan: Instant::now(),
             sessions: Vec::new(),
             active: 0,
             panes: HashMap::new(),
@@ -291,6 +300,9 @@ impl App {
             #[cfg(not(unix))]
             Launch::Resume(_) => app.new_session()?,
         }
+        app.close_unbound_ade_runs()?;
+        app.refresh_ade()?;
+        app.ade.flush()?;
         Ok(app)
     }
 
@@ -412,6 +424,16 @@ impl App {
                     &self.theme,
                 )?;
                 pane.custom_name = sp.custom_name;
+                if let Some(run_id) = sp.ade_run_id {
+                    if let Err(error) = self.ade.bind_run(run_id, sp.id, pane.pty.process_id()) {
+                        log::warn!("ADE resume binding rejected: {error:#}");
+                    } else {
+                        self.ade_runs.insert(sp.id, run_id);
+                        pane.detected_ai = true;
+                        pane.detected_ai_name = self.ade.snapshot().runs().iter()
+                            .find(|run| run.id == run_id).map(|run| run.agent.clone());
+                    }
+                }
                 self.panes.insert(sp.id, pane);
             }
             let mut tabs = Vec::new();
@@ -475,6 +497,7 @@ impl App {
                 }
                 panes.push(state::SavedPane {
                     id: pid,
+                    ade_run_id: self.ade_runs.get(&pid).copied(),
                     is_ai: pane.is_ai,
                     shell: pane.pty.shell.clone(),
                     program: pane.program.clone(),

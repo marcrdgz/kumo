@@ -51,6 +51,7 @@ struct Client {
     /// Panes for which the client has not yet received a full `PaneFrame`
     /// (first subscribe or after a resize).
     pane_needs_full: HashSet<u64>,
+    ade_revision: Option<u64>,
 }
 
 /// Outcome of queueing one message to a client's writer thread.
@@ -74,6 +75,7 @@ impl Client {
             pending_layout: false,
             panes_subscribed: HashSet::new(),
             pane_needs_full: HashSet::new(),
+            ade_revision: None,
         }
     }
 
@@ -218,11 +220,33 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         }
                     }
                 }
+                Command::AdeList => {
+                    match app.refresh_ade() {
+                        Ok(()) => { let _ = send_to(&mut clients, id, &app.ade_event()); }
+                        Err(error) => { let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "ade".into(), message: error.to_string() }); }
+                    }
+                }
+                Command::AdeFocusRun { run_id } => {
+                    let event = match app.refresh_ade().and_then(|()| app.focus_ade_run(run_id)) {
+                        Ok(()) => DaemonEvent::Reply { message: format!("focused run {run_id}") },
+                        Err(error) => DaemonEvent::Error { code: "ade_run_unavailable".into(), message: error.to_string() },
+                    };
+                    let _ = send_to(&mut clients, id, &event);
+                }
+                Command::AdeAcknowledge { inbox_id } => {
+                    let event = if app.ade.snapshot().inbox().iter().any(|item| item.id == inbox_id) {
+                        app.ade.acknowledge(inbox_id);
+                        DaemonEvent::Reply { message: format!("acknowledged inbox event {inbox_id}") }
+                    } else {
+                        DaemonEvent::Error { code: "ade_inbox_not_found".into(), message: format!("unknown inbox event {inbox_id}") }
+                    };
+                    let _ = send_to(&mut clients, id, &event);
+                }
                 Command::Restart => {
                     // `kumo update` swapped the binary on disk: restart this
                     // process so the new version serves the sessions, inheriting
                     // the live PTY masters so panes and agents survive.
-                    match restart_daemon(&app) {
+                    match app.refresh_ade().and_then(|()| app.ade.flush()).and_then(|()| restart_daemon(&app)) {
                         Ok(_inheritance) => {
                             for client in clients.values_mut() {
                                 let _ = client.tx.try_send(DaemonEvent::Restarting);
@@ -627,6 +651,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
 
         // Render dirty pane content into the caches, then stream what changed.
         let changed: HashSet<u64> = app.tick().into_iter().collect();
+        if app.last_ade_scan.elapsed() >= Duration::from_millis(250) {
+            if let Err(error) = app.refresh_ade() {
+                log::error!("ADE lifecycle update failed: {error:#}");
+            }
+        }
 
         // Prune per-pane server caches for panes that no longer exist (closed by
         // user command or process exit). Without this `pane_bufs`/`pane_cursors`
@@ -690,6 +719,13 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         for (id, client) in clients.iter_mut() {
             if !client.welcomed {
                 continue;
+            }
+            if client.wants_layout && client.ade_revision != Some(app.ade.revision()) {
+                match client.send_msg(app.ade_event()) {
+                    SendOutcome::Ok => client.ade_revision = Some(app.ade.revision()),
+                    SendOutcome::Lagging => {},
+                    SendOutcome::Disconnected => { dead.push(*id); continue; }
+                }
             }
             if let Some(layout) = &layout {
                 if client.wants_layout && (layout_changed || client.pending_layout) {
@@ -776,6 +812,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         let _ = worker.join();
     }
     let _ = std::fs::remove_file(&path);
+    app.ade_runs.clear();
+    app.close_unbound_ade_runs()?;
+    app.ade.flush()?;
     Ok(())
 }
 

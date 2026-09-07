@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     // Control CLI: `kumo session|pane|agent|tab|worktree ...` (and the legacy aliases
     // `ls`/`kill`/`reload`/`server restart`).
     match args.first().map(|s| s.as_str()) {
-        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("ls")
+        Some("session") | Some("pane") | Some("agent") | Some("tab") | Some("worktree") | Some("ade") | Some("ls")
         | Some("list") | Some("kill") | Some("reload") | Some("server") => {
             #[cfg(unix)]
             {
@@ -186,6 +186,9 @@ fn print_help() {
     println!("    kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]");
     println!("    kumo worktree current [--path PATH] [-s SESSION] [--json]");
     println!("    kumo worktree list [-s SESSION] [--json]");
+    println!();
+    println!("ADE:");
+    println!("    kumo ade list | focus RUN_ID | ack INBOX_ID");
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");

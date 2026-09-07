@@ -87,6 +87,21 @@ fn await_frame(stream: &mut UnixStream, full: bool, needle: &str) {
     }
 }
 
+fn await_ade_run(stream: &mut UnixStream) -> (u64, u64, u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "missing ADE run snapshot");
+        send(stream, Command::AdeList);
+        if let Ok(DaemonEvent::AdeSnapshot { workspaces, runs, .. }) = read_framed(stream) {
+            if let Some(run) = runs.first() {
+                return (run.id, run.workspace_id, run.pane_id);
+            }
+            assert!(!workspaces.is_empty(), "ADE snapshot has no workspace");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn both_viewers_receive_incremental_output() {
     let mut daemon = Daemon::start();
@@ -120,4 +135,36 @@ fn real_exec_restart_reaps_exited_shell() {
     send(&mut resumed, Command::PaneWrite { pane_id: pid, bytes: b"exit 7\n".to_vec() });
     daemon.wait_exit();
     assert!(!daemon.root.join("kumo/kumo.sock").exists());
+}
+
+#[test]
+fn ade_run_survives_exec_restart_and_focuses_same_run() {
+    let mut daemon = Daemon::start();
+    let mut stream = daemon.connect();
+    send(&mut stream, Command::SessionList);
+    let session = loop {
+        if let DaemonEvent::SessionList { sessions } = read_framed(&mut stream).unwrap() {
+            break sessions[0].name.clone();
+        }
+    };
+    send(&mut stream, Command::AgentSpawn { session: session.clone(), program: Some("/bin/sh".into()) });
+    let _ = read_framed::<DaemonEvent>(&mut stream);
+    let (run_id, workspace_id, pane_id) = await_ade_run(&mut stream);
+    send(&mut stream, Command::Restart);
+    while read_framed::<DaemonEvent>(&mut stream).is_ok() {}
+    let mut resumed = daemon.connect();
+    let (resumed_id, resumed_workspace, resumed_pane) = await_ade_run(&mut resumed);
+    assert_eq!((resumed_id, resumed_workspace), (run_id, workspace_id));
+    send(&mut resumed, Command::AdeFocusRun { run_id });
+    let _ = read_framed::<DaemonEvent>(&mut resumed);
+    send(&mut resumed, Command::SessionList);
+    loop {
+        if let DaemonEvent::SessionList { sessions } = read_framed(&mut resumed).unwrap() {
+            assert_eq!(sessions[0].focus, Some(resumed_pane));
+            break;
+        }
+    }
+    assert_ne!(pane_id, 0);
+    send(&mut resumed, Command::KillServer);
+    daemon.wait_exit();
 }

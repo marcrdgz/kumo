@@ -106,6 +106,9 @@ pub enum SavedNode {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SavedPane {
     pub id: u64,
+    /// Restored only when adopting the live PTY, never on cold respawn.
+    #[serde(default)]
+    pub ade_run_id: Option<u64>,
     pub is_ai: bool,
     pub shell: String,
     pub program: Option<(String, Vec<String>)>,
@@ -292,6 +295,7 @@ mod tests {
                 panes: vec![
                     SavedPane {
                         id: 11,
+                        ade_run_id: None,
                         is_ai: false,
                         shell: "/bin/zsh".into(),
                         program: None,
@@ -306,6 +310,7 @@ mod tests {
                     },
                     SavedPane {
                         id: 12,
+                        ade_run_id: Some(42),
                         is_ai: true,
                         shell: "/bin/zsh".into(),
                         program: Some(("opencode".into(), Vec::new())),

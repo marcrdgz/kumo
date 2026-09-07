@@ -6,6 +6,7 @@
 //! The wire protocol lives in the pure `kumo-protocol` crate and is re-exported
 //! here as `protocol`.
 
+pub mod ade;
 pub mod color;
 pub mod config;
 pub mod daemon;

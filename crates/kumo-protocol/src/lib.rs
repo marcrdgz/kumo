@@ -52,7 +52,7 @@ mod crossterm;
 /// and their result events. v12 adds isolated `--ai` worktrees: extends
 /// `WorktreeCreate` with `from`/`note`/`agent`/`is_ai` and adds `WorktreeRemove`,
 /// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -847,6 +847,13 @@ pub enum Command {
     /// Re-read the config and apply it live.
     ReloadConfig,
 
+    /// Return the durable ADE workspace/run/inbox snapshot.
+    AdeList,
+    /// Focus the pane associated with a durable ADE run.
+    AdeFocusRun { run_id: u64 },
+    /// Acknowledge a durable ADE inbox event.
+    AdeAcknowledge { inbox_id: u64 },
+
     // -- sessions -----------------------------------------------------------
     /// `kumo session list`: reply with `SessionList`.
     SessionList,
@@ -1199,6 +1206,12 @@ pub enum DaemonEvent {
     ConfigReloaded {
         notice: String,
     },
+    /// Durable ADE state snapshot for CLI and interactive clients.
+    AdeSnapshot {
+        workspaces: Vec<AdeWorkspace>,
+        runs: Vec<AdeRun>,
+        inbox: Vec<AdeInboxItem>,
+    },
     /// Generic reply to a one-shot command (CLI): human-readable outcome.
     Reply {
         message: String,
@@ -1288,6 +1301,39 @@ pub enum DaemonEvent {
         code: String,
         message: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct AdeSnapshot {
+    pub workspaces: Vec<AdeWorkspace>,
+    pub runs: Vec<AdeRun>,
+    pub inbox: Vec<AdeInboxItem>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct AdeWorkspace {
+    pub id: u64,
+    pub path: std::path::PathBuf,
+    pub label: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct AdeRun {
+    pub id: u64,
+    pub workspace_id: u64,
+    pub pane_id: u64,
+    pub agent: String,
+    pub state: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct AdeInboxItem {
+    pub id: u64,
+    pub run_id: u64,
+    pub key: String,
+    pub kind: String,
+    pub created_at_ms: u64,
+    pub acknowledged: bool,
 }
 
 // ---------------------------------------------------------------------------

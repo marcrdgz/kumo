@@ -77,6 +77,11 @@ pub fn state_file() -> PathBuf {
     state_dir().join("state.json")
 }
 
+/// Durable ADE workspace/run/inbox records.
+pub fn ade_file() -> PathBuf {
+    state_dir().join("ade.json")
+}
+
 /// The future daemon's IPC socket (0.4.0 client-server): `runtime_dir()/kumo.sock`.
 /// Reserved now so 0.3.0's state contract and 0.4.0's daemon agree on the path
 /// from day one.

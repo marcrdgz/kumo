@@ -133,6 +133,9 @@ enum CliCmd {
     Kill,
     Reload,
     Restart,
+    AdeList,
+    AdeFocus { run_id: u64 },
+    AdeAck { inbox_id: u64 },
 }
 
 /// `-p` value or a positional selector: all-digits = stable numeric id,
@@ -511,6 +514,9 @@ fn run_inner(args: &[String]) -> Result<()> {
                 CliCmd::WorktreeSet { .. } => unreachable!(),
                 CliCmd::WorktreeCurrent { .. } => unreachable!(),
                 CliCmd::WorktreeList { .. } => unreachable!(),
+                CliCmd::AdeList => Command::AdeList,
+                CliCmd::AdeFocus { run_id } => Command::AdeFocusRun { run_id },
+                CliCmd::AdeAck { inbox_id } => Command::AdeAcknowledge { inbox_id },
             };
 
             // Waiter commands need a long read timeout (agent wait up to 120s, output wait 30s)
@@ -553,11 +559,22 @@ fn parse(args: &[String]) -> Result<CliCmd> {
         "agent" => parse_agent(rest),
         "tab" => parse_tab(rest),
         "worktree" => parse_worktree(rest),
+        "ade" => parse_ade(rest),
         "ls" | "list" => Ok(CliCmd::List),
         "kill" => Ok(CliCmd::Kill),
         "reload" => Ok(CliCmd::Reload),
         "server" if rest.first().map(|s| s.as_str()) == Some("restart") => Ok(CliCmd::Restart),
         other => anyhow::bail!("unknown command {other:?}"),
+    }
+}
+
+fn parse_ade(args: &[String]) -> Result<CliCmd> {
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    match sub {
+        "list" | "ls" => Ok(CliCmd::AdeList),
+        "focus" => Ok(CliCmd::AdeFocus { run_id: args.get(1).ok_or_else(|| anyhow::anyhow!("ade focus needs RUN_ID"))?.parse()? }),
+        "ack" | "acknowledge" => Ok(CliCmd::AdeAck { inbox_id: args.get(1).ok_or_else(|| anyhow::anyhow!("ade ack needs INBOX_ID"))?.parse()? }),
+        other => anyhow::bail!("unknown ade subcommand {other:?}"),
     }
 }
 
@@ -1589,6 +1606,13 @@ fn read_reply_with_timeout(stream: &mut UnixStream, timeout: Duration) -> Result
             }
             Ok(DaemonEvent::AgentStatus { agents }) => {
                 print_agent_status(&agents);
+                return Ok(());
+            }
+            Ok(DaemonEvent::AdeSnapshot { workspaces, runs, inbox }) => {
+                println!("workspaces: {}  runs: {}  inbox: {}", workspaces.len(), runs.len(), inbox.iter().filter(|item| !item.acknowledged).count());
+                for workspace in workspaces { println!("workspace {} {} ({})", workspace.id, workspace.label, workspace.path.display()); }
+                for run in runs { println!("run {} pane={} agent={} state={} workspace={}", run.id, run.pane_id, run.agent, run.state, run.workspace_id); }
+                for item in inbox { println!("inbox {} run={} kind={}{}", item.id, item.run_id, item.kind, if item.acknowledged { " [ack]" } else { "" }); }
                 return Ok(());
             }
             Ok(DaemonEvent::AgentExplain { report }) => {

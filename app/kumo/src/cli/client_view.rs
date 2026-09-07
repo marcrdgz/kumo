@@ -21,7 +21,7 @@ use kumo_core::color::ColorRgb;
 use kumo_core::layout::{self, PaneGeom, TreeGeom};
 use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
-    AgentStatus, Command, CopyHit, DaemonEvent, Layout, LayoutNode, LinkRange, PaneFrame, ScrollState,
+    AdeSnapshot, AgentStatus, Command, CopyHit, DaemonEvent, Layout, LayoutNode, LinkRange, PaneFrame, ScrollState,
     SessionLayout, SplitDir, ToastKind, WireBranch, WireCell, WireWorktree,
 };
 
@@ -136,6 +136,10 @@ struct CopyState {
 struct Inbox {
     /// Index into the actionable list.
     sel: usize,
+    /// Pane identity for preserving selection across layout reordering.
+    pane_id: Option<u64>,
+    /// Durable inbox identity, when the cursor is backed by ADE storage.
+    item_id: Option<u64>,
 }
 
 /// Geometry of the divided sidebar layout (stacked spaces + agent panels),
@@ -587,6 +591,8 @@ pub struct View {
     copy: Option<CopyState>,
     /// Agent-inbox selection while `Mode::Inbox` is active.
     inbox: Option<Inbox>,
+    /// Latest daemon-owned ADE snapshot; optional for compatibility with older daemons.
+    ade_snapshot: Option<AdeSnapshot>,
     /// Test-only override of the `[sidebar] layout` config.
     sidebar_layout_override: Option<SidebarLayout>,
     /// User-adjusted spaces-panel height in rows (divided layout); `None`
@@ -750,6 +756,7 @@ impl View {
             leader,
             keymap,
             layout: None,
+            ade_snapshot: None,
             grids: HashMap::new(),
             rects: Vec::new(),
             splitters: Vec::new(),
@@ -804,6 +811,7 @@ impl View {
             spinner_next: Instant::now(),
         };
         let _ = view.send(&Command::SubscribeLayout);
+        let _ = view.send(&Command::AdeList);
         view
     }
 
@@ -957,6 +965,17 @@ impl View {
                 self.worktree_picker.scroll = 0;
                 self.mark_dirty();
             }
+            DaemonEvent::AdeSnapshot { workspaces, runs, inbox } => {
+                self.ade_snapshot = Some(AdeSnapshot { workspaces, runs, inbox });
+                let item_ids: Vec<u64> = self.durable_inbox_items().iter().map(|item| item.id).collect();
+                if let Some(state) = self.inbox.as_mut() {
+                    if let Some(id) = state.item_id {
+                        state.sel = item_ids.iter().position(|item_id| *item_id == id).unwrap_or(0);
+                    }
+                    state.item_id = item_ids.get(state.sel).copied();
+                }
+                self.mark_dirty();
+            }
             DaemonEvent::Reply { message } => {
                 self.status_msg = Some((message, Instant::now()));
                 self.mark_dirty();
@@ -1028,9 +1047,25 @@ impl View {
 
     fn on_layout(&mut self, layout: Layout) {
         self.layout = Some(layout);
+        if self.mode == Mode::Inbox && self.ade_snapshot.is_none() {
+            let (previous_sel, previous_pane) = self.inbox.as_ref().map(|inbox| (inbox.sel, inbox.pane_id)).unwrap_or((0, None));
+            let actionables = self.inbox_actionables();
+            if actionables.is_empty() {
+                self.close_inbox();
+            } else {
+                let sel = previous_pane.and_then(|pane_id| actionables.iter().position(|(_, pid, _)| *pid == pane_id)).unwrap_or_else(|| previous_sel.min(actionables.len() - 1));
+                let item_id = self.durable_inbox_item(sel).map(|item| item.id);
+                if let Some(inbox) = self.inbox.as_mut() {
+                    inbox.sel = sel;
+                    inbox.pane_id = Some(actionables[sel].1);
+                    inbox.item_id = item_id;
+                }
+            }
+        }
         self.ensure_sidebar_tab_visible();
         self.update_tab_rects();
         self.recompute_geometry();
+        if self.mode == Mode::Inbox { self.inbox_follow_selection(); }
     }
 
     fn on_pane_frame(&mut self, frame: PaneFrame) {
@@ -2287,7 +2322,7 @@ impl View {
             self.mark_dirty();
             return;
         }
-        if self.inbox_actionables().is_empty() {
+        if self.ade_snapshot.is_none() && self.inbox_actionables().is_empty() {
             self.notice = Some(("no agents need attention".to_string(), Instant::now()));
             self.mark_dirty();
             return;
@@ -2300,7 +2335,8 @@ impl View {
             self.sidebar_tab = SidebarTab::Agents;
         }
         self.mode = Mode::Inbox;
-        self.inbox = Some(Inbox { sel: 0 });
+        let pane_id = self.inbox_actionables().first().map(|(_, pid, _)| *pid);
+        self.inbox = Some(Inbox { sel: 0, pane_id, item_id: self.durable_inbox_item(0).map(|item| item.id) });
         self.inbox_follow_selection();
         self.mark_dirty();
     }
@@ -2384,11 +2420,13 @@ impl View {
             self.close_inbox();
             return;
         }
-        let len = self.inbox_actionables().len();
-        if len == 0 {
+        let durable = self.ade_snapshot.is_some();
+        let len = if durable { self.durable_inbox_items().len() } else { self.inbox_actionables().len() };
+        if len == 0 && !durable {
             self.close_inbox();
             return;
         }
+        if len == 0 { self.mark_dirty(); return; }
         let page = (self.content_region_h() as usize).max(3) - 1;
         let cur = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0).min(len - 1);
         let next = match key.code {
@@ -2399,19 +2437,68 @@ impl View {
             KeyCode::Home => 0,
             KeyCode::End => len - 1,
             KeyCode::Enter | KeyCode::Char('\n') => {
+                if let Some(item) = self.durable_inbox_item(cur) {
+                    let _ = self.send(&Command::AdeFocusRun { run_id: item.run_id });
+                    self.close_inbox();
+                    return;
+                }
                 self.inbox_jump();
+                return;
+            }
+            KeyCode::Char('a') => {
+                if let Some(item) = self.durable_inbox_item(cur) {
+                    let _ = self.send(&Command::AdeAcknowledge { inbox_id: item.id });
+                }
                 return;
             }
             _ => cur,
         };
+        let pane_id = if durable { None } else { self.inbox_actionables().get(next).map(|(_, pid, _)| *pid) };
+        let item_id = self.durable_inbox_item(next).map(|item| item.id);
         if let Some(inb) = self.inbox.as_mut() {
             inb.sel = next;
+            inb.pane_id = pane_id;
+            inb.item_id = item_id;
         }
         self.inbox_follow_selection();
         self.mark_dirty();
     }
 
+    fn durable_inbox_item(&self, index: usize) -> Option<&kumo_protocol::AdeInboxItem> {
+        self.ade_snapshot.as_ref()?.inbox.iter().filter(|item| !item.acknowledged).nth(index)
+    }
+
+    fn durable_inbox_items(&self) -> Vec<&kumo_protocol::AdeInboxItem> {
+        self.ade_snapshot.as_ref().map(|s| s.inbox.iter().filter(|item| !item.acknowledged).collect()).unwrap_or_default()
+    }
+
+    fn durable_inbox_visible_start(&self, visible: usize) -> usize {
+        let items = self.durable_inbox_items();
+        let selected = self.inbox.as_ref().and_then(|state| state.item_id).and_then(|id| items.iter().position(|item| item.id == id)).unwrap_or(0);
+        selected.saturating_sub(visible.saturating_sub(1))
+    }
+
     fn on_inbox_mouse(&mut self, m: MouseEvent) -> Result<()> {
+        if self.ade_snapshot.is_some() {
+            let dd = Rect::new(self.cols.saturating_sub(70) / 2, self.rows.saturating_sub(12) / 2, 70.min(self.cols.saturating_sub(4)), 12.min(self.rows.saturating_sub(4)));
+            if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                if dd.contains(Position::new(m.column, m.row)) {
+                    let visible = dd.height.saturating_sub(5) as usize;
+                    let row = self.durable_inbox_visible_start(visible) + m.row.saturating_sub(dd.y + 3) as usize;
+                    let item_ids: Vec<u64> = self.durable_inbox_items().iter().map(|item| item.id).collect();
+                    if row < item_ids.len() {
+                        if let Some(inbox) = self.inbox.as_mut() {
+                            inbox.sel = row;
+                            inbox.item_id = Some(item_ids[row]);
+                        }
+                        self.mark_dirty();
+                    }
+                    return Ok(());
+                }
+                self.close_inbox();
+                return Ok(());
+            }
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Clicking an agent row jumps (sidebar_hit ends the focus
@@ -5170,6 +5257,28 @@ impl View {
         self.render_worktree_create(f);
         self.render_session_close_confirm(f);
         self.render_finder(f);
+        self.render_durable_inbox(f);
+    }
+
+    fn render_durable_inbox(&self, f: &mut Frame) {
+        if self.mode != Mode::Inbox || self.ade_snapshot.is_none() { return; }
+        let theme = self.current_theme();
+        let dd = Rect::new(self.cols.saturating_sub(70) / 2, self.rows.saturating_sub(12) / 2, 70.min(self.cols.saturating_sub(4)), 12.min(self.rows.saturating_sub(4)));
+        draw_modal(f, dd, &theme, self.shadow_floor());
+        text(f, dd.x + 2, dd.y + 1, "ADE inbox", Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD), dd.width.saturating_sub(4));
+        let selected = self.inbox.as_ref().and_then(|i| i.item_id);
+        let items = self.durable_inbox_items();
+        let visible = dd.height.saturating_sub(5) as usize;
+        let start = self.durable_inbox_visible_start(visible);
+        for (n, item) in items.iter().skip(start).take(visible).enumerate() {
+            let workspace = self.ade_snapshot.as_ref().and_then(|snapshot| {
+                let run = snapshot.runs.iter().find(|run| run.id == item.run_id)?;
+                snapshot.workspaces.iter().find(|workspace| workspace.id == run.workspace_id)
+            }).map(|workspace| workspace.label.as_str()).unwrap_or("workspace?");
+            let label = format!("#{}  run {}  {}  [{}]", item.id, item.run_id, item.kind, workspace);
+            render_item_row(f, dd.x + 1, dd.y + 3 + n as u16, dd.width.saturating_sub(4), &label, Some(item.id) == selected, &theme);
+        }
+        text(f, dd.x + 2, dd.bottom().saturating_sub(2), "enter focus · a acknowledge · esc close", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), dd.width.saturating_sub(4));
     }
 
     fn pane_label(&self, pid: u64) -> String {
@@ -7308,6 +7417,7 @@ mod tests {
             leader: bindings::LEADER,
             keymap: bindings::build_keymap(&Default::default()),
             layout: None,
+            ade_snapshot: None,
             grids: HashMap::new(),
             rects: Vec::new(),
             splitters: Vec::new(),
