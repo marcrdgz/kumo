@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender as Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     fn test_pane(is_ai: bool) -> Pane {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(256);
         Pane::spawn(
             1,
             1,
@@ -1857,7 +1857,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         let dir = std::env::temp_dir().join(format!("kumo-pane-cwd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(256);
         let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, &test_theme()).unwrap();
         pane.write(format!("cd {}\n", dir.display()).as_bytes());
         std::thread::sleep(Duration::from_millis(600));
@@ -1880,7 +1880,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
             let _ = std::fs::remove_dir_all(d);
             std::fs::create_dir_all(d).unwrap();
         }
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(256);
         let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, &test_theme()).unwrap();
         pane.write(format!("cd {}\nsleep 3 &\ncd {}\n", bg.display(), cwd_dir.display()).as_bytes());
         std::thread::sleep(Duration::from_millis(900));
@@ -1927,7 +1927,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         // for `Pane::resume` to adopt (mirrors `resumed_pty_keeps_live_shell_io`).
         std::mem::forget(p);
 
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(256);
         let mut resumed = Pane::resume(
             1,
             2,
@@ -1961,7 +1961,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         let child_pid = p.pty.process_id();
         std::mem::forget(p);
 
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(256);
         let mut resumed = Pane::resume(
             1,
             2,
@@ -2056,7 +2056,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         let child_pid = pty.process_id();
         std::mem::forget(pty);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(256);
         let mut resumed = Pane::resume(
             1,
             2,

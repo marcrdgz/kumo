@@ -87,7 +87,7 @@ pub struct App {
     sessions: Vec<Session>,
     active: usize,
     panes: HashMap<u64, Pane>,
-    events_tx: mpsc::Sender<PtyEvent>,
+    events_tx: mpsc::SyncSender<PtyEvent>,
     events_rx: mpsc::Receiver<PtyEvent>,
     shell: String,
     ai: (String, Vec<String>),
@@ -185,7 +185,7 @@ impl App {
             _ => cwd.clone().unwrap_or_else(|| home.clone()),
         };
 
-        let (events_tx, events_rx) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::sync_channel(256);
         let (update_tx, update_rx) = mpsc::channel();
         let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
         let (ai_tx, ai_rx) = mpsc::channel::<AiScanResult>();
@@ -765,13 +765,14 @@ impl App {
             .or_else(|| repo_hint.and_then(kumo_core::worktrees::repo_root))
             .or_else(|| kumo_core::worktrees::repo_root(path));
         let Some(root) = repo_root else { return Err("not a git repository".to_string()); };
-        // Close session using this worktree, if any (keep path for removal)
+        // Git must accept removal before we terminate the user's terminals.
+        // Keep the session index because canonicalization stops working once
+        // Git removes the directory. Failed removal leaves the session intact.
         let session_idx = self.session_for_workspace(path);
+        kumo_core::worktrees::remove_worktree(&root, path, force)?;
         if let Some(idx) = session_idx {
             self.close_session(idx);
         }
-        // Remove the worktree directory (fails if dirty and !force — surface git's message)
-        kumo_core::worktrees::remove_worktree(&root, path, force)?;
         if let Some(br) = branch {
             let still_used = kumo_core::worktrees::list_worktrees(&root).map(|list| list.iter().any(|w| w.branch.as_deref() == Some(&br))).unwrap_or(false);
             if !still_used {
@@ -1501,6 +1502,16 @@ mod tests {
         app.open_session_in_worktree(&wt_path, Some("feat/test")).unwrap();
         assert_eq!(app.sessions.len(), 2, "reuse, not duplicate");
         assert_eq!(app.active, 1);
+
+        // A rejected removal must preserve the live workspace and its panes.
+        std::fs::write(wt_path.join("untracked.txt"), "unfinished work").unwrap();
+        let pane_id = app.sessions[1].active_tab().tree.focus;
+        assert!(app.remove_worktree_at(&wt_path, false, Some(&repo)).is_err());
+        assert_eq!(app.sessions.len(), 2);
+        assert!(app.panes.contains_key(&pane_id));
+        assert!(wt_path.join("untracked.txt").exists());
+        app.remove_worktree_at(&wt_path, true, Some(&repo)).unwrap();
+        assert_eq!(app.sessions.len(), 1);
 
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&cfg);

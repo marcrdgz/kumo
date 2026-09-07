@@ -64,11 +64,11 @@ impl Child for DummyChild {
 }
 
 /// The child process running in the PTY. Spawned panes own a reapable `Child`;
-/// resumed panes can only signal the (now-reparented) process by pid.
+/// resumed panes retain child ownership across exec and reap by pid.
 pub enum PtyChild {
     Spawned(Box<dyn Child + Send + Sync>),
-    /// Child of a *previous* daemon process: after exec it belongs to init, so
-    /// we can signal it by pid but never wait/reap it.
+    /// Child inherited across exec, which preserves parenthood. None means
+    /// the child has already been reaped or transferred to a cleanup worker.
     #[cfg(unix)]
     Pid { pid: Option<i32> },
 }
@@ -261,37 +261,30 @@ impl Pty {
         }
     }
 
-    /// Non-blocking exit probe. Resumed children are reparented to init, which
-    /// reaps them, so liveness is checked with `kill(pid, 0)` instead.
+    /// Non-blocking exit probe. Exec preserves parenthood, so inherited
+    /// children must be reaped too. Clear their identity before PID reuse.
     pub fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
         match &mut self.child {
             PtyChild::Spawned(c) => c.try_wait(),
             #[cfg(unix)]
             PtyChild::Pid { pid } => match pid {
-                Some(pid) => {
-                    let rc = unsafe { libc::kill(*pid, 0) };
-                    if rc == 0 {
-                        Ok(None)
-                    } else {
-                        let err = std::io::Error::last_os_error();
-                        if err.raw_os_error() == Some(libc::ESRCH) {
-                            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
-                        } else {
-                            // EPERM or other: process exists but we lack permission, treat as alive.
-                            Ok(None)
-                        }
-                    }
+                Some(child_pid) => {
+                    let status = wait_inherited(*child_pid)?;
+                    if status.is_some() { *pid = None; }
+                    Ok(status)
                 }
                 None => Ok(Some(portable_pty::ExitStatus::with_exit_code(0))),
             },
         }
     }
 
-    /// Kill the child process. Spawned children are reaped too; resumed
-    /// children were reparented to init by the previous daemon's exec, so they
-    /// are only signalled. Never blocks the daemon loop: the actual `wait` and
-    /// `SIGKILL` fallback run in a detached thread.
+    /// Start cleanup without blocking the daemon command loop.
     pub fn kill(&mut self) {
+        let _ = self.kill_worker();
+    }
+
+    /// Return the cleanup worker so shutdown can wait for reaping.
+    pub fn kill_worker(&mut self) -> Option<std::thread::JoinHandle<()>> {
         // Take ownership of the child so we can move it into a waiter thread.
         #[cfg(unix)]
         let child = std::mem::replace(&mut self.child, PtyChild::Pid { pid: None });
@@ -303,7 +296,7 @@ impl Pty {
         match child {
             PtyChild::Spawned(mut c) => {
                 let _ = c.kill();
-                let _ = std::thread::Builder::new()
+                std::thread::Builder::new()
                     .name("kumo-pty-killer".into())
                     .spawn(move || {
                         use std::time::{Duration, Instant};
@@ -330,27 +323,39 @@ impl Pty {
                                 }
                             }
                         }
-                    });
+                    }).ok()
             }
             #[cfg(unix)]
             PtyChild::Pid { pid: Some(pid) } => {
+                // A reaped child must never be signalled after PID reuse.
+                if !matches!(wait_inherited(pid), Ok(None)) {
+                    return None;
+                }
                 unsafe {
                     // Signal the process group and the pid itself.
                     libc::kill(-pid, libc::SIGTERM);
                     libc::kill(pid, libc::SIGTERM);
                 }
-                let _ = std::thread::Builder::new()
+                std::thread::Builder::new()
                     .name("kumo-pty-killer".into())
                     .spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                        while matches!(wait_inherited(pid), Ok(None)) {
+                            if std::time::Instant::now() >= deadline { break; }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        if !matches!(wait_inherited(pid), Ok(None)) { return; }
                         unsafe {
                             libc::kill(-pid, libc::SIGKILL);
                             libc::kill(pid, libc::SIGKILL);
+                            let mut status = 0;
+                            while libc::waitpid(pid, &mut status, 0) < 0
+                                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}
                         }
-                    });
+                    }).ok()
             }
             #[allow(unreachable_patterns)]
-            _ => {}
+            _ => None,
         }
     }
 
@@ -361,6 +366,30 @@ impl Pty {
         match &self.master {
             PtyMaster::Spawned(m) => m.as_raw_fd(),
             PtyMaster::Inherited { fd } => Some(*fd),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_inherited(pid: i32) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+    use std::os::unix::process::ExitStatusExt;
+    if pid <= 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid child pid"));
+    }
+    loop {
+        let mut status = 0;
+        let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if rc > 0 {
+            return Ok(Some(std::process::ExitStatus::from_raw(status).into()));
+        }
+        if rc == 0 { return Ok(None); }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            // Ownership was already released. Do not probe or signal a PID
+            // that might now belong to an unrelated process.
+            Some(libc::ECHILD) => return Ok(Some(portable_pty::ExitStatus::with_exit_code(0))),
+            _ => return Err(err),
         }
     }
 }
