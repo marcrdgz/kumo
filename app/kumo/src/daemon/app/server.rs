@@ -117,7 +117,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     set_socket_perms(&path)?;
     listener.set_nonblocking(true)?;
 
-    let (input_tx, input_rx) = mpsc::channel::<(usize, Command)>();
+    let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Command)>(256);
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
     let mut last_layout: Option<Arc<Layout>> = None;
@@ -162,7 +162,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         // Commands from clients.
-        while let Ok((id, cmd)) = input_rx.try_recv() {
+        for (id, cmd) in input_rx.try_iter().take(128) {
             match cmd {
                 Command::Attach { protocol, kind, .. } => {
                     if protocol != PROTOCOL_VERSION {
@@ -223,7 +223,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     // process so the new version serves the sessions, inheriting
                     // the live PTY masters so panes and agents survive.
                     match restart_daemon(&app) {
-                        Ok(()) => {
+                        Ok(_inheritance) => {
                             for client in clients.values_mut() {
                                 let _ = client.tx.try_send(DaemonEvent::Restarting);
                             }
@@ -595,7 +595,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         // PTY output and background results.
-        while let Ok(ev) = app.events_rx.try_recv() {
+        for _ in 0..128 {
+            let Ok(ev) = app.events_rx.try_recv() else { break };
             app.on_pty_event(ev);
         }
         while let Ok(notice) = app.update_rx.try_recv() {
@@ -651,10 +652,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             // Evaluate per-pane waiters
             let pids: Vec<u64> = app.panes.keys().copied().collect();
             for pid in pids {
-                if let Some(status) = app.current_agent_status(pid) {
+                if let Some(status) = waits.has_agent_waiters(pid).then(|| app.current_agent_status(pid)).flatten() {
                     wait_events.extend(waits.poll_agent(pid, status.into(), app.pane_os_pid(pid)));
                 }
-                if let Some(pane) = app.panes.get(&pid) {
+                if let Some(pane) = app.panes.get(&pid).filter(|_| waits.has_output_waiters(pid)) {
                     let mut txt = pane.recent_text_tail(16 * 1024);
                     txt.push_str(&pane.vt.bottom_text(200));
                     wait_events.extend(waits.poll_output(pid, &txt, app.pane_os_pid(pid)));
@@ -680,6 +681,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             last_layout = layout.clone();
         }
 
+        // Every subscriber must diff against the same previous generation.
+        // Publish new baselines only after all subscribers have been served.
+        let mut next_bufs = HashMap::new();
+        let mut next_cursors = HashMap::new();
+        let mut prepared_frames = HashMap::new();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
             if !client.welcomed {
@@ -718,25 +724,17 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 });
                 let scroll = pane.map(|p| super::ui::scroll_state(p.scrollbar_data()));
                 let palette = &app.theme.palette;
-                let frame = if was_pending || resized {
-                    // Full frame: no previous buffer to diff against
-                    let buf = frames::detach_buffer(cached);
-                    let frame = frames::pane_frame(pid, &buf, None, pane_cursor, palette, pane, scroll);
-                    pane_bufs.insert(pid, buf);
-                    frame
-                } else {
-                    // Partial frame: diff against the previous buffer
-                    let prev = pane_bufs.get(&pid);
-                    let buf = frames::detach_buffer(cached);
-                    let frame = frames::pane_frame(pid, &buf, prev, pane_cursor, palette, pane, scroll);
-                    pane_bufs.insert(pid, buf);
-                    frame
-                };
+                let full = was_pending || resized;
+                let frame = prepared_frames.entry((pid, full)).or_insert_with(|| {
+                    let buf = next_bufs.entry(pid).or_insert_with(|| frames::detach_buffer(cached));
+                    let prev = if full { None } else { pane_bufs.get(&pid) };
+                    frames::pane_frame(pid, buf, prev, pane_cursor, palette, pane, scroll)
+                }).clone();
                 let cursor_changed = pane_cursors.get(&pid) != Some(&pane_cursor);
                 if !frame.full && frame.rows_dirty.is_empty() && !cursor_changed {
                     continue;
                 }
-                pane_cursors.insert(pid, pane_cursor);
+                next_cursors.insert(pid, pane_cursor);
                 match client.send_msg(DaemonEvent::PaneFrame { frame }) {
                     SendOutcome::Ok => {}
                     SendOutcome::Lagging => {
@@ -749,6 +747,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 }
             }
         }
+        pane_bufs.extend(next_bufs);
+        pane_cursors.extend(next_cursors);
         let idle = changed.is_empty() && !layout_changed && dead.is_empty() && waits.is_empty();
         for id in dead {
             waits.cancel_client(id);
@@ -770,6 +770,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         std::thread::sleep(Duration::from_millis(if idle { 10 } else { 2 }));
     }
 
+    // Start every cleanup together, then wait while all children are reaped.
+    let cleanup: Vec<_> = app.panes.values_mut().filter_map(|p| p.pty.kill_worker()).collect();
+    for worker in cleanup {
+        let _ = worker.join();
+    }
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
@@ -779,21 +784,36 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
 /// pid) and clear `FD_CLOEXEC` on those descriptors so they survive the exec.
 /// `portable-pty` sets the flag at openpty; without clearing it, the masters
 /// would close at exec and the panes (and their processes) would die.
-fn restart_daemon(app: &App) -> Result<()> {
+struct InheritedDescriptors(Vec<(i32, i32)>);
+
+impl Drop for InheritedDescriptors {
+    fn drop(&mut self) {
+        for &(fd, flags) in &self.0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags); }
+        }
+    }
+}
+
+fn restart_daemon(app: &App) -> Result<InheritedDescriptors> {
     let Some(state) = app.to_resume_state() else {
         anyhow::bail!("nothing to resume (no live sessions)");
     };
     let path = kumo_core::config::resume_file();
     crate::daemon::state::save(&path, &state)?;
+    let mut inheritance = InheritedDescriptors(Vec::new());
     for pane in app.panes.values() {
         if let Some(fd) = pane.pty.raw_fd() {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            if flags >= 0 {
-                let _ = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+            if flags < 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            inheritance.0.push((fd, flags));
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error().into());
             }
         }
     }
-    Ok(())
+    Ok(inheritance)
 }
 
 /// Replace the current process image with the `kumo` binary at the current
@@ -839,7 +859,7 @@ fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<DaemonEvent>) {
 /// Read loop for one client: decodes frames and forwards them to the daemon's
 /// main loop (tagged with the client id). A closed socket yields a synthetic
 /// `Detach` so the writer is dropped.
-fn client_read_loop(mut stream: UnixStream, tx: mpsc::Sender<(usize, Command)>, id: usize) {
+fn client_read_loop(mut stream: UnixStream, tx: mpsc::SyncSender<(usize, Command)>, id: usize) {
     let mut reader = kumo_core::protocol::FrameReader::default();
     let mut buf = [0u8; 8192];
     'outer: loop {

@@ -52,10 +52,10 @@ fn color_to_wire(color: ratatui::style::Color, palette: &[ColorRgb; 16]) -> Opti
 pub(crate) fn row_cells(buf: &Buffer, row: u16, cols: u16, palette: &[ColorRgb; 16]) -> Vec<WireCell> {
     let s = row as usize * cols as usize;
     let e = s + cols as usize;
-    let cells: Vec<WireCell> = buf.content[s..e].iter().map(|c| cell_from_ratatui(c, palette)).collect();
-    let mut out = Vec::with_capacity(cells.len());
+    let mut out = Vec::with_capacity(cols as usize);
     let mut prev_wide = false;
-    for mut cell in cells {
+    for cell in &buf.content[s..e] {
+        let mut cell = cell_from_ratatui(cell, palette);
         if prev_wide {
             cell.cell_width = 0;
             out.push(cell);

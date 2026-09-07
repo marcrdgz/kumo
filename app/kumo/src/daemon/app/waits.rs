@@ -297,6 +297,14 @@ impl WaitRegistry {
         self.agent.is_empty() && self.output.is_empty()
     }
 
+    pub fn has_agent_waiters(&self, pane_id: u64) -> bool {
+        self.agent.values().any(|w| w.pane_id == pane_id)
+    }
+
+    pub fn has_output_waiters(&self, pane_id: u64) -> bool {
+        self.output.values().any(|w| w.pane_id == pane_id)
+    }
+
     /// Drain waiters whose pane no longer exists. Returns `(client_id, pane_id)` for callers to error.
     pub fn drain_dead_panes(&mut self, live: &std::collections::HashSet<u64>) -> Vec<(usize, u64)> {
         let mut dead = Vec::new();
