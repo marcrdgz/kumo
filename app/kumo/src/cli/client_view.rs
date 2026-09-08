@@ -1486,12 +1486,6 @@ impl View {
                     self.mark_dirty();
                     return Ok(());
                 }
-                if key.code == KeyCode::Char('/') && self.sidebar_open && self.sidebar_layout() == SidebarLayout::Project {
-                    self.sidebar_filter_active = true;
-                    self.sidebar_filter.clear();
-                    self.mark_dirty();
-                    return Ok(());
-                }
                 let wire: kumo_protocol::WireKeyEvent = key.into();
                 self.send(&Command::Input { key: wire })?;
             }
@@ -1554,6 +1548,16 @@ impl View {
     }
 
     fn run_action(&mut self, action: Action) -> Result<()> {
+        if action == Action::OpenSidebarFilter {
+            if self.sidebar_layout() == SidebarLayout::Project {
+                self.sidebar_open = true;
+                self.sidebar_filter_active = true;
+                self.sidebar_filter.clear();
+                self.recompute_geometry();
+                self.mark_dirty();
+            }
+            return Ok(());
+        }
         let Some(session) = self.active_session().map(|s| s.name.clone()) else {
             self.notice = Some(("no active session".to_string(), Instant::now()));
             self.mark_dirty();
@@ -1677,6 +1681,7 @@ impl View {
             Action::ShowKeybinds => self.open_keybind_overlay(),
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterCopyModeSearch => self.enter_copy_mode_with_search(true),
+            Action::OpenSidebarFilter => unreachable!("sidebar filter handled before session lookup"),
             Action::AgentInbox => self.open_inbox(),
             Action::WorkspaceFinder => self.open_finder(),
         }
