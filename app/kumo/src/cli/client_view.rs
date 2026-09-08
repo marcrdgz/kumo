@@ -189,6 +189,16 @@ struct SidebarReorderDrag {
     moved: bool,
 }
 
+struct TabReorderDrag {
+    session: String,
+    tab_id: u64,
+    tab_name: String,
+    source_idx: usize,
+    target_idx: usize,
+    after: bool,
+    moved: bool,
+}
+
 /// Finder item for the workspace finder (`leader+f`).
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -579,6 +589,7 @@ pub struct View {
     tab_hover: Option<usize>,
     tab_rects: Vec<(usize, Rect, Rect)>, // (tab_idx, pill rect, close rect)
     tab_scroll: usize,
+    tab_reorder_drag: Option<TabReorderDrag>,
     plus_rect: Option<Rect>,
     popup: Popup,
     menu: Menu,
@@ -828,6 +839,7 @@ impl View {
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
+            tab_reorder_drag: None,
             plus_rect: None,
             dirty: true,
             detach_requested: false,
@@ -1393,7 +1405,12 @@ impl View {
         if area.width == 0 { return; }
         self.ensure_tab_visible();
         let has_left = self.tab_scroll > 0;
-        let mut cur_x = area.x + if has_left { 1 } else { 0 };
+        let leading_drop_gap = self
+            .tab_reorder_drag
+            .as_ref()
+            .map(|drag| drag.moved && !drag.after && drag.target_idx == self.tab_scroll)
+            .unwrap_or(false);
+        let mut cur_x = area.x + if has_left { 1 } else { 0 } + u16::from(leading_drop_gap);
         // Reserve for right arrow and plus
         let has_right = self.tab_right_arrow_rect().is_some();
         let plus_w: u16 = 3;
@@ -1437,6 +1454,74 @@ impl View {
             }
         }
         None
+    }
+
+    fn begin_tab_reorder(&mut self, tab_idx: usize) -> bool {
+        let Some((session, tab_id, tab_name)) = self.active_session().and_then(|session| {
+            session
+                .tabs
+                .get(tab_idx)
+                .map(|tab| (session.name.clone(), tab.id, tab.name.clone()))
+        }) else {
+            return false;
+        };
+        self.tab_reorder_drag = Some(TabReorderDrag {
+            session,
+            tab_id,
+            tab_name,
+            source_idx: tab_idx,
+            target_idx: tab_idx,
+            after: false,
+            moved: false,
+        });
+        self.mark_dirty();
+        true
+    }
+
+    fn update_tab_reorder(&mut self, x: u16) -> bool {
+        if self.tab_reorder_drag.is_none() { return false; }
+        let target = self
+            .tab_rects
+            .iter()
+            .min_by_key(|(_, pill, _)| {
+                let center = pill.x as i32 + pill.width as i32 / 2;
+                (x as i32 - center).unsigned_abs()
+            })
+            .map(|(idx, pill, _)| (*idx, x >= pill.x + pill.width / 2));
+        if let Some(drag) = self.tab_reorder_drag.as_mut() {
+            drag.moved = true;
+            if let Some((target_idx, after)) = target {
+                drag.target_idx = target_idx;
+                drag.after = after;
+            }
+        }
+        self.update_tab_rects();
+        self.mark_dirty();
+        true
+    }
+
+    fn finish_tab_reorder(&mut self) -> bool {
+        let Some(drag) = self.tab_reorder_drag.take() else { return false };
+        if drag.moved {
+            if let Some(to_index) = tab_reorder_index(drag.source_idx, drag.target_idx, drag.after) {
+                let _ = self.send(&Command::TabMove {
+                    session: drag.session,
+                    tab_id: drag.tab_id,
+                    to_index,
+                });
+            }
+        } else {
+            let _ = self.send(&Command::TabFocus { session: drag.session, tab: drag.tab_name });
+        }
+        self.update_tab_rects();
+        self.mark_dirty();
+        true
+    }
+
+    fn tab_reorder_indicator_x(&self) -> Option<u16> {
+        let drag = self.tab_reorder_drag.as_ref().filter(|drag| drag.moved)?;
+        let (_, pill, _) = self.tab_rects.iter().find(|(idx, _, _)| *idx == drag.target_idx)?;
+        Some(if drag.after { pill.right() } else { pill.x.saturating_sub(1) })
     }
 
     // ------------------------------------------------------------------
@@ -4013,13 +4098,13 @@ impl View {
                     }
                 }
                 if let Some((idx, is_close)) = self.tab_hit(x, y) {
-                    if let Some(sess) = self.active_session().cloned() {
-                        let tab_name = sess.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
-                        if is_close {
+                    if is_close {
+                        if let Some(sess) = self.active_session().cloned() {
+                            let tab_name = sess.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
                             let _ = self.send(&Command::TabClose { session: sess.name, tab: Some(tab_name) });
-                        } else {
-                            let _ = self.send(&Command::TabFocus { session: sess.name, tab: tab_name });
                         }
+                    } else {
+                        self.begin_tab_reorder(idx);
                     }
                     return Ok(());
                 }
@@ -4112,6 +4197,9 @@ impl View {
                 return Ok(());
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.update_tab_reorder(x) {
+                    return Ok(());
+                }
                 if self.update_sidebar_reorder(y) {
                     return Ok(());
                 }
@@ -4182,6 +4270,9 @@ impl View {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.finish_tab_reorder() {
+                    return Ok(());
+                }
                 if self.finish_sidebar_reorder() {
                     return Ok(());
                 }
@@ -5694,6 +5785,9 @@ impl View {
             let style = Style::default().fg(theme.panel_muted).bg(plus_bg).add_modifier(Modifier::BOLD);
             // Center "+" in the 3-wide pill
             put(f, pr.x + 1, pr.y, "+", style);
+        }
+        if let Some(x) = self.tab_reorder_indicator_x() {
+            put(f, x, area.y, "│", Style::default().fg(theme.accent).bg(bar_bg).add_modifier(Modifier::BOLD));
         }
     }
 
@@ -7423,6 +7517,13 @@ fn move_sidebar_item(order: &mut Vec<String>, source: &str, target: &str, after:
     true
 }
 
+fn tab_reorder_index(source_idx: usize, target_idx: usize, after: bool) -> Option<usize> {
+    if source_idx == target_idx { return None; }
+    let target_idx = target_idx.saturating_sub(usize::from(source_idx < target_idx));
+    let insert_idx = target_idx + usize::from(after);
+    (insert_idx != source_idx).then_some(insert_idx)
+}
+
 /// Shared modal chrome: panel fill, rounded accent border, and a one-cell
 /// drop shadow along the bottom/right edges (clamped to the screen). Every
 /// overlay renders through this so popups read as one design system.
@@ -7734,6 +7835,7 @@ mod tests {
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
+            tab_reorder_drag: None,
             plus_rect: None,
             dirty: false,
             detach_requested: false,
@@ -8820,6 +8922,43 @@ mod tests {
         assert_eq!(order, ["one", "two", "three"]);
         assert!(!move_sidebar_item(&mut order, "one", "one", false));
         assert!(!move_sidebar_item(&mut order, "one", "two", false));
+    }
+
+    #[test]
+    fn tab_reorder_calculates_final_index_after_removal() {
+        assert_eq!(tab_reorder_index(0, 2, true), Some(2));
+        assert_eq!(tab_reorder_index(2, 0, false), Some(0));
+        assert_eq!(tab_reorder_index(0, 1, false), None);
+        assert_eq!(tab_reorder_index(1, 0, true), None);
+        assert_eq!(tab_reorder_index(1, 1, false), None);
+    }
+
+    #[test]
+    fn tab_reorder_reserves_a_new_leading_indicator_column() {
+        let mut view = test_view();
+        view.cols = 120;
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        let first = layout.sessions[0].tabs[0].clone();
+        let mut second = first.clone();
+        second.id = 2;
+        second.name = "two".into();
+        let mut third = first.clone();
+        third.id = 3;
+        third.name = "three".into();
+        layout.sessions[0].tabs = vec![first, second, third];
+        view.layout = Some(layout);
+        view.update_tab_rects();
+        let original_x = view.tab_rects[0].1.x;
+
+        assert!(view.begin_tab_reorder(2));
+        let drag = view.tab_reorder_drag.as_mut().unwrap();
+        drag.target_idx = 0;
+        drag.after = false;
+        drag.moved = true;
+        view.update_tab_rects();
+
+        assert_eq!(view.tab_reorder_indicator_x(), Some(original_x));
+        assert_eq!(view.tab_rects[0].1.x, original_x + 1);
     }
 
     #[test]

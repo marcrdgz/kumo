@@ -83,6 +83,18 @@ impl Session {
     fn find_tab_containing(&self, pid: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.tree.contains(pid))
     }
+    fn move_tab(&mut self, tab_id: u64, to_index: usize) -> bool {
+        let Some(from_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else { return false };
+        let to_index = to_index.min(self.tabs.len().saturating_sub(1));
+        if from_index == to_index { return false; }
+        let active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let tab = self.tabs.remove(from_index);
+        self.tabs.insert(to_index, tab);
+        if let Some(active_id) = active_id {
+            self.active_tab = self.tabs.iter().position(|tab| tab.id == active_id).unwrap_or(0);
+        }
+        true
+    }
 }
 
 type AiScanResult = (Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>);
@@ -973,6 +985,16 @@ impl App {
         Ok(format!("renamed tab to {name:?}"))
     }
 
+    pub(crate) fn move_tab_in_session(&mut self, session: &str, tab_id: u64, to_index: usize) -> bool {
+        let Some(session_idx) = self.sessions.iter().position(|candidate| candidate.name == session) else { return false };
+        if self.sessions[session_idx].move_tab(tab_id, to_index) {
+            self.bump_layout_version();
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn cycle_tab_in_session(&mut self, session: &str, delta: isize) -> Result<String> {
         let Some(s_idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
@@ -1417,6 +1439,26 @@ mod tests {
         };
 
         assert_eq!(session.project_anchor_pane(), Some(11));
+    }
+
+    #[test]
+    fn session_tab_move_preserves_active_tab_identity() {
+        let mut session = Session {
+            id: 1,
+            name: "session".into(),
+            tabs: vec![
+                Tab { id: 1, name: "one".into(), tree: LayoutTree::new(11), zoom: false },
+                Tab { id: 2, name: "two".into(), tree: LayoutTree::new(21), zoom: false },
+                Tab { id: 3, name: "three".into(), tree: LayoutTree::new(31), zoom: false },
+            ],
+            active_tab: 1,
+            workspace: PathBuf::from("/tmp/project"),
+        };
+
+        assert!(session.move_tab(1, 2));
+        assert_eq!(session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(), [2, 3, 1]);
+        assert_eq!(session.tabs[session.active_tab].id, 2);
+        assert!(!session.move_tab(99, 0));
     }
 
     #[test]

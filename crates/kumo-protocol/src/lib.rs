@@ -53,8 +53,8 @@ mod crossterm;
 /// `WorktreeCreate` with `from`/`note`/`agent`/`is_ai` and adds `WorktreeRemove`,
 /// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
 /// v13 adds the main Git worktree path to `SessionLayout` so clients can group
-/// linked worktrees under one project.
-pub const PROTOCOL_VERSION: u32 = 13;
+/// linked worktrees under one project. v14 adds `TabMove`.
+pub const PROTOCOL_VERSION: u32 = 14;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -893,6 +893,12 @@ pub enum Command {
         tab: String,
         new_name: String,
     },
+    /// Move a tab to a zero-based position within its session.
+    TabMove {
+        session: String,
+        tab_id: u64,
+        to_index: usize,
+    },
 
     // -- panes ---------------------------------------------------------------
     /// Split a pane (default: the focused one in `session`'s active tab).
@@ -1482,6 +1488,7 @@ mod tests {
         let cmds = vec![
             Command::SessionList,
             Command::SessionNew { name: Some("session-2".into()), workspace: None },
+            Command::TabMove { session: "session-1".into(), tab_id: 2, to_index: 0 },
             Command::PaneSplit { session: "session-1".into(), dir: SplitDir::Vertical, is_ai: false },
             Command::PaneSendKeys {
                 session: "session-1".into(),
