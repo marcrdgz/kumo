@@ -169,6 +169,26 @@ struct SidebarWidthDrag {
     start_width: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarReorderItem {
+    Project(String),
+    Worktree { project: String, worktree: String, session_idx: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarReorderTarget {
+    Project(String),
+    Worktree { project: String, worktree: String },
+}
+
+struct SidebarReorderDrag {
+    source: SidebarReorderItem,
+    source_y: u16,
+    target: SidebarReorderTarget,
+    after: bool,
+    moved: bool,
+}
+
 /// Finder item for the workspace finder (`leader+f`).
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -535,6 +555,7 @@ enum SidebarRow {
     ProjectHeader { key: String, label: String },
     Worktree(usize),
     InlineAgent(usize, u64, String, AgentStatus),
+    DropIndicator,
 }
 
 pub struct View {
@@ -598,11 +619,14 @@ pub struct View {
     agents_panel_order: AgentPanelOrder,
     sidebar_width: u16,
     sidebar_width_drag: Option<SidebarWidthDrag>,
+    sidebar_reorder_drag: Option<SidebarReorderDrag>,
     finder: WorkspaceFinder,
     sidebar_hover: Option<usize>,
     /// Project groups collapsed in the project sidebar. This is client-only
     /// view state: it intentionally does not affect daemon/session state.
     collapsed_projects: HashSet<String>,
+    project_order: Vec<String>,
+    worktree_order: HashMap<String, Vec<String>>,
     sidebar_filter: String,
     sidebar_filter_active: bool,
     dirty: bool,
@@ -747,6 +771,7 @@ impl View {
         let sidebar_width = kumo_core::config::sidebar().width.unwrap_or_else(|| {
             if kumo_core::config::sidebar().layout == SidebarLayout::Project { PROJECT_DEFAULT_WIDTH } else { SIDEBAR_WIDTH }
         }).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let ui_state = kumo_core::ui_state::load();
         let mut view = View {
             out,
             cols: cols.max(2),
@@ -792,9 +817,12 @@ impl View {
             agents_panel_order: AgentPanelOrder::default(),
             sidebar_width,
             sidebar_width_drag: None,
+            sidebar_reorder_drag: None,
             finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
             sidebar_hover: None,
-            collapsed_projects: kumo_core::ui_state::load().collapsed_projects,
+            collapsed_projects: ui_state.collapsed_projects,
+            project_order: ui_state.project_order,
+            worktree_order: ui_state.worktree_order,
             sidebar_filter: String::new(),
             sidebar_filter_active: false,
             tab_hover: None,
@@ -4000,6 +4028,9 @@ impl View {
                     self.sidebar_width_drag = Some(SidebarWidthDrag { start_x: x, start_width: w });
                     return Ok(());
                 }
+                if self.sidebar_open && x < w && self.begin_sidebar_reorder(y) {
+                    return Ok(());
+                }
                 if self.sidebar_open && x < w && self.sidebar_hit(x, y) {
                     return Ok(());
                 }
@@ -4081,6 +4112,9 @@ impl View {
                 return Ok(());
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.update_sidebar_reorder(y) {
+                    return Ok(());
+                }
                 if let Some(d) = self.sidebar_width_drag {
                     let delta = x as i32 - d.start_x as i32;
                     let w = (d.start_width as i32 + delta).clamp(MIN_SIDEBAR_WIDTH as i32, MAX_SIDEBAR_WIDTH as i32) as u16;
@@ -4148,6 +4182,9 @@ impl View {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.finish_sidebar_reorder() {
+                    return Ok(());
+                }
                 self.drag = None;
                 self.sidebar_drag = None;
                 self.sidebar_width_drag = None;
@@ -4420,17 +4457,11 @@ impl View {
             }
         };
         let mut projects = self.project_groups();
-        projects.sort_by_key(|(_, _, indices)| {
-            indices
-                .iter()
-                .map(|idx| self.project_attention(*idx))
-                .min()
-                .unwrap_or(u8::MAX)
-        });
+        self.sort_project_groups(&mut projects);
         for (project_key, project, mut indices) in projects {
             indices.retain(|idx| self.sidebar_filter_matches(*idx, &project));
             if indices.is_empty() { continue; }
-            indices.sort_by_key(|idx| self.project_attention(*idx));
+            self.sort_project_worktrees(&project_key, &mut indices);
             let attention = indices.iter().filter(|idx| self.project_attention(**idx) < 2).count();
             let title = if attention > 0 { format!("{project} · {attention} pending") } else { project.clone() };
             out.push(SidebarRow::ProjectHeader { key: project_key.clone(), label: title });
@@ -4465,6 +4496,35 @@ impl View {
         }
         out.push(SidebarRow::NewSession);
         out
+    }
+
+    fn sort_project_groups(&self, projects: &mut [(String, String, Vec<usize>)]) {
+        if self.project_order.is_empty() {
+            projects.sort_by_key(|(_, _, indices)| {
+                indices
+                    .iter()
+                    .map(|idx| self.project_attention(*idx))
+                    .min()
+                    .unwrap_or(u8::MAX)
+            });
+        } else {
+            projects.sort_by_key(|(key, _, _)| self.project_order.iter().position(|saved| saved == key).unwrap_or(usize::MAX));
+        }
+    }
+
+    fn sort_project_worktrees(&self, project_key: &str, indices: &mut [usize]) {
+        if let Some(order) = self.worktree_order.get(project_key).filter(|order| !order.is_empty()) {
+            indices.sort_by_key(|idx| {
+                self.layout
+                    .as_ref()
+                    .and_then(|layout| layout.sessions.get(*idx))
+                    .map(session_worktree_key)
+                    .and_then(|key| order.iter().position(|saved| saved == &key))
+                    .unwrap_or(usize::MAX)
+            });
+        } else {
+            indices.sort_by_key(|idx| self.project_attention(*idx));
+        }
     }
 
     fn sidebar_filter_matches(&self, idx: usize, project: &str) -> bool {
@@ -4648,7 +4708,7 @@ impl View {
         self.active_tab_items().len().saturating_sub(region_h) as u16
     }
 
-    fn sidebar_rows(&self) -> Vec<(u16, SidebarRow)> {
+    fn sidebar_rows_base(&self) -> Vec<(u16, SidebarRow)> {
         let mut out = vec![
             (0, SidebarRow::Header("kumo".into())),
             (1, SidebarRow::Spacer),
@@ -4704,6 +4764,23 @@ impl View {
             }
         }
         out
+    }
+
+    fn sidebar_rows(&self) -> Vec<(u16, SidebarRow)> {
+        let mut rows = self.sidebar_rows_base();
+        let insertion_y = self
+            .sidebar_reorder_drag
+            .as_ref()
+            .filter(|drag| drag.moved)
+            .and_then(|drag| self.sidebar_reorder_insertion_y(drag, &rows));
+        if let Some(insertion_y) = insertion_y {
+            for (y, _) in &mut rows {
+                if *y >= insertion_y { *y = y.saturating_add(1); }
+            }
+            rows.push((insertion_y, SidebarRow::DropIndicator));
+            rows.sort_by_key(|(y, _)| *y);
+        }
+        rows
     }
 
     fn sidebar_wheel(&mut self, x: u16, y: u16, up: bool) -> bool {
@@ -4764,6 +4841,202 @@ impl View {
                 self.sidebar_scroll.0 = next as u16;
                 self.mark_dirty();
                 true
+            }
+        }
+    }
+
+    fn begin_sidebar_reorder(&mut self, y: u16) -> bool {
+        if self.sidebar_layout() != SidebarLayout::Project
+            || self.sidebar_filter_active
+            || !self.sidebar_filter.trim().is_empty()
+        {
+            return false;
+        }
+        let row = self.sidebar_rows().into_iter().find(|(ry, _)| *ry == y).map(|(_, row)| row);
+        let source = match row {
+            Some(SidebarRow::ProjectHeader { key, .. }) => SidebarReorderItem::Project(key),
+            Some(SidebarRow::Worktree(session_idx)) => {
+                let Some(session) = self.layout.as_ref().and_then(|layout| layout.sessions.get(session_idx)) else {
+                    return false;
+                };
+                SidebarReorderItem::Worktree {
+                    project: session_project_key(session),
+                    worktree: session_worktree_key(session),
+                    session_idx,
+                }
+            }
+            _ => return false,
+        };
+        let target = match &source {
+            SidebarReorderItem::Project(key) => SidebarReorderTarget::Project(key.clone()),
+            SidebarReorderItem::Worktree { project, worktree, .. } => SidebarReorderTarget::Worktree {
+                project: project.clone(),
+                worktree: worktree.clone(),
+            },
+        };
+        self.sidebar_reorder_drag = Some(SidebarReorderDrag {
+            source,
+            source_y: y,
+            target,
+            after: false,
+            moved: false,
+        });
+        self.mark_dirty();
+        true
+    }
+
+    fn sidebar_reorder_target_at(&self, source: &SidebarReorderItem, y: u16) -> Option<(SidebarReorderTarget, u16)> {
+        let mut project: Option<(String, u16)> = None;
+        let mut worktree: Option<(String, String, u16)> = None;
+        let rows = self.sidebar_rows();
+        if rows.iter().any(|(row_y, row)| *row_y == y && matches!(row, SidebarRow::DropIndicator)) {
+            return None;
+        }
+        for (row_y, row) in rows {
+            if row_y > y { break; }
+            match row {
+                SidebarRow::ProjectHeader { key, .. } => {
+                    project = Some((key, row_y));
+                    worktree = None;
+                }
+                SidebarRow::Worktree(idx) => {
+                    if let Some(session) = self.layout.as_ref().and_then(|layout| layout.sessions.get(idx)) {
+                        worktree = Some((session_project_key(session), session_worktree_key(session), row_y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        match source {
+            SidebarReorderItem::Project(_) => {
+                project.map(|(key, row_y)| (SidebarReorderTarget::Project(key), row_y))
+            }
+            SidebarReorderItem::Worktree { project: source_project, .. } => {
+                worktree
+                    .filter(|(project, _, _)| project == source_project)
+                    .map(|(project, worktree, row_y)| {
+                        (SidebarReorderTarget::Worktree { project, worktree }, row_y)
+                    })
+            }
+        }
+    }
+
+    fn update_sidebar_reorder(&mut self, y: u16) -> bool {
+        let Some(source) = self.sidebar_reorder_drag.as_ref().map(|drag| drag.source.clone()) else {
+            return false;
+        };
+        let target = self.sidebar_reorder_target_at(&source, y);
+        if let Some(drag) = self.sidebar_reorder_drag.as_mut() {
+            drag.moved = true;
+            if let Some((target, target_y)) = target {
+                drag.after = target_y > drag.source_y;
+                drag.target = target;
+            }
+        }
+        self.mark_dirty();
+        true
+    }
+
+    fn finish_sidebar_reorder(&mut self) -> bool {
+        let Some(drag) = self.sidebar_reorder_drag.take() else { return false };
+        if !drag.moved {
+            match drag.source {
+                SidebarReorderItem::Project(key) => self.toggle_project_collapsed(&key),
+                SidebarReorderItem::Worktree { session_idx, .. } => {
+                    if let Some(name) = self.layout.as_ref().and_then(|layout| layout.sessions.get(session_idx)).map(|s| s.name.clone()) {
+                        let _ = self.send(&Command::SessionFocus { name });
+                    }
+                }
+            }
+            self.mark_dirty();
+            return true;
+        }
+
+        let changed = match (drag.source, drag.target) {
+            (SidebarReorderItem::Project(source), SidebarReorderTarget::Project(target)) => {
+                let mut projects = self.project_groups();
+                self.sort_project_groups(&mut projects);
+                let mut order: Vec<String> = projects.into_iter().map(|(key, _, _)| key).collect();
+                let changed = move_sidebar_item(&mut order, &source, &target, drag.after);
+                if changed { self.project_order = order; }
+                changed
+            }
+            (
+                SidebarReorderItem::Worktree { project, worktree: source, .. },
+                SidebarReorderTarget::Worktree { project: target_project, worktree: target },
+            ) if project == target_project => {
+                let mut indices = self
+                    .project_groups()
+                    .into_iter()
+                    .find(|(key, _, _)| key == &project)
+                    .map(|(_, _, indices)| indices)
+                    .unwrap_or_default();
+                self.sort_project_worktrees(&project, &mut indices);
+                let mut order: Vec<String> = indices
+                    .into_iter()
+                    .filter_map(|idx| self.layout.as_ref()?.sessions.get(idx).map(session_worktree_key))
+                    .collect();
+                let changed = move_sidebar_item(&mut order, &source, &target, drag.after);
+                if changed { self.worktree_order.insert(project, order); }
+                changed
+            }
+            _ => false,
+        };
+        if changed {
+            if let Err(e) = kumo_core::ui_state::set_sidebar_order(self.project_order.clone(), self.worktree_order.clone()) {
+                self.notice = Some((format!("could not save sidebar order: {e}"), Instant::now()));
+            }
+        }
+        self.mark_dirty();
+        true
+    }
+
+    fn sidebar_reorder_insertion_y(&self, drag: &SidebarReorderDrag, rows: &[(u16, SidebarRow)]) -> Option<u16> {
+        let target_idx = rows.iter().position(|(_, row)| match (&drag.target, row) {
+            (SidebarReorderTarget::Project(target), SidebarRow::ProjectHeader { key, .. }) => target == key,
+            (SidebarReorderTarget::Worktree { project, worktree }, SidebarRow::Worktree(idx)) => self
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.sessions.get(*idx))
+                .map(|session| session_project_key(session) == *project && session_worktree_key(session) == *worktree)
+                .unwrap_or(false),
+            _ => false,
+        })?;
+        if !drag.after {
+            return Some(rows[target_idx].0);
+        }
+        for (y, row) in rows.iter().skip(target_idx + 1) {
+            let boundary = match &drag.target {
+                SidebarReorderTarget::Project(_) => {
+                    matches!(row, SidebarRow::ProjectHeader { .. } | SidebarRow::NewSession)
+                }
+                SidebarReorderTarget::Worktree { project, .. } => match row {
+                    SidebarRow::Worktree(idx) => self
+                        .layout
+                        .as_ref()
+                        .and_then(|layout| layout.sessions.get(*idx))
+                        .map(|session| session_project_key(session) == *project)
+                        .unwrap_or(false),
+                    SidebarRow::ProjectHeader { .. } | SidebarRow::NewSession => true,
+                    _ => false,
+                },
+            };
+            if boundary { return Some(*y); }
+        }
+        Some(self.sidebar_footer_y())
+    }
+
+    fn toggle_project_collapsed(&mut self, key: &str) {
+        let collapsed = !self.collapsed_projects.contains(key);
+        if collapsed { self.collapsed_projects.insert(key.to_string()); } else { self.collapsed_projects.remove(key); }
+        if let Some(path) = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.sessions.iter().find(|session| session_project_key(session) == key))
+            .map(|session| session.project_root.clone().unwrap_or_else(|| session.workspace.clone()))
+        {
+            if let Err(e) = kumo_core::ui_state::set_project_collapsed(&path, collapsed) {
+                self.notice = Some((format!("could not save sidebar state: {e}"), Instant::now()));
             }
         }
     }
@@ -4846,13 +5119,7 @@ impl View {
                     return true;
                 }
                 SidebarRow::ProjectHeader { key, .. } => {
-                    let collapsed = !self.collapsed_projects.contains(&key);
-                    if collapsed { self.collapsed_projects.insert(key.clone()); } else { self.collapsed_projects.remove(&key); }
-                    if let Some(path) = self.layout.as_ref().and_then(|l| l.sessions.iter().find(|s| session_project_key(s) == key)).map(|s| s.project_root.clone().unwrap_or_else(|| s.workspace.clone())) {
-                        if let Err(e) = kumo_core::ui_state::set_project_collapsed(&path, collapsed) {
-                            self.notice = Some((format!("could not save sidebar state: {e}"), Instant::now()));
-                        }
-                    }
+                    self.toggle_project_collapsed(&key);
                     self.mark_dirty();
                     return true;
                 }
@@ -5485,6 +5752,11 @@ impl View {
                     if w > 1 {
                         text(f, x, y, &line, style, w.saturating_sub(1));
                     }
+                }
+                SidebarRow::DropIndicator => {
+                    let style = Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD);
+                    let line = "─".repeat(w.saturating_sub(4).max(1) as usize);
+                    text(f, x + 2, y, &line, style, w.saturating_sub(4).max(1));
                 }
                 SidebarRow::GroupHeader(status, count) => {
                     let dim = matches!(status, AgentStatus::Idle | AgentStatus::Unknown);
@@ -7135,6 +7407,22 @@ fn session_project_key(session: &SessionLayout) -> String {
     )
 }
 
+fn session_worktree_key(session: &SessionLayout) -> String {
+    kumo_core::ui_state::canonical_project_key(&session.workspace)
+}
+
+fn move_sidebar_item(order: &mut Vec<String>, source: &str, target: &str, after: bool) -> bool {
+    if source == target { return false; }
+    let Some(source_idx) = order.iter().position(|key| key == source) else { return false };
+    let Some(target_idx) = order.iter().position(|key| key == target) else { return false };
+    let target_idx = target_idx.saturating_sub(usize::from(source_idx < target_idx));
+    let insert_idx = target_idx + usize::from(after);
+    if insert_idx == source_idx { return false; }
+    order.remove(source_idx);
+    order.insert(insert_idx, source.to_string());
+    true
+}
+
 /// Shared modal chrome: panel fill, rounded accent border, and a one-cell
 /// drop shadow along the bottom/right edges (clamped to the screen). Every
 /// overlay renders through this so popups read as one design system.
@@ -7435,9 +7723,12 @@ mod tests {
             agents_panel_order: AgentPanelOrder::default(),
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_width_drag: None,
+            sidebar_reorder_drag: None,
             finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
             sidebar_hover: None,
             collapsed_projects: HashSet::new(),
+            project_order: Vec::new(),
+            worktree_order: HashMap::new(),
             sidebar_filter: String::new(),
             sidebar_filter_active: false,
             tab_hover: None,
@@ -8472,6 +8763,125 @@ mod tests {
         let rows = view.project_content();
         let first = rows.iter().find_map(|r| match r { SidebarRow::Worktree(i) => Some(view.session_name(*i)), _ => None });
         assert_eq!(first.as_deref(), Some("blocked"));
+    }
+
+    #[test]
+    fn project_sidebar_manual_worktree_order_overrides_attention() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "idle".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-idle");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project"));
+        let mut blocked = panes_layout(&[(9, AgentStatus::Blocked)]).sessions.remove(0);
+        blocked.name = "blocked".into();
+        blocked.workspace = std::path::PathBuf::from("/tmp/project-blocked");
+        blocked.project_root = Some(std::path::PathBuf::from("/tmp/project"));
+        let project = session_project_key(&layout.sessions[0]);
+        view.worktree_order.insert(
+            project,
+            vec![session_worktree_key(&layout.sessions[0]), session_worktree_key(&blocked)],
+        );
+        layout.sessions.push(blocked);
+        view.layout = Some(layout);
+
+        let first = view.project_content().into_iter().find_map(|row| match row {
+            SidebarRow::Worktree(i) => Some(view.session_name(i)),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn project_sidebar_manual_project_order_overrides_attention() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "first".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/first");
+        let mut urgent = panes_layout(&[(9, AgentStatus::Blocked)]).sessions.remove(0);
+        urgent.name = "urgent".into();
+        urgent.workspace = std::path::PathBuf::from("/tmp/urgent");
+        view.project_order = vec![session_project_key(&layout.sessions[0]), session_project_key(&urgent)];
+        layout.sessions.push(urgent);
+        view.layout = Some(layout);
+
+        let first = view.project_content().into_iter().find_map(|row| match row {
+            SidebarRow::ProjectHeader { key, .. } => Some(key),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("/tmp/first"));
+    }
+
+    #[test]
+    fn sidebar_reorder_moves_before_and_after_target() {
+        let mut order = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        assert!(move_sidebar_item(&mut order, "one", "three", true));
+        assert_eq!(order, ["two", "three", "one"]);
+        assert!(move_sidebar_item(&mut order, "one", "two", false));
+        assert_eq!(order, ["one", "two", "three"]);
+        assert!(!move_sidebar_item(&mut order, "one", "one", false));
+        assert!(!move_sidebar_item(&mut order, "one", "two", false));
+    }
+
+    #[test]
+    fn sidebar_reorder_rejects_worktree_drop_in_another_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/one");
+        let mut other = panes_layout(&[(2, AgentStatus::Idle)]).sessions.remove(0);
+        other.name = "other".into();
+        other.workspace = std::path::PathBuf::from("/tmp/two");
+        layout.sessions.push(other);
+        view.layout = Some(layout);
+        let worktree_rows: Vec<u16> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(y, row)| matches!(row, SidebarRow::Worktree(_)).then_some(y))
+            .collect();
+
+        assert!(view.begin_sidebar_reorder(worktree_rows[0]));
+        assert!(view.update_sidebar_reorder(worktree_rows[1]));
+        let drag = view.sidebar_reorder_drag.as_ref().unwrap();
+        let SidebarReorderTarget::Worktree { project, .. } = &drag.target else { panic!("worktree target") };
+        assert_eq!(project, "/tmp/one");
+    }
+
+    #[test]
+    fn sidebar_reorder_bar_uses_worktree_boundaries() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "one".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-one");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project"));
+        let mut two = layout.sessions[0].clone();
+        two.name = "two".into();
+        two.workspace = std::path::PathBuf::from("/tmp/project-two");
+        layout.sessions.push(two);
+        view.layout = Some(layout);
+        let project = session_project_key(&view.layout.as_ref().unwrap().sessions[0]);
+        let first_key = session_worktree_key(&view.layout.as_ref().unwrap().sessions[0]);
+        let worktree_rows: Vec<u16> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(y, row)| matches!(row, SidebarRow::Worktree(_)).then_some(y))
+            .collect();
+        let drag = SidebarReorderDrag {
+            source: SidebarReorderItem::Worktree {
+                project: project.clone(),
+                worktree: session_worktree_key(&view.layout.as_ref().unwrap().sessions[1]),
+                session_idx: 1,
+            },
+            source_y: worktree_rows[1],
+            target: SidebarReorderTarget::Worktree { project, worktree: first_key },
+            after: true,
+            moved: true,
+        };
+
+        let base_rows = view.sidebar_rows_base();
+        assert_eq!(view.sidebar_reorder_insertion_y(&drag, &base_rows), Some(worktree_rows[1]));
+        view.sidebar_reorder_drag = Some(drag);
+        let visual_rows = view.sidebar_rows();
+        assert!(visual_rows.iter().any(|(y, row)| *y == worktree_rows[1] && matches!(row, SidebarRow::DropIndicator)));
+        assert!(visual_rows.iter().any(|(y, row)| *y == worktree_rows[1] + 1 && matches!(row, SidebarRow::Worktree(1))));
     }
 
     #[test]
