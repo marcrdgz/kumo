@@ -534,7 +534,6 @@ enum SidebarRow {
     SectionLabel(String, Option<String>),
     ProjectHeader { key: String, label: String },
     Worktree(usize),
-    WorktreeCheckpoint(usize, String),
     InlineAgent(usize, u64, String, AgentStatus),
 }
 
@@ -566,7 +565,6 @@ pub struct View {
     keybind_overlay: KeybindOverlay,
     settings: SettingsPanel,
     worktree_picker: WorktreePicker,
-    worktree_items: HashMap<String, Vec<WireWorktree>>,
     worktree_create: WorktreeCreateDialog,
     session_close_confirm: SessionCloseConfirm,
     pane_numbers: Option<Instant>,
@@ -773,7 +771,6 @@ impl View {
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
-            worktree_items: HashMap::new(),
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
@@ -961,15 +958,11 @@ impl View {
                 }
                 self.mark_dirty();
             }
-            DaemonEvent::Worktrees { session, items } => {
-                self.worktree_items.insert(session.clone(), items.clone());
-                let picker_session = self.layout.as_ref().and_then(|layout| layout.sessions.get(self.worktree_picker.session)).map(|session| session.name.as_str());
-                if self.worktree_picker.open && picker_session == Some(session.as_str()) {
-                    self.worktree_picker.items = items;
-                    self.worktree_picker.error = None;
-                    self.worktree_picker.selected = 0;
-                    self.worktree_picker.scroll = 0;
-                }
+            DaemonEvent::Worktrees { items } => {
+                self.worktree_picker.items = items;
+                self.worktree_picker.error = None;
+                self.worktree_picker.selected = 0;
+                self.worktree_picker.scroll = 0;
                 self.mark_dirty();
             }
             DaemonEvent::Reply { message } => {
@@ -1042,14 +1035,7 @@ impl View {
     }
 
     fn on_layout(&mut self, layout: Layout) {
-        let sessions: HashSet<String> = layout.sessions.iter().map(|session| session.name.clone()).collect();
-        self.worktree_items.retain(|session, _| sessions.contains(session));
         self.layout = Some(layout);
-        for session in sessions {
-            if !self.worktree_items.contains_key(&session) {
-                let _ = self.send(&Command::WorktreeList { session });
-            }
-        }
         self.ensure_sidebar_tab_visible();
         self.update_tab_rects();
         self.recompute_geometry();
@@ -1116,12 +1102,6 @@ impl View {
             }
         }
         best.map(|(_, s)| s)
-    }
-
-    fn worktree_checkpoint_label(&self, session_idx: usize) -> Option<String> {
-        let session = self.layout.as_ref()?.sessions.get(session_idx)?;
-        let item = self.worktree_items.get(&session.name)?.iter().find(|item| item.path == session.workspace)?;
-        format_worktree_checkpoint(item.status.as_deref(), item.comment.as_deref())
     }
 
     fn panes_area(&self) -> Rect {
@@ -4448,9 +4428,6 @@ impl View {
             if self.collapsed_projects.contains(&project_key) { continue; }
             for idx in indices {
                 out.push(SidebarRow::Worktree(idx));
-                if let Some(checkpoint) = self.worktree_checkpoint_label(idx) {
-                    out.push(SidebarRow::WorktreeCheckpoint(idx, checkpoint));
-                }
                 if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
                     out.push(SidebarRow::Branch(idx, branch));
                 }
@@ -4484,7 +4461,6 @@ impl View {
         let Some(session) = self.layout.as_ref().and_then(|l| l.sessions.get(idx)) else { return false; };
         let mut haystack = format!("{} {} {}", project, session.name, session.workspace.display()).to_lowercase();
         if let Some(branch) = &session.branch { haystack.push_str(&format!(" {}", branch.name)); }
-        if let Some(checkpoint) = self.worktree_checkpoint_label(idx) { haystack.push_str(&format!(" {checkpoint}")); }
         for (_, pane) in session_panes_all(session) {
             if let Some(agent) = &pane.agent { haystack.push_str(&format!(" {}", agent.name)); }
         }
@@ -4495,13 +4471,8 @@ impl View {
         let status = self.worktree_primary_status(idx);
         if matches!(status, Some(AgentStatus::Blocked)) { return 0; }
         if matches!(status, Some(AgentStatus::Done)) { return 1; }
-        let checkpoint = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).and_then(|s| {
-            self.worktree_items.get(&s.name)?.iter().find(|item| item.path == s.workspace).and_then(|item| item.status.as_deref())
-        });
-        match checkpoint {
-            Some("completed") => 1,
-            Some("in-progress") | Some("in-review") => 2,
-            _ if matches!(status, Some(AgentStatus::Working)) => 2,
+        match status {
+            Some(AgentStatus::Working) => 2,
             _ if matches!(status, Some(AgentStatus::Idle)) => 3,
             _ => 4,
         }
@@ -4854,7 +4825,7 @@ impl View {
                     self.mark_dirty();
                     return true;
                 }
-                SidebarRow::Worktree(i) | SidebarRow::WorktreeCheckpoint(i, _) => {
+                SidebarRow::Worktree(i) => {
                     let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
                     if let Some(name) = name {
                         let _ = self.send(&Command::SessionFocus { name });
@@ -4900,7 +4871,6 @@ impl View {
                 SidebarRow::Session(i) => Some(i),
                 SidebarRow::Branch(i, _) => Some(i),
                 SidebarRow::Worktree(i) => Some(i),
-                SidebarRow::WorktreeCheckpoint(i, _) => Some(i),
                 _ => None,
             })
     }
@@ -5782,14 +5752,6 @@ impl View {
                     } else { name.clone() };
                     let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
                     text(f, x + 3, y, &shown, name_style, name_avail);
-                }
-                SidebarRow::WorktreeCheckpoint(i, checkpoint) => {
-                    let active = self.layout.as_ref().map(|layout| layout.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
-                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
-                    if bg != RColor::Reset { fill(f, Rect::new(x, y, w, 1), bg); }
-                    let avail = max.saturating_sub(5).max(1);
-                    let shown = truncate_sidebar_label(&checkpoint, avail);
-                    text(f, x + 4, y, &shown, Style::default().fg(theme.panel_muted).bg(bg), avail);
                 }
                 SidebarRow::InlineAgent(i, pid, name, status) => {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
@@ -7385,25 +7347,6 @@ fn fit_worktree_path(path: &std::path::Path, avail: usize) -> String {
     format!("…{tail}")
 }
 
-fn format_worktree_checkpoint(status: Option<&str>, comment: Option<&str>) -> Option<String> {
-    let status = status.map(str::trim).filter(|status| !status.is_empty());
-    let comment = comment.and_then(|comment| comment.lines().next()).map(str::trim).filter(|comment| !comment.is_empty());
-    match (status, comment) {
-        (Some(status), Some(comment)) => Some(format!("{status} · {comment}")),
-        (Some(status), None) => Some(status.to_string()),
-        (None, Some(comment)) => Some(comment.to_string()),
-        (None, None) => None,
-    }
-}
-
-fn truncate_sidebar_label(label: &str, avail: u16) -> String {
-    let avail = avail as usize;
-    if label.chars().count() <= avail { return label.to_string(); }
-    if avail < 2 { return label.chars().take(avail).collect(); }
-    let prefix: String = label.chars().take(avail - 1).collect();
-    format!("{prefix}…")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7420,21 +7363,6 @@ mod tests {
             faint: false,
             cell_width: width,
         }
-    }
-
-    #[test]
-    fn sidebar_checkpoint_uses_status_and_first_comment_line() {
-        assert_eq!(format_worktree_checkpoint(Some("in-review"), Some("fix auth flow\nrun tests")), Some("in-review · fix auth flow".to_string()));
-        assert_eq!(format_worktree_checkpoint(Some("completed"), None), Some("completed".to_string()));
-        assert_eq!(format_worktree_checkpoint(None, Some("  note only  ")), Some("note only".to_string()));
-        assert_eq!(format_worktree_checkpoint(None, Some("\nignored")), None);
-    }
-
-    #[test]
-    fn sidebar_checkpoint_truncates_to_available_width() {
-        assert_eq!(truncate_sidebar_label("in-review · fix authentication", 12), "in-review ·…");
-        assert_eq!(truncate_sidebar_label("ready", 12), "ready");
-        assert_eq!(truncate_sidebar_label("ready", 1), "r");
     }
 
     fn grid() -> Grid {
@@ -7466,7 +7394,6 @@ mod tests {
             keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
-            worktree_items: HashMap::new(),
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
             pane_numbers: None,
