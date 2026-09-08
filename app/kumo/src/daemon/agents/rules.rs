@@ -112,6 +112,8 @@ struct Test {
     yes_no_line: Option<bool>,
     #[serde(default, rename = "braille-in")]
     braille_in: Option<bool>,
+    #[serde(default)]
+    nonempty: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,7 @@ enum Matcher {
     BtwOverlay,
     YesNoLine,
     BrailleIn,
+    NonEmpty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +269,7 @@ impl TestOwned {
             Matcher::YesNoLine => text.lines().any(yes_no_line).then(|| "yes/no options".to_string()),
             Matcher::BrailleIn => text.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
                 .then(|| "braille spinner".to_string()),
+            Matcher::NonEmpty => (!text.trim().is_empty()).then(|| "non-empty text".to_string()),
         };
         marker.map(|marker| MarkerMatch { marker, region: self.region })
     }
@@ -441,6 +445,9 @@ fn compile_entry(entry: Entry) -> Result<EntryOwned, ManifestError> {
             if t.braille_in.unwrap_or(false) {
                 matchers.push(Matcher::BrailleIn);
             }
+            if t.nonempty.unwrap_or(false) {
+                matchers.push(Matcher::NonEmpty);
+            }
             if matchers.len() != 1 {
                 return Err(ManifestError(format!(
                     "test on region {:?} must use exactly one matcher",
@@ -471,6 +478,10 @@ const BUNDLED: &[(&str, &str)] = &[
     (
         "opencode",
         include_str!("rules/opencode.toml"),
+    ),
+    (
+        "codex",
+        include_str!("rules/codex.toml"),
     ),
 ];
 
@@ -597,6 +608,59 @@ mod tests {
             let man = toml::from_str::<Manifest>(src).expect("bundled toml parses");
             compile(man, Some(id)).expect("bundled manifest validates");
         }
+    }
+
+    #[test]
+    fn codex_manifest_classifies_common_states() {
+        let rules = agent_from(include_str!("rules/codex.toml"), "codex").unwrap();
+        let blocked = snap("Do you want to continue?\n❯ yes", "", "gpt-5");
+        assert!(rules.blocked(&blocked), "selected answer confirms weak prompt");
+
+        let quoted_prompt = snap("the agent asked: would you like to continue?", "", "gpt-5");
+        assert!(
+            !rules.blocked(&quoted_prompt),
+            "weak wording without answer chrome is not a live blocker"
+        );
+
+        let trust = snap(
+            "> You are in ~/code/kumo\nDo you trust the contents of this directory?",
+            "",
+            "gpt-5",
+        );
+        assert!(rules.blocked(&trust), "startup trust dialog blocks");
+
+        let update = snap(
+            "Update available!\nUpdate now\nSkip until next version\nPress enter to continue",
+            "",
+            "gpt-5",
+        );
+        assert!(rules.blocked(&update), "startup update dialog blocks");
+
+        let incomplete_update = snap("Update available!\nUpdate now\nPress enter to continue", "", "gpt-5");
+        assert!(
+            !rules.blocked(&incomplete_update),
+            "ordinary update output is not the startup confirmation"
+        );
+
+        let working = snap("", "", "⠋ gpt-5");
+        assert!(rules.working(&working));
+        assert!(!rules.idle(&working));
+
+        let interrupted = snap("■ Conversation interrupted", "• Working (esc to interrupt)", "gpt-5");
+        assert!(!rules.working(&interrupted), "stale working footer is ignored after interruption");
+
+        let footer_working = snap("", "• Working (esc to interrupt)", "gpt-5");
+        assert!(rules.working(&footer_working), "live working footer matches");
+
+        let idle = snap("", "", "gpt-5");
+        assert!(rules.idle(&idle));
+
+        let viewer = snap(
+            "↑/↓ to scroll\npgup/pgdn to move\nhome/end to jump\nq to quit\nesc to edit prev",
+            "",
+            "gpt-5",
+        );
+        assert!(!rules.idle(&viewer), "transcript viewer is not an idle prompt");
     }
 
     #[test]

@@ -136,11 +136,14 @@ pub(crate) fn ends_with_ci(haystack: &str, needle: &str) -> bool {
     true
 }
 
-/// Detect the agent lifecycle state across every loaded agent. A blocked
-/// signal wins over working; working wins over explicit idle; `Unknown` is
-/// the fallback when no signal matches.
-pub fn detect(snap: &Snapshot) -> AgentStatus {
+/// Detect the lifecycle state, restricting evaluation to `agent_id` when it
+/// names a loaded manifest. An unknown ID preserves the legacy all-rules
+/// fallback until process detection identifies the CLI.
+pub fn detect_for(snap: &Snapshot, agent_id: Option<&str>) -> AgentStatus {
     rules::with_rules(|r| {
+        if let Some(agent) = agent_id.and_then(|id| r.agents.iter().find(|agent| agent.id == id)) {
+            return detect_agent(agent, snap);
+        }
         for agent in &r.agents {
             if agent.blocked(snap) {
                 return AgentStatus::Blocked;
@@ -158,6 +161,18 @@ pub fn detect(snap: &Snapshot) -> AgentStatus {
         }
         AgentStatus::Unknown
     })
+}
+
+fn detect_agent(agent: &rules::AgentRules, snap: &Snapshot) -> AgentStatus {
+    if agent.blocked(snap) {
+        AgentStatus::Blocked
+    } else if agent.working(snap) {
+        AgentStatus::Working
+    } else if agent.idle(snap) {
+        AgentStatus::Idle
+    } else {
+        AgentStatus::Unknown
+    }
 }
 
 /// The detection precedence chain, in human-readable form. A blocked signal
@@ -207,15 +222,19 @@ pub(crate) struct Explanation {
     pub idle: Vec<AgentEvidence>,
 }
 
-/// Detect *and* explain, on demand for `kumo agent explain`: computes each
-/// agent's per-region marker evidence and derives the status with the same
-/// precedence `detect` uses (kept in sync by the consistency tests below).
-pub(crate) fn explain(snap: &Snapshot) -> Explanation {
+/// Explain lifecycle detection, restricting evidence to a known agent CLI.
+/// An unknown ID retains the all-rules fallback used by [`detect_for`].
+pub(crate) fn explain_for(snap: &Snapshot, agent_id: Option<&str>) -> Explanation {
     let mut blocked = Vec::new();
     let mut working = Vec::new();
     let mut idle = Vec::new();
     rules::with_rules(|r| {
-        for agent in &r.agents {
+        let known = agent_id.is_some_and(|id| r.agents.iter().any(|agent| agent.id == id));
+        for agent in r
+            .agents
+            .iter()
+            .filter(|agent| !known || agent_id == Some(agent.id.as_str()))
+        {
             let ev = agent.evidence(snap);
             if !ev.blocked.is_empty() {
                 blocked.push(ev.clone());
@@ -290,7 +309,7 @@ mod tests {
             "esc interrupt",
             "",
         );
-        assert_eq!(detect(&s), AgentStatus::Blocked);
+        assert_eq!(detect_for(&s, None), AgentStatus::Blocked);
     }
 
     #[test]
@@ -298,21 +317,21 @@ mod tests {
         // Claude's OSC title spinner is enough, even with an opencode-like
         // empty screen.
         let s = snap("", "", "\u{280b} Fixing the bug");
-        assert_eq!(detect(&s), AgentStatus::Working);
+        assert_eq!(detect_for(&s, None), AgentStatus::Working);
     }
 
     #[test]
     fn idle_when_any_agent_reports_an_idle_marker() {
         // opencode's prompt box (ask anything) is an explicit idle marker.
         let s = snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "", "");
-        assert_eq!(detect(&s), AgentStatus::Idle);
+        assert_eq!(detect_for(&s, None), AgentStatus::Idle);
     }
 
     #[test]
     fn unknown_is_the_fallback() {
         // No blocked/working/idle marker matches: classification failed.
         let s = snap("opencode 1.18.15\n~/.opencode\n", "", "");
-        assert_eq!(detect(&s), AgentStatus::Unknown);
+        assert_eq!(detect_for(&s, None), AgentStatus::Unknown);
     }
 
     #[test]
@@ -350,7 +369,7 @@ mod tests {
             snap("assistant: do you want to proceed? (y/n)\n\u{276f} ", "", ""),
         ];
         for s in &snapshots {
-            assert_eq!(detect(s), explain(s).status, "status mismatch for {s:?}");
+            assert_eq!(detect_for(s, None), explain_for(s, None).status, "status mismatch for {s:?}");
             assert_eq!(opencode::blocked(s), !opencode::evidence(s).blocked.is_empty());
             assert_eq!(opencode::working(s), !opencode::evidence(s).working.is_empty());
             assert_eq!(opencode::idle(s), !opencode::evidence(s).idle.is_empty());
@@ -364,7 +383,7 @@ mod tests {
     fn explain_reports_region_and_marker() {
         // opencode idle marker lives in the screen region; the status derives.
         let s = snap("opencode 1.18.15\nAsk anything... \"\"\nesc dismiss", "esc dismiss", "");
-        let exp = explain(&s);
+        let exp = explain_for(&s, None);
         assert_eq!(exp.status, AgentStatus::Idle);
         assert_eq!(exp.idle.len(), 1);
         let ev = &exp.idle[0];
@@ -377,7 +396,7 @@ mod tests {
         // Both a blocked dialog and a working footer are present: explain
         // records both but the status is Blocked (precedence).
         let s = snap("△ Permission required\nAllow once\nesc interrupt", "esc interrupt", "");
-        let exp = explain(&s);
+        let exp = explain_for(&s, None);
         assert_eq!(exp.status, AgentStatus::Blocked);
         assert_eq!(exp.blocked.len(), 1);
         assert_eq!(exp.working.len(), 1);
