@@ -532,7 +532,7 @@ enum SidebarRow {
     // Project-structured layout rows
     Search,
     SectionLabel(String, Option<String>),
-    ProjectHeader(String),
+    ProjectHeader { key: String, label: String },
     Worktree(usize),
     WorktreeCheckpoint(usize, String),
     InlineAgent(usize, u64, String, AgentStatus),
@@ -602,6 +602,11 @@ pub struct View {
     sidebar_width_drag: Option<SidebarWidthDrag>,
     finder: WorkspaceFinder,
     sidebar_hover: Option<usize>,
+    /// Project groups collapsed in the project sidebar. This is client-only
+    /// view state: it intentionally does not affect daemon/session state.
+    collapsed_projects: HashSet<String>,
+    sidebar_filter: String,
+    sidebar_filter_active: bool,
     dirty: bool,
     detach_requested: bool,
     status_bar: StatusBarConfig,
@@ -759,7 +764,7 @@ impl View {
             sent_sizes: HashMap::new(),
             theme_idx: kumo_core::theme::DEFAULT_THEME_IDX,
             custom_theme: None,
-            sidebar_open: true,
+            sidebar_open: cols >= 80,
             sidebar_tab: SidebarTab::Sessions,
             sidebar_scroll: (0, u16::MAX),
             popup: Popup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
@@ -792,6 +797,9 @@ impl View {
             sidebar_width_drag: None,
             finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
             sidebar_hover: None,
+            collapsed_projects: kumo_core::ui_state::load().collapsed_projects,
+            sidebar_filter: String::new(),
+            sidebar_filter_active: false,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -1470,6 +1478,16 @@ impl View {
             self.on_finder_key(key);
             return Ok(());
         }
+        if self.sidebar_filter_active {
+            match key.code {
+                KeyCode::Esc => { self.sidebar_filter.clear(); self.sidebar_filter_active = false; self.mark_dirty(); return Ok(()); }
+                KeyCode::Backspace => { self.sidebar_filter.pop(); self.mark_dirty(); return Ok(()); }
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
+                    self.sidebar_filter.push(c); self.sidebar_scroll.0 = 0; self.mark_dirty(); return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
 
         if self.mode == Mode::Copy {
             self.on_copy_key(key)?;
@@ -1485,6 +1503,12 @@ impl View {
             Mode::Normal => {
                 if leader {
                     self.mode = Mode::Leader;
+                    self.mark_dirty();
+                    return Ok(());
+                }
+                if key.code == KeyCode::Char('/') && self.sidebar_open && self.sidebar_layout() == SidebarLayout::Project {
+                    self.sidebar_filter_active = true;
+                    self.sidebar_filter.clear();
                     self.mark_dirty();
                     return Ok(());
                 }
@@ -4405,41 +4429,82 @@ impl View {
                 return out;
             }
         };
-        let active_idx = layout
-            .active
-            .as_deref()
-            .and_then(|name| layout.sessions.iter().position(|s| s.name == name));
-        for idx in 0..layout.sessions.len() {
-            out.push(SidebarRow::Worktree(idx));
-            if let Some(checkpoint) = self.worktree_checkpoint_label(idx) {
-                out.push(SidebarRow::WorktreeCheckpoint(idx, checkpoint));
-            }
-            // minimize non-active worktrees: only the active one shows branch + agents
-            let is_active = Some(idx) == active_idx;
-            if !is_active {
-                continue;
-            }
-            if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
-                out.push(SidebarRow::Branch(idx, branch));
-            }
-            // every agent for this worktree, sorted by rank
-            let mut agents: Vec<(u64, String, AgentStatus)> = Vec::new();
-            if let Some(sess) = layout.sessions.get(idx) {
-                for (_, pane) in session_panes_all(sess) {
-                    if pane.is_ai {
-                        if let Some(agent) = pane.agent.as_ref() {
-                            agents.push((pane.id, agent.name.clone(), agent.status));
+        let mut projects = self.project_groups();
+        projects.sort_by_key(|(_, indices)| {
+            indices
+                .iter()
+                .map(|idx| self.project_attention(*idx))
+                .min()
+                .unwrap_or(u8::MAX)
+        });
+        for (project, mut indices) in projects {
+            indices.retain(|idx| self.sidebar_filter_matches(*idx, &project));
+            if indices.is_empty() { continue; }
+            indices.sort_by_key(|idx| self.project_attention(*idx));
+            let attention = indices.iter().filter(|idx| self.project_attention(**idx) < 2).count();
+            let title = if attention > 0 { format!("{project} · {attention} attention") } else { project.clone() };
+            out.push(SidebarRow::ProjectHeader { key: kumo_core::ui_state::canonical_project_key(&layout.sessions[indices[0]].workspace), label: title });
+            let project_key = kumo_core::ui_state::canonical_project_key(&layout.sessions[indices[0]].workspace);
+            if self.collapsed_projects.contains(&project_key) { continue; }
+            for idx in indices {
+                out.push(SidebarRow::Worktree(idx));
+                if let Some(checkpoint) = self.worktree_checkpoint_label(idx) {
+                    out.push(SidebarRow::WorktreeCheckpoint(idx, checkpoint));
+                }
+                if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
+                    out.push(SidebarRow::Branch(idx, branch));
+                }
+                let mut agents: Vec<(u64, String, AgentStatus)> = Vec::new();
+                if let Some(sess) = layout.sessions.get(idx) {
+                    for (_, pane) in session_panes_all(sess) {
+                        if pane.is_ai {
+                            if let Some(agent) = pane.agent.as_ref() {
+                                agents.push((pane.id, agent.name.clone(), agent.status));
+                            }
                         }
                     }
                 }
+                agents.sort_by_key(|(_, _, st)| Self::agent_rank(*st));
+                for (pid, name, status) in agents {
+                    if self.cols < 100 && matches!(status, AgentStatus::Idle | AgentStatus::Unknown) { continue; }
+                    out.push(SidebarRow::InlineAgent(idx, pid, name, status));
+                }
             }
-            agents.sort_by_key(|(_, _, st)| Self::agent_rank(*st));
-            for (pid, name, status) in agents {
-                out.push(SidebarRow::InlineAgent(idx, pid, name, status));
-            }
+        }
+        if !self.sidebar_filter.trim().is_empty() && !out.iter().any(|row| matches!(row, SidebarRow::Worktree(_))) {
+            out.push(SidebarRow::Dim(format!("no matches for \"{}\"", self.sidebar_filter)));
         }
         out.push(SidebarRow::NewSession);
         out
+    }
+
+    fn sidebar_filter_matches(&self, idx: usize, project: &str) -> bool {
+        let query = self.sidebar_filter.trim().to_lowercase();
+        if query.is_empty() { return true; }
+        let Some(session) = self.layout.as_ref().and_then(|l| l.sessions.get(idx)) else { return false; };
+        let mut haystack = format!("{} {} {}", project, session.name, session.workspace.display()).to_lowercase();
+        if let Some(branch) = &session.branch { haystack.push_str(&format!(" {}", branch.name)); }
+        if let Some(checkpoint) = self.worktree_checkpoint_label(idx) { haystack.push_str(&format!(" {checkpoint}")); }
+        for (_, pane) in session_panes_all(session) {
+            if let Some(agent) = &pane.agent { haystack.push_str(&format!(" {}", agent.name)); }
+        }
+        haystack.contains(&query)
+    }
+
+    fn project_attention(&self, idx: usize) -> u8 {
+        let status = self.worktree_primary_status(idx);
+        if matches!(status, Some(AgentStatus::Blocked)) { return 0; }
+        if matches!(status, Some(AgentStatus::Done)) { return 1; }
+        let checkpoint = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).and_then(|s| {
+            self.worktree_items.get(&s.name)?.iter().find(|item| item.path == s.workspace).and_then(|item| item.status.as_deref())
+        });
+        match checkpoint {
+            Some("completed") => 1,
+            Some("in-progress") | Some("in-review") => 2,
+            _ if matches!(status, Some(AgentStatus::Working)) => 2,
+            _ if matches!(status, Some(AgentStatus::Idle)) => 3,
+            _ => 4,
+        }
     }
 
     fn agent_rank(status: AgentStatus) -> u8 {
@@ -4785,7 +4850,8 @@ impl View {
                     return true;
                 }
                 SidebarRow::Search => {
-                    self.open_finder();
+                    self.sidebar_filter_active = true;
+                    self.mark_dirty();
                     return true;
                 }
                 SidebarRow::Worktree(i) | SidebarRow::WorktreeCheckpoint(i, _) => {
@@ -4795,7 +4861,15 @@ impl View {
                     }
                     return true;
                 }
-                SidebarRow::ProjectHeader(_) => {
+                SidebarRow::ProjectHeader { key, .. } => {
+                    let collapsed = !self.collapsed_projects.contains(&key);
+                    if collapsed { self.collapsed_projects.insert(key.clone()); } else { self.collapsed_projects.remove(&key); }
+                    if let Some(path) = self.layout.as_ref().and_then(|l| l.sessions.iter().find(|s| kumo_core::ui_state::canonical_project_key(&s.workspace) == key)).map(|s| s.workspace.clone()) {
+                        if let Err(e) = kumo_core::ui_state::set_project_collapsed(&path, collapsed) {
+                            self.notice = Some((format!("could not save sidebar state: {e}"), Instant::now()));
+                        }
+                    }
+                    self.mark_dirty();
                     return true;
                 }
                 SidebarRow::InlineAgent(i, pid, _, _) => {
@@ -5604,15 +5678,16 @@ impl View {
                     text(f, x, y, "  + NEW SESSION", style, max);
                 }
                 SidebarRow::Search => {
-                    let style = Style::default().fg(theme.panel_muted).bg(RColor::Reset);
-                    let label = "⌕ find";
-                    text(f, x + 2, y, label, style, max.saturating_sub(2));
-                    let hint = "leader+f";
+                    let style = Style::default().fg(if self.sidebar_filter_active { theme.fg } else { theme.panel_muted }).bg(RColor::Reset);
+                    let label = if self.sidebar_filter.is_empty() { "⌕ filter /".to_string() } else { format!("⌕ {}", self.sidebar_filter) };
+                    text(f, x + 2, y, &label, style, max.saturating_sub(2));
+                    let count = self.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count();
+                    let hint = if self.sidebar_filter_active { format!("{count} match{}", if count == 1 { "" } else { "es" }) } else { " / to filter".to_string() };
                     let rw = hint.chars().count() as u16;
                     let max_r = w.saturating_sub(1).max(1);
                     if rw + 4 <= max {
                         let hs = Style::default().fg(theme.panel_muted).bg(RColor::Reset);
-                        text(f, x + max_r.saturating_sub(rw), y, hint, hs, rw);
+                        text(f, x + max_r.saturating_sub(rw), y, &hint, hs, rw);
                     }
                 }
                 SidebarRow::SectionLabel(title, right) => {
@@ -5626,18 +5701,19 @@ impl View {
                         }
                     }
                 }
-                SidebarRow::ProjectHeader(name) => {
+                SidebarRow::ProjectHeader { key, label: name } => {
+                    let collapsed = self.collapsed_projects.contains(&key);
                     let active = {
                         // header is active if any worktree in its group hosts the active session
                         let mut is_active = false;
                         if let Some(layout) = &self.layout {
                             for (idx, s) in layout.sessions.iter().enumerate() {
-                                if short_workspace(&s.workspace) == name && layout.active.as_deref() == Some(&s.name) {
+                                if kumo_core::ui_state::canonical_project_key(&s.workspace) == key && layout.active.as_deref() == Some(&s.name) {
                                     is_active = true;
                                     break;
                                 }
                                 // fallback when workspace name equals session name
-                                if name == s.name && layout.active.as_deref() == Some(&s.name) {
+                                if key == kumo_core::ui_state::canonical_project_key(&s.workspace) && layout.active.as_deref() == Some(&s.name) {
                                     is_active = true;
                                     break;
                                 }
@@ -5659,7 +5735,7 @@ impl View {
                     };
                     let palette = [theme.accent, theme.secondary, theme.green, theme.orange, theme.panel_muted];
                     let dot_col = palette[(hash as usize) % palette.len()];
-                    put(f, x + 1, y, "▸", Style::default().fg(dot_col).bg(bg));
+                    put(f, x + 1, y, if collapsed { "▸" } else { "▾" }, Style::default().fg(dot_col).bg(bg));
                     let shown = if name.chars().count() as u16 > max.saturating_sub(3) {
                         let mut s = name.clone();
                         while s.chars().count() as u16 > max.saturating_sub(4) && !s.is_empty() { s.pop(); }
@@ -7414,6 +7490,9 @@ mod tests {
             sidebar_width_drag: None,
             finder: WorkspaceFinder { open: false, input: String::new(), cursor: 0, items: Vec::new(), filtered: Vec::new(), selected: 0, scroll: 0 },
             sidebar_hover: None,
+            collapsed_projects: HashSet::new(),
+            sidebar_filter: String::new(),
+            sidebar_filter_active: false,
             tab_hover: None,
             tab_rects: Vec::new(),
             tab_scroll: 0,
@@ -8373,5 +8452,79 @@ mod tests {
         // Unselected item rows carry the panel surface, not the selection bg.
         let theme = view.current_theme();
         assert_eq!(buf.cell((dd.x + 3, dd.y + 3)).unwrap().bg, theme.panel_sep);
+    }
+
+    #[test]
+    fn project_sidebar_emits_headers_and_every_worktree_branch() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "main".into();
+        layout.sessions[0].branch = Some(WireBranch { name: "main".into(), ahead: 2, behind: 1 });
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "feature".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/work-feature");
+        linked.branch = Some(WireBranch { name: "feature/ui".into(), ahead: 1, behind: 0 });
+        layout.sessions.push(linked);
+        view.layout = Some(layout);
+        let rows = view.project_content();
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::ProjectHeader { .. })).count(), 2);
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Branch(_, _))).count(), 2);
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 2);
+    }
+
+    #[test]
+    fn project_sidebar_collapse_hides_only_that_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "main".into();
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "other".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/other");
+        layout.sessions.push(linked);
+        view.layout = Some(layout);
+        let project = kumo_core::ui_state::canonical_project_key(&view.layout.as_ref().unwrap().sessions[0].workspace);
+        view.collapsed_projects.insert(project);
+        let rows = view.project_content();
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 1);
+        assert!(rows.iter().any(|r| matches!(r, SidebarRow::ProjectHeader { .. })));
+    }
+
+    #[test]
+    fn project_sidebar_orders_blocked_worktree_first() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "idle".into();
+        let mut blocked = panes_layout(&[(9, AgentStatus::Blocked)]).sessions.remove(0);
+        blocked.name = "blocked".into();
+        blocked.workspace = layout.sessions[0].workspace.clone();
+        layout.sessions.push(blocked);
+        view.layout = Some(layout);
+        let rows = view.project_content();
+        let first = rows.iter().find_map(|r| match r { SidebarRow::Worktree(i) => Some(view.session_name(*i)), _ => None });
+        assert_eq!(first.as_deref(), Some("blocked"));
+    }
+
+    #[test]
+    fn project_sidebar_filter_matches_branch_and_shows_empty_state() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/search".into(), ahead: 0, behind: 0 });
+        view.layout = Some(layout);
+        view.sidebar_filter = "search".into();
+        assert_eq!(view.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 1);
+        view.sidebar_filter = "does-not-exist".into();
+        assert!(view.project_content().iter().any(|r| matches!(r, SidebarRow::Dim(s) if s.contains("no matches"))));
+    }
+
+    #[test]
+    fn project_sidebar_filter_backspace_and_escape_are_local() {
+        let mut view = test_view();
+        view.sidebar_filter = "abc".into();
+        view.sidebar_filter_active = true;
+        view.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).unwrap();
+        assert_eq!(view.sidebar_filter, "ab");
+        view.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+        assert!(!view.sidebar_filter_active);
+        assert!(view.sidebar_filter.is_empty());
     }
 }
