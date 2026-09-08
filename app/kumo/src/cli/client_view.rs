@@ -5654,10 +5654,10 @@ impl View {
                 }
                 SidebarRow::Search => {
                     let style = Style::default().fg(if self.sidebar_filter_active { theme.fg } else { theme.panel_muted }).bg(RColor::Reset);
-                    let label = if self.sidebar_filter.is_empty() { "⌕ filter /".to_string() } else { format!("⌕ {}", self.sidebar_filter) };
+                    let label = if self.sidebar_filter.is_empty() { "⌕ (f)ilter".to_string() } else { format!("⌕ {}", self.sidebar_filter) };
                     text(f, x + 2, y, &label, style, max.saturating_sub(2));
                     let count = self.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count();
-                    let hint = if self.sidebar_filter_active { format!("{count} match{}", if count == 1 { "" } else { "es" }) } else { " / to filter".to_string() };
+                    let hint = if self.sidebar_filter_active { format!("{count} match{}", if count == 1 { "" } else { "es" }) } else { String::new() };
                     let rw = hint.chars().count() as u16;
                     let max_r = w.saturating_sub(1).max(1);
                     if rw + 4 <= max {
