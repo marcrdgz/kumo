@@ -4432,9 +4432,12 @@ impl View {
             if indices.is_empty() { continue; }
             indices.sort_by_key(|idx| self.project_attention(*idx));
             let attention = indices.iter().filter(|idx| self.project_attention(**idx) < 2).count();
-            let title = if attention > 0 { format!("{project} · {attention} attention") } else { project.clone() };
+            let title = if attention > 0 { format!("{project} · {attention} pending") } else { project.clone() };
             out.push(SidebarRow::ProjectHeader { key: project_key.clone(), label: title });
-            if self.collapsed_projects.contains(&project_key) { continue; }
+            // Filtering temporarily reveals matching worktrees inside collapsed
+            // projects. Otherwise the matching header would be followed by a
+            // misleading "no matches" row with the result still hidden.
+            if self.sidebar_filter.trim().is_empty() && self.collapsed_projects.contains(&project_key) { continue; }
             for idx in indices {
                 out.push(SidebarRow::Worktree(idx));
                 if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
@@ -4691,8 +4694,9 @@ impl View {
             SidebarLayout::Project => {
                 // y=1 is search, y=2 is section label
                 out[1] = (1, SidebarRow::Search);
-                out.push((2, SidebarRow::SectionLabel("projects".to_string(), None)));
                 let items = self.project_content();
+                let project_count = items.iter().filter(|row| matches!(row, SidebarRow::ProjectHeader { .. })).count();
+                out.push((2, SidebarRow::SectionLabel("projects".to_string(), Some(project_count.to_string()))));
                 let offset = (self.sidebar_scroll.0 as usize).min(items.len().saturating_sub(region_h));
                 for (i, item) in items.iter().skip(offset).take(region_h).enumerate() {
                     out.push((3 + i as u16, item.clone()));
@@ -5658,7 +5662,13 @@ impl View {
                 }
                 SidebarRow::Search => {
                     let style = Style::default().fg(if self.sidebar_filter_active { theme.fg } else { theme.panel_muted }).bg(RColor::Reset);
-                    let label = if self.sidebar_filter.is_empty() { "⌕ (f)ilter".to_string() } else { format!("⌕ {}", self.sidebar_filter) };
+                    let label = if self.sidebar_filter_active {
+                        format!("⌕ {}▏", self.sidebar_filter)
+                    } else if self.sidebar_filter.is_empty() {
+                        "⌕ (f)ilter".to_string()
+                    } else {
+                        format!("⌕ {}", self.sidebar_filter)
+                    };
                     text(f, x + 2, y, &label, style, max.saturating_sub(2));
                     let count = self.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count();
                     let hint = if self.sidebar_filter_active { format!("{count} match{}", if count == 1 { "" } else { "es" }) } else { String::new() };
@@ -5700,10 +5710,11 @@ impl View {
                     if active {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    // folder glyph + name, with repo hash color dot
+                    // Folder glyph + name, with a stable repo-key color. The
+                    // visible label can change as attention counts change.
                     let hash = {
                         let mut h: u32 = 0;
-                        for b in name.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
+                        for b in key.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
                         h
                     };
                     let palette = [theme.accent, theme.secondary, theme.green, theme.orange, theme.panel_muted];
@@ -8473,6 +8484,22 @@ mod tests {
         assert_eq!(view.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 1);
         view.sidebar_filter = "does-not-exist".into();
         assert!(view.project_content().iter().any(|r| matches!(r, SidebarRow::Dim(s) if s.contains("no matches"))));
+    }
+
+    #[test]
+    fn project_sidebar_filter_reveals_matches_in_collapsed_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/search".into(), ahead: 0, behind: 0 });
+        let project = session_project_key(&layout.sessions[0]);
+        view.layout = Some(layout);
+        view.collapsed_projects.insert(project);
+
+        assert!(!view.project_content().iter().any(|row| matches!(row, SidebarRow::Worktree(_))));
+        view.sidebar_filter = "search".into();
+        let filtered = view.project_content();
+        assert!(filtered.iter().any(|row| matches!(row, SidebarRow::Worktree(_))));
+        assert!(!filtered.iter().any(|row| matches!(row, SidebarRow::Dim(s) if s.contains("no matches"))));
     }
 
     #[test]
