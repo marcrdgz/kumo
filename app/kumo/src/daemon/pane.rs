@@ -34,6 +34,9 @@ pub struct Pane {
     /// Cached name of the detected AI CLI process (refreshed by the periodic
     /// process scan, so the sidebar never spawns `ps` per frame).
     pub detected_ai_name: Option<String>,
+    /// Explicit agent kind supplied by `kumo agent start`. This scopes state
+    /// detection before the periodic process scan observes the new process.
+    pub agent_kind: Option<String>,
     pub pty: Pty,
     pub vt: vt::Terminal,
     pub dead: bool,
@@ -375,6 +378,7 @@ impl Pane {
             custom_name: None,
             detected_ai: false,
             detected_ai_name: None,
+            agent_kind: None,
             pty,
             vt,
             dead: false,
@@ -446,6 +450,26 @@ impl Pane {
     /// an AI CLI (opencode/claude) was detected running inside a plain shell.
     pub fn is_ai_cli(&self) -> bool {
         self.is_ai || self.detected_ai
+    }
+
+    /// The normalized CLI identifier used to choose an agent-detection
+    /// manifest. Prefer an explicit `agent start` kind, then the process scan,
+    /// then the program used to spawn a dedicated AI pane.
+    pub fn agent_rule_id(&self) -> Option<&str> {
+        let command = self
+            .agent_kind
+            .as_deref()
+            .or(self.detected_ai_name.as_deref())
+            .or_else(|| self.program.as_ref().map(|(program, _)| program.as_str()))?;
+        let file = command.rsplit('/').next().unwrap_or(command);
+        let name = file.split_whitespace().next().unwrap_or(file);
+        Some(name.strip_suffix(".exe").unwrap_or(name))
+    }
+
+    /// Remember a CLI selected by `kumo agent start` so its state rules apply
+    /// before the asynchronous process scan completes.
+    pub fn set_agent_kind(&mut self, kind: &str) {
+        self.agent_kind = Some(kind.trim().to_string());
     }
 
     /// The current working directory this pane is *actually* in, used by
@@ -558,11 +582,14 @@ impl Pane {
 
         self.vt.refresh();
         let level = self.vt.render_dirty_level();
-        // Blank cells use the host terminal's default background (Reset), so
-        // panes look native; apps that paint their own background (e.g. a
-        // black opencode) keep theirs via `has_bg`.
-        let fg = RColor::Reset;
-        let bg = RColor::Reset;
+        // Always materialize the emulator defaults. `Reset` means "leave the
+        // host terminal's current rendition alone" to ratatui, which lets a
+        // previously drawn chrome background leak into only the glyph cells.
+        // Codex deliberately clears the surrounding composer rows with the
+        // terminal default, so its three-row input needs these colours on its
+        // blank cells as well as on its text cells.
+        let fg = rgb(self.vt.default_fg());
+        let bg = rgb(self.vt.default_bg());
         let full = level == vt::DIRTY_FULL || self.full_redraw;
         self.full_redraw = false;
 
@@ -588,6 +615,59 @@ impl Pane {
             None
         };
 
+        // Codex paints its three-line composer by applying a background to
+        // blank (including whitespace-only) anchor cells. Ghostty does not
+        // expose that background on neighbouring blank cells, so remember the
+        // anchor per dirty row and use it when materializing the row. The
+        // process scan that identifies a plain-shell pane as Codex is
+        // asynchronous, so also recognize the visible placeholder here; this
+        // prevents the first frame from showing only the prompt text while
+        // the three-line background arrives on a later refresh.
+        let mut codex_row_bg: HashMap<usize, RColor> = HashMap::new();
+        let mut composer_text: HashMap<usize, String> = HashMap::new();
+        let mut composer_bg: HashMap<usize, RColor> = HashMap::new();
+        self.vt.for_each_cell(|row, _col, rc, _selected, _row_dirty| {
+            if row >= ah as usize {
+                return;
+            }
+            let line = composer_text.entry(row).or_default();
+            line.push_str(rc.text);
+            if !rc.text.trim().is_empty() && rc.has_bg {
+                composer_bg.entry(row).or_insert_with(|| rgb(rc.bg));
+            }
+        });
+        let placeholder_row = composer_text
+            .iter()
+            .find_map(|(&row, text)| text.contains("Ask Codex to do anything").then_some(row));
+        let codex_composer = self.agent_rule_id() == Some("codex") || placeholder_row.is_some();
+        if codex_composer {
+            // Ghostty can keep the blank cells carrying the composer's
+            // background clean while marking only the prompt text dirty.
+            // Scan the complete viewport before resetting the cache, and add
+            // every row with an explicit blank/whitespace background anchor to the
+            // patch. This ensures all three composer rows are transmitted
+            // together when the composer is redrawn.
+            self.vt.for_each_cell(|row, _col, rc, _selected, _row_dirty| {
+                if row < ah as usize && rc.text.trim().is_empty() && rc.has_bg {
+                    codex_row_bg.entry(row).or_insert_with(|| rgb(rc.bg));
+                }
+            });
+            // The initial placeholder is often the only non-empty cell in
+            // the composer.  Its surrounding rows can be reported clean by
+            // the render-state API even though Ghostty has painted them. Find
+            // the placeholder independently of dirty-row state, then carry
+            // the background from one of its real (non-whitespace) cells to
+            // the complete three-row composer.
+            if let Some(row) = placeholder_row {
+                let row_bg = composer_bg.get(&row).copied().unwrap_or(bg);
+                for y in row.saturating_sub(1)..=(row + 1).min(ah.saturating_sub(1) as usize) {
+                    codex_row_bg.insert(y, row_bg);
+                    dirty.insert(y);
+                }
+            }
+            dirty.extend(codex_row_bg.keys().copied());
+        }
+
         // Reset dirty rows to the default background, then apply populated
         // cells so content that disappeared this frame is cleared.
         for y in dirty.iter().copied() {
@@ -595,9 +675,10 @@ impl Pane {
             if yy >= area_y + area.height {
                 continue;
             }
+            let row_bg = codex_row_bg.get(&y).copied().unwrap_or(bg);
             for x in area_x..(area_x + area.width) {
                 if let Some(c) = cache.cell_mut((x, yy)) {
-                    c.set_char(' ').set_fg(fg).set_bg(bg);
+                    c.set_char(' ').set_fg(fg).set_bg(row_bg);
                     c.modifier = Modifier::empty();
                     c.set_diff_option(CellDiffOption::None);
                 }
@@ -645,10 +726,16 @@ impl Pane {
             if selected {
                 mods |= Modifier::REVERSED;
             }
-            // Respect explicit app colors; otherwise fall back to the host
-            // terminal's defaults (native).
-            let cell_fg = if rc.has_fg { rgb(rc.fg) } else { RColor::Reset };
-            let cell_bg = if rc.has_bg { rgb(rc.bg) } else { RColor::Reset };
+            // Respect explicit app colours; otherwise materialize the
+            // emulator defaults (see the row reset above).
+            let cell_fg = if rc.has_fg { rgb(rc.fg) } else { fg };
+            let cell_bg = if rc.has_bg {
+                rgb(rc.bg)
+            } else if codex_composer {
+                codex_row_bg.get(&row).copied().unwrap_or(bg)
+            } else {
+                bg
+            };
             // Effective glyph width. `unicode-width` covers the common case
             // (CJK, EAW=Wide emoji). The emulator's own grapheme width handles
             // the rest with its exact text-layout rules: VS16 forces emoji
@@ -759,7 +846,10 @@ impl Pane {
         if self.dead {
             return AgentStatus::Idle;
         }
-        crate::daemon::agents::detect(&crate::daemon::agents::Snapshot::capture(&self.vt))
+        crate::daemon::agents::detect_for(
+            &crate::daemon::agents::Snapshot::capture(&self.vt),
+            self.agent_rule_id(),
+        )
     }
 
     /// Install the terminal's active selection from two viewport coordinates.
@@ -1391,6 +1481,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         // shortcuts hint or the ✳ title, the classification stays unknown
         // even though generic question text above is not blocked.
         let mut p = test_pane(true);
+        p.program = Some(("claude".into(), Vec::new()));
         p.feed(b"assistant: do you want to proceed? (y/n)\n");
         p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
         p.feed("\u{276f} ".as_bytes());
@@ -1434,16 +1525,65 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
-    fn default_cells_use_native_terminal_background() {
+    fn default_cells_materialize_terminal_background() {
         let mut p = test_pane(false);
         let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
         p.feed(b"hi");
         p.render_dirty(area, true, &mut buf);
-        // Text with no explicit color and blank areas fall back to the host
-        // terminal's default (Reset), not a fixed kumo background.
-        assert_eq!(buf.cell((0, 0)).unwrap().bg, RColor::Reset, "text cell bg");
-        assert_eq!(buf.cell((60, 30)).unwrap().bg, RColor::Reset, "blank cell bg");
+        let theme = test_theme();
+        let default_fg = rgb(theme.term_fg);
+        let default_bg = rgb(theme.term_bg);
+        // Text with no explicit colour and blank areas must both carry the
+        // terminal defaults. This prevents the client terminal's previous
+        // chrome rendition from leaking into only populated cells.
+        assert_eq!(buf.cell((0, 0)).unwrap().fg, default_fg, "text cell fg");
+        assert_eq!(buf.cell((0, 0)).unwrap().bg, default_bg, "text cell bg");
+        assert_eq!(buf.cell((60, 30)).unwrap().fg, default_fg, "blank cell fg");
+        assert_eq!(buf.cell((60, 30)).unwrap().bg, default_bg, "blank cell bg");
+    }
+
+    #[test]
+    fn codex_composer_default_background_covers_blank_rows() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // This is the relevant shape of Codex's real initial draw: the
+        // composer is three rows high, but Codex sets no explicit SGR
+        // background for its blank rows or dim placeholder text.
+        p.feed(b"\x1b[9;1H \x1b[10;1H \x1b[11;1H  ");
+        p.feed(b"\x1b[9;1H\x1b[2m\xe2\x80\xba Ask Codex to do anything\x1b[m");
+        p.render_dirty(area, true, &mut buf);
+
+        let default_bg = rgb(test_theme().term_bg);
+        for y in 8..11 {
+            for x in [0, 40, 119] {
+                assert_eq!(
+                    buf.cell((x, y)).unwrap().bg,
+                    default_bg,
+                    "Codex composer cell ({x}, {y}) must use terminal background"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_composer_is_detected_before_process_scan() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // A plain shell pane has no agent metadata yet, as it does before the
+        // periodic process scan identifies the Codex child. The visible
+        // placeholder must still make the three-line composer background
+        // available in this first render.
+        p.feed(b"\x1b[48;2;18;28;38m\x1b[9;1H \x1b[10;1H \x1b[11;1H  ");
+        p.feed(b"\x1b[9;1H\x1b[2m\xe2\x80\xba Ask Codex to do anything\x1b[m");
+        p.render_dirty(area, true, &mut buf);
+
+        let composer_bg = RColor::Rgb(18, 28, 38);
+        for y in 8..11 {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, composer_bg, "row {y}");
+        }
     }
 
     #[test]

@@ -1,0 +1,78 @@
+# Codex lifecycle detection rules, adapted from Herdr's published codex.toml.
+# User overrides may replace this file in ~/.config/kumo/agent-detection.
+#
+# The source rules distinguish a live prompt from old transcript text. Kumo's
+# regions are coarser, so interactive blockers are kept deliberately specific
+# and the transcript viewer excludes the otherwise broad title-idle signal.
+
+[agent]
+id = "codex"
+
+[[blocked]]
+tests = [{ region = "title", contains = "action required" }]
+
+# Initial trust prompt. Both phrases are required: output which merely quotes
+# either one must not make the pane look blocked.
+[[blocked]]
+tests = [
+  { region = "screen", contains = "you are in" },
+  { region = "screen", contains = "do you trust the contents of this directory?" },
+]
+
+# Startup update prompt.
+[[blocked]]
+tests = [
+  { region = "screen", contains = "update available!" },
+  { region = "screen", contains = "update now" },
+  { region = "screen", contains = "skip until next version" },
+  { region = "screen", contains = "press enter to continue" },
+]
+
+# Live approval / question form.
+[[blocked]]
+tests = [{ region = "form", contains-any = [
+  "press enter to confirm or esc to cancel",
+  "enter to submit answer",
+  "enter to submit all",
+  "allow command?",
+] }]
+
+# Weak wording is only a blocker when the prompt also paints a selected or
+# explicit yes option, matching the upstream rule's extra guard.
+[[blocked]]
+tests = [{ region = "screen", contains-any = ["[y/n]", "yes (y)"] }]
+
+[[blocked]]
+tests = [
+  { region = "screen", contains-any = ["do you want to", "would you like to"] },
+  { region = "screen", contains-any = ["yes", "❯"] },
+]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+
+[[working]]
+tests = [
+  { region = "footer", contains-any = ["• working (", "◦ working ("] },
+  { region = "footer", contains = "esc to interrupt" },
+  { not = [{ region = "screen", contains = "conversation interrupted" }] },
+]
+
+# Codex's transcript viewer is not a live prompt. Its title stays non-empty,
+# so exclude its chrome before accepting the title-only idle marker.
+[[idle]]
+tests = [
+  { region = "title", nonempty = true },
+  { not = [{ region = "title", spinner = "braille" }] },
+  { not = [{ region = "title", contains = "action required" }] },
+  { not = [
+      { region = "screen", contains = "↑/↓ to scroll" },
+      { region = "screen", contains = "pgup/pgdn to" },
+      { region = "screen", contains = "home/end to jump" },
+      { region = "screen", contains = "q to quit" },
+      { any-of = [
+          { region = "screen", contains = "esc to edit prev" },
+          { region = "screen", contains = "esc/← to edit prev" },
+      ]},
+  ]},
+]

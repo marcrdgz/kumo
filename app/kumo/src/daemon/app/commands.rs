@@ -430,6 +430,7 @@ impl App {
         }
         cmd.push('\r');
         if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.set_agent_kind(kind);
             pane.write(cmd.as_bytes());
         }
         // Check immediately whether pane went blocked (e.g. permission prompt on launch)
@@ -547,7 +548,7 @@ impl App {
         let Some(pane) = self.panes.get(&pane_id) else {
             anyhow::bail!("no pane {pane_id}");
         };
-        let exp = agents::explain(&Snapshot::capture(&pane.vt));
+        let exp = agents::explain_for(&Snapshot::capture(&pane.vt), pane.agent_rule_id());
         // Detection only runs for AI panes; a dead or plain shell pane reads
         // the default Idle (matching what the UI displays via the cache).
         let raw = if pane.dead || !pane.is_ai_cli() {
