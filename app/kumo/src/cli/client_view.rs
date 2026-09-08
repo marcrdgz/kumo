@@ -4385,22 +4385,27 @@ impl View {
     }
 
     #[allow(dead_code)]
-    fn project_groups(&self) -> Vec<(String, Vec<usize>)> {
-        let mut map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    fn project_groups(&self) -> Vec<(String, String, Vec<usize>)> {
+        let mut map: std::collections::HashMap<String, (String, Vec<usize>)> = std::collections::HashMap::new();
         let mut order: Vec<String> = Vec::new();
         if let Some(layout) = &self.layout {
             for (i, s) in layout.sessions.iter().enumerate() {
-                let name = short_workspace(&s.workspace);
-                let key = if name.is_empty() { s.name.clone() } else { name.clone() };
+                let root = s.project_root.as_deref().unwrap_or(&s.workspace);
+                let key = session_project_key(s);
                 if !map.contains_key(&key) {
                     order.push(key.clone());
                 }
-                map.entry(key).or_default().push(i);
+                let label = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| s.name.clone());
+                map.entry(key).or_insert_with(|| (label, Vec::new())).1.push(i);
             }
         }
         order.into_iter().map(|k| {
-            let v = map.remove(&k).unwrap_or_default();
-            (k, v)
+            let (label, indices) = map.remove(&k).unwrap_or_default();
+            (k, label, indices)
         }).collect()
     }
 
@@ -4415,21 +4420,20 @@ impl View {
             }
         };
         let mut projects = self.project_groups();
-        projects.sort_by_key(|(_, indices)| {
+        projects.sort_by_key(|(_, _, indices)| {
             indices
                 .iter()
                 .map(|idx| self.project_attention(*idx))
                 .min()
                 .unwrap_or(u8::MAX)
         });
-        for (project, mut indices) in projects {
+        for (project_key, project, mut indices) in projects {
             indices.retain(|idx| self.sidebar_filter_matches(*idx, &project));
             if indices.is_empty() { continue; }
             indices.sort_by_key(|idx| self.project_attention(*idx));
             let attention = indices.iter().filter(|idx| self.project_attention(**idx) < 2).count();
             let title = if attention > 0 { format!("{project} · {attention} attention") } else { project.clone() };
-            out.push(SidebarRow::ProjectHeader { key: kumo_core::ui_state::canonical_project_key(&layout.sessions[indices[0]].workspace), label: title });
-            let project_key = kumo_core::ui_state::canonical_project_key(&layout.sessions[indices[0]].workspace);
+            out.push(SidebarRow::ProjectHeader { key: project_key.clone(), label: title });
             if self.collapsed_projects.contains(&project_key) { continue; }
             for idx in indices {
                 out.push(SidebarRow::Worktree(idx));
@@ -4840,7 +4844,7 @@ impl View {
                 SidebarRow::ProjectHeader { key, .. } => {
                     let collapsed = !self.collapsed_projects.contains(&key);
                     if collapsed { self.collapsed_projects.insert(key.clone()); } else { self.collapsed_projects.remove(&key); }
-                    if let Some(path) = self.layout.as_ref().and_then(|l| l.sessions.iter().find(|s| kumo_core::ui_state::canonical_project_key(&s.workspace) == key)).map(|s| s.workspace.clone()) {
+                    if let Some(path) = self.layout.as_ref().and_then(|l| l.sessions.iter().find(|s| session_project_key(s) == key)).map(|s| s.project_root.clone().unwrap_or_else(|| s.workspace.clone())) {
                         if let Err(e) = kumo_core::ui_state::set_project_collapsed(&path, collapsed) {
                             self.notice = Some((format!("could not save sidebar state: {e}"), Instant::now()));
                         }
@@ -5682,17 +5686,11 @@ impl View {
                         // header is active if any worktree in its group hosts the active session
                         let mut is_active = false;
                         if let Some(layout) = &self.layout {
-                            for (idx, s) in layout.sessions.iter().enumerate() {
-                                if kumo_core::ui_state::canonical_project_key(&s.workspace) == key && layout.active.as_deref() == Some(&s.name) {
+                            for s in &layout.sessions {
+                                if session_project_key(s) == key && layout.active.as_deref() == Some(&s.name) {
                                     is_active = true;
                                     break;
                                 }
-                                // fallback when workspace name equals session name
-                                if key == kumo_core::ui_state::canonical_project_key(&s.workspace) && layout.active.as_deref() == Some(&s.name) {
-                                    is_active = true;
-                                    break;
-                                }
-                                let _ = idx;
                             }
                         }
                         is_active
@@ -7120,6 +7118,12 @@ fn short_workspace(ws: &std::path::Path) -> String {
     }
 }
 
+fn session_project_key(session: &SessionLayout) -> String {
+    kumo_core::ui_state::canonical_project_key(
+        session.project_root.as_deref().unwrap_or(&session.workspace),
+    )
+}
+
 /// Shared modal chrome: panel fill, rounded accent border, and a one-cell
 /// drop shadow along the bottom/right edges (clamped to the screen). Every
 /// overlay renders through this so popups read as one design system.
@@ -7489,6 +7493,7 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp/work"),
+                project_root: None,
                 active_tab: 0,
                 tabs,
                 focus,
@@ -7905,6 +7910,7 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -7956,6 +7962,7 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -7997,6 +8004,7 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -8054,6 +8062,7 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -8303,6 +8312,7 @@ mod tests {
             sessions: vec![SessionLayout {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -8387,21 +8397,38 @@ mod tests {
     }
 
     #[test]
-    fn project_sidebar_emits_headers_and_every_worktree_branch() {
+    fn project_sidebar_groups_linked_worktrees_under_main_project() {
         let mut view = test_view();
         let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
         layout.sessions[0].name = "main".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/kumo");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/kumo"));
         layout.sessions[0].branch = Some(WireBranch { name: "main".into(), ahead: 2, behind: 1 });
         let mut linked = layout.sessions[0].clone();
-        linked.name = "feature".into();
-        linked.workspace = std::path::PathBuf::from("/tmp/work-feature");
-        linked.branch = Some(WireBranch { name: "feature/ui".into(), ahead: 1, behind: 0 });
+        linked.name = "sidebar-uiux".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/kumo-sidebar-uiux");
+        linked.branch = Some(WireBranch { name: "sidebar-uiux".into(), ahead: 1, behind: 0 });
         layout.sessions.push(linked);
         view.layout = Some(layout);
         let rows = view.project_content();
-        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::ProjectHeader { .. })).count(), 2);
+        let headers: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::ProjectHeader { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["kumo"]);
         assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Branch(_, _))).count(), 2);
         assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 2);
+        let worktrees: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Worktree(i) => Some(view.session_name(*i)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(worktrees, vec!["main", "sidebar-uiux"]);
     }
 
     #[test]

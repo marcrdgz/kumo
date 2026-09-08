@@ -51,6 +51,11 @@ impl Session {
     fn active_tab(&self) -> &Tab {
         &self.tabs[self.active_tab]
     }
+    /// The pane that defines this session's workspace/project: the first pane
+    /// in the first tab, independent of the active tab and focused pane.
+    fn project_anchor_pane(&self) -> Option<u64> {
+        self.tabs.first()?.tree.pane_ids().first().copied()
+    }
     fn tab_index_by_spec(&self, spec: &str) -> Option<usize> {
         // by name, then id, then 1-based index — name takes precedence so a
         // tab named "2" (id 4) is not shadowed by the tab whose id is 2
@@ -1393,6 +1398,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn session_project_anchor_ignores_active_tab_and_focus() {
+        let mut first_tree = LayoutTree::new(11);
+        first_tree.split(11, 12, SplitDir::V);
+        first_tree.focus = 12;
+        let session = Session {
+            id: 1,
+            name: "session".into(),
+            tabs: vec![
+                Tab { id: 1, name: "1".into(), tree: first_tree, zoom: false },
+                Tab { id: 2, name: "2".into(), tree: LayoutTree::new(21), zoom: false },
+            ],
+            active_tab: 1,
+            workspace: PathBuf::from("/tmp/project"),
+        };
+
+        assert_eq!(session.project_anchor_pane(), Some(11));
     }
 
     #[test]

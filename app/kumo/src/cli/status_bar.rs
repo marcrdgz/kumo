@@ -535,6 +535,7 @@ mod tests {
         SessionLayout {
             name: "s".into(),
             workspace: std::path::PathBuf::from("/tmp"),
+            project_root: None,
             active_tab: 0,
             tabs: vec![TabLayout {
                 id: 1,
