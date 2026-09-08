@@ -281,10 +281,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 Command::WorktreeList { session } => {
                     match app.worktree_list(&session) {
                         Ok(items) => {
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { session, items });
                         }
                         Err(e) => {
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items: Vec::new() });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { session, items: Vec::new() });
                             let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
                         }
                     }
@@ -292,10 +292,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 Command::WorktreeListDetailed { session } => {
                     match app.worktree_list(&session) {
                         Ok(items) => {
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { session, items });
                         }
                         Err(e) => {
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items: Vec::new() });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { session, items: Vec::new() });
                             let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
                         }
                     }

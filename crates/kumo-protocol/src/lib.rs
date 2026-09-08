@@ -1237,6 +1237,8 @@ pub enum DaemonEvent {
     },
     /// Reply to `WorktreeList`.
     Worktrees {
+        /// Session that supplied this repository-scoped worktree list.
+        session: String,
         items: Vec<WireWorktree>,
     },
     /// Reply to `WorktreeCurrent` (single worktree checkpoint).

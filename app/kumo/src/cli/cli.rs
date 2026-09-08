@@ -231,7 +231,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
             loop {
                 match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
-                    Ok(DaemonEvent::Worktrees { items }) => {
+                    Ok(DaemonEvent::Worktrees { items, .. }) => {
                         if json {
                             let j = serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into());
                             println!("{}", j);
