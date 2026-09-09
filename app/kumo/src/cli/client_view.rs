@@ -5614,8 +5614,12 @@ impl View {
     fn pane_label(&self, pid: u64) -> String {
         self.active_session()
             .and_then(|s| find_pane_in_session(s, pid))
-            .map(|p| p.title.clone())
-            .unwrap_or_else(|| " pane ".to_string())
+            .map(|p| {
+                let role = if p.is_ai { "AI" } else { "PTY" };
+                let title = p.title.trim();
+                if title.is_empty() { format!(" {role} ") } else { format!(" {role} · {title} ") }
+            })
+            .unwrap_or_else(|| " PTY · pane ".to_string())
     }
 
     fn pane_title(&self, pid: u64, focused: bool, rect: Rect) -> String {
@@ -5756,11 +5760,20 @@ impl View {
             let Some(tab) = sess.tabs.get(*idx) else { continue };
             let active = sess.active_tab == *idx;
             let is_hover = self.tab_hover == Some(*idx);
-            let pill_bg = if active { theme.accent } else { lighten(bar_bg, 14) };
-            let fg = if active { RColor::Rgb(0x0a,0x0a,0x0a) } else { theme.fg };
+            // Tabs are navigation chrome, so they use a raised neutral surface
+            // and the secondary accent. The primary accent remains reserved
+            // for the focused pane outline.
+            let pill_bg = if active {
+                lighten(bar_bg, 24)
+            } else if is_hover {
+                lighten(bar_bg, 14)
+            } else {
+                bar_bg
+            };
+            let fg = if active { theme.secondary } else { theme.panel_muted };
             fill(f, *pill, pill_bg);
             let base_style = if active {
-                Style::default().fg(RColor::Rgb(0x0a,0x0a,0x0a)).bg(pill_bg).add_modifier(Modifier::BOLD)
+                Style::default().fg(fg).bg(pill_bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(fg).bg(pill_bg)
             };
@@ -5770,7 +5783,7 @@ impl View {
             let name_w = (name.chars().count() as u16).min(max_w);
             text(f, pill.x, pill.y, name, base_style, name_w);
             if is_hover {
-                let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
+                let x_fg = theme.red;
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
             } else {
                 // Persistent ghost close hint: always visible (clickable without
@@ -8363,11 +8376,13 @@ mod tests {
         // Pill width for "1" is 6 => pill at x=26..31, name at 26
         assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
         assert!(buf.cell((26, 0)).unwrap().style().bg.is_some(), "tab bar should have distinct bg");
+        assert_eq!(buf.cell((26, 0)).unwrap().fg, view.current_theme().secondary);
+        assert_ne!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
         // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).
         assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
-        assert!(buf.cell((28, 1)).unwrap().symbol() == "s" || buf.cell((28, 1)).unwrap().symbol() == " ");
+        assert_eq!(buf.cell((28, 1)).unwrap().symbol(), "P", "plain shell pane should expose its PTY role");
         let title_cell = buf.cell((28, 1)).unwrap();
         assert_eq!(title_cell.fg, view.current_theme().accent);
         assert_eq!(title_cell.bg, RColor::Reset, "focused pane title must not add a competing accent fill");
@@ -8375,6 +8390,23 @@ mod tests {
         let status_line: String = (0..40).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
         assert!(status_line.contains("NORMAL"), "status chip missing: {status_line:?}");
         assert!(status_line.contains("sess"), "session name missing: {status_line:?}");
+    }
+
+    #[test]
+    fn pane_titles_expose_terminal_role() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        assert!(view.pane_label(1).starts_with(" AI ·"));
+
+        if let Some(session) = view.layout.as_mut().and_then(|layout| layout.sessions.first_mut()) {
+            if let Some(tab) = session.tabs.first_mut() {
+                if let Some(LayoutNode::Pane(pane)) = tab.root.as_deref_mut() {
+                    pane.is_ai = false;
+                    pane.agent = None;
+                }
+            }
+        }
+        assert!(view.pane_label(1).starts_with(" PTY ·"));
     }
 
     #[test]
