@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -56,6 +57,8 @@ const AGENT_TOAST_W: u16 = 34;
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Interval between spinner frames (~8 fps).
 const SPINNER_PERIOD: Duration = Duration::from_millis(120);
+/// GitHub is useful ambient context, but should never become a hot API poll.
+const GITHUB_REFRESH: Duration = Duration::from_secs(60);
 /// Right-aligned badge drawn on a zoomed pane's top border.
 const ZOOM_BADGE: &str = " ⤢ zoom ";
 /// Label of the MENU button in the status bar.
@@ -647,6 +650,12 @@ pub struct View {
     clock_str: String,
     clock_next: Instant,
     is_ssh: bool,
+    github_status: Option<status_bar::GitHubStatus>,
+    github_workspace: Option<PathBuf>,
+    github_query: Option<PathBuf>,
+    github_refresh_at: Instant,
+    github_tx: Sender<(PathBuf, Option<status_bar::GitHubStatus>)>,
+    github_rx: Receiver<(PathBuf, Option<status_bar::GitHubStatus>)>,
     /// Current frame of the agent-activity spinner.
     spinner_frame: usize,
     /// When to advance the spinner next (kept ~8 fps, not per loop tick).
@@ -779,6 +788,7 @@ impl View {
         let now_secs = chrono::Local::now().timestamp() % 60;
         let rem = (60 - now_secs).max(1) as u64;
         let clock_next = Instant::now() + Duration::from_secs(rem);
+        let (github_tx, github_rx) = mpsc::channel();
         let sidebar_width = kumo_core::config::sidebar().width.unwrap_or_else(|| {
             if kumo_core::config::sidebar().layout == SidebarLayout::Project { PROJECT_DEFAULT_WIDTH } else { SIDEBAR_WIDTH }
         }).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
@@ -848,6 +858,12 @@ impl View {
             clock_str,
             clock_next,
             is_ssh,
+            github_status: None,
+            github_workspace: None,
+            github_query: None,
+            github_refresh_at: Instant::now(),
+            github_tx,
+            github_rx,
             spinner_frame: 0,
             spinner_next: Instant::now(),
         };
@@ -882,6 +898,9 @@ impl View {
     /// equivalent of the daemon's forced frame.
     pub fn has_transient(&mut self) -> bool {
         let now = Instant::now();
+        if self.poll_github(now) {
+            return true;
+        }
         // Clock tick: repaint once per minute when the clock widget is visible.
         if self.status_bar.enabled && self.status_bar_contains(StatusWidget::Clock) && now >= self.clock_next {
             self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
@@ -911,6 +930,52 @@ impl View {
             return true;
         }
         false
+    }
+
+    fn poll_github(&mut self, now: Instant) -> bool {
+        if !self.status_bar.enabled || !self.status_bar_contains(StatusWidget::Github) {
+            self.github_status = None;
+            self.github_workspace = None;
+            return false;
+        }
+
+        let workspace = self.active_session().map(|session| session.workspace.clone());
+        if workspace != self.github_workspace {
+            self.github_workspace = workspace.clone();
+            self.github_status = None;
+            self.github_refresh_at = now;
+        }
+
+        let mut changed = false;
+        while let Ok((queried, status)) = self.github_rx.try_recv() {
+            if self.github_query.as_ref() == Some(&queried) {
+                self.github_query = None;
+            }
+            if self.github_workspace.as_ref() == Some(&queried) {
+                if self.github_status != status {
+                    self.github_status = status;
+                    changed = true;
+                }
+                self.github_refresh_at = now + GITHUB_REFRESH;
+            }
+        }
+
+        if self.github_query.is_none() && now >= self.github_refresh_at {
+            if let Some(workspace) = workspace {
+                let tx = self.github_tx.clone();
+                self.github_query = Some(workspace.clone());
+                self.github_refresh_at = now + GITHUB_REFRESH;
+                std::thread::spawn(move || {
+                    let status = status_bar::query_github(&workspace);
+                    let _ = tx.send((workspace, status));
+                });
+            }
+        }
+
+        if changed {
+            self.mark_dirty();
+        }
+        changed
     }
     pub fn detach_requested(&self) -> bool {
         self.detach_requested
@@ -6307,6 +6372,7 @@ impl View {
             is_leader: self.mode == Mode::Leader,
             menu_open: self.menu.open,
             sidebar_open: self.sidebar_open,
+            github: self.github_status.as_ref(),
             spinner: self.spinner_char(),
         };
 
@@ -6326,6 +6392,7 @@ impl View {
         let drop_priority: &[StatusWidget] = &[
             StatusWidget::Hostname,
             StatusWidget::Clock,
+            StatusWidget::Github,
             StatusWidget::Branch,
             StatusWidget::AgentStatus,
             StatusWidget::Session,
@@ -7807,6 +7874,7 @@ mod tests {
     }
 
     fn test_view() -> View {
+        let (github_tx, github_rx) = mpsc::channel();
         View {
             out: UnixStream::pair().unwrap().1,
             cols: 80,
@@ -7872,6 +7940,12 @@ mod tests {
             clock_str: "12:00".to_string(),
             clock_next: Instant::now() + Duration::from_secs(60),
             is_ssh: false,
+            github_status: None,
+            github_workspace: None,
+            github_query: None,
+            github_refresh_at: Instant::now() + Duration::from_secs(60),
+            github_tx,
+            github_rx,
             spinner_frame: 0,
             spinner_next: Instant::now(),
         }
@@ -8612,6 +8686,27 @@ mod tests {
         assert!(!view.has_transient());
         view.expire_timers();
         assert!(view.agent_toasts.is_empty(), "expired toasts are dropped at render time");
+    }
+
+    #[test]
+    fn github_result_updates_status_without_blocking_the_view() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        let workspace = view.active_session().unwrap().workspace.clone();
+        view.github_workspace = Some(workspace.clone());
+        view.github_query = Some(workspace.clone());
+        view.github_refresh_at = Instant::now() + GITHUB_REFRESH;
+        let expected = status_bar::GitHubStatus {
+            number: 15,
+            draft: false,
+            review_decision: Some("REVIEW_REQUIRED".to_string()),
+            checks: Some(status_bar::CheckState::Pending),
+        };
+        view.github_tx.send((workspace, Some(expected.clone()))).unwrap();
+
+        assert!(view.poll_github(Instant::now()));
+        assert_eq!(view.github_status, Some(expected));
+        assert!(view.github_query.is_none());
     }
 
     /// Toasts stack downward from the tab bar in the default top-right anchor

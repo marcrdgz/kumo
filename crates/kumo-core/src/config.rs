@@ -219,6 +219,7 @@ pub enum StatusWidget {
     Menu,
     Session,
     Branch,
+    Github,
     AgentStatus,
     Hostname,
     Clock,
@@ -231,6 +232,7 @@ impl StatusWidget {
             "menu" => Some(Self::Menu),
             "session" => Some(Self::Session),
             "branch" => Some(Self::Branch),
+            "github" | "gh" | "pull_request" | "pull-request" | "pr" => Some(Self::Github),
             "agent" | "agents" | "agent_status" | "agent-status" => Some(Self::AgentStatus),
             "hostname" | "host" => Some(Self::Hostname),
             "clock" | "time" => Some(Self::Clock),
@@ -244,6 +246,7 @@ impl StatusWidget {
             Self::Menu => "menu",
             Self::Session => "session",
             Self::Branch => "branch",
+            Self::Github => "github",
             Self::AgentStatus => "agent_status",
             Self::Hostname => "hostname",
             Self::Clock => "clock",
@@ -452,7 +455,7 @@ impl Default for StatusBarConfig {
         Self {
             enabled: true,
             left: vec![StatusWidget::Mode, StatusWidget::Menu, StatusWidget::Session],
-            center: vec![StatusWidget::Branch],
+            center: vec![StatusWidget::Branch, StatusWidget::Github],
             right: vec![StatusWidget::AgentStatus, StatusWidget::Clock],
             widgets: StatusBarWidgets::default(),
         }
@@ -2523,7 +2526,7 @@ mod tests {
         let s = status_bar();
         assert!(s.enabled);
         assert_eq!(s.left, vec![StatusWidget::Mode, StatusWidget::Menu, StatusWidget::Session]);
-        assert_eq!(s.center, vec![StatusWidget::Branch]);
+        assert_eq!(s.center, vec![StatusWidget::Branch, StatusWidget::Github]);
         assert_eq!(s.right, vec![StatusWidget::AgentStatus, StatusWidget::Clock]);
         assert_eq!(s.widgets.clock.format, "%H:%M");
         assert!(s.widgets.branch.show_ahead_behind);
@@ -2604,6 +2607,8 @@ mod tests {
         assert_eq!(StatusWidget::parse("MENU"), Some(StatusWidget::Menu));
         assert_eq!(StatusWidget::parse("agent_status"), Some(StatusWidget::AgentStatus));
         assert_eq!(StatusWidget::parse("agent-status"), Some(StatusWidget::AgentStatus));
+        assert_eq!(StatusWidget::parse("gh"), Some(StatusWidget::Github));
+        assert_eq!(StatusWidget::parse("pr"), Some(StatusWidget::Github));
         assert_eq!(StatusWidget::parse("host"), Some(StatusWidget::Hostname));
         assert_eq!(StatusWidget::parse("time"), Some(StatusWidget::Clock));
         assert_eq!(StatusWidget::parse("unknown"), None);

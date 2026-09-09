@@ -171,9 +171,11 @@ styling; the config hot-reload file watcher rolls into 0.7.0.
   of the 0.5.0 picker — full palette customization in `config.toml` (schemes,
   accents, status dots, borders) instead of the built-in constants.
 - ✅ **Status bar widgets** (deferred from 0.5.0): customizable widgets (branch,
+  active tab, asynchronous GitHub pull-request/CI/review status,
   session, agent status, hostname, clock) — includes the status-bar **layout**
   config deferred from 0.4.0. Configurable via `[status_bar]` (`left`/`center`/`right`
-  widget lists, `enabled`, `[status_bar.widgets.*]` for clock/branch/agent/hostname/session)
+  widget lists, `enabled`, `[status_bar.widgets.*]` for clock/branch/agent/hostname/session;
+  use `github` or `gh` in a slot to toggle GitHub context)
   with live `kumo reload` and per-minute clock tick; collapses to `0` rows when
   `enabled = false` (`crates/kumo-core/src/config.rs`, `app/kumo/src/cli/status_bar.rs`,
   `app/kumo/src/cli/client_view.rs`).
