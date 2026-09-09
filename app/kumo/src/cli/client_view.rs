@@ -5881,12 +5881,14 @@ impl View {
                 }
                 SidebarRow::Branch(i, b) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
-                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
+                    let project_layout = self.sidebar_layout() == SidebarLayout::Project;
+                    let bg = if active && !project_layout { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let name_color = if active { theme.fg } else { theme.panel_muted };
                     if active {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    let avail = max.saturating_sub(4) as usize;
+                    let branch_x = if project_layout { x + 7 } else { x + 4 };
+                    let avail = max.saturating_sub(if project_layout { 7 } else { 4 }) as usize;
                     let suffix = match (b.ahead, b.behind) {
                         (0, 0) => String::new(),
                         (a, 0) => format!(" \u{2191}{}", a),
@@ -5897,8 +5899,13 @@ impl View {
                     let name_avail = avail.saturating_sub(suffix_w);
                     let shown = fit_branch_name(&b.name, name_avail);
                     let branch_style = Style::default().fg(name_color).bg(bg).add_modifier(Modifier::DIM);
-                    text(f, x + 4, y, &shown, branch_style, avail as u16);
-                    let mut cx = x + 4 + shown.chars().count() as u16;
+                    if project_layout {
+                        put(f, x + 2, y, "│", Style::default().fg(theme.panel_sep).bg(bg));
+                        put(f, x + 4, y, "└", Style::default().fg(theme.panel_sep).bg(bg));
+                        put(f, x + 5, y, "⎇", Style::default().fg(theme.panel_muted).bg(bg));
+                    }
+                    text(f, branch_x, y, &shown, branch_style, avail as u16);
+                    let mut cx = branch_x + shown.chars().count() as u16;
                     let mut remaining = (avail as u16).saturating_sub(shown.chars().count() as u16);
                     if b.ahead > 0 && remaining > 1 {
                         put(f, cx, y, " ", Style::default().bg(bg));
@@ -6071,11 +6078,11 @@ impl View {
                         }
                         is_active
                     };
-                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
+                    // A project is a grouping node, not the current target.
+                    // Keep it typographically strong but reserve the selection
+                    // background for the exact workspace/session below it.
+                    let bg = RColor::Reset;
                     let fg = if active { theme.fg } else { theme.panel_muted };
-                    if active {
-                        fill(f, Rect::new(x, y, w, 1), bg);
-                    }
                     // Folder glyph + name, with a stable repo-key color. The
                     // visible label can change as attention counts change.
                     let hash = {
@@ -6101,7 +6108,12 @@ impl View {
                     if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    // AI status icon where `>` used to be (far left)
+                    // Tree guide + workspace glyph make the hierarchy legible
+                    // even when project, session and branch share a name.
+                    put(f, x + 2, y, "├", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 3, y, "─", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 4, y, "◇", Style::default().fg(if active { theme.accent } else { theme.panel_muted }).bg(bg));
+                    // Agent state remains a compact signal in the outer gutter.
                     let dot_status = self.worktree_primary_status(i);
                     if let Some(st) = dot_status {
                         let (r,g,b) = kumo_core::theme::agent_status_color(st);
@@ -6124,22 +6136,22 @@ impl View {
                         put(f, x + 1, y, " ", Style::default().bg(bg));
                     }
                     let name = self.session_name(i);
-                    let name_avail = max.saturating_sub(3).max(1);
+                    let name_avail = max.saturating_sub(6).max(1);
                     let shown = if name.chars().count() as u16 > name_avail {
                         let mut s = name.clone();
                         while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
                         format!("{s}…")
                     } else { name.clone() };
                     let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
-                    text(f, x + 3, y, &shown, name_style, name_avail);
+                    text(f, x + 6, y, &shown, name_style, name_avail);
                 }
                 SidebarRow::InlineAgent(i, pid, name, status) => {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let pane_focused = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == pid).unwrap_or(false)).unwrap_or(false);
                     let focused = (session_active && pane_focused) || self.inbox_selected(i, pid);
-                    // every agent under the active worktree shares a subtle block bg;
-                    // the actually focused agent gets a brighter pop
-                    let bg = if focused { agent_active_bg(&theme) } else if session_active { sidebar_active_bg(&theme) } else { RColor::Reset };
+                    // Only the exact focused agent receives a selection fill;
+                    // the parent workspace row already communicates session focus.
+                    let bg = if focused { agent_active_bg(&theme) } else { RColor::Reset };
                     if bg != RColor::Reset { fill(f, Rect::new(x, y, w, 1), bg); }
                     if self.inbox_selected(i, pid) {
                         put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
@@ -6158,8 +6170,10 @@ impl View {
                     } else {
                         Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
                     };
-                    put(f, x + 4, y, dot, dot_style);
-                    let avail = max.saturating_sub(6) as usize;
+                    put(f, x + 2, y, "│", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 4, y, "└", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 5, y, dot, dot_style);
+                    let avail = max.saturating_sub(7) as usize;
                     let label = if name.chars().count() > avail {
                         let mut s = name.clone();
                         while s.chars().count() > avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
@@ -6172,7 +6186,7 @@ impl View {
                     } else {
                         Style::default().fg(dot_fg).bg(bg)
                     };
-                    text(f, x + 6, y, &label, name_style, avail as u16);
+                    text(f, x + 7, y, &label, name_style, avail as u16);
                 }
             }
         }
@@ -8833,6 +8847,35 @@ mod tests {
             })
             .collect();
         assert_eq!(worktrees, vec!["main", "sidebar-uiux"]);
+    }
+
+    #[test]
+    fn project_sidebar_renders_distinct_hierarchy_levels() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "workspace".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/kumo-workspace");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/kumo"));
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/ui".into(), ahead: 0, behind: 0 });
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.recompute_geometry();
+
+        let rows = view.sidebar_rows();
+        let workspace_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::Worktree(0)).then_some(*y)).unwrap();
+        let branch_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::Branch(0, _)).then_some(*y)).unwrap();
+        let agent_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::InlineAgent(0, ..)).then_some(*y)).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        assert_eq!(buf.cell((2, workspace_y)).unwrap().symbol(), "├");
+        assert_eq!(buf.cell((4, workspace_y)).unwrap().symbol(), "◇");
+        assert_eq!(buf.cell((5, branch_y)).unwrap().symbol(), "⎇");
+        assert_eq!(buf.cell((4, agent_y)).unwrap().symbol(), "└");
     }
 
     #[test]
