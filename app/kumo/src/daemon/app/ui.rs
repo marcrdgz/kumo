@@ -112,6 +112,7 @@ impl App {
                 kumo_protocol::SessionLayout {
                     name: s.name.clone(),
                     workspace: s.workspace.clone(),
+                    project_root: kumo_core::worktrees::main_worktree_path(&s.workspace),
                     active_tab: s.active_tab,
                     tabs,
                     branch: self.session_branch(i).map(Into::into),

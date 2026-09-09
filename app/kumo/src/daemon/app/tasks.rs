@@ -8,7 +8,7 @@ use super::App;
 
 /// How often the sidebar re-reads the git branch of each session's workspace.
 const BRANCH_REFRESH: Duration = Duration::from_secs(3);
-/// How often to re-scan the focused pane's cwd for follow-workspace.
+/// How often to re-scan the session's project-anchor pane for follow-workspace.
 const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
 /// How often to re-scan pane process trees for an AI CLI (opencode/claude).
 const AI_SCAN_INTERVAL: Duration = Duration::from_secs(2);
@@ -82,12 +82,12 @@ impl App {
         self.branch_cache.get(ws).and_then(|(b, _)| b.clone())
     }
 
-    /// Follow the workspace to the focused pane's actual cwd (`[terminal]
+    /// Follow the workspace to the first pane in the first tab (`[terminal]
     /// new-cwd = "follow"`, the default), at most every `FOLLOW_INTERVAL`.
     /// The session workspace drives new splits, the sidebar, and the git
-    /// branch, so updating it here makes all of them follow. Only real local
-    /// directories are adopted (a remote `ssh` pane's OSC 7 path is not), so
-    /// new panes never spawn into a nonexistent cwd.
+    /// branch. Anchoring it keeps focus changes and cwd changes in other panes
+    /// from moving the session to another sidebar project. Only real local
+    /// directories are adopted (a remote `ssh` pane's OSC 7 path is not).
     pub(super) fn refresh_workspace_follow(&mut self) {
         if !matches!(kumo_core::config::new_cwd(), kumo_core::config::NewCwd::Follow) {
             return;
@@ -96,9 +96,9 @@ impl App {
             return;
         }
         self.last_follow_scan = Instant::now();
-        let focus = self.sessions[self.active].active_tab().tree.focus;
+        let Some(anchor) = self.sessions[self.active].project_anchor_pane() else { return };
         let cwd = {
-            let Some(pane) = self.panes.get_mut(&focus) else { return };
+            let Some(pane) = self.panes.get_mut(&anchor) else { return };
             pane.detected_cwd()
         };
         let Some(cwd) = cwd else { return };

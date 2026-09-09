@@ -410,6 +410,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let reply = app.rename_tab_in_session(&session, &tab, &new_name).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
+                Command::TabMove { session, tab_id, to_index } => {
+                    let _ = app.move_tab_in_session(&session, tab_id, to_index);
+                }
                 Command::PaneSplit { session, dir, is_ai } => {
                     let reply = app.split_in_session(&session, dir, is_ai).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
