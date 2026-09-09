@@ -5659,9 +5659,9 @@ impl View {
             // Hidden: no border, just title chip at top-left inset.
             let max = rect.width.saturating_sub(2) as usize;
             let chip = if focused {
-                Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD)
             } else if blocked {
-                Style::default().fg(RColor::Black).bg(theme.orange).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.orange).bg(RColor::Reset).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg).bg(RColor::Reset)
             };
@@ -5695,12 +5695,13 @@ impl View {
             put(f, x0, y, v, border_style);
             put(f, x1, y, v, border_style);
         }
-        // Title chip.
+        // The outline owns focus. Keeping the title on the terminal surface
+        // avoids a second saturated chip competing with the same border.
         let max = rect.width.saturating_sub(2) as usize;
         let chip = if focused {
-            Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         } else if blocked {
-            Style::default().fg(RColor::Black).bg(theme.orange).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.orange).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg).bg(RColor::Reset)
         };
@@ -8367,6 +8368,9 @@ mod tests {
         // The title chip carries the pane label (pane frame at y=1).
         assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
         assert!(buf.cell((28, 1)).unwrap().symbol() == "s" || buf.cell((28, 1)).unwrap().symbol() == " ");
+        let title_cell = buf.cell((28, 1)).unwrap();
+        assert_eq!(title_cell.fg, view.current_theme().accent);
+        assert_eq!(title_cell.bg, RColor::Reset, "focused pane title must not add a competing accent fill");
         // The status bar shows NORMAL + the session name.
         let status_line: String = (0..40).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
         assert!(status_line.contains("NORMAL"), "status chip missing: {status_line:?}");
