@@ -9237,7 +9237,11 @@ mod tests {
             let backend = ratatui::backend::TestBackend::new(20, 10);
             let mut term = ratatui::Terminal::new(backend).unwrap();
             term.draw(|frame| view.render_pane_frame(frame, rect, true, " title ")).unwrap();
-            assert_eq!(term.backend().buffer().cell((rect.x, rect.y)).unwrap().fg, expected);
+            let buffer = term.backend().buffer();
+            assert_eq!(buffer.cell((rect.x, rect.y)).unwrap().fg, expected, "attention state owns the focused pane border");
+            let title_cell = buffer.cell((rect.x + 1, rect.y)).unwrap();
+            assert_eq!(title_cell.fg, view.current_theme().accent, "focused title keeps the focus accent");
+            assert!(title_cell.modifier.contains(Modifier::BOLD), "focused title remains bold alongside attention state");
         }
     }
 
