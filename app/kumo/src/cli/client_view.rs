@@ -74,7 +74,7 @@ const COPY_SEARCH_H: u16 = 5;
 
 fn tab_width(name: &str) -> u16 {
     let n = name.chars().count() as u16;
-    (n + 4).max(6)
+    n + 2
 }
 fn lighten(c: RColor, amt: u8) -> RColor {
     match c {
@@ -5939,30 +5939,21 @@ impl View {
             let Some(tab) = sess.tabs.get(*idx) else { continue };
             let active = sess.active_tab == *idx;
             let is_hover = self.tab_hover == Some(*idx);
-            // Tabs are navigation chrome, so they use a raised neutral surface
-            // and the secondary accent. The primary accent remains reserved
-            // for the focused pane outline.
-            let pill_bg = if active {
-                lighten(bar_bg, 24)
-            } else if is_hover {
-                lighten(bar_bg, 14)
-            } else {
-                bar_bg
-            };
-            let fg = if active { theme.secondary } else { theme.panel_muted };
+            let pill_bg = if active { theme.accent } else { lighten(bar_bg, 14) };
+            let fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.fg };
             fill(f, *pill, pill_bg);
             let base_style = if active {
-                Style::default().fg(fg).bg(pill_bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                Style::default().fg(fg).bg(pill_bg).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(fg).bg(pill_bg)
             };
-            // Draw name left-aligned at first cell; last cell reserved for x
+            // Draw the name, one spacer cell, then the persistent close action.
             let name = &tab.name;
             let max_w = pill.width.saturating_sub(1);
             let name_w = (name.chars().count() as u16).min(max_w);
             text(f, pill.x, pill.y, name, base_style, name_w);
             if is_hover {
-                let x_fg = theme.red;
+                let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
             } else {
                 // Persistent ghost close hint: always visible (clickable without
@@ -8623,12 +8614,13 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Tab bar at top — rectangular pill, no brackets, x in last cell on hover, name at first cell
-        // Pill width for "1" is 6 => pill at x=26..31, name at 26
+        // Tab bar at top — active tab uses the primary accent, followed by one
+        // spacer cell and the persistent close action.
         assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
-        assert!(buf.cell((26, 0)).unwrap().style().bg.is_some(), "tab bar should have distinct bg");
-        assert_eq!(buf.cell((26, 0)).unwrap().fg, view.current_theme().secondary);
-        assert_ne!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
+        assert_eq!(buf.cell((26, 0)).unwrap().fg, RColor::Rgb(0x0a, 0x0a, 0x0a));
+        assert_eq!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
+        assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "x");
         // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).
@@ -9334,6 +9326,25 @@ mod tests {
         assert_eq!(tab_reorder_index(0, 1, false), None);
         assert_eq!(tab_reorder_index(1, 0, true), None);
         assert_eq!(tab_reorder_index(1, 1, false), None);
+    }
+
+    #[test]
+    fn active_tab_uses_primary_accent_and_one_cell_before_close() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        view.update_tab_rects();
+        let (_, pill, close) = view.tab_rects[0];
+        assert_eq!(pill.width, 3);
+        assert_eq!(close.x, pill.x + 2, "one cell separates the one-character title and close action");
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+        let buffer = term.backend().buffer();
+        let theme = view.current_theme();
+        assert_eq!(buffer.cell((pill.x, pill.y)).unwrap().bg, theme.accent);
+        assert_eq!(buffer.cell((pill.x + 1, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
     }
 
     #[test]
