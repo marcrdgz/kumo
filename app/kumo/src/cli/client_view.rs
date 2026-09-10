@@ -6460,22 +6460,48 @@ impl View {
                 }
                 SidebarRow::NewSession => {
                     let style = Style::default().fg(theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD);
-                    text(f, x, y, "  + NEW SESSION", style, max);
+                    let hint_style = Style::default().fg(theme.panel_muted).bg(RColor::Reset);
+                    let show_hint = self.sidebar_layout() == SidebarLayout::Project && max >= 5;
+                    let hint_w = 1u16;
+                    let max_r = w.saturating_sub(1).max(1);
+                    let label_w = if show_hint { max.saturating_sub(hint_w + 2) } else { max };
+                    text(f, x, y, "  + NEW SESSION", style, label_w);
+                    if show_hint {
+                        text(f, x + max_r.saturating_sub(hint_w), y, "c", hint_style, hint_w);
+                    }
                 }
                 SidebarRow::AgentInboxHeader { blocked, done, working } => {
                     let style = Style::default().fg(theme.panel_muted).bg(RColor::Reset).add_modifier(Modifier::BOLD);
                     text(f, x + 2, y, "AGENTS", style, max.saturating_sub(2));
                     let summary = format!("!{blocked} ✓{done} {}{working}", self.spinner_char());
                     let summary_w = summary.chars().count() as u16;
+                    let show_hint = self.sidebar_layout() == SidebarLayout::Project && summary_w + 12 < w;
                     if summary_w + 10 < w {
+                        let hint_w = 1u16;
+                        let max_r = w.saturating_sub(1).max(1);
+                        let summary_x = if show_hint {
+                            x + max_r.saturating_sub(hint_w + 2 + summary_w)
+                        } else {
+                            x + max_r.saturating_sub(summary_w)
+                        };
                         text(
                             f,
-                            x + w.saturating_sub(summary_w + 1),
+                            summary_x,
                             y,
                             &summary,
                             Style::default().fg(theme.panel_muted).bg(RColor::Reset),
                             summary_w,
                         );
+                        if show_hint {
+                            text(
+                                f,
+                                x + max_r.saturating_sub(hint_w),
+                                y,
+                                "i",
+                                Style::default().fg(theme.panel_muted).bg(RColor::Reset),
+                                hint_w,
+                            );
+                        }
                     }
                 }
                 SidebarRow::CompactAgent(i, _pid, name, status) => {
@@ -8730,6 +8756,69 @@ mod tests {
         let scrolled = view.sidebar_rows();
         assert!(scrolled.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
         assert!(scrolled.iter().any(|(y, row)| *y == geometry.agents_header_y && matches!(row, SidebarRow::AgentInboxHeader { .. })));
+    }
+
+    #[test]
+    fn project_sidebar_renders_contextual_shortcuts_without_covering_counters() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Working),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.sidebar_width = 28;
+        view.recompute_geometry();
+
+        let geometry = view.project_sidebar_geometry();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            view.render_sidebar(f, area);
+        }).unwrap();
+        let buffer = term.backend().buffer();
+        let hint_x = view.effective_sidebar_width() - 2;
+        assert_eq!(buffer.cell((hint_x, geometry.new_session_y)).unwrap().symbol(), "c");
+        assert_eq!(buffer.cell((hint_x, geometry.agents_header_y)).unwrap().symbol(), "i");
+        let header: String = (0..hint_x).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(header.contains("!1"), "blocked counter missing: {header:?}");
+        assert!(header.contains("✓1"), "done counter missing: {header:?}");
+        assert!(view.sidebar_hit(hint_x, geometry.new_session_y));
+        assert!(view.popup.open, "clicking the contextual new-session hint keeps the row target");
+        view.popup.open = false;
+        assert!(view.sidebar_hit(hint_x, geometry.agents_header_y));
+        assert_eq!(view.mode, Mode::Inbox, "clicking the contextual inbox hint keeps the row target");
+    }
+
+    #[test]
+    fn project_sidebar_hides_inbox_shortcut_when_width_is_tight() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Working),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 21;
+        view.sidebar_width = 21;
+        view.recompute_geometry();
+
+        let geometry = view.project_sidebar_geometry();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            view.render_sidebar(f, area);
+        }).unwrap();
+        let buffer = term.backend().buffer();
+        let hint_x = view.effective_sidebar_width() - 2;
+        assert_eq!(buffer.cell((hint_x, geometry.new_session_y)).unwrap().symbol(), "c");
+        assert_ne!(buffer.cell((hint_x, geometry.agents_header_y)).unwrap().symbol(), "i");
+        let header: String = (0..hint_x).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(header.contains("!1"), "blocked counter remains visible at narrow width: {header:?}");
+        assert!(header.contains("✓1"), "done counter remains visible at narrow width: {header:?}");
     }
 
     #[test]
