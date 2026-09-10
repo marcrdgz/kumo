@@ -6318,7 +6318,11 @@ impl View {
                     let suffix_w = suffix.chars().count().min(avail);
                     let name_avail = avail.saturating_sub(suffix_w);
                     let shown = fit_branch_name(&b.name, name_avail);
-                    let branch_style = Style::default().fg(name_color).bg(bg).add_modifier(Modifier::DIM);
+                    let branch_style = Style::default()
+                        .fg(name_color)
+                        .bg(bg)
+                        .add_modifier(Modifier::DIM)
+                        .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() });
                     if project_layout {
                         put(
                             f,
@@ -6553,11 +6557,15 @@ impl View {
                         }
                         is_active
                     };
-                    // A project is a grouping node, not the current target.
-                    // Keep it typographically strong but reserve the selection
-                    // background for the exact workspace/session below it.
-                    let bg = RColor::Reset;
+                    // Keep the complete active path visually connected: the
+                    // project, its active worktree, and that worktree's
+                    // branch all share the same selection background and
+                    // accent path marker.
+                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let fg = if active { theme.fg } else { theme.panel_muted };
+                    if active {
+                        fill(f, Rect::new(x, y, w, 1), bg);
+                    }
                     // Folder glyph + name, with a stable repo-key color. The
                     // visible label can change as attention counts change.
                     let hash = {
@@ -9917,6 +9925,69 @@ mod tests {
         assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
         assert_eq!(buf.cell((0, workspace_y)).unwrap().symbol(), "┃");
         assert_eq!(buf.cell((0, branch_y)).unwrap().symbol(), "┃");
+    }
+
+    #[test]
+    fn project_sidebar_highlights_only_the_active_workspace_path() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.active = Some("active".into());
+        layout.sessions[0].name = "active".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-active");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project-active"));
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/active".into(), ahead: 0, behind: 0 });
+
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "linked".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/project-active-linked");
+        linked.branch = Some(WireBranch { name: "feature/linked".into(), ahead: 0, behind: 0 });
+
+        let mut other = layout.sessions[0].clone();
+        other.name = "other".into();
+        other.workspace = std::path::PathBuf::from("/tmp/project-other");
+        other.project_root = Some(std::path::PathBuf::from("/tmp/project-other"));
+        other.branch = Some(WireBranch { name: "main".into(), ahead: 0, behind: 0 });
+
+        let active_project = session_project_key(&layout.sessions[0]);
+        let other_project = session_project_key(&other);
+        layout.sessions.extend([linked, other]);
+        view.project_order = vec![active_project.clone(), other_project.clone()];
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.recompute_geometry();
+
+        let rows = view.sidebar_rows();
+        let row_y = |predicate: &dyn Fn(&SidebarRow) -> bool| {
+            rows.iter().find_map(|(y, row)| predicate(row).then_some(*y)).unwrap()
+        };
+        let active_project_y = row_y(&|row| matches!(row, SidebarRow::ProjectHeader { key, .. } if key == &active_project));
+        let active_worktree_y = row_y(&|row| matches!(row, SidebarRow::Worktree(0)));
+        let active_branch_y = row_y(&|row| matches!(row, SidebarRow::Branch(0, _)));
+        let other_project_y = row_y(&|row| matches!(row, SidebarRow::ProjectHeader { key, .. } if key == &other_project));
+        let other_worktree_y = row_y(&|row| matches!(row, SidebarRow::Worktree(2)));
+        let other_branch_y = row_y(&|row| matches!(row, SidebarRow::Branch(2, _)));
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let active_bg = sidebar_active_bg(&view.current_theme());
+
+        for y in [active_project_y, active_worktree_y, active_branch_y] {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, active_bg, "active path background at y={y}");
+            assert_eq!(buf.cell((0, y)).unwrap().symbol(), "┃", "active path marker at y={y}");
+        }
+        assert!(buf.cell((5, active_project_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(buf.cell((6, active_worktree_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(buf.cell((7, active_branch_y)).unwrap().modifier.contains(Modifier::BOLD));
+
+        for y in [other_project_y, other_worktree_y, other_branch_y] {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, RColor::Reset, "inactive path background at y={y}");
+            assert_ne!(buf.cell((0, y)).unwrap().symbol(), "┃", "inactive path marker at y={y}");
+        }
+        assert!(!buf.cell((6, other_worktree_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(!buf.cell((7, other_branch_y)).unwrap().modifier.contains(Modifier::BOLD));
     }
 
     #[test]
