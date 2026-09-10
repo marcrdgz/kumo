@@ -4660,6 +4660,17 @@ impl View {
         (blocked, done, working)
     }
 
+    fn compact_agent_summary(&self) -> String {
+        let (blocked, done, working) = self.agent_counts();
+        if blocked + done + working > 0 {
+            format!("!{blocked} ✓{done} {}{working}", self.spinner_char())
+        } else if self.all_agent_entries().is_empty() {
+            "no agents".to_string()
+        } else {
+            "all clear".to_string()
+        }
+    }
+
     /// Attention rows lead the compact inbox; working agents fill any
     /// remaining slots. Idle and unknown agents stay in the full inbox.
     fn compact_agent_entries(&self) -> Vec<(usize, u64, String, AgentStatus)> {
@@ -4807,7 +4818,8 @@ impl View {
         let layout = match &self.layout {
             Some(l) if !l.sessions.is_empty() => l,
             _ => {
-                out.push(SidebarRow::Dim("no workspaces".to_string()));
+                out.push(SidebarRow::Dim("No sessions yet".to_string()));
+                out.push(SidebarRow::Dim("press c to create one".to_string()));
                 return out;
             }
         };
@@ -5103,9 +5115,14 @@ impl View {
                 // scrolling project tree ends above the fixed New Session and
                 // bottom-anchored compact agent inbox.
                 out[1] = (1, SidebarRow::Search);
-                let items = self.project_content();
-                let space_count = items.iter().filter(|row| matches!(row, SidebarRow::Worktree(..))).count();
                 let geometry = self.project_sidebar_geometry();
+                let no_sessions = self.layout.as_ref().map(|layout| layout.sessions.is_empty()).unwrap_or(true);
+                let items = if no_sessions && geometry.spaces_h < 2 {
+                    vec![SidebarRow::Dim("No sessions · press c".to_string())]
+                } else {
+                    self.project_content()
+                };
+                let space_count = items.iter().filter(|row| matches!(row, SidebarRow::Worktree(..))).count();
                 if geometry.tiny {
                     out.clear();
                     if geometry.new_session_y > 0 {
@@ -6470,10 +6487,10 @@ impl View {
                         text(f, x + max_r.saturating_sub(hint_w), y, "c", hint_style, hint_w);
                     }
                 }
-                SidebarRow::AgentInboxHeader { blocked, done, working } => {
+                SidebarRow::AgentInboxHeader { .. } => {
                     let style = Style::default().fg(theme.panel_muted).bg(RColor::Reset).add_modifier(Modifier::BOLD);
                     text(f, x + 2, y, "AGENTS", style, max.saturating_sub(2));
-                    let summary = format!("!{blocked} ✓{done} {}{working}", self.spinner_char());
+                    let summary = self.compact_agent_summary();
                     let summary_w = summary.chars().count() as u16;
                     let show_hint = self.sidebar_layout() == SidebarLayout::Project && summary_w + 12 < w;
                     if summary_w + 10 < w {
@@ -8831,6 +8848,95 @@ mod tests {
         let rows = view.sidebar_rows();
         assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::AgentInboxHeader { .. })));
         assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::CompactAgent(..))));
+    }
+
+    #[test]
+    fn project_sidebar_empty_state_keeps_new_session_fixed_below_two_lines() {
+        let mut view = test_view();
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert!(geometry.spaces_h >= 2);
+
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "No sessions yet")));
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "press c to create one")));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line = |y| (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, y)).unwrap().symbol().to_string()).collect::<String>();
+        assert!(line(3).contains("No sessions yet"));
+        assert!(line(4).contains("press c to create one"));
+    }
+
+    #[test]
+    fn project_sidebar_empty_state_falls_back_to_one_line_at_low_height() {
+        let mut view = test_view();
+        view.rows = 8;
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(geometry.spaces_h, 1);
+
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "No sessions · press c")));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.agents_header_y && matches!(row, SidebarRow::AgentInboxHeader { .. })));
+    }
+
+    #[test]
+    fn compact_agent_header_shows_all_clear_for_idle_only_agents() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle), (2, AgentStatus::Unknown)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(view.compact_agent_summary(), "all clear");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line: String = (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(line.contains("AGENTS"));
+        assert!(line.contains("all clear"));
+        assert!(!line.contains("no agents"));
+    }
+
+    #[test]
+    fn compact_agent_header_keeps_attention_counters() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Done), (3, AgentStatus::Working)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(view.compact_agent_summary(), "!1 ✓1 ⠋1");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line: String = (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(line.contains("!1 ✓1 ⠋1"));
+    }
+
+    #[test]
+    fn compact_agent_header_stays_separate_from_title_at_narrow_width() {
+        let mut view = test_view();
+        view.sidebar_width = MIN_SIDEBAR_WIDTH;
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let title: String = (2..8).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        let summary: String = (10..19).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert_eq!(title, "AGENTS");
+        assert_eq!(summary, "no agents");
     }
 
     #[test]
