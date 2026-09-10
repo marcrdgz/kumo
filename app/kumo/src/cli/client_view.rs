@@ -6511,7 +6511,9 @@ impl View {
                         if active { "◆" } else { "◇" },
                         Style::default().fg(if active { theme.accent } else { theme.panel_muted }).bg(bg),
                     );
-                    // Agent state remains a compact signal in the outer gutter.
+                    // Keep hierarchy on the left and align the aggregate AI
+                    // state in a stable metadata column on the right. The
+                    // final sidebar column remains reserved for the scrollbar.
                     let dot_status = self.worktree_primary_status(i);
                     if let Some(st) = dot_status {
                         let (r,g,b) = kumo_core::theme::agent_status_color(st);
@@ -6528,10 +6530,7 @@ impl View {
                         } else {
                             Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
                         };
-                        put(f, x + 1, y, dot, dot_style);
-                    } else {
-                        // no agent — keep gutter empty
-                        put(f, x + 1, y, " ", Style::default().bg(bg));
+                        put(f, x + w.saturating_sub(2), y, dot, dot_style);
                     }
                     let name = self.session_name(i);
                     let name_avail = max.saturating_sub(6).max(1);
@@ -9693,6 +9692,8 @@ mod tests {
         assert_eq!(buf.cell((2, workspace_y)).unwrap().symbol(), "└");
         assert_eq!(buf.cell((2, workspace_y)).unwrap().fg, view.current_theme().panel_muted);
         assert_eq!(buf.cell((4, workspace_y)).unwrap().symbol(), "◆");
+        assert_eq!(buf.cell((view.effective_sidebar_width() - 2, workspace_y)).unwrap().symbol(), "●");
+        assert_eq!(buf.cell((1, workspace_y)).unwrap().symbol(), " ");
         assert_eq!(buf.cell((5, branch_y)).unwrap().symbol(), "⎇");
         assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
         assert_eq!(buf.cell((0, workspace_y)).unwrap().symbol(), "┃");
