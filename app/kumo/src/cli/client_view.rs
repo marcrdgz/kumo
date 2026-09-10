@@ -6580,11 +6580,7 @@ impl View {
                     }
                     put(f, x + 1, y, if collapsed { "▸" } else { "▾" }, Style::default().fg(dot_col).bg(bg));
                     put(f, x + 3, y, "▰", Style::default().fg(dot_col).bg(bg));
-                    let shown = if name.chars().count() as u16 > max.saturating_sub(5) {
-                        let mut s = name.clone();
-                        while s.chars().count() as u16 > max.saturating_sub(6) && !s.is_empty() { s.pop(); }
-                        format!("{s}…")
-                    } else { name.clone() };
+                    let shown = fit_middle_label(&name, max.saturating_sub(5) as usize);
                     text(f, x + 5, y, &shown, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD), max.saturating_sub(5));
                 }
                 SidebarRow::Worktree(i) => {
@@ -6638,11 +6634,7 @@ impl View {
                     }
                     let name = self.session_name(i);
                     let name_avail = max.saturating_sub(6).max(1);
-                    let shown = if name.chars().count() as u16 > name_avail {
-                        let mut s = name.clone();
-                        while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
-                        format!("{s}…")
-                    } else { name.clone() };
+                    let shown = fit_middle_label(&name, name_avail as usize);
                     let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
                     text(f, x + 6, y, &shown, name_style, name_avail);
                 }
@@ -8113,17 +8105,51 @@ fn sel_corners(sel: &Sel) -> ((u16, u16), (u16, u16)) {
     }
 }
 
-/// Truncate a git branch name to `avail` columns, appending `…` when cut.
-fn fit_branch_name(name: &str, avail: usize) -> String {
-    if name.chars().count() <= avail {
-        name.to_string()
-    } else if avail == 0 {
-        String::new()
-    } else {
-        let mut s: String = name.chars().take(avail - 1).collect();
-        s.push('…');
-        s
+/// Truncate a label in the middle while keeping both ends visible.
+///
+/// This works on Unicode scalar values rather than byte offsets, so a narrow
+/// sidebar cannot split a multi-byte character. For one or two columns the
+/// ellipsis is kept as the only reliable indication that content was cut.
+fn fit_middle_label(name: &str, avail: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= avail {
+        return name.to_string();
     }
+    match avail {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let kept = avail - 1;
+            let left = kept.div_ceil(2);
+            let right = kept - left;
+            let mut shown: String = chars[..left].iter().collect();
+            shown.push('…');
+            shown.extend(chars[chars.len() - right..].iter());
+            shown
+        }
+    }
+}
+
+/// Truncate a git branch name to `avail` columns, preserving its category when
+/// possible and otherwise using the shared middle truncation.
+fn fit_branch_name(name: &str, avail: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= avail {
+        return name.to_string();
+    }
+    if let Some(slash) = chars.iter().position(|ch| *ch == '/') {
+        let category_len = slash + 1;
+        // Keep at least one differentiating suffix character after the
+        // category and ellipsis; otherwise the generic middle form is clearer.
+        if avail >= category_len + 2 {
+            let suffix_len = avail - category_len - 1;
+            let mut shown: String = chars[..category_len].iter().collect();
+            shown.push('…');
+            shown.extend(chars[chars.len() - suffix_len..].iter());
+            return shown;
+        }
+    }
+    fit_middle_label(name, avail)
 }
 
 /// Short display form of a workspace path, e.g. `.../kumo`.
@@ -9763,7 +9789,24 @@ mod tests {
 
     #[test]
     fn fit_branch_name_truncates() {
-        assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/lo…");
+        assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/…me");
+        assert_eq!(fit_branch_name("feat/long-agent-inbox", 17), "feat/…agent-inbox");
+        assert_eq!(fit_branch_name("agent-inbox", 6), "age…ox");
+        assert_eq!(fit_branch_name("feat/agent-inbox", 0), "");
+        assert_eq!(fit_branch_name("feat/agent-inbox", 1), "…");
+        assert_eq!(fit_branch_name("feat/agent-inbox", 2), "f…");
+    }
+
+    #[test]
+    fn sidebar_label_middle_truncation_preserves_unicode_context() {
+        assert_eq!(fit_middle_label("project-name", 12), "project-name");
+        assert_eq!(fit_middle_label("project-name", 0), "");
+        assert_eq!(fit_middle_label("project-name", 1), "…");
+        assert_eq!(fit_middle_label("project-name", 2), "p…");
+        assert_eq!(fit_middle_label("project-name", 7), "pro…ame");
+        assert_eq!(fit_middle_label("café界面", 4), "ca…面");
+        assert_eq!(fit_middle_label("a-very-long-project-name", 9), "a-ve…name");
+        assert_eq!(fit_middle_label("worktree-with-a-long-name", 11), "workt…-name");
     }
 
     fn one_pane_layout() -> Layout {
