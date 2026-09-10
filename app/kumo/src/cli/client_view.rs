@@ -83,6 +83,28 @@ fn lighten(c: RColor, amt: u8) -> RColor {
     }
 }
 
+/// Foreground with readable contrast against a theme's input surface. Built-in
+/// themes use a light neutral surface; custom themes may choose a dark one.
+fn input_fg(theme: &OwnedTheme) -> RColor {
+    let rgb = match theme.input_bg {
+        RColor::Rgb(r, g, b) => Some((r, g, b)),
+        RColor::Indexed(i) => theme.palette.get(i as usize).map(|c| (c.r, c.g, c.b)),
+        RColor::Black | RColor::DarkGray | RColor::Red | RColor::Blue | RColor::Magenta => return RColor::White,
+        _ => return RColor::Black,
+    };
+    let Some((r, g, b)) = rgb else { return RColor::Black };
+    let luminance = 299 * r as u32 + 587 * g as u32 + 114 * b as u32;
+    if luminance >= 140_000 { RColor::Black } else { RColor::White }
+}
+
+fn input_style(theme: &OwnedTheme) -> Style {
+    Style::default().fg(input_fg(theme)).bg(theme.input_bg)
+}
+
+fn input_hint_style(theme: &OwnedTheme) -> Style {
+    input_style(theme).add_modifier(Modifier::DIM)
+}
+
 fn sidebar_active_bg(theme: &OwnedTheme) -> RColor {
     // worktree selection — subtle but visible, a touch darker than before
     lighten(theme.panel_sep, 28)
@@ -3823,7 +3845,12 @@ impl View {
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
         let lines = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
-        let height = ((lines + 5) as u16).min(h.saturating_sub(4)).max(7);
+        let available = h.saturating_sub(4);
+        if available < 7 {
+            return None;
+        }
+        let height_cap = (((h as u32 * 3) / 5) as u16).max(7).min(available);
+        let height = ((lines + 5) as u16).min(height_cap).max(7);
         if w < width || h < height {
             return None;
         }
@@ -6744,7 +6771,7 @@ impl View {
             _ => "name:",
         };
         text(f, x0 + 2, y0 + 2, label_text, label, dd.width.saturating_sub(4));
-        let field = Style::default().fg(RColor::Black).bg(theme.input_bg);
+        let field = input_style(&theme);
         let field_w = dd.width.saturating_sub(4);
         for cx in (x0 + 2)..(x0 + 2 + field_w) {
             put(f, cx, y0 + 3, " ", field);
@@ -6798,10 +6825,10 @@ impl View {
 
         let input = Rect::new(dd.x + 2, dd.y + 2, inner_w, 1);
         fill(f, input, theme.input_bg);
-        put(f, input.x, input.y, "›", Style::default().fg(theme.secondary).bg(theme.input_bg).add_modifier(Modifier::BOLD));
-        let query_style = Style::default().fg(theme.fg).bg(theme.input_bg);
+        let query_style = input_style(&theme);
+        put(f, input.x, input.y, "›", query_style.add_modifier(Modifier::BOLD));
         if self.keybind_overlay.input.is_empty() {
-            text(f, input.x + 2, input.y, "type to filter actions…", Style::default().fg(theme.panel_muted).bg(theme.input_bg), input.width.saturating_sub(2));
+            text(f, input.x + 2, input.y, "type to filter actions…", input_hint_style(&theme), input.width.saturating_sub(2));
         } else {
             let field_w = input.width.saturating_sub(2) as usize;
             let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w);
@@ -7082,7 +7109,7 @@ impl View {
         text(f, dd.x + 2, dd.y + 3, "Create from", input_label_style, inner_w);
         let input_rect = Rect::new(dd.x + 2, dd.y + 4, inner_w, 1);
         let input_bg = if is_create_focused { theme.accent } else { theme.input_bg };
-        let input_fg = if is_create_focused { RColor::Black } else { theme.fg };
+        let field_fg = if is_create_focused { RColor::Black } else { input_fg(&theme) };
         fill(f, input_rect, input_bg);
         // Placeholder / content
         let cf = &self.worktree_create.create_from;
@@ -7096,9 +7123,9 @@ impl View {
         };
         let display = if cf.is_empty() && !is_create_focused { placeholder } else { cf.as_str() };
         let text_style = if cf.is_empty() && !is_create_focused {
-            Style::default().fg(theme.panel_muted).bg(input_bg)
+            input_hint_style(&theme)
         } else {
-            Style::default().fg(input_fg).bg(input_bg)
+            Style::default().fg(field_fg).bg(input_bg)
         };
         // Render with cursor handling (scroll if needed)
         let field_w = inner_w as usize;
@@ -7134,13 +7161,13 @@ impl View {
             text(f, dd.x + 2, dd.y + 7, "Branch name override", input_label_style, inner_w);
             let br_rect = Rect::new(dd.x + 2, dd.y + 8, inner_w, 1);
             let bg = if branch_focused { theme.accent } else { theme.input_bg };
-            let fg = if branch_focused { RColor::Black } else { theme.fg };
+            let fg = if branch_focused { RColor::Black } else { input_fg(&theme) };
             fill(f, br_rect, bg);
             let b = &self.worktree_create.branch_override;
             let bc = self.worktree_create.branch_cursor;
             let bph = "e.g. feat/login (leave empty to derive)";
             let bdisplay = if b.is_empty() && !branch_focused { bph } else { b.as_str() };
-            let bstyle = if b.is_empty() && !branch_focused { Style::default().fg(theme.panel_muted).bg(bg) } else { Style::default().fg(fg).bg(bg) };
+            let bstyle = if b.is_empty() && !branch_focused { input_hint_style(&theme) } else { Style::default().fg(fg).bg(bg) };
             let blen = bdisplay.chars().count();
             let bcur = bc.min(blen);
             let bstart = if blen <= inner_w as usize { 0 } else { bcur.saturating_sub(inner_w as usize / 2).min(blen - inner_w as usize) };
@@ -7160,13 +7187,13 @@ impl View {
             text(f, dd.x + 2, dd.y + 9, "Note", input_label_style, inner_w);
             let note_rect = Rect::new(dd.x + 2, dd.y + 10, inner_w, 1);
             let nbg = if note_focused { theme.accent } else { theme.input_bg };
-            let nfg = if note_focused { RColor::Black } else { theme.fg };
+            let nfg = if note_focused { RColor::Black } else { input_fg(&theme) };
             fill(f, note_rect, nbg);
             let n = &self.worktree_create.note;
             let nc = self.worktree_create.note_cursor;
             let nph = "optional checkpoint note";
             let ndisp = if n.is_empty() && !note_focused { nph } else { n.as_str() };
-            let nstyle = if n.is_empty() && !note_focused { Style::default().fg(theme.panel_muted).bg(nbg) } else { Style::default().fg(nfg).bg(nbg) };
+            let nstyle = if n.is_empty() && !note_focused { input_hint_style(&theme) } else { Style::default().fg(nfg).bg(nbg) };
             let nlen = ndisp.chars().count();
             let ncur = nc.min(nlen);
             let nstart = if nlen <= inner_w as usize { 0 } else { ncur.saturating_sub(inner_w as usize / 2).min(nlen - inner_w as usize) };
@@ -7186,13 +7213,13 @@ impl View {
             text(f, dd.x + 2, dd.y + 11, "Agent", input_label_style, inner_w);
             let ag_rect = Rect::new(dd.x + 2, dd.y + 12, inner_w, 1);
             let abg = if agent_focused { theme.accent } else { theme.input_bg };
-            let afg = if agent_focused { RColor::Black } else { theme.fg };
+            let afg = if agent_focused { RColor::Black } else { input_fg(&theme) };
             fill(f, ag_rect, abg);
             let ag = &self.worktree_create.agent;
             let agc = self.worktree_create.agent_cursor;
             let agph = "e.g. claude, codex, opencode (leave empty for none)";
             let agdisp = if ag.is_empty() && !agent_focused { agph } else { ag.as_str() };
-            let agstyle = if ag.is_empty() && !agent_focused { Style::default().fg(theme.panel_muted).bg(abg) } else { Style::default().fg(afg).bg(abg) };
+            let agstyle = if ag.is_empty() && !agent_focused { input_hint_style(&theme) } else { Style::default().fg(afg).bg(abg) };
             let aglen = agdisp.chars().count();
             let agcur = agc.min(aglen);
             let agstart = if aglen <= inner_w as usize { 0 } else { agcur.saturating_sub(inner_w as usize / 2).min(aglen - inner_w as usize) };
@@ -7276,6 +7303,7 @@ impl View {
         text(f, dd.x + 2, dd.y + 1, "workspace finder", title, inner_w);
         // input line
         let input_bg = theme.input_bg;
+        let field_style = input_style(&theme);
         let input_area = Rect::new(dd.x + 2, dd.y + 2, inner_w, 1);
         fill(f, input_area, input_bg);
         let cursor = self.finder.cursor.min(self.finder.input.chars().count());
@@ -7285,16 +7313,16 @@ impl View {
             if i < cursor { before.push(c); } else { after.push(c); }
         }
         let prompt = "⌕ ";
-        text(f, input_area.x, input_area.y, prompt, Style::default().fg(theme.panel_muted).bg(input_bg), 2);
-        text(f, input_area.x + 2, input_area.y, &before, Style::default().fg(theme.fg).bg(input_bg), inner_w.saturating_sub(3));
+        text(f, input_area.x, input_area.y, prompt, input_hint_style(&theme), 2);
+        text(f, input_area.x + 2, input_area.y, &before, field_style, inner_w.saturating_sub(3));
         // cursor
         let cur_x = input_area.x + 2 + before.chars().count() as u16;
         if cur_x < input_area.x + input_area.width {
             let ch = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".to_string());
-            let cur_style = Style::default().fg(RColor::Black).bg(theme.accent);
+            let cur_style = field_style.add_modifier(Modifier::REVERSED);
             put(f, cur_x, input_area.y, &ch, cur_style);
             if !after.is_empty() {
-                text(f, cur_x + 1, input_area.y, &after[after.chars().next().unwrap().len_utf8()..], Style::default().fg(theme.fg).bg(input_bg), inner_w.saturating_sub(3 + before.chars().count() as u16 + 1));
+                text(f, cur_x + 1, input_area.y, &after[after.chars().next().unwrap().len_utf8()..], field_style, inner_w.saturating_sub(3 + before.chars().count() as u16 + 1));
             }
         }
         let body_top = dd.y + 3;
@@ -7461,8 +7489,7 @@ impl View {
             let title = Style::default().fg(RColor::White).bg(RColor::Black).add_modifier(Modifier::BOLD);
             let title_text = if cs.search_forward { "search /" } else { "search ?" };
             text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
-            // field (Black on light input_bg, like rename)
-            let field = Style::default().fg(RColor::Black).bg(theme.input_bg);
+            let field = input_style(&theme);
             let field_w = inner_w;
             for cx in (dd.x + 2)..(dd.x + 2 + field_w) {
                 put(f, cx, dd.y + 2, " ", field);
@@ -7499,7 +7526,7 @@ impl View {
         let rect = Rect::new(pa.x, bar_y, pa.width, 1);
         fill(f, rect, theme.input_bg);
         let prefix = if cs.search_forward { "/" } else { "?" };
-        let style = Style::default().fg(RColor::Black).bg(theme.input_bg);
+        let style = input_style(&theme);
         let mut x = rect.x + 1;
         put(f, x, rect.y, prefix, style.add_modifier(Modifier::BOLD));
         x += 1;
@@ -7517,7 +7544,7 @@ impl View {
         let hint = " enter: search  esc: cancel ";
         let hint_x = rect.right().saturating_sub(hint.len() as u16 + 1);
         if hint_x > x + 1 {
-            text(f, hint_x, rect.y, hint, Style::default().fg(theme.panel_muted).bg(theme.input_bg), hint.len() as u16);
+            text(f, hint_x, rect.y, hint, input_hint_style(&theme), hint.len() as u16);
         }
     }
 
@@ -8660,6 +8687,29 @@ mod tests {
         view.on_overlay_key(key(KeyCode::Char('?'))).unwrap();
         assert!(view.keybind_overlay.open);
         assert_eq!(view.keybind_overlay.input, "?");
+    }
+
+    #[test]
+    fn command_palette_is_compact_and_uses_readable_input_contrast() {
+        let mut view = test_view();
+        view.open_keybind_overlay();
+        for ch in "toggle".chars() {
+            view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+        }
+        let rect = view.keybind_overlay_rect().unwrap();
+        assert!(rect.height as u32 * 5 <= view.rows as u32 * 3, "palette must stay within 60% of the window");
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.draw(frame)).unwrap();
+        let cell = term.backend().buffer().cell((rect.x + 4, rect.y + 2)).unwrap();
+        assert_eq!(cell.symbol(), "t");
+        assert_eq!(cell.fg, RColor::Black);
+        assert_eq!(cell.bg, view.current_theme().input_bg);
+
+        let mut dark_input_theme = view.current_theme();
+        dark_input_theme.input_bg = RColor::Rgb(0x20, 0x22, 0x28);
+        assert_eq!(input_fg(&dark_input_theme), RColor::White, "dark custom inputs need light text");
     }
 
     #[test]

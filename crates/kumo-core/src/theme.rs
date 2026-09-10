@@ -8,6 +8,9 @@ use ratatui::style::Color as RColor;
 
 use crate::color::{ColorRgb, parse_hex};
 
+/// Shared neutral surface for text inputs in the built-in dark themes.
+const INPUT_SURFACE: RColor = RColor::Rgb(0xc6, 0xca, 0xd2);
+
 /// A complete color scheme: ANSI palette + terminal defaults + chrome colors.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -139,7 +142,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0xa6, 0xe3, 0xa1),
         orange: RColor::Rgb(0xfa, 0xb3, 0x87),
         red: RColor::Rgb(0xf3, 0x8b, 0xa8),
-        input_bg: RColor::Rgb(0xcd, 0xd6, 0xf4),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Spider-Verse",
@@ -173,7 +176,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x2e, 0xe0, 0x6b),
         orange: RColor::Rgb(0xff, 0xb8, 0x4d),
         red: RColor::Rgb(0xef, 0x39, 0x45),
-        input_bg: RColor::Rgb(0xed, 0xed, 0xf3),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Cyber Spider",
@@ -207,7 +210,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x4a, 0xde, 0x80),
         orange: RColor::Rgb(0xf9, 0x73, 0x16),
         red: RColor::Rgb(0xff, 0x54, 0x70),
-        input_bg: RColor::Rgb(0xe6, 0xed, 0xf3),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Toxic Arachnid",
@@ -241,7 +244,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x00, 0xff, 0x88),
         orange: RColor::Rgb(0xff, 0xb8, 0x4d),
         red: RColor::Rgb(0xff, 0x38, 0x60),
-        input_bg: RColor::Rgb(0xd1, 0xd5, 0xdb),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Silk & Steel",
@@ -275,7 +278,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x47, 0xc0, 0x87),
         orange: RColor::Rgb(0xff, 0xb7, 0x03),
         red: RColor::Rgb(0xe5, 0x48, 0x4d),
-        input_bg: RColor::Rgb(0xf8, 0xf9, 0xfa),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Gruvbox Dark",
@@ -309,7 +312,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0xb8, 0xbb, 0x26),
         orange: RColor::Rgb(0xfe, 0x80, 0x19),
         red: RColor::Rgb(0xfb, 0x49, 0x34),
-        input_bg: RColor::Rgb(0xeb, 0xdb, 0xb2),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Dracula",
@@ -343,7 +346,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x50, 0xfa, 0x7b),
         orange: RColor::Rgb(0xff, 0xb8, 0x6c),
         red: RColor::Rgb(0xff, 0x55, 0x55),
-        input_bg: RColor::Rgb(0xf8, 0xf8, 0xf2),
+        input_bg: INPUT_SURFACE,
     },
     Theme {
         name: "Tokyo Night",
@@ -377,7 +380,7 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x9e, 0xce, 0x6a),
         orange: RColor::Rgb(0xe0, 0xaf, 0x68),
         red: RColor::Rgb(0xf7, 0x76, 0x8e),
-        input_bg: RColor::Rgb(0xc0, 0xca, 0xf5),
+        input_bg: INPUT_SURFACE,
     },
 ];
 
