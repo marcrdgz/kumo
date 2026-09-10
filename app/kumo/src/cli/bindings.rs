@@ -1,5 +1,5 @@
 //! Leader keymap: the single source of truth for dispatch, the leader-mode
-//! status-bar hint, and the `leader+?` keybind showcase.
+//! status-bar hint, and the searchable `leader+?` command palette.
 //!
 //! [`BINDING_SPECS`] holds the stock bindings (chord + action + showcase row).
 //! [`build_keymap`] turns them into the runtime table the app actually uses,
@@ -106,6 +106,7 @@ pub(crate) enum Group {
 }
 
 impl Group {
+    #[cfg(test)]
     pub(crate) const ALL: [Group; 6] =
         [Group::Layout, Group::Panes, Group::Tabs, Group::Sessions, Group::Chrome, Group::General];
 
@@ -225,8 +226,8 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
     BindingSpec { key: chord(KeyCode::Char('f')), keys: "f", desc: "filter worktrees in the project sidebar", group: Group::Chrome, action: Action::OpenSidebarFilter },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
-    BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "focus the agent inbox (blocked · done · running)", group: Group::General, action: Action::AgentInbox },
-    BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "show all keybindings", group: Group::General, action: Action::ShowKeybinds },
+    BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "open the agent inbox", group: Group::General, action: Action::AgentInbox },
+    BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "open the searchable command palette", group: Group::General, action: Action::ShowKeybinds },
 ];
 
 /// The stock bindings as a runtime table.
@@ -460,11 +461,11 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::ToggleSidebar => "toggle the sidebar",
         Action::WorkspaceFinder => "open workspace finder",
         Action::Detach => "detach (daemon keeps running)",
-        Action::ShowKeybinds => "show all keybindings",
+        Action::ShowKeybinds => "open the searchable command palette",
         Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
         Action::EnterCopyModeSearch => "search forward (enter copy-mode)",
         Action::OpenSidebarFilter => "filter worktrees in the project sidebar",
-        Action::AgentInbox => "focus the agent inbox (blocked · done · running)",
+        Action::AgentInbox => "open the agent inbox",
     }
 }
 
@@ -598,7 +599,7 @@ mod tests {
     #[test]
     fn hint_points_to_the_showcase_only() {
         let hint = leader_hint(&stock_bindings());
-        assert!(hint.contains("?: show all keybindings"));
+        assert!(hint.contains("?: open the searchable command palette"));
         // The hint no longer lists every binding; the showcase is the reference.
         assert!(!hint.contains("v-split"));
         assert!(!hint.contains("esc: exit"));

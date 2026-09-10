@@ -170,7 +170,7 @@ The `action-id` column below is exactly what goes on the right-hand side.
 
 | Key | Action id (`[keymap.bindings]`) | Action |
 | --- | --- | --- |
-| `Ctrl+B` | `leader` | Leader key (configurable via `leader`; shows all bindings in the status bar) |
+| `Ctrl+B` | `leader` | Leader key (configurable via `leader`; points to the command palette in the status bar) |
 | `v` | `split-vertical` | Split the focused pane vertically 🪓 |
 | `-` | `split-horizontal` | Split the focused pane horizontally 🪓 |
 | `a` | `split-ai` | Spawn an AI CLI pane (vertical split) 🤖 |
@@ -193,7 +193,7 @@ The `action-id` column below is exactly what goes on the right-hand side.
 | `1`–`9` | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position 🎯 |
 | `b` | `toggle-sidebar` | Toggle the sidebar 📌 |
 | `d` | `detach` | Detach (daemon keeps running) 🚪 |
-| `?` | `show-keybinds` | Keybind showcase — every leader binding at a glance 📖 |
+| `?` | `show-keybinds` | Searchable command palette — filter by action, key, or group and run with Enter 🔎 |
 | `Esc` | — | Exit leader mode ↩️ |
 
 > The **leader key** and the leader **bindings** are configurable via
@@ -210,13 +210,13 @@ The `action-id` column below is exactly what goes on the right-hand side.
   scrollback.
 - ↔️ **Drag a splitter** to resize.
 - 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
-  dropdown with `config` (coming soon), `keybinds` (the same showcase as
+  dropdown with `config` (coming soon), `keybinds` (the same command palette as
   `leader+?`), and `exit`.
 
 ## 🗺️ Roadmap
 
 Kumo is on a path to become fully customizable — TOML config, data-driven
-keybinding remapping (including the `LEADER+?` keybind showcase), follow-workspace
+keybinding remapping (including the `LEADER+?` command palette), follow-workspace
 (your cwd follows the focused pane, PID-based), themes & status-bar widgets, and
 a thin plugin system. See [ROADMAP.md](ROADMAP.md) for the details.
 

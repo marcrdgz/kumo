@@ -6,6 +6,8 @@
 //! and the shared `hostname`/`clock` utilities so `client_view::View` stays
 //! focused on geometry and input.
 
+use std::path::Path;
+use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color as RColor, Modifier, Style};
@@ -17,6 +19,68 @@ use kumo_core::config::{
 };
 use kumo_core::theme::OwnedTheme;
 use kumo_protocol::{SessionLayout, WireBranch};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckState {
+    Passing,
+    Failing,
+    Pending,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHubStatus {
+    pub number: u64,
+    pub draft: bool,
+    pub review_decision: Option<String>,
+    pub checks: Option<CheckState>,
+}
+
+/// Query the pull request associated with the checked-out branch. This is
+/// intentionally a blocking helper: callers run it on a disposable worker
+/// thread so a missing credential helper or slow network never stalls input.
+pub fn query_github(workspace: &Path) -> Option<GitHubStatus> {
+    let output = ProcessCommand::new("gh")
+        .args(["pr", "view", "--json", "number,isDraft,reviewDecision,statusCheckRollup"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let number = value.get("number")?.as_u64()?;
+    let draft = value.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false);
+    let review_decision = value
+        .get("reviewDecision")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    let checks = summarize_checks(value.get("statusCheckRollup").and_then(|v| v.as_array()));
+    Some(GitHubStatus { number, draft, review_decision, checks })
+}
+
+fn summarize_checks(checks: Option<&Vec<serde_json::Value>>) -> Option<CheckState> {
+    let checks = checks.filter(|items| !items.is_empty())?;
+    let mut pending = false;
+    for check in checks {
+        let conclusion = check.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+        let state = check.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let status = check.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(conclusion, "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
+            || matches!(state, "ERROR" | "FAILURE")
+        {
+            return Some(CheckState::Failing);
+        }
+        if conclusion.is_empty()
+            && !matches!(state, "SUCCESS" | "EXPECTED")
+            || (!status.is_empty() && status != "COMPLETED")
+        {
+            pending = true;
+        }
+    }
+    Some(if pending { CheckState::Pending } else { CheckState::Passing })
+}
 
 // ---------------------------------------------------------------------------
 // hostname + clock (client-local)
@@ -126,6 +190,37 @@ pub fn branch_spans(
                 Style::default().fg(theme.orange),
             ));
         }
+    }
+    Some(spans)
+}
+
+pub fn github_spans(status: Option<&GitHubStatus>, theme: &OwnedTheme) -> Option<Vec<Span<'static>>> {
+    let status = status?;
+    let mut spans = vec![Span::styled(
+        format!("PR #{}", status.number),
+        Style::default().fg(if status.draft { theme.panel_muted } else { theme.secondary }),
+    )];
+    if status.draft {
+        spans.push(Span::styled(" draft", Style::default().fg(theme.panel_muted)));
+    }
+    if let Some(checks) = status.checks {
+        let (label, color) = match checks {
+            CheckState::Passing => ("✓ CI", theme.green),
+            CheckState::Failing => ("× CI", theme.red),
+            CheckState::Pending => ("◌ CI", theme.orange),
+        };
+        spans.push(Span::styled(" · ", Style::default().fg(theme.panel_muted)));
+        spans.push(Span::styled(label, Style::default().fg(color)));
+    }
+    if let Some(review) = status.review_decision.as_deref() {
+        let (label, color) = match review {
+            "APPROVED" => ("✓ review", theme.green),
+            "CHANGES_REQUESTED" => ("! changes", theme.red),
+            "REVIEW_REQUIRED" => ("◌ review", theme.orange),
+            _ => ("review", theme.panel_muted),
+        };
+        spans.push(Span::styled(" · ", Style::default().fg(theme.panel_muted)));
+        spans.push(Span::styled(label, Style::default().fg(color)));
     }
     Some(spans)
 }
@@ -357,15 +452,21 @@ pub fn session_spans(
     let s = session?;
     let mut spans = Vec::new();
     spans.push(Span::styled(s.name.clone(), Style::default().fg(theme.fg)));
+    if cfg.show_tabs {
+        if let Some(tab) = s.tabs.get(s.active_tab) {
+            spans.push(Span::styled(" › ", Style::default().fg(theme.panel_muted)));
+            spans.push(Span::styled(tab.name.clone(), Style::default().fg(theme.secondary)));
+        }
+    }
     if cfg.show_tabs || cfg.show_panes {
         let t = s.tabs.len();
         let n = pane_count(s);
         let mut suffix = String::new();
-        if cfg.show_tabs {
+        if cfg.show_tabs && t > 1 {
             suffix.push_str(&format!(" · {t} tabs"));
         }
         if cfg.show_panes {
-            suffix.push_str(&format!(" · {n} panes"));
+            suffix.push_str(&format!(" · {n} pane{}", if n == 1 { "" } else { "s" }));
         }
         if !suffix.is_empty() {
             spans.push(Span::styled(suffix, Style::default().fg(theme.panel_muted)));
@@ -483,6 +584,7 @@ pub fn slot_spans(
             StatusWidget::Menu => Some(menu_spans(ctx.menu_open, ctx.theme)),
             StatusWidget::Session => session_spans(ctx.session, &ctx.cfg.widgets.session, ctx.sidebar_open, ctx.theme),
             StatusWidget::Branch => branch_spans(ctx.session.and_then(|s| s.branch.as_ref()), &ctx.cfg.widgets.branch, ctx.theme),
+            StatusWidget::Github => github_spans(ctx.github, ctx.theme),
             StatusWidget::AgentStatus => agent_spans(ctx.session, &ctx.cfg.widgets.agent, ctx.theme, ctx.spinner),
             StatusWidget::Hostname => {
                 if ctx.hostname.is_empty() {
@@ -516,6 +618,7 @@ pub struct SlotContext<'a> {
     pub is_leader: bool,
     pub menu_open: bool,
     pub sidebar_open: bool,
+    pub github: Option<&'a GitHubStatus>,
     /// Current braille spinner frame, shown while agents are `Working`.
     pub spinner: &'a str,
 }
@@ -604,6 +707,43 @@ mod tests {
     }
 
     #[test]
+    fn session_spans_include_active_tab_context() {
+        let session = session_with_agent(AgentStatus::Idle);
+        let spans = session_spans(Some(&session), &SessionWidgetConfig::default(), true, &theme()).unwrap();
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(text.contains("s › t"), "active tab context missing: {text}");
+        assert!(text.contains("1 pane"), "pane count missing: {text}");
+    }
+
+    #[test]
+    fn github_spans_surface_pr_ci_and_review() {
+        let status = GitHubStatus {
+            number: 42,
+            draft: false,
+            review_decision: Some("APPROVED".to_string()),
+            checks: Some(CheckState::Passing),
+        };
+        let spans = github_spans(Some(&status), &theme()).unwrap();
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, "PR #42 · ✓ CI · ✓ review");
+    }
+
+    #[test]
+    fn check_summary_prioritizes_failure_then_pending() {
+        let failing = vec![
+            serde_json::json!({"status": "IN_PROGRESS", "conclusion": null}),
+            serde_json::json!({"status": "COMPLETED", "conclusion": "FAILURE"}),
+        ];
+        assert_eq!(summarize_checks(Some(&failing)), Some(CheckState::Failing));
+
+        let pending = vec![serde_json::json!({"status": "IN_PROGRESS", "conclusion": null})];
+        assert_eq!(summarize_checks(Some(&pending)), Some(CheckState::Pending));
+
+        let passing = vec![serde_json::json!({"status": "COMPLETED", "conclusion": "SUCCESS"})];
+        assert_eq!(summarize_checks(Some(&passing)), Some(CheckState::Passing));
+    }
+
+    #[test]
     fn spans_width_counts_chars() {
         let spans = vec![Span::raw("ab"), Span::raw("c")];
         assert_eq!(spans_width(&spans), 3);
@@ -631,6 +771,7 @@ mod tests {
             is_leader: false,
             menu_open: false,
             sidebar_open: true,
+            github: None,
             spinner: "●",
         };
         let spans = slot_spans(&cfg.left, &ctx);

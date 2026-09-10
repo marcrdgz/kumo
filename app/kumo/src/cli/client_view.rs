@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -56,6 +57,8 @@ const AGENT_TOAST_W: u16 = 34;
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Interval between spinner frames (~8 fps).
 const SPINNER_PERIOD: Duration = Duration::from_millis(120);
+/// GitHub is useful ambient context, but should never become a hot API poll.
+const GITHUB_REFRESH: Duration = Duration::from_secs(60);
 /// Right-aligned badge drawn on a zoomed pane's top border.
 const ZOOM_BADGE: &str = " ⤢ zoom ";
 /// Label of the MENU button in the status bar.
@@ -69,15 +72,37 @@ const SESSION_POPUP_H: u16 = 7;
 const COPY_SEARCH_W: u16 = 50;
 const COPY_SEARCH_H: u16 = 5;
 
-fn tab_width(name: &str) -> u16 {
+fn tab_width(name: &str, has_agent_indicator: bool) -> u16 {
     let n = name.chars().count() as u16;
-    (n + 4).max(6)
+    n.saturating_add(2).saturating_add(if has_agent_indicator { 2 } else { 0 })
 }
 fn lighten(c: RColor, amt: u8) -> RColor {
     match c {
         RColor::Rgb(r, g, b) => RColor::Rgb(r.saturating_add(amt), g.saturating_add(amt), b.saturating_add(amt)),
         _ => c,
     }
+}
+
+/// Foreground with readable contrast against a theme's input surface. Built-in
+/// themes use a light neutral surface; custom themes may choose a dark one.
+fn input_fg(theme: &OwnedTheme) -> RColor {
+    let rgb = match theme.input_bg {
+        RColor::Rgb(r, g, b) => Some((r, g, b)),
+        RColor::Indexed(i) => theme.palette.get(i as usize).map(|c| (c.r, c.g, c.b)),
+        RColor::Black | RColor::DarkGray | RColor::Red | RColor::Blue | RColor::Magenta => return RColor::White,
+        _ => return RColor::Black,
+    };
+    let Some((r, g, b)) = rgb else { return RColor::Black };
+    let luminance = 299 * r as u32 + 587 * g as u32 + 114 * b as u32;
+    if luminance >= 140_000 { RColor::Black } else { RColor::White }
+}
+
+fn input_style(theme: &OwnedTheme) -> Style {
+    Style::default().fg(input_fg(theme)).bg(theme.input_bg)
+}
+
+fn input_hint_style(theme: &OwnedTheme) -> Style {
+    input_style(theme).add_modifier(Modifier::DIM)
 }
 
 fn sidebar_active_bg(theme: &OwnedTheme) -> RColor {
@@ -110,7 +135,7 @@ enum Mode {
     Normal,
     Leader,
     Copy,
-    /// Agent-inbox focus: the sidebar agent panel owns the keyboard.
+    /// Agent-inbox popup owns the keyboard.
     Inbox,
 }
 
@@ -130,11 +155,10 @@ struct CopyState {
     hit_idx: Option<usize>,
 }
 
-/// Agent-inbox focus state (active while `Mode::Inbox`): the cursor into the
-/// actionable agent list (blocked · done · running).
+/// Agent-inbox popup state (active while `Mode::Inbox`).
 #[derive(Clone, Copy)]
 struct Inbox {
-    /// Index into the actionable list.
+    /// Index into the full attention-sorted agent list.
     sel: usize,
 }
 
@@ -153,6 +177,18 @@ struct DividedPanels {
     divider_y: u16,
     /// Row of the agent panel label (`2` when the spaces panel is hidden).
     agents_label_y: u16,
+}
+
+/// Fixed geometry for the project navigator and its compact, bottom-anchored
+/// agent inbox. The spaces list is the only scrolling region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectSidebarGeometry {
+    tiny: bool,
+    spaces_h: usize,
+    new_session_y: u16,
+    divider_y: u16,
+    agents_header_y: u16,
+    agent_rows: usize,
 }
 
 /// In-flight sidebar panel divider drag: (start row, spaces height at start).
@@ -327,7 +363,10 @@ struct SettingsPanel {
 
 struct KeybindOverlay {
     open: bool,
-    scroll: u16,
+    input: String,
+    cursor: usize,
+    selected: usize,
+    scroll: usize,
 }
 
 struct WorktreePicker {
@@ -565,6 +604,8 @@ enum SidebarRow {
     ProjectHeader { key: String, label: String },
     Worktree(usize),
     InlineAgent(usize, u64, String, AgentStatus),
+    AgentInboxHeader { blocked: usize, done: usize, working: usize },
+    CompactAgent(usize, u64, String, AgentStatus),
     DropIndicator,
 }
 
@@ -617,7 +658,7 @@ pub struct View {
     /// per pane instead of one IPC frame per wheel tick.
     pending_wheel: HashMap<u64, Vec<u8>>,
     copy: Option<CopyState>,
-    /// Agent-inbox selection while `Mode::Inbox` is active.
+    /// Full agent-inbox selection while `Mode::Inbox` is active.
     inbox: Option<Inbox>,
     /// Test-only override of the `[sidebar] layout` config.
     sidebar_layout_override: Option<SidebarLayout>,
@@ -647,6 +688,12 @@ pub struct View {
     clock_str: String,
     clock_next: Instant,
     is_ssh: bool,
+    github_status: Option<status_bar::GitHubStatus>,
+    github_workspace: Option<PathBuf>,
+    github_query: Option<PathBuf>,
+    github_refresh_at: Instant,
+    github_tx: Sender<(PathBuf, Option<status_bar::GitHubStatus>)>,
+    github_rx: Receiver<(PathBuf, Option<status_bar::GitHubStatus>)>,
     /// Current frame of the agent-activity spinner.
     spinner_frame: usize,
     /// When to advance the spinner next (kept ~8 fps, not per loop tick).
@@ -779,6 +826,7 @@ impl View {
         let now_secs = chrono::Local::now().timestamp() % 60;
         let rem = (60 - now_secs).max(1) as u64;
         let clock_next = Instant::now() + Duration::from_secs(rem);
+        let (github_tx, github_rx) = mpsc::channel();
         let sidebar_width = kumo_core::config::sidebar().width.unwrap_or_else(|| {
             if kumo_core::config::sidebar().layout == SidebarLayout::Project { PROJECT_DEFAULT_WIDTH } else { SIDEBAR_WIDTH }
         }).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
@@ -804,7 +852,7 @@ impl View {
             popup: Popup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
-            keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
+            keybind_overlay: KeybindOverlay { open: false, input: String::new(), cursor: 0, selected: 0, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
@@ -848,6 +896,12 @@ impl View {
             clock_str,
             clock_next,
             is_ssh,
+            github_status: None,
+            github_workspace: None,
+            github_query: None,
+            github_refresh_at: Instant::now(),
+            github_tx,
+            github_rx,
             spinner_frame: 0,
             spinner_next: Instant::now(),
         };
@@ -882,6 +936,9 @@ impl View {
     /// equivalent of the daemon's forced frame.
     pub fn has_transient(&mut self) -> bool {
         let now = Instant::now();
+        if self.poll_github(now) {
+            return true;
+        }
         // Clock tick: repaint once per minute when the clock widget is visible.
         if self.status_bar.enabled && self.status_bar_contains(StatusWidget::Clock) && now >= self.clock_next {
             self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
@@ -911,6 +968,52 @@ impl View {
             return true;
         }
         false
+    }
+
+    fn poll_github(&mut self, now: Instant) -> bool {
+        if !self.status_bar.enabled || !self.status_bar_contains(StatusWidget::Github) {
+            self.github_status = None;
+            self.github_workspace = None;
+            return false;
+        }
+
+        let workspace = self.active_session().map(|session| session.workspace.clone());
+        if workspace != self.github_workspace {
+            self.github_workspace = workspace.clone();
+            self.github_status = None;
+            self.github_refresh_at = now;
+        }
+
+        let mut changed = false;
+        while let Ok((queried, status)) = self.github_rx.try_recv() {
+            if self.github_query.as_ref() == Some(&queried) {
+                self.github_query = None;
+            }
+            if self.github_workspace.as_ref() == Some(&queried) {
+                if self.github_status != status {
+                    self.github_status = status;
+                    changed = true;
+                }
+                self.github_refresh_at = now + GITHUB_REFRESH;
+            }
+        }
+
+        if self.github_query.is_none() && now >= self.github_refresh_at {
+            if let Some(workspace) = workspace {
+                let tx = self.github_tx.clone();
+                self.github_query = Some(workspace.clone());
+                self.github_refresh_at = now + GITHUB_REFRESH;
+                std::thread::spawn(move || {
+                    let status = status_bar::query_github(&workspace);
+                    let _ = tx.send((workspace, status));
+                });
+            }
+        }
+
+        if changed {
+            self.mark_dirty();
+        }
+        changed
     }
     pub fn detach_requested(&self) -> bool {
         self.detach_requested
@@ -1310,6 +1413,69 @@ impl View {
         sess.tabs.get(n.saturating_sub(1)).map(|t| t.name.clone())
     }
 
+    /// Aggregate the AI state for a tab. The first value records whether the
+    /// tab has an agent at all; the second is the actionable status to render.
+    /// Idle and unknown agents keep the reserved slot blank. The precedence
+    /// mirrors the attention order used by the Agent Inbox.
+    fn tab_agent_state(&self, tab: &kumo_protocol::TabLayout) -> (bool, Option<AgentStatus>) {
+        fn visit(node: &LayoutNode, has_agent: &mut bool, found: &mut Option<AgentStatus>) {
+            if *found == Some(AgentStatus::Blocked) {
+                return;
+            }
+            match node {
+                LayoutNode::Pane(p) => {
+                    if !p.is_ai {
+                        return;
+                    }
+                    *has_agent = true;
+                    let Some(agent) = p.agent.as_ref() else { return };
+                    match agent.status {
+                        AgentStatus::Blocked => *found = Some(AgentStatus::Blocked),
+                        AgentStatus::Done => {
+                            if !matches!(*found, Some(AgentStatus::Blocked | AgentStatus::Done)) {
+                                *found = Some(AgentStatus::Done);
+                            }
+                        }
+                        AgentStatus::Working => {
+                            if found.is_none() {
+                                *found = Some(AgentStatus::Working);
+                            }
+                        }
+                        AgentStatus::Idle | AgentStatus::Unknown => {}
+                    }
+                }
+                LayoutNode::Split { a, b, .. } => {
+                    visit(a, has_agent, found);
+                    visit(b, has_agent, found);
+                }
+            }
+        }
+
+        let mut has_agent = false;
+        let mut found = None;
+        if let Some(root) = tab.root.as_deref() {
+            visit(root, &mut has_agent, &mut found);
+        }
+        (has_agent, found)
+    }
+
+    fn tab_agent_indicator(&self, tab: &kumo_protocol::TabLayout) -> Option<AgentStatus> {
+        self.tab_agent_state(tab).1
+    }
+
+    fn tab_has_agent(&self, tab: &kumo_protocol::TabLayout) -> bool {
+        self.tab_agent_state(tab).0
+    }
+
+    fn tab_agent_marker(&self, status: AgentStatus) -> &'static str {
+        match status {
+            AgentStatus::Blocked => "!",
+            AgentStatus::Done => "✓",
+            AgentStatus::Working => self.spinner_char(),
+            AgentStatus::Idle | AgentStatus::Unknown => "",
+        }
+    }
+
     fn tabs_area(&self) -> Rect {
         let w = self.effective_sidebar_width();
         let x = if self.sidebar_open { (w + 1).min(self.cols.saturating_sub(1)) } else { 0 };
@@ -1333,7 +1499,7 @@ impl View {
         let mut visible_end = self.tab_scroll;
         let avail_no_arrow = base_avail.saturating_sub(plus_reserve);
         for idx in self.tab_scroll..sess.tabs.len() {
-            let w = tab_width(&sess.tabs[idx].name) + 1;
+            let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
             if cur + w - 1 > avail_no_arrow { break; }
             cur += w;
             visible_end = idx + 1;
@@ -1361,7 +1527,7 @@ impl View {
             let mut cur: u16 = 0;
             let mut visible_end = scroll;
             for idx in scroll..sess.tabs.len() {
-                let w = tab_width(&sess.tabs[idx].name) + 1;
+                let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
                 if cur + w - 1 > avail { break; }
                 cur += w;
                 visible_end = idx + 1;
@@ -1373,7 +1539,7 @@ impl View {
                     let mut c: u16 = 0;
                     let mut e = s;
                     for idx in s..sess.tabs.len() {
-                        let w = tab_width(&sess.tabs[idx].name) + 1;
+                        let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
                         if c + w - 1 > av { break; }
                         c += w;
                         e = idx + 1;
@@ -1417,7 +1583,7 @@ impl View {
         let right_bound = (area.x as i32 + area.width as i32 - if has_right {1} else {0} - plus_w as i32 - 1).max(area.x as i32) as u16;
         for idx in self.tab_scroll..sess.tabs.len() {
             let tab = &sess.tabs[idx];
-            let w = tab_width(&tab.name);
+            let w = tab_width(&tab.name, self.tab_has_agent(tab));
             if cur_x + w > right_bound { break; }
             let pill = Rect::new(cur_x, area.y, w, 1);
             let close = Rect::new(cur_x + w - 1, area.y, 1, 1);
@@ -1552,7 +1718,7 @@ impl View {
             return Ok(());
         }
         if self.keybind_overlay.open {
-            self.on_overlay_key(key);
+            self.on_overlay_key(key)?;
             return Ok(());
         }
         if self.settings.open {
@@ -2404,46 +2570,24 @@ impl View {
     // Agent inbox: keyboard focus of the sidebar agent panel
     // ------------------------------------------------------------------
 
-    /// Actionable agent entries across every session — blocked · done ·
-    /// running — in the same order the sidebar lists them.
-    fn inbox_actionables(&self) -> Vec<(usize, u64, AgentStatus)> {
+    /// Every agent in attention order for the full inbox popup.
+    fn inbox_entries(&self) -> Vec<(usize, u64, AgentStatus)> {
         self.all_agent_entries()
             .into_iter()
-            .filter(|(_, _, _, st, _)| matches!(st, AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Working))
             .map(|(_, i, pid, status, _)| (i, pid, status))
             .collect()
     }
 
-    /// Enter the agent-inbox focus mode: the sidebar agent panel takes the
-    /// keyboard (`j`/`k` to move, `Enter` to focus the pane, `Esc` to leave).
+    /// Open the full agent inbox popup. It is independent of sidebar layout
+    /// and remains useful when there are no alerts or the sidebar is hidden.
     fn open_inbox(&mut self) {
-        let cfg = kumo_core::config::sidebar();
-        let layout = self.sidebar_layout();
-        let panel_ok = match layout {
-            SidebarLayout::Divided => cfg.sections.agents,
-            SidebarLayout::Tabs => cfg.sections.agents && self.visible_sidebar_tabs().contains(&SidebarTab::Agents),
-            SidebarLayout::Project => true,
-        };
-        if !panel_ok {
-            self.notice = Some(("the sidebar agent panel is hidden in the config".to_string(), Instant::now()));
+        if self.cols < 28 || self.rows < 11 {
+            self.notice = Some(("terminal too small for the full agent inbox".to_string(), Instant::now()));
             self.mark_dirty();
             return;
-        }
-        if self.inbox_actionables().is_empty() {
-            self.notice = Some(("no agents need attention".to_string(), Instant::now()));
-            self.mark_dirty();
-            return;
-        }
-        if !self.sidebar_open {
-            self.sidebar_open = true;
-            self.recompute_geometry();
-        }
-        if cfg.layout == SidebarLayout::Tabs {
-            self.sidebar_tab = SidebarTab::Agents;
         }
         self.mode = Mode::Inbox;
         self.inbox = Some(Inbox { sel: 0 });
-        self.inbox_follow_selection();
         self.mark_dirty();
     }
 
@@ -2459,58 +2603,17 @@ impl View {
             return false;
         }
         let sel = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0);
-        self.inbox_actionables()
+        self.inbox_entries()
             .get(sel)
             .map(|(s, p, _)| *s == si && *p == pid)
             .unwrap_or(false)
-    }
-
-    /// Keep the sidebar agent scroll positioned so the inbox cursor is
-    /// visible in the agent panel (either layout).
-    fn inbox_follow_selection(&mut self) {
-        let Some(inb) = self.inbox.as_ref() else { return };
-        let Some(&(si, pid, _)) = self.inbox_actionables().get(inb.sel) else { return };
-        let matches = |row: &SidebarRow| matches!(row, SidebarRow::AgentName(i, p, _, _) if *i == si && *p == pid);
-        let matches_inline = |row: &SidebarRow| matches!(row, SidebarRow::InlineAgent(i, p, _, _) if *i == si && *p == pid);
-        match self.sidebar_layout() {
-            SidebarLayout::Tabs => {
-                let items = self.agents_content();
-                let shown = self.content_region_h() as usize;
-                let Some(idx) = items.iter().position(matches) else { return };
-                let max = items.len().saturating_sub(shown);
-                let cur = self.sidebar_scroll.1 as usize;
-                let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
-                self.sidebar_scroll.1 = target as u16;
-            }
-            SidebarLayout::Divided => {
-                let p = self.divided_panels();
-                if !p.agents_visible {
-                    return;
-                }
-                let shown = p.agents_h;
-                let Some(idx) = p.agents_items.iter().position(matches) else { return };
-                let max = p.agents_items.len().saturating_sub(shown);
-                let cur = self.sidebar_scroll.1 as usize;
-                let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
-                self.sidebar_scroll.1 = target as u16;
-            }
-            SidebarLayout::Project => {
-                let items = self.project_content();
-                let shown = self.content_region_h() as usize;
-                let Some(idx) = items.iter().position(|r| matches(r) || matches_inline(r)) else { return };
-                let max = items.len().saturating_sub(shown);
-                let cur = self.sidebar_scroll.0 as usize;
-                let target = cur.clamp(idx.saturating_sub(shown.saturating_sub(1)), idx.min(max));
-                self.sidebar_scroll.0 = target as u16;
-            }
-        }
     }
 
     /// Focus the pane behind the selected inbox entry (switching session/tab)
     /// and leave the focus mode.
     fn inbox_jump(&mut self) {
         let sel = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0);
-        let Some(&(si, pid, _)) = self.inbox_actionables().get(sel) else {
+        let Some(&(si, pid, _)) = self.inbox_entries().get(sel) else {
             self.close_inbox();
             return;
         };
@@ -2526,12 +2629,11 @@ impl View {
             self.close_inbox();
             return;
         }
-        let len = self.inbox_actionables().len();
+        let len = self.inbox_entries().len();
         if len == 0 {
-            self.close_inbox();
             return;
         }
-        let page = (self.content_region_h() as usize).max(3) - 1;
+        let page = self.agent_inbox_visible_rows().max(2) - 1;
         let cur = self.inbox.as_ref().map(|i| i.sel).unwrap_or(0).min(len - 1);
         let next = match key.code {
             KeyCode::Char('j') | KeyCode::Down => (cur + 1).min(len - 1),
@@ -2549,25 +2651,40 @@ impl View {
         if let Some(inb) = self.inbox.as_mut() {
             inb.sel = next;
         }
-        self.inbox_follow_selection();
         self.mark_dirty();
     }
 
     fn on_inbox_mouse(&mut self, m: MouseEvent) -> Result<()> {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Clicking an agent row jumps (sidebar_hit ends the focus
-                // mode); any other click just leaves.
-                let w = self.effective_sidebar_width();
-                if self.sidebar_open && m.column < w && self.sidebar_hit(m.column, m.row) {
+                if let Some(idx) = self.agent_inbox_item_at(m.column, m.row) {
+                    if let Some(inbox) = self.inbox.as_mut() {
+                        inbox.sel = idx;
+                    }
+                    self.inbox_jump();
                     return Ok(());
                 }
-                self.close_inbox();
+                if !self
+                    .agent_inbox_rect()
+                    .map(|rect| rect.contains(Position::new(m.column, m.row)))
+                    .unwrap_or(false)
+                {
+                    self.close_inbox();
+                }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                let up = m.kind == MouseEventKind::ScrollUp;
-                if self.sidebar_open && self.sidebar_wheel(m.column, m.row, up) {
-                    self.inbox_follow_selection();
+                let len = self.inbox_entries().len();
+                if len > 0 {
+                    let cur = self.inbox.as_ref().map(|inbox| inbox.sel).unwrap_or(0).min(len - 1);
+                    let next = if m.kind == MouseEventKind::ScrollUp {
+                        cur.saturating_sub(1)
+                    } else {
+                        (cur + 1).min(len - 1)
+                    };
+                    if let Some(inbox) = self.inbox.as_mut() {
+                        inbox.sel = next;
+                    }
+                    self.mark_dirty();
                 }
             }
             _ => {}
@@ -3662,50 +3779,118 @@ impl View {
 
     fn open_keybind_overlay(&mut self) {
         self.keybind_overlay.open = true;
+        self.keybind_overlay.input.clear();
+        self.keybind_overlay.cursor = 0;
+        self.keybind_overlay.selected = 0;
         self.keybind_overlay.scroll = 0;
         self.mark_dirty();
     }
 
-    fn on_overlay_key(&mut self, key: KeyEvent) {
-        if self.leader.is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
+    fn on_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.keybind_overlay.open = false;
             self.mark_dirty();
-            return;
+            return Ok(());
         }
-        let max = self.keybind_overlay_scroll_max();
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.keybind_overlay.scroll = (self.keybind_overlay.scroll + 1).min(max);
+            KeyCode::Down | KeyCode::Tab => {
+                let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+                if len > 0 {
+                    self.keybind_overlay.selected = (self.keybind_overlay.selected + 1).min(len - 1);
+                }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.keybind_overlay.scroll = self.keybind_overlay.scroll.saturating_sub(1);
+            KeyCode::Up | KeyCode::BackTab => {
+                self.keybind_overlay.selected = self.keybind_overlay.selected.saturating_sub(1);
             }
-            KeyCode::Home => self.keybind_overlay.scroll = 0,
-            KeyCode::End => self.keybind_overlay.scroll = max,
+            KeyCode::Enter => {
+                let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
+                if let Some(index) = matches.get(self.keybind_overlay.selected).copied() {
+                    let action = self.keymap[index].action;
+                    self.keybind_overlay.open = false;
+                    self.run_action(action)?;
+                    return Ok(());
+                }
+            }
+            KeyCode::Backspace => {
+                if self.keybind_overlay.cursor > 0 {
+                    let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
+                    chars.remove(self.keybind_overlay.cursor - 1);
+                    self.keybind_overlay.input = chars.into_iter().collect();
+                    self.keybind_overlay.cursor -= 1;
+                    self.keybind_overlay.selected = 0;
+                    self.keybind_overlay.scroll = 0;
+                }
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
+                if self.keybind_overlay.cursor < chars.len() {
+                    chars.remove(self.keybind_overlay.cursor);
+                    self.keybind_overlay.input = chars.into_iter().collect();
+                    self.keybind_overlay.selected = 0;
+                    self.keybind_overlay.scroll = 0;
+                }
+            }
+            KeyCode::Left => self.keybind_overlay.cursor = self.keybind_overlay.cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.keybind_overlay.cursor = (self.keybind_overlay.cursor + 1).min(self.keybind_overlay.input.chars().count());
+            }
+            KeyCode::Home => self.keybind_overlay.cursor = 0,
+            KeyCode::End => self.keybind_overlay.cursor = self.keybind_overlay.input.chars().count(),
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+            {
+                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
+                chars.insert(self.keybind_overlay.cursor, c);
+                self.keybind_overlay.input = chars.into_iter().collect();
+                self.keybind_overlay.cursor += 1;
+                self.keybind_overlay.selected = 0;
+                self.keybind_overlay.scroll = 0;
+            }
             _ => {}
         }
+        self.normalize_command_palette_scroll();
         self.mark_dirty();
+        Ok(())
     }
 
-    fn keybind_overlay_scroll_max(&self) -> u16 {
-        let Some(dd) = self.keybind_overlay_rect() else { return 0 };
-        let lines = keybind_lines(&self.keymap).len();
-        let visible = dd.height.saturating_sub(4) as usize;
-        lines.saturating_sub(visible) as u16
+    fn normalize_command_palette_scroll(&mut self) {
+        let Some(dd) = self.keybind_overlay_rect() else { return };
+        let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+        self.keybind_overlay.selected = self.keybind_overlay.selected.min(len.saturating_sub(1));
+        let visible = dd.height.saturating_sub(5) as usize;
+        if self.keybind_overlay.selected < self.keybind_overlay.scroll {
+            self.keybind_overlay.scroll = self.keybind_overlay.selected;
+        } else if self.keybind_overlay.selected >= self.keybind_overlay.scroll + visible.max(1) {
+            self.keybind_overlay.scroll = self.keybind_overlay.selected + 1 - visible.max(1);
+        }
     }
 
     fn keybind_overlay_rect(&self) -> Option<Rect> {
         let (w, h) = (self.cols, self.rows);
         let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let max_desc = self.keymap.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
+        let max_desc = self.keymap.iter().map(|b| palette_action_desc(b.action).chars().count()).max().unwrap_or(10) as u16;
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
-        let lines = keybind_lines(&self.keymap).len();
-        let height = ((lines + 4) as u16).min(h.saturating_sub(4)).max(3);
+        let lines = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+        let available = h.saturating_sub(4);
+        if available < 7 {
+            return None;
+        }
+        let height_cap = (((h as u32 * 3) / 5) as u16).max(7).min(available);
+        let height = ((lines + 5) as u16).min(height_cap).max(7);
         if w < width || h < height {
             return None;
         }
         Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    fn command_palette_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let rect = self.keybind_overlay_rect()?;
+        if x <= rect.x || x >= rect.right().saturating_sub(1) || y < rect.y + 3 || y >= rect.bottom().saturating_sub(2) {
+            return None;
+        }
+        let item = self.keybind_overlay.scroll + (y - (rect.y + 3)) as usize;
+        (item < command_palette_matches(&self.keymap, &self.keybind_overlay.input).len()).then_some(item)
     }
 
     fn on_settings_key(&mut self, key: KeyEvent) {
@@ -3787,7 +3972,10 @@ impl View {
             if self.sidebar_open && self.sidebar_layout() == SidebarLayout::Project && x < w && y >= 3 && y <= self.sidebar_footer_y() {
                 for (ry, row) in self.sidebar_rows() {
                     if ry == y {
-                        if let SidebarRow::Worktree(i) = row { new_side_hover = Some(i); }
+                        match row {
+                            SidebarRow::Worktree(i) | SidebarRow::Branch(i, _) => new_side_hover = Some(i),
+                            _ => {}
+                        }
                         break;
                     }
                 }
@@ -3805,12 +3993,33 @@ impl View {
             return Ok(());
         }
         if self.keybind_overlay.open {
-            if matches!(
-                m.kind,
-                MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-            ) {
-                self.keybind_overlay.open = false;
+            match m.kind {
+                MouseEventKind::ScrollDown => {
+                    let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+                    if len > 0 {
+                        self.keybind_overlay.selected = (self.keybind_overlay.selected + 1).min(len - 1);
+                        self.normalize_command_palette_scroll();
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.keybind_overlay.selected = self.keybind_overlay.selected.saturating_sub(1);
+                    self.normalize_command_palette_scroll();
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(item) = self.command_palette_item_at(x, y) {
+                        let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
+                        if let Some(keymap_idx) = matches.get(item).copied() {
+                            let action = self.keymap[keymap_idx].action;
+                            self.keybind_overlay.open = false;
+                            self.run_action(action)?;
+                        }
+                    } else if !self.keybind_overlay_rect().map(|rect| rect.contains(Position::new(x, y))).unwrap_or(false) {
+                        self.keybind_overlay.open = false;
+                    }
+                }
+                _ => {}
             }
+            self.mark_dirty();
             return Ok(());
         }
         if self.session_close_confirm.open {
@@ -4430,9 +4639,76 @@ impl View {
 
     fn content_region_h(&self) -> u16 {
         if self.sidebar_layout() == SidebarLayout::Project {
-            self.sidebar_footer_y().saturating_sub(3)
+            self.project_sidebar_geometry().spaces_h as u16
         } else {
             self.sidebar_footer_y().saturating_sub(2)
+        }
+    }
+
+    fn agent_counts(&self) -> (usize, usize, usize) {
+        let mut blocked = 0;
+        let mut done = 0;
+        let mut working = 0;
+        for (_, _, _, status, _) in self.all_agent_entries() {
+            match status {
+                AgentStatus::Blocked => blocked += 1,
+                AgentStatus::Done => done += 1,
+                AgentStatus::Working => working += 1,
+                AgentStatus::Idle | AgentStatus::Unknown => {}
+            }
+        }
+        (blocked, done, working)
+    }
+
+    fn compact_agent_summary(&self) -> String {
+        let (blocked, done, working) = self.agent_counts();
+        if blocked + done + working > 0 {
+            format!("!{blocked} ✓{done} {}{working}", self.spinner_char())
+        } else if self.all_agent_entries().is_empty() {
+            "no agents".to_string()
+        } else {
+            "all clear".to_string()
+        }
+    }
+
+    /// Attention rows lead the compact inbox; working agents fill any
+    /// remaining slots. Idle and unknown agents stay in the full inbox.
+    fn compact_agent_entries(&self) -> Vec<(usize, u64, String, AgentStatus)> {
+        self.all_agent_entries()
+            .into_iter()
+            .filter(|(_, _, _, status, _)| {
+                matches!(status, AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Working)
+            })
+            .map(|(_, session, pane, status, name)| (session, pane, name, status))
+            .collect()
+    }
+
+    fn project_sidebar_geometry(&self) -> ProjectSidebarGeometry {
+        let footer = self.sidebar_footer_y();
+        if footer < 5 {
+            return ProjectSidebarGeometry {
+                tiny: true,
+                spaces_h: 0,
+                new_session_y: footer.saturating_sub(1),
+                divider_y: footer,
+                agents_header_y: footer,
+                agent_rows: 0,
+            };
+        }
+        let desired = if self.rows < 14 { 0 } else if self.rows < 20 { 2 } else { 3 };
+        let agent_rows = desired
+            .min(self.compact_agent_entries().len())
+            .min(footer.saturating_sub(5) as usize);
+        let agents_header_y = footer.saturating_sub(agent_rows as u16);
+        let divider_y = agents_header_y.saturating_sub(1);
+        let new_session_y = divider_y.saturating_sub(1);
+        ProjectSidebarGeometry {
+            tiny: false,
+            spaces_h: new_session_y.saturating_sub(3) as usize,
+            new_session_y,
+            divider_y,
+            agents_header_y,
+            agent_rows,
         }
     }
 
@@ -4542,8 +4818,8 @@ impl View {
         let layout = match &self.layout {
             Some(l) if !l.sessions.is_empty() => l,
             _ => {
-                out.push(SidebarRow::Dim("no workspaces".to_string()));
-                out.push(SidebarRow::NewSession);
+                out.push(SidebarRow::Dim("No sessions yet".to_string()));
+                out.push(SidebarRow::Dim("press c to create one".to_string()));
                 return out;
             }
         };
@@ -4553,9 +4829,7 @@ impl View {
             indices.retain(|idx| self.sidebar_filter_matches(*idx, &project));
             if indices.is_empty() { continue; }
             self.sort_project_worktrees(&project_key, &mut indices);
-            let attention = indices.iter().filter(|idx| self.project_attention(**idx) < 2).count();
-            let title = if attention > 0 { format!("{project} · {attention} pending") } else { project.clone() };
-            out.push(SidebarRow::ProjectHeader { key: project_key.clone(), label: title });
+            out.push(SidebarRow::ProjectHeader { key: project_key.clone(), label: project });
             // Filtering temporarily reveals matching worktrees inside collapsed
             // projects. Otherwise the matching header would be followed by a
             // misleading "no matches" row with the result still hidden.
@@ -4565,27 +4839,11 @@ impl View {
                 if let Some(branch) = layout.sessions.get(idx).and_then(|s| s.branch.clone()) {
                     out.push(SidebarRow::Branch(idx, branch));
                 }
-                let mut agents: Vec<(u64, String, AgentStatus)> = Vec::new();
-                if let Some(sess) = layout.sessions.get(idx) {
-                    for (_, pane) in session_panes_all(sess) {
-                        if pane.is_ai {
-                            if let Some(agent) = pane.agent.as_ref() {
-                                agents.push((pane.id, agent.name.clone(), agent.status));
-                            }
-                        }
-                    }
-                }
-                agents.sort_by_key(|(_, _, st)| Self::agent_rank(*st));
-                for (pid, name, status) in agents {
-                    if self.cols < 100 && matches!(status, AgentStatus::Idle | AgentStatus::Unknown) { continue; }
-                    out.push(SidebarRow::InlineAgent(idx, pid, name, status));
-                }
             }
         }
         if !self.sidebar_filter.trim().is_empty() && !out.iter().any(|row| matches!(row, SidebarRow::Worktree(_))) {
             out.push(SidebarRow::Dim(format!("no matches for \"{}\"", self.sidebar_filter)));
         }
-        out.push(SidebarRow::NewSession);
         out
     }
 
@@ -4616,6 +4874,16 @@ impl View {
         } else {
             indices.sort_by_key(|idx| self.project_attention(*idx));
         }
+    }
+
+    fn is_last_project_worktree(&self, idx: usize) -> bool {
+        let Some(session) = self.layout.as_ref().and_then(|layout| layout.sessions.get(idx)) else { return false };
+        let project_key = session_project_key(session);
+        let Some((_, _, mut indices)) = self.project_groups().into_iter().find(|(key, _, _)| *key == project_key) else {
+            return false;
+        };
+        self.sort_project_worktrees(&project_key, &mut indices);
+        indices.last().copied() == Some(idx)
     }
 
     fn sidebar_filter_matches(&self, idx: usize, project: &str) -> bool {
@@ -4843,14 +5111,60 @@ impl View {
                 }
             }
             SidebarLayout::Project => {
-                // y=1 is search, y=2 is section label
+                // Search and project label stay at the top. The independently
+                // scrolling project tree ends above the fixed New Session and
+                // bottom-anchored compact agent inbox.
                 out[1] = (1, SidebarRow::Search);
-                let items = self.project_content();
-                let project_count = items.iter().filter(|row| matches!(row, SidebarRow::ProjectHeader { .. })).count();
-                out.push((2, SidebarRow::SectionLabel("projects".to_string(), Some(project_count.to_string()))));
-                let offset = (self.sidebar_scroll.0 as usize).min(items.len().saturating_sub(region_h));
-                for (i, item) in items.iter().skip(offset).take(region_h).enumerate() {
+                let geometry = self.project_sidebar_geometry();
+                let no_sessions = self.layout.as_ref().map(|layout| layout.sessions.is_empty()).unwrap_or(true);
+                let items = if no_sessions && geometry.spaces_h < 2 {
+                    vec![SidebarRow::Dim("No sessions · press c".to_string())]
+                } else {
+                    self.project_content()
+                };
+                let space_count = items.iter().filter(|row| matches!(row, SidebarRow::Worktree(..))).count();
+                if geometry.tiny {
+                    out.clear();
+                    if geometry.new_session_y > 0 {
+                        out.push((0, SidebarRow::Header("kumo".into())));
+                    }
+                    if geometry.agents_header_y > 0 {
+                        out.push((geometry.new_session_y, SidebarRow::NewSession));
+                    }
+                    let (blocked, done, working) = self.agent_counts();
+                    out.push((geometry.agents_header_y, SidebarRow::AgentInboxHeader { blocked, done, working }));
+                    return out;
+                }
+                out.push((2, SidebarRow::SectionLabel("SPACES".to_string(), Some(space_count.to_string()))));
+                let mut offset = (self.sidebar_scroll.0 as usize).min(items.len().saturating_sub(geometry.spaces_h));
+                if offset > 0 && matches!(items.get(offset), Some(SidebarRow::Branch(..))) {
+                    offset -= 1;
+                }
+                let mut end = (offset + geometry.spaces_h).min(items.len());
+                if geometry.spaces_h >= 2
+                    && end < items.len()
+                    && matches!(items.get(end.saturating_sub(1)), Some(SidebarRow::Worktree(..)))
+                    && matches!(items.get(end), Some(SidebarRow::Branch(..)))
+                {
+                    end = end.saturating_sub(1);
+                }
+                for (i, item) in items[offset..end].iter().enumerate() {
                     out.push((3 + i as u16, item.clone()));
+                }
+                out.push((geometry.new_session_y, SidebarRow::NewSession));
+                out.push((geometry.divider_y, SidebarRow::Divider));
+                let (blocked, done, working) = self.agent_counts();
+                out.push((geometry.agents_header_y, SidebarRow::AgentInboxHeader { blocked, done, working }));
+                for (i, (session, pane, name, status)) in self
+                    .compact_agent_entries()
+                    .into_iter()
+                    .take(geometry.agent_rows)
+                    .enumerate()
+                {
+                    out.push((
+                        geometry.agents_header_y + 1 + i as u16,
+                        SidebarRow::CompactAgent(session, pane, name, status),
+                    ));
                 }
             }
         }
@@ -4865,8 +5179,24 @@ impl View {
             .filter(|drag| drag.moved)
             .and_then(|drag| self.sidebar_reorder_insertion_y(drag, &rows));
         if let Some(insertion_y) = insertion_y {
+            let project_footer = (self.sidebar_layout() == SidebarLayout::Project)
+                .then(|| self.project_sidebar_geometry().new_session_y);
             for (y, _) in &mut rows {
-                if *y >= insertion_y { *y = y.saturating_add(1); }
+                if *y >= insertion_y && project_footer.map(|footer| *y < footer).unwrap_or(true) {
+                    *y = y.saturating_add(1);
+                }
+            }
+            if let Some(footer) = project_footer {
+                rows.retain(|(y, row)| {
+                    *y < footer
+                        || matches!(
+                            row,
+                            SidebarRow::NewSession
+                                | SidebarRow::Divider
+                                | SidebarRow::AgentInboxHeader { .. }
+                                | SidebarRow::CompactAgent(..)
+                        )
+                });
             }
             rows.push((insertion_y, SidebarRow::DropIndicator));
             rows.sort_by_key(|(y, _)| *y);
@@ -4921,6 +5251,9 @@ impl View {
                 true
             }
             SidebarLayout::Project => {
+                if y >= self.project_sidebar_geometry().new_session_y {
+                    return false;
+                }
                 let items = self.project_content();
                 let region_h = self.content_region_h() as usize;
                 let max = items.len().saturating_sub(region_h);
@@ -5112,9 +5445,19 @@ impl View {
                     _ => false,
                 },
             };
-            if boundary { return Some(*y); }
+            if boundary {
+                return Some(if self.sidebar_layout() == SidebarLayout::Project && matches!(row, SidebarRow::NewSession) {
+                    y.saturating_sub(1)
+                } else {
+                    *y
+                });
+            }
         }
-        Some(self.sidebar_footer_y())
+        Some(if self.sidebar_layout() == SidebarLayout::Project {
+            self.project_sidebar_geometry().new_session_y.saturating_sub(1)
+        } else {
+            self.sidebar_footer_y()
+        })
     }
 
     fn toggle_project_collapsed(&mut self, key: &str) {
@@ -5189,12 +5532,14 @@ impl View {
                     return true;
                 }
                 SidebarRow::Divider => {
-                    // Press on the divider starts a panel-height drag; both
-                    // panels reserve one row each so they stay scrollable.
-                    let spaces_h = self.divided_panels().spaces_h as u16;
-                    self.sidebar_drag =
-                        Some(SidebarDrag { start_y: y, start_split: self.sidebar_split.unwrap_or(spaces_h) });
-                    self.mark_dirty();
+                    if self.sidebar_layout() == SidebarLayout::Divided {
+                        // The legacy divided layout keeps its adjustable split;
+                        // the project inbox divider is deliberately fixed.
+                        let spaces_h = self.divided_panels().spaces_h as u16;
+                        self.sidebar_drag =
+                            Some(SidebarDrag { start_y: y, start_split: self.sidebar_split.unwrap_or(spaces_h) });
+                        self.mark_dirty();
+                    }
                     return true;
                 }
                 SidebarRow::Search => {
@@ -5224,6 +5569,17 @@ impl View {
                     }
                     return true;
                 }
+                SidebarRow::AgentInboxHeader { .. } => {
+                    self.open_inbox();
+                    return true;
+                }
+                SidebarRow::CompactAgent(i, pid, _, _) => {
+                    let name = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.name.clone());
+                    if let Some(name) = name {
+                        let _ = self.send(&Command::PaneFocus { session: name, pane_id: pid });
+                    }
+                    return true;
+                }
                 _ => return false,
             }
         }
@@ -5249,6 +5605,37 @@ impl View {
     // ------------------------------------------------------------------
     // Overlay hit-testing (menus / popup / settings)
     // ------------------------------------------------------------------
+
+    fn agent_inbox_rect(&self) -> Option<Rect> {
+        if self.mode != Mode::Inbox || self.cols < 28 || self.rows < 11 {
+            return None;
+        }
+        let width = self.cols.saturating_sub(4).min(72);
+        let height = self.rows.saturating_sub(2).min(18);
+        Some(Rect::new((self.cols - width) / 2, (self.rows - height) / 2, width, height))
+    }
+
+    fn agent_inbox_visible_rows(&self) -> usize {
+        self.agent_inbox_rect().map(|rect| rect.height.saturating_sub(8) as usize).unwrap_or(1).max(1)
+    }
+
+    fn agent_inbox_view_start(&self) -> usize {
+        let len = self.inbox_entries().len();
+        let visible = self.agent_inbox_visible_rows();
+        let selected = self.inbox.as_ref().map(|inbox| inbox.sel).unwrap_or(0).min(len.saturating_sub(1));
+        selected.saturating_sub(visible.saturating_sub(1)).min(len.saturating_sub(visible))
+    }
+
+    fn agent_inbox_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let rect = self.agent_inbox_rect()?;
+        let first_y = rect.y + 3;
+        let visible = self.agent_inbox_visible_rows() as u16;
+        if x <= rect.x || x >= rect.right().saturating_sub(1) || y < first_y || y >= first_y + visible {
+            return None;
+        }
+        let idx = self.agent_inbox_view_start() + (y - first_y) as usize;
+        (idx < self.inbox_entries().len()).then_some(idx)
+    }
 
     fn menu_btn_x(&self) -> u16 {
         // Mirrors status_bar::slot_spans for [Mode, Menu, ..]: the mode chip
@@ -5609,13 +5996,26 @@ impl View {
         self.render_worktree_create(f);
         self.render_session_close_confirm(f);
         self.render_finder(f);
+        self.render_agent_inbox(f);
     }
 
     fn pane_label(&self, pid: u64) -> String {
         self.active_session()
             .and_then(|s| find_pane_in_session(s, pid))
-            .map(|p| p.title.clone())
-            .unwrap_or_else(|| " pane ".to_string())
+            .map(|p| {
+                if p.is_ai {
+                    if let Some(agent) = p.agent.as_ref() {
+                        let name = agent.name.trim();
+                        if !name.is_empty() {
+                            return format!(" AI · {name} ");
+                        }
+                    }
+                }
+                let role = if p.is_ai { "AI" } else { "PTY" };
+                let title = p.title.trim();
+                if title.is_empty() { format!(" {role} ") } else { format!(" {role} · {title} ") }
+            })
+            .unwrap_or_else(|| " PTY · pane ".to_string())
     }
 
     fn pane_title(&self, pid: u64, focused: bool, rect: Rect) -> String {
@@ -5636,17 +6036,21 @@ impl View {
             return;
         }
         let theme = self.current_theme();
-        // A blocked AI pane glows orange even when it does not have focus.
-        let blocked = self.rects.iter().any(|(pid, r)| {
-            *r == rect
-                && self
-                    .active_session()
+        // Attention states own the border color even when the pane does not
+        // have focus, so a blocked or finished agent remains visible.
+        let agent_status = self.rects.iter().find_map(|(pid, r)| {
+            (*r == rect).then(|| {
+                self.active_session()
                     .and_then(|s| find_pane_in_session(s, *pid))
-                    .map(|p| p.agent.as_ref().map(|a| a.status == AgentStatus::Blocked).unwrap_or(false))
-                    .unwrap_or(false)
-        });
+                    .and_then(|p| p.agent.as_ref().map(|agent| agent.status))
+            })
+        }).flatten();
+        let blocked = agent_status == Some(AgentStatus::Blocked);
+        let done = agent_status == Some(AgentStatus::Done);
         let border = if blocked {
             theme.orange
+        } else if done {
+            theme.green
         } else if focused {
             theme.accent
         } else {
@@ -5659,9 +6063,11 @@ impl View {
             // Hidden: no border, just title chip at top-left inset.
             let max = rect.width.saturating_sub(2) as usize;
             let chip = if focused {
-                Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD)
             } else if blocked {
-                Style::default().fg(RColor::Black).bg(theme.orange).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.orange).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+            } else if done {
+                Style::default().fg(theme.green).bg(RColor::Reset).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg).bg(RColor::Reset)
             };
@@ -5695,12 +6101,15 @@ impl View {
             put(f, x0, y, v, border_style);
             put(f, x1, y, v, border_style);
         }
-        // Title chip.
+        // The outline owns focus. Keeping the title on the terminal surface
+        // avoids a second saturated chip competing with the same border.
         let max = rect.width.saturating_sub(2) as usize;
         let chip = if focused {
-            Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         } else if blocked {
-            Style::default().fg(RColor::Black).bg(theme.orange).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.orange).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+        } else if done {
+            Style::default().fg(theme.green).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg).bg(RColor::Reset)
         };
@@ -5756,18 +6165,35 @@ impl View {
             let active = sess.active_tab == *idx;
             let is_hover = self.tab_hover == Some(*idx);
             let pill_bg = if active { theme.accent } else { lighten(bar_bg, 14) };
-            let fg = if active { RColor::Rgb(0x0a,0x0a,0x0a) } else { theme.fg };
+            let fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.fg };
             fill(f, *pill, pill_bg);
             let base_style = if active {
-                Style::default().fg(RColor::Rgb(0x0a,0x0a,0x0a)).bg(pill_bg).add_modifier(Modifier::BOLD)
+                Style::default().fg(fg).bg(pill_bg).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(fg).bg(pill_bg)
             };
-            // Draw name left-aligned at first cell; last cell reserved for x
+            // Draw the name, optional aggregate agent state, then the
+            // persistent close action. The geometry reserves these cells too.
             let name = &tab.name;
             let max_w = pill.width.saturating_sub(1);
             let name_w = (name.chars().count() as u16).min(max_w);
             text(f, pill.x, pill.y, name, base_style, name_w);
+            if let Some(status) = self.tab_agent_indicator(tab) {
+                let marker = self.tab_agent_marker(status);
+                let marker_fg = if active {
+                    fg
+                } else {
+                    let (r, g, b) = kumo_core::theme::agent_status_color(status);
+                    RColor::Rgb(r, g, b)
+                };
+                put(
+                    f,
+                    pill.x + name_w + 1,
+                    pill.y,
+                    marker,
+                    Style::default().fg(marker_fg).bg(pill_bg).add_modifier(Modifier::BOLD),
+                );
+            }
             if is_hover {
                 let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
@@ -5840,7 +6266,8 @@ impl View {
                     }
                 }
                 SidebarRow::Divider => {
-                    // Plain grey divider: draggable, no pressed/active styling.
+                    // Plain grey divider. Only the legacy divided layout makes
+                    // it draggable; the project inbox divider stays fixed.
                     let style = Style::default().fg(RColor::Gray);
                     let line: String = "─".repeat(w.saturating_sub(1).max(1) as usize);
                     if w > 1 {
@@ -5881,12 +6308,24 @@ impl View {
                 }
                 SidebarRow::Branch(i, b) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
-                    let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
-                    let name_color = if active { theme.fg } else { theme.panel_muted };
-                    if active {
+                    let project_layout = self.sidebar_layout() == SidebarLayout::Project;
+                    let is_hover = project_layout && self.sidebar_hover == Some(i);
+                    let bg = if active {
+                        sidebar_active_bg(&theme)
+                    } else if is_hover {
+                        lighten(theme.panel_sep, 18)
+                    } else {
+                        RColor::Reset
+                    };
+                    let name_color = if active || is_hover { theme.fg } else { theme.panel_muted };
+                    if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    let avail = max.saturating_sub(4) as usize;
+                    if active && project_layout {
+                        put(f, x, y, "┃", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
+                    }
+                    let branch_x = if project_layout { x + 7 } else { x + 4 };
+                    let avail = max.saturating_sub(if project_layout { 7 } else { 4 }) as usize;
                     let suffix = match (b.ahead, b.behind) {
                         (0, 0) => String::new(),
                         (a, 0) => format!(" \u{2191}{}", a),
@@ -5896,9 +6335,23 @@ impl View {
                     let suffix_w = suffix.chars().count().min(avail);
                     let name_avail = avail.saturating_sub(suffix_w);
                     let shown = fit_branch_name(&b.name, name_avail);
-                    let branch_style = Style::default().fg(name_color).bg(bg).add_modifier(Modifier::DIM);
-                    text(f, x + 4, y, &shown, branch_style, avail as u16);
-                    let mut cx = x + 4 + shown.chars().count() as u16;
+                    let branch_style = Style::default()
+                        .fg(name_color)
+                        .bg(bg)
+                        .add_modifier(Modifier::DIM)
+                        .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() });
+                    if project_layout {
+                        put(
+                            f,
+                            x + 2,
+                            y,
+                            if self.is_last_project_worktree(i) { " " } else { "│" },
+                            Style::default().fg(theme.panel_muted).bg(bg),
+                        );
+                        put(f, x + 5, y, "⎇", Style::default().fg(theme.panel_muted).bg(bg));
+                    }
+                    text(f, branch_x, y, &shown, branch_style, avail as u16);
+                    let mut cx = branch_x + shown.chars().count() as u16;
                     let mut remaining = (avail as u16).saturating_sub(shown.chars().count() as u16);
                     if b.ahead > 0 && remaining > 1 {
                         put(f, cx, y, " ", Style::default().bg(bg));
@@ -6024,20 +6477,96 @@ impl View {
                 }
                 SidebarRow::NewSession => {
                     let style = Style::default().fg(theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD);
-                    text(f, x, y, "  + NEW SESSION", style, max);
+                    let hint_style = Style::default().fg(theme.panel_muted).bg(RColor::Reset);
+                    let show_hint = self.sidebar_layout() == SidebarLayout::Project && max >= 5;
+                    let hint_w = 1u16;
+                    let max_r = w.saturating_sub(1).max(1);
+                    let label_w = if show_hint { max.saturating_sub(hint_w + 2) } else { max };
+                    text(f, x, y, "  + NEW SESSION", style, label_w);
+                    if show_hint {
+                        text(f, x + max_r.saturating_sub(hint_w), y, "c", hint_style, hint_w);
+                    }
+                }
+                SidebarRow::AgentInboxHeader { .. } => {
+                    let style = Style::default().fg(theme.panel_muted).bg(RColor::Reset).add_modifier(Modifier::BOLD);
+                    text(f, x + 2, y, "AGENTS", style, max.saturating_sub(2));
+                    let summary = self.compact_agent_summary();
+                    let summary_w = summary.chars().count() as u16;
+                    let show_hint = self.sidebar_layout() == SidebarLayout::Project && summary_w + 12 < w;
+                    if summary_w + 10 < w {
+                        let hint_w = 1u16;
+                        let max_r = w.saturating_sub(1).max(1);
+                        let summary_x = if show_hint {
+                            x + max_r.saturating_sub(hint_w + 2 + summary_w)
+                        } else {
+                            x + max_r.saturating_sub(summary_w)
+                        };
+                        text(
+                            f,
+                            summary_x,
+                            y,
+                            &summary,
+                            Style::default().fg(theme.panel_muted).bg(RColor::Reset),
+                            summary_w,
+                        );
+                        if show_hint {
+                            text(
+                                f,
+                                x + max_r.saturating_sub(hint_w),
+                                y,
+                                "i",
+                                Style::default().fg(theme.panel_muted).bg(RColor::Reset),
+                                hint_w,
+                            );
+                        }
+                    }
+                }
+                SidebarRow::CompactAgent(i, _pid, name, status) => {
+                    let (r, g, b) = kumo_core::theme::agent_status_color(status);
+                    let marker = match status {
+                        AgentStatus::Blocked => "!",
+                        AgentStatus::Done => "✓",
+                        AgentStatus::Working => self.spinner_char(),
+                        AgentStatus::Idle | AgentStatus::Unknown => "·",
+                    };
+                    put(
+                        f,
+                        x + 2,
+                        y,
+                        marker,
+                        Style::default().fg(RColor::Rgb(r, g, b)).bg(RColor::Reset).add_modifier(Modifier::BOLD),
+                    );
+                    let workspace = self.session_name(i);
+                    let label = format!("{name} · {workspace}");
+                    let avail = max.saturating_sub(4) as usize;
+                    let shown = fit_branch_name(&label, avail);
+                    text(
+                        f,
+                        x + 4,
+                        y,
+                        &shown,
+                        Style::default().fg(theme.fg).bg(RColor::Reset),
+                        avail as u16,
+                    );
                 }
                 SidebarRow::Search => {
                     let style = Style::default().fg(if self.sidebar_filter_active { theme.fg } else { theme.panel_muted }).bg(RColor::Reset);
                     let label = if self.sidebar_filter_active {
                         format!("⌕ {}▏", self.sidebar_filter)
                     } else if self.sidebar_filter.is_empty() {
-                        "⌕ (f)ilter".to_string()
+                        "⌕ Filter…".to_string()
                     } else {
                         format!("⌕ {}", self.sidebar_filter)
                     };
                     text(f, x + 2, y, &label, style, max.saturating_sub(2));
                     let count = self.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count();
-                    let hint = if self.sidebar_filter_active { format!("{count} match{}", if count == 1 { "" } else { "es" }) } else { String::new() };
+                    let hint = if self.sidebar_filter_active {
+                        format!("{count} match{}", if count == 1 { "" } else { "es" })
+                    } else if self.sidebar_filter.is_empty() {
+                        "f".to_string()
+                    } else {
+                        String::new()
+                    };
                     let rw = hint.chars().count() as u16;
                     let max_r = w.saturating_sub(1).max(1);
                     if rw + 4 <= max {
@@ -6071,6 +6600,10 @@ impl View {
                         }
                         is_active
                     };
+                    // Keep the complete active path visually connected: the
+                    // project, its active worktree, and that worktree's
+                    // branch all share the same selection background and
+                    // accent path marker.
                     let bg = if active { sidebar_active_bg(&theme) } else { RColor::Reset };
                     let fg = if active { theme.fg } else { theme.panel_muted };
                     if active {
@@ -6085,13 +6618,13 @@ impl View {
                     };
                     let palette = [theme.accent, theme.secondary, theme.green, theme.orange, theme.panel_muted];
                     let dot_col = palette[(hash as usize) % palette.len()];
+                    if active {
+                        put(f, x, y, "┃", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
+                    }
                     put(f, x + 1, y, if collapsed { "▸" } else { "▾" }, Style::default().fg(dot_col).bg(bg));
-                    let shown = if name.chars().count() as u16 > max.saturating_sub(3) {
-                        let mut s = name.clone();
-                        while s.chars().count() as u16 > max.saturating_sub(4) && !s.is_empty() { s.pop(); }
-                        format!("{s}…")
-                    } else { name.clone() };
-                    text(f, x + 3, y, &shown, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD), max.saturating_sub(3));
+                    put(f, x + 3, y, "▰", Style::default().fg(dot_col).bg(bg));
+                    let shown = fit_middle_label(&name, max.saturating_sub(5) as usize);
+                    text(f, x + 5, y, &shown, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD), max.saturating_sub(5));
                 }
                 SidebarRow::Worktree(i) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
@@ -6101,7 +6634,29 @@ impl View {
                     if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);
                     }
-                    // AI status icon where `>` used to be (far left)
+                    if active {
+                        put(f, x, y, "┃", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
+                    }
+                    // Tree guide + workspace glyph make the hierarchy legible
+                    // even when project, session and branch share a name.
+                    put(
+                        f,
+                        x + 2,
+                        y,
+                        if self.is_last_project_worktree(i) { "└" } else { "├" },
+                        Style::default().fg(theme.panel_muted).bg(bg),
+                    );
+                    put(f, x + 3, y, "─", Style::default().fg(theme.panel_muted).bg(bg));
+                    put(
+                        f,
+                        x + 4,
+                        y,
+                        if active { "◆" } else { "◇" },
+                        Style::default().fg(if active { theme.accent } else { theme.panel_muted }).bg(bg),
+                    );
+                    // Keep hierarchy on the left and align the aggregate AI
+                    // state in a stable metadata column on the right. The
+                    // final sidebar column remains reserved for the scrollbar.
                     let dot_status = self.worktree_primary_status(i);
                     if let Some(st) = dot_status {
                         let (r,g,b) = kumo_core::theme::agent_status_color(st);
@@ -6118,28 +6673,21 @@ impl View {
                         } else {
                             Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
                         };
-                        put(f, x + 1, y, dot, dot_style);
-                    } else {
-                        // no agent — keep gutter empty
-                        put(f, x + 1, y, " ", Style::default().bg(bg));
+                        put(f, x + w.saturating_sub(2), y, dot, dot_style);
                     }
                     let name = self.session_name(i);
-                    let name_avail = max.saturating_sub(3).max(1);
-                    let shown = if name.chars().count() as u16 > name_avail {
-                        let mut s = name.clone();
-                        while s.chars().count() as u16 > name_avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
-                        format!("{s}…")
-                    } else { name.clone() };
+                    let name_avail = max.saturating_sub(6).max(1);
+                    let shown = fit_middle_label(&name, name_avail as usize);
                     let name_style = if active { Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
-                    text(f, x + 3, y, &shown, name_style, name_avail);
+                    text(f, x + 6, y, &shown, name_style, name_avail);
                 }
                 SidebarRow::InlineAgent(i, pid, name, status) => {
                     let session_active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let pane_focused = self.layout.as_ref().and_then(|l| l.sessions.get(i)).map(|s| s.tabs.get(s.active_tab).map(|t| t.focus == pid).unwrap_or(false)).unwrap_or(false);
                     let focused = (session_active && pane_focused) || self.inbox_selected(i, pid);
-                    // every agent under the active worktree shares a subtle block bg;
-                    // the actually focused agent gets a brighter pop
-                    let bg = if focused { agent_active_bg(&theme) } else if session_active { sidebar_active_bg(&theme) } else { RColor::Reset };
+                    // Only the exact focused agent receives a selection fill;
+                    // the parent workspace row already communicates session focus.
+                    let bg = if focused { agent_active_bg(&theme) } else { RColor::Reset };
                     if bg != RColor::Reset { fill(f, Rect::new(x, y, w, 1), bg); }
                     if self.inbox_selected(i, pid) {
                         put(f, x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
@@ -6158,8 +6706,10 @@ impl View {
                     } else {
                         Style::default().fg(dot_fg).bg(bg).add_modifier(Modifier::BOLD)
                     };
-                    put(f, x + 4, y, dot, dot_style);
-                    let avail = max.saturating_sub(6) as usize;
+                    put(f, x + 2, y, "│", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 4, y, "└", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 5, y, dot, dot_style);
+                    let avail = max.saturating_sub(7) as usize;
                     let label = if name.chars().count() > avail {
                         let mut s = name.clone();
                         while s.chars().count() > avail.saturating_sub(1) && !s.is_empty() { s.pop(); }
@@ -6172,7 +6722,7 @@ impl View {
                     } else {
                         Style::default().fg(dot_fg).bg(bg)
                     };
-                    text(f, x + 6, y, &label, name_style, avail as u16);
+                    text(f, x + 7, y, &label, name_style, avail as u16);
                 }
             }
         }
@@ -6279,6 +6829,7 @@ impl View {
             is_leader: self.mode == Mode::Leader,
             menu_open: self.menu.open,
             sidebar_open: self.sidebar_open,
+            github: self.github_status.as_ref(),
             spinner: self.spinner_char(),
         };
 
@@ -6298,6 +6849,7 @@ impl View {
         let drop_priority: &[StatusWidget] = &[
             StatusWidget::Hostname,
             StatusWidget::Clock,
+            StatusWidget::Github,
             StatusWidget::Branch,
             StatusWidget::AgentStatus,
             StatusWidget::Session,
@@ -6562,7 +7114,7 @@ impl View {
             _ => "name:",
         };
         text(f, x0 + 2, y0 + 2, label_text, label, dd.width.saturating_sub(4));
-        let field = Style::default().fg(RColor::Black).bg(theme.input_bg);
+        let field = input_style(&theme);
         let field_w = dd.width.saturating_sub(4);
         for cx in (x0 + 2)..(x0 + 2 + field_w) {
             put(f, cx, y0 + 3, " ", field);
@@ -6602,6 +7154,98 @@ impl View {
         }
     }
 
+    fn render_agent_inbox(&self, f: &mut Frame) {
+        let Some(rect) = self.agent_inbox_rect() else { return };
+        let theme = self.current_theme();
+        draw_modal(f, rect, &theme, self.shadow_floor());
+        let inner_w = rect.width.saturating_sub(4);
+        let entries = self.all_agent_entries();
+        let (blocked, done, working) = self.agent_counts();
+        let title = format!("agent inbox · !{blocked}  ✓{done}  {}{working}", self.spinner_char());
+        text(
+            f,
+            rect.x + 2,
+            rect.y + 1,
+            &title,
+            Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD),
+            inner_w,
+        );
+
+        if entries.is_empty() {
+            text(
+                f,
+                rect.x + 2,
+                rect.y + 3,
+                "no agents",
+                Style::default().fg(theme.panel_muted).bg(theme.panel_sep),
+                inner_w,
+            );
+        } else {
+            let visible = self.agent_inbox_visible_rows();
+            let start = self.agent_inbox_view_start();
+            let selected = self.inbox.as_ref().map(|inbox| inbox.sel).unwrap_or(0).min(entries.len() - 1);
+            for (row, (_, session, _pane, status, name)) in entries.iter().skip(start).take(visible).enumerate() {
+                let idx = start + row;
+                let y = rect.y + 3 + row as u16;
+                let active = idx == selected;
+                let bg = if active { sidebar_active_bg(&theme) } else { theme.panel_sep };
+                fill(f, Rect::new(rect.x + 1, y, rect.width.saturating_sub(2), 1), bg);
+                let (r, g, b) = kumo_core::theme::agent_status_color(*status);
+                let marker = match status {
+                    AgentStatus::Blocked => "!",
+                    AgentStatus::Done => "✓",
+                    AgentStatus::Working => self.spinner_char(),
+                    AgentStatus::Idle => "●",
+                    AgentStatus::Unknown => "·",
+                };
+                put(
+                    f,
+                    rect.x + 2,
+                    y,
+                    if active { "▸" } else { " " },
+                    Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD),
+                );
+                put(
+                    f,
+                    rect.x + 4,
+                    y,
+                    marker,
+                    Style::default().fg(RColor::Rgb(r, g, b)).bg(bg).add_modifier(Modifier::BOLD),
+                );
+                let label = format!("{name} · {}", self.session_name(*session));
+                let shown = fit_branch_name(&label, inner_w.saturating_sub(5) as usize);
+                text(
+                    f,
+                    rect.x + 6,
+                    y,
+                    &shown,
+                    Style::default().fg(if active { theme.fg } else { theme.panel_muted }).bg(bg),
+                    inner_w.saturating_sub(5),
+                );
+            }
+
+            let (_, session, pane, status, name) = &entries[selected];
+            let session_info = self.layout.as_ref().and_then(|layout| layout.sessions.get(*session));
+            let workspace = session_info.map(|session| session.workspace.display().to_string()).unwrap_or_default();
+            let (_, tab) = Self::agent_pane_location(self.layout.as_ref(), *session, *pane);
+            let detail_y = rect.bottom().saturating_sub(4);
+            let separator = "─".repeat(inner_w as usize);
+            text(f, rect.x + 2, detail_y.saturating_sub(1), &separator, Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
+            let detail = format!("{name} · {} · {}", status.label(), if tab.is_empty() { "pane" } else { &tab });
+            text(f, rect.x + 2, detail_y, &fit_branch_name(&detail, inner_w as usize), Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w);
+            text(f, rect.x + 2, detail_y + 1, &fit_branch_name(&workspace, inner_w as usize), Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
+        }
+        let footer = "j/k navigate · enter open · esc close";
+        text(
+            f,
+            rect.x + 2,
+            rect.bottom().saturating_sub(2),
+            footer,
+            Style::default().fg(theme.panel_muted).bg(theme.panel_sep),
+            inner_w,
+        );
+    }
+
     fn render_keybind_overlay(&self, f: &mut Frame) {
         if !self.keybind_overlay.open {
             return;
@@ -6611,31 +7255,56 @@ impl View {
         draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-        text(f, dd.x + 2, dd.y + 1, "keybindings", title, inner_w);
-        let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let scroll = self.keybind_overlay.scroll as usize;
-        let body_top = dd.y + 2;
-        let body_bottom = dd.bottom() - 1;
-        for (i, line) in keybind_lines(&self.keymap).iter().skip(scroll).enumerate() {
-            let y = body_top + i as u16;
+        let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
+        text(f, dd.x + 2, dd.y + 1, &format!("commands · {}", matches.len()), title, inner_w);
+
+        let input = Rect::new(dd.x + 2, dd.y + 2, inner_w, 1);
+        fill(f, input, theme.input_bg);
+        let query_style = input_style(&theme);
+        put(f, input.x, input.y, "›", query_style.add_modifier(Modifier::BOLD));
+        if self.keybind_overlay.input.is_empty() {
+            text(f, input.x + 2, input.y, "type to filter actions…", input_hint_style(&theme), input.width.saturating_sub(2));
+        } else {
+            let field_w = input.width.saturating_sub(2) as usize;
+            let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w);
+            let visible: String = self.keybind_overlay.input.chars().skip(start).take(field_w).collect();
+            text(f, input.x + 2, input.y, &visible, query_style, field_w as u16);
+        }
+        let field_w = input.width.saturating_sub(2) as usize;
+        let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w);
+        let cursor_x = input.x + 2 + self.keybind_overlay.cursor.saturating_sub(start) as u16;
+        if cursor_x < input.right() {
+            let symbol = self.keybind_overlay.input.chars().nth(self.keybind_overlay.cursor).unwrap_or(' ').to_string();
+            put(f, cursor_x, input.y, &symbol, query_style.add_modifier(Modifier::REVERSED));
+        }
+
+        let max_keys = self.keymap.iter().map(|b| bindings::chord_display(b.key).chars().count()).max().unwrap_or(4) as u16;
+        let body_top = dd.y + 3;
+        let body_bottom = dd.bottom() - 2;
+        if matches.is_empty() {
+            text(f, dd.x + 2, body_top, "no matching commands", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
+        }
+        for (row, keymap_idx) in matches.iter().copied().skip(self.keybind_overlay.scroll).enumerate() {
+            let i = self.keybind_overlay.scroll + row;
+            let b = &self.keymap[keymap_idx];
+            let y = body_top + row as u16;
             if y >= body_bottom {
                 break;
             }
-            match line {
-                KbLine::Header(label) => {
-                    let st = Style::default().fg(theme.orange).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-                    text(f, dd.x + 2, y, label, st, inner_w);
-                }
-                KbLine::Bind(b) => {
-                    let keys = Style::default().fg(theme.accent).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-                    let desc = Style::default().fg(theme.fg).bg(theme.panel_sep);
-                    text(f, dd.x + 2, y, &b.keys, keys, max_keys);
-                    text(f, dd.x + 2 + max_keys + 2, y, &b.desc, desc, inner_w.saturating_sub(max_keys + 2));
-                }
+            let selected = i == self.keybind_overlay.selected;
+            let bg = if selected { lighten(theme.panel_sep, 28) } else { theme.panel_sep };
+            fill(f, Rect::new(dd.x + 1, y, dd.width.saturating_sub(2), 1), bg);
+            if selected {
+                put(f, dd.x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
             }
+            let keys = Style::default().fg(if selected { theme.secondary } else { theme.accent }).bg(bg).add_modifier(Modifier::BOLD);
+            let desc = Style::default().fg(if selected { theme.fg } else { theme.panel_muted }).bg(bg);
+            let chord = bindings::chord_display(b.key);
+            text(f, dd.x + 2, y, &chord, keys, max_keys);
+            text(f, dd.x + 2 + max_keys + 2, y, palette_action_desc(b.action), desc, inner_w.saturating_sub(max_keys + 2));
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.bottom() - 2, "j/k: scroll · esc / ?: close", footer, inner_w);
+        text(f, dd.x + 2, dd.bottom() - 2, "↑/↓ select · enter run · esc close", footer, inner_w);
     }
 
     fn render_settings(&self, f: &mut Frame) {
@@ -6875,7 +7544,7 @@ impl View {
         text(f, dd.x + 2, dd.y + 3, "Create from", input_label_style, inner_w);
         let input_rect = Rect::new(dd.x + 2, dd.y + 4, inner_w, 1);
         let input_bg = if is_create_focused { theme.accent } else { theme.input_bg };
-        let input_fg = if is_create_focused { RColor::Black } else { theme.fg };
+        let field_fg = if is_create_focused { RColor::Black } else { input_fg(&theme) };
         fill(f, input_rect, input_bg);
         // Placeholder / content
         let cf = &self.worktree_create.create_from;
@@ -6889,9 +7558,9 @@ impl View {
         };
         let display = if cf.is_empty() && !is_create_focused { placeholder } else { cf.as_str() };
         let text_style = if cf.is_empty() && !is_create_focused {
-            Style::default().fg(theme.panel_muted).bg(input_bg)
+            input_hint_style(&theme)
         } else {
-            Style::default().fg(input_fg).bg(input_bg)
+            Style::default().fg(field_fg).bg(input_bg)
         };
         // Render with cursor handling (scroll if needed)
         let field_w = inner_w as usize;
@@ -6927,13 +7596,13 @@ impl View {
             text(f, dd.x + 2, dd.y + 7, "Branch name override", input_label_style, inner_w);
             let br_rect = Rect::new(dd.x + 2, dd.y + 8, inner_w, 1);
             let bg = if branch_focused { theme.accent } else { theme.input_bg };
-            let fg = if branch_focused { RColor::Black } else { theme.fg };
+            let fg = if branch_focused { RColor::Black } else { input_fg(&theme) };
             fill(f, br_rect, bg);
             let b = &self.worktree_create.branch_override;
             let bc = self.worktree_create.branch_cursor;
             let bph = "e.g. feat/login (leave empty to derive)";
             let bdisplay = if b.is_empty() && !branch_focused { bph } else { b.as_str() };
-            let bstyle = if b.is_empty() && !branch_focused { Style::default().fg(theme.panel_muted).bg(bg) } else { Style::default().fg(fg).bg(bg) };
+            let bstyle = if b.is_empty() && !branch_focused { input_hint_style(&theme) } else { Style::default().fg(fg).bg(bg) };
             let blen = bdisplay.chars().count();
             let bcur = bc.min(blen);
             let bstart = if blen <= inner_w as usize { 0 } else { bcur.saturating_sub(inner_w as usize / 2).min(blen - inner_w as usize) };
@@ -6953,13 +7622,13 @@ impl View {
             text(f, dd.x + 2, dd.y + 9, "Note", input_label_style, inner_w);
             let note_rect = Rect::new(dd.x + 2, dd.y + 10, inner_w, 1);
             let nbg = if note_focused { theme.accent } else { theme.input_bg };
-            let nfg = if note_focused { RColor::Black } else { theme.fg };
+            let nfg = if note_focused { RColor::Black } else { input_fg(&theme) };
             fill(f, note_rect, nbg);
             let n = &self.worktree_create.note;
             let nc = self.worktree_create.note_cursor;
             let nph = "optional checkpoint note";
             let ndisp = if n.is_empty() && !note_focused { nph } else { n.as_str() };
-            let nstyle = if n.is_empty() && !note_focused { Style::default().fg(theme.panel_muted).bg(nbg) } else { Style::default().fg(nfg).bg(nbg) };
+            let nstyle = if n.is_empty() && !note_focused { input_hint_style(&theme) } else { Style::default().fg(nfg).bg(nbg) };
             let nlen = ndisp.chars().count();
             let ncur = nc.min(nlen);
             let nstart = if nlen <= inner_w as usize { 0 } else { ncur.saturating_sub(inner_w as usize / 2).min(nlen - inner_w as usize) };
@@ -6979,13 +7648,13 @@ impl View {
             text(f, dd.x + 2, dd.y + 11, "Agent", input_label_style, inner_w);
             let ag_rect = Rect::new(dd.x + 2, dd.y + 12, inner_w, 1);
             let abg = if agent_focused { theme.accent } else { theme.input_bg };
-            let afg = if agent_focused { RColor::Black } else { theme.fg };
+            let afg = if agent_focused { RColor::Black } else { input_fg(&theme) };
             fill(f, ag_rect, abg);
             let ag = &self.worktree_create.agent;
             let agc = self.worktree_create.agent_cursor;
             let agph = "e.g. claude, codex, opencode (leave empty for none)";
             let agdisp = if ag.is_empty() && !agent_focused { agph } else { ag.as_str() };
-            let agstyle = if ag.is_empty() && !agent_focused { Style::default().fg(theme.panel_muted).bg(abg) } else { Style::default().fg(afg).bg(abg) };
+            let agstyle = if ag.is_empty() && !agent_focused { input_hint_style(&theme) } else { Style::default().fg(afg).bg(abg) };
             let aglen = agdisp.chars().count();
             let agcur = agc.min(aglen);
             let agstart = if aglen <= inner_w as usize { 0 } else { agcur.saturating_sub(inner_w as usize / 2).min(aglen - inner_w as usize) };
@@ -7069,6 +7738,7 @@ impl View {
         text(f, dd.x + 2, dd.y + 1, "workspace finder", title, inner_w);
         // input line
         let input_bg = theme.input_bg;
+        let field_style = input_style(&theme);
         let input_area = Rect::new(dd.x + 2, dd.y + 2, inner_w, 1);
         fill(f, input_area, input_bg);
         let cursor = self.finder.cursor.min(self.finder.input.chars().count());
@@ -7078,16 +7748,16 @@ impl View {
             if i < cursor { before.push(c); } else { after.push(c); }
         }
         let prompt = "⌕ ";
-        text(f, input_area.x, input_area.y, prompt, Style::default().fg(theme.panel_muted).bg(input_bg), 2);
-        text(f, input_area.x + 2, input_area.y, &before, Style::default().fg(theme.fg).bg(input_bg), inner_w.saturating_sub(3));
+        text(f, input_area.x, input_area.y, prompt, input_hint_style(&theme), 2);
+        text(f, input_area.x + 2, input_area.y, &before, field_style, inner_w.saturating_sub(3));
         // cursor
         let cur_x = input_area.x + 2 + before.chars().count() as u16;
         if cur_x < input_area.x + input_area.width {
             let ch = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".to_string());
-            let cur_style = Style::default().fg(RColor::Black).bg(theme.accent);
+            let cur_style = field_style.add_modifier(Modifier::REVERSED);
             put(f, cur_x, input_area.y, &ch, cur_style);
             if !after.is_empty() {
-                text(f, cur_x + 1, input_area.y, &after[after.chars().next().unwrap().len_utf8()..], Style::default().fg(theme.fg).bg(input_bg), inner_w.saturating_sub(3 + before.chars().count() as u16 + 1));
+                text(f, cur_x + 1, input_area.y, &after[after.chars().next().unwrap().len_utf8()..], field_style, inner_w.saturating_sub(3 + before.chars().count() as u16 + 1));
             }
         }
         let body_top = dd.y + 3;
@@ -7254,8 +7924,7 @@ impl View {
             let title = Style::default().fg(RColor::White).bg(RColor::Black).add_modifier(Modifier::BOLD);
             let title_text = if cs.search_forward { "search /" } else { "search ?" };
             text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
-            // field (Black on light input_bg, like rename)
-            let field = Style::default().fg(RColor::Black).bg(theme.input_bg);
+            let field = input_style(&theme);
             let field_w = inner_w;
             for cx in (dd.x + 2)..(dd.x + 2 + field_w) {
                 put(f, cx, dd.y + 2, " ", field);
@@ -7292,7 +7961,7 @@ impl View {
         let rect = Rect::new(pa.x, bar_y, pa.width, 1);
         fill(f, rect, theme.input_bg);
         let prefix = if cs.search_forward { "/" } else { "?" };
-        let style = Style::default().fg(RColor::Black).bg(theme.input_bg);
+        let style = input_style(&theme);
         let mut x = rect.x + 1;
         put(f, x, rect.y, prefix, style.add_modifier(Modifier::BOLD));
         x += 1;
@@ -7310,7 +7979,7 @@ impl View {
         let hint = " enter: search  esc: cancel ";
         let hint_x = rect.right().saturating_sub(hint.len() as u16 + 1);
         if hint_x > x + 1 {
-            text(f, hint_x, rect.y, hint, Style::default().fg(theme.panel_muted).bg(theme.input_bg), hint.len() as u16);
+            text(f, hint_x, rect.y, hint, input_hint_style(&theme), hint.len() as u16);
         }
     }
 
@@ -7320,6 +7989,18 @@ impl View {
     where
         B::Error: Send + Sync + 'static,
     {
+        if self.keybind_overlay.open {
+            if let Some(rect) = self.keybind_overlay_rect() {
+                let field_w = rect.width.saturating_sub(4) as usize;
+                let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w.saturating_sub(2));
+                let x = rect.x + 4 + self.keybind_overlay.cursor.saturating_sub(start) as u16;
+                if x < rect.right().saturating_sub(2) {
+                    terminal.set_cursor_position((x, rect.y + 2))?;
+                    terminal.show_cursor()?;
+                    return Ok(());
+                }
+            }
+        }
         if self.popup.open {
             if let Some((x, y)) = self.name_popup_input_cursor() {
                 terminal.set_cursor_position((x, y))?;
@@ -7467,17 +8148,51 @@ fn sel_corners(sel: &Sel) -> ((u16, u16), (u16, u16)) {
     }
 }
 
-/// Truncate a git branch name to `avail` columns, appending `…` when cut.
-fn fit_branch_name(name: &str, avail: usize) -> String {
-    if name.chars().count() <= avail {
-        name.to_string()
-    } else if avail == 0 {
-        String::new()
-    } else {
-        let mut s: String = name.chars().take(avail - 1).collect();
-        s.push('…');
-        s
+/// Truncate a label in the middle while keeping both ends visible.
+///
+/// This works on Unicode scalar values rather than byte offsets, so a narrow
+/// sidebar cannot split a multi-byte character. For one or two columns the
+/// ellipsis is kept as the only reliable indication that content was cut.
+fn fit_middle_label(name: &str, avail: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= avail {
+        return name.to_string();
     }
+    match avail {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let kept = avail - 1;
+            let left = kept.div_ceil(2);
+            let right = kept - left;
+            let mut shown: String = chars[..left].iter().collect();
+            shown.push('…');
+            shown.extend(chars[chars.len() - right..].iter());
+            shown
+        }
+    }
+}
+
+/// Truncate a git branch name to `avail` columns, preserving its category when
+/// possible and otherwise using the shared middle truncation.
+fn fit_branch_name(name: &str, avail: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= avail {
+        return name.to_string();
+    }
+    if let Some(slash) = chars.iter().position(|ch| *ch == '/') {
+        let category_len = slash + 1;
+        // Keep at least one differentiating suffix character after the
+        // category and ellipsis; otherwise the generic middle form is clearer.
+        if avail >= category_len + 2 {
+            let suffix_len = avail - category_len - 1;
+            let mut shown: String = chars[..category_len].iter().collect();
+            shown.push('…');
+            shown.extend(chars[chars.len() - suffix_len..].iter());
+            return shown;
+        }
+    }
+    fit_middle_label(name, avail)
 }
 
 /// Short display form of a workspace path, e.g. `.../kumo`.
@@ -7624,32 +8339,58 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
     }
 }
 
-/// One display row of the keybind showcase: a group header or a binding.
-enum KbLine<'a> {
-    Header(&'a str),
-    Bind(&'a Binding),
+fn palette_action_desc(action: Action) -> &'static str {
+    match action {
+        Action::Focus(Dir::Left) => "focus pane left",
+        Action::Focus(Dir::Down) => "focus pane down",
+        Action::Focus(Dir::Up) => "focus pane up",
+        Action::Focus(Dir::Right) => "focus pane right",
+        Action::Resize(kumo_core::layout::ResizeDir::Left) => "resize pane left",
+        Action::Resize(kumo_core::layout::ResizeDir::Down) => "resize pane down",
+        Action::Resize(kumo_core::layout::ResizeDir::Up) => "resize pane up",
+        Action::Resize(kumo_core::layout::ResizeDir::Right) => "resize pane right",
+        Action::JumpSession(1) => "jump to session 1",
+        Action::JumpSession(2) => "jump to session 2",
+        Action::JumpSession(3) => "jump to session 3",
+        Action::JumpSession(4) => "jump to session 4",
+        Action::JumpSession(5) => "jump to session 5",
+        Action::JumpSession(6) => "jump to session 6",
+        Action::JumpSession(7) => "jump to session 7",
+        Action::JumpSession(8) => "jump to session 8",
+        Action::JumpSession(9) => "jump to session 9",
+        Action::JumpTab(1) => "jump to tab 1",
+        Action::JumpTab(2) => "jump to tab 2",
+        Action::JumpTab(3) => "jump to tab 3",
+        Action::JumpTab(4) => "jump to tab 4",
+        Action::JumpTab(5) => "jump to tab 5",
+        Action::JumpTab(6) => "jump to tab 6",
+        Action::JumpTab(7) => "jump to tab 7",
+        Action::JumpTab(8) => "jump to tab 8",
+        Action::JumpTab(9) => "jump to tab 9",
+        Action::JumpSession(_) => "jump to session",
+        Action::JumpTab(_) => "jump to tab",
+        other => bindings::action_desc(other),
+    }
 }
 
-fn keybind_lines<'a>(keymap: &'a [Binding]) -> Vec<KbLine<'a>> {
-    let mut lines = Vec::new();
-    for group in bindings::Group::ALL {
-        let mut pushed = false;
-        let mut last_keys: Option<&str> = None;
-        for b in keymap {
-            if b.group == group {
-                if !pushed {
-                    lines.push(KbLine::Header(group.label()));
-                    pushed = true;
-                }
-                if last_keys == Some(b.keys.as_str()) {
-                    continue;
-                }
-                last_keys = Some(&b.keys);
-                lines.push(KbLine::Bind(b));
-            }
-        }
-    }
-    lines
+fn command_palette_matches(keymap: &[Binding], query: &str) -> Vec<usize> {
+    let needles: Vec<String> = query.split_whitespace().map(str::to_ascii_lowercase).collect();
+    keymap
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            let haystack = format!(
+                "{} {} {} {} {}",
+                bindings::action_id(binding.action),
+                palette_action_desc(binding.action),
+                binding.group.label(),
+                bindings::chord_display(binding.key),
+                binding.keys
+            )
+            .to_ascii_lowercase();
+            needles.iter().all(|needle| haystack.contains(needle)).then_some(index)
+        })
+        .collect()
 }
 
 /// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).
@@ -7779,6 +8520,7 @@ mod tests {
     }
 
     fn test_view() -> View {
+        let (github_tx, github_rx) = mpsc::channel();
         View {
             out: UnixStream::pair().unwrap().1,
             cols: 80,
@@ -7800,7 +8542,7 @@ mod tests {
             popup: Popup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
-            keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
+            keybind_overlay: KeybindOverlay { open: false, input: String::new(), cursor: 0, selected: 0, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
@@ -7844,6 +8586,12 @@ mod tests {
             clock_str: "12:00".to_string(),
             clock_next: Instant::now() + Duration::from_secs(60),
             is_ssh: false,
+            github_status: None,
+            github_workspace: None,
+            github_query: None,
+            github_refresh_at: Instant::now() + Duration::from_secs(60),
+            github_tx,
+            github_rx,
             spinner_frame: 0,
             spinner_next: Instant::now(),
         }
@@ -7956,7 +8704,7 @@ mod tests {
     }
 
     #[test]
-    fn inbox_lists_only_actionable_states() {
+    fn full_inbox_lists_all_states_in_attention_order() {
         let mut view = test_view();
         view.layout = Some(panes_layout(&[
             (1, AgentStatus::Idle),
@@ -7966,18 +8714,328 @@ mod tests {
             (5, AgentStatus::Unknown),
         ]));
         assert_eq!(
-            view.inbox_actionables(),
-            vec![(0, 2, AgentStatus::Blocked), (0, 4, AgentStatus::Done), (0, 3, AgentStatus::Working)]
+            view.inbox_entries(),
+            vec![
+                (0, 2, AgentStatus::Blocked),
+                (0, 4, AgentStatus::Done),
+                (0, 3, AgentStatus::Working),
+                (0, 1, AgentStatus::Idle),
+                (0, 5, AgentStatus::Unknown),
+            ]
         );
     }
 
     #[test]
-    fn open_inbox_with_nothing_actionable_notes() {
+    fn open_inbox_without_alerts_still_opens_full_view() {
         let mut view = test_view();
         view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
         view.open_inbox();
+        assert_eq!(view.mode, Mode::Inbox);
+        assert!(view.agent_inbox_rect().is_some());
+    }
+
+    #[test]
+    fn project_sidebar_anchors_compact_agent_inbox_below_new_session() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Idle),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Working),
+            (4, AgentStatus::Done),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.divider_y && matches!(row, SidebarRow::Divider)));
+        assert!(rows.iter().any(|(y, row)| {
+            *y == geometry.agents_header_y
+                && matches!(row, SidebarRow::AgentInboxHeader { blocked: 1, done: 1, working: 1 })
+        }));
+        let compact: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, row)| match row {
+                SidebarRow::CompactAgent(_, pid, _, status) => Some((*pid, *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            compact,
+            vec![
+                (2, AgentStatus::Blocked),
+                (4, AgentStatus::Done),
+                (3, AgentStatus::Working),
+            ]
+        );
+        assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
+
+        view.sidebar_scroll.0 = u16::MAX;
+        let scrolled = view.sidebar_rows();
+        assert!(scrolled.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(scrolled.iter().any(|(y, row)| *y == geometry.agents_header_y && matches!(row, SidebarRow::AgentInboxHeader { .. })));
+    }
+
+    #[test]
+    fn project_sidebar_renders_contextual_shortcuts_without_covering_counters() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Working),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.sidebar_width = 28;
+        view.recompute_geometry();
+
+        let geometry = view.project_sidebar_geometry();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            view.render_sidebar(f, area);
+        }).unwrap();
+        let buffer = term.backend().buffer();
+        let hint_x = view.effective_sidebar_width() - 2;
+        assert_eq!(buffer.cell((hint_x, geometry.new_session_y)).unwrap().symbol(), "c");
+        assert_eq!(buffer.cell((hint_x, geometry.agents_header_y)).unwrap().symbol(), "i");
+        let header: String = (0..hint_x).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(header.contains("!1"), "blocked counter missing: {header:?}");
+        assert!(header.contains("✓1"), "done counter missing: {header:?}");
+        assert!(view.sidebar_hit(hint_x, geometry.new_session_y));
+        assert!(view.popup.open, "clicking the contextual new-session hint keeps the row target");
+        view.popup.open = false;
+        assert!(view.sidebar_hit(hint_x, geometry.agents_header_y));
+        assert_eq!(view.mode, Mode::Inbox, "clicking the contextual inbox hint keeps the row target");
+    }
+
+    #[test]
+    fn project_sidebar_hides_inbox_shortcut_when_width_is_tight() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Working),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 21;
+        view.sidebar_width = 21;
+        view.recompute_geometry();
+
+        let geometry = view.project_sidebar_geometry();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            view.render_sidebar(f, area);
+        }).unwrap();
+        let buffer = term.backend().buffer();
+        let hint_x = view.effective_sidebar_width() - 2;
+        assert_eq!(buffer.cell((hint_x, geometry.new_session_y)).unwrap().symbol(), "c");
+        assert_ne!(buffer.cell((hint_x, geometry.agents_header_y)).unwrap().symbol(), "i");
+        let header: String = (0..hint_x).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(header.contains("!1"), "blocked counter remains visible at narrow width: {header:?}");
+        assert!(header.contains("✓1"), "done counter remains visible at narrow width: {header:?}");
+    }
+
+    #[test]
+    fn short_project_sidebar_reduces_agent_inbox_to_header() {
+        let mut view = test_view();
+        view.rows = 12;
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Done)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        assert_eq!(view.project_sidebar_geometry().agent_rows, 0);
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::AgentInboxHeader { .. })));
+        assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::CompactAgent(..))));
+    }
+
+    #[test]
+    fn project_sidebar_empty_state_keeps_new_session_fixed_below_two_lines() {
+        let mut view = test_view();
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert!(geometry.spaces_h >= 2);
+
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "No sessions yet")));
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "press c to create one")));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line = |y| (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, y)).unwrap().symbol().to_string()).collect::<String>();
+        assert!(line(3).contains("No sessions yet"));
+        assert!(line(4).contains("press c to create one"));
+    }
+
+    #[test]
+    fn project_sidebar_empty_state_falls_back_to_one_line_at_low_height() {
+        let mut view = test_view();
+        view.rows = 8;
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(geometry.spaces_h, 1);
+
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "No sessions · press c")));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.agents_header_y && matches!(row, SidebarRow::AgentInboxHeader { .. })));
+    }
+
+    #[test]
+    fn compact_agent_header_shows_all_clear_for_idle_only_agents() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle), (2, AgentStatus::Unknown)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(view.compact_agent_summary(), "all clear");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line: String = (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(line.contains("AGENTS"));
+        assert!(line.contains("all clear"));
+        assert!(!line.contains("no agents"));
+    }
+
+    #[test]
+    fn compact_agent_header_keeps_attention_counters() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Done), (3, AgentStatus::Working)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(view.compact_agent_summary(), "!1 ✓1 ⠋1");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line: String = (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(line.contains("!1 ✓1 ⠋1"));
+    }
+
+    #[test]
+    fn compact_agent_header_stays_separate_from_title_at_narrow_width() {
+        let mut view = test_view();
+        view.sidebar_width = MIN_SIDEBAR_WIDTH;
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let title: String = (2..8).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        let summary: String = (10..19).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert_eq!(title, "AGENTS");
+        assert_eq!(summary, "no agents");
+    }
+
+    #[test]
+    fn compact_agent_inbox_caps_rows_and_has_a_fixed_divider() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Done),
+            (4, AgentStatus::Done),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(geometry.agent_rows, 3);
+        assert_eq!(
+            view.sidebar_rows().iter().filter(|(_, row)| matches!(row, SidebarRow::CompactAgent(..))).count(),
+            3
+        );
+        assert!(view.sidebar_hit(0, geometry.divider_y));
+        assert!(view.sidebar_drag.is_none(), "project inbox divider is not draggable");
+    }
+
+    #[test]
+    fn working_agents_fill_available_compact_inbox_rows() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let compact: Vec<_> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(_, row)| match row {
+                SidebarRow::CompactAgent(_, pid, _, status) => Some((pid, status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compact, vec![(1, AgentStatus::Working)]);
+    }
+
+    #[test]
+    fn clicking_compact_agent_header_opens_full_inbox() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let y = view.project_sidebar_geometry().agents_header_y;
+        assert!(view.sidebar_hit(2, y));
+        assert_eq!(view.mode, Mode::Inbox);
+        assert!(view.agent_inbox_rect().is_some());
+    }
+
+    #[test]
+    fn tiny_project_sidebar_rows_never_overlap() {
+        for height in 2..7 {
+            let mut view = test_view();
+            view.rows = height;
+            view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+            view.sidebar_layout_override = Some(SidebarLayout::Project);
+            let rows = view.sidebar_rows();
+            let mut ys: Vec<_> = rows.iter().map(|(y, _)| *y).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            assert_eq!(ys.len(), rows.len(), "duplicate sidebar rows at height {height}");
+        }
+    }
+
+    #[test]
+    fn one_row_spaces_view_keeps_worktree_visible_as_compact_fallback() {
+        let mut view = test_view();
+        view.rows = 8;
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].branch = Some(WireBranch { name: "main".into(), ahead: 0, behind: 0 });
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        assert_eq!(view.project_sidebar_geometry().spaces_h, 1);
+        view.sidebar_scroll.0 = 1;
+        assert!(view.sidebar_rows().iter().any(|(_, row)| matches!(row, SidebarRow::Worktree(0))));
+    }
+
+    #[test]
+    fn full_inbox_does_not_trap_input_when_terminal_is_too_small() {
+        let mut view = test_view();
+        view.rows = 10;
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        view.open_inbox();
         assert_eq!(view.mode, Mode::Normal);
-        assert!(view.notice.is_some(), "notice shown when nothing actionable");
+        assert!(view.inbox.is_none());
+        assert!(view.notice.is_some());
+    }
+
+    #[test]
+    fn minimum_full_inbox_height_keeps_list_above_details() {
+        let mut view = test_view();
+        view.rows = 11;
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        view.open_inbox();
+        let rect = view.agent_inbox_rect().unwrap();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_agent_inbox(frame)).unwrap();
+        assert_eq!(term.backend().buffer().cell((rect.x + 4, rect.y + 3)).unwrap().symbol(), "!");
     }
 
     #[test]
@@ -8344,19 +9402,217 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Tab bar at top — rectangular pill, no brackets, x in last cell on hover, name at first cell
-        // Pill width for "1" is 6 => pill at x=26..31, name at 26
+        // Tab bar at top — active tab uses the primary accent, followed by one
+        // spacer cell and the persistent close action.
         assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
-        assert!(buf.cell((26, 0)).unwrap().style().bg.is_some(), "tab bar should have distinct bg");
+        assert_eq!(buf.cell((26, 0)).unwrap().fg, RColor::Rgb(0x0a, 0x0a, 0x0a));
+        assert_eq!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
+        assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "x");
         // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).
         assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
-        assert!(buf.cell((28, 1)).unwrap().symbol() == "s" || buf.cell((28, 1)).unwrap().symbol() == " ");
+        assert_eq!(buf.cell((28, 1)).unwrap().symbol(), "P", "plain shell pane should expose its PTY role");
+        let title_cell = buf.cell((28, 1)).unwrap();
+        assert_eq!(title_cell.fg, view.current_theme().accent);
+        assert_eq!(title_cell.bg, RColor::Reset, "focused pane title must not add a competing accent fill");
         // The status bar shows NORMAL + the session name.
         let status_line: String = (0..40).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
         assert!(status_line.contains("NORMAL"), "status chip missing: {status_line:?}");
         assert!(status_line.contains("sess"), "session name missing: {status_line:?}");
+    }
+
+    #[test]
+    fn pane_titles_expose_terminal_role() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        assert_eq!(view.pane_label(1), " AI · agent1 ");
+
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.title = "custom title".into();
+            pane.agent.as_mut().unwrap().name = "   ".into();
+        }
+        assert_eq!(view.pane_label(1), " AI · custom title ");
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.agent = None;
+            pane.is_ai = false;
+        }
+        assert!(view.pane_label(1).starts_with(" PTY ·"));
+    }
+
+    #[test]
+    fn pane_borders_prioritize_blocked_then_done_attention() {
+        let rect = Rect::new(2, 2, 12, 5);
+        for (status, expected) in [
+            (AgentStatus::Blocked, test_view().current_theme().orange),
+            (AgentStatus::Done, test_view().current_theme().green),
+        ] {
+            let mut view = test_view();
+            view.layout = Some(panes_layout(&[(1, status)]));
+            view.rects = vec![(1, rect)];
+            let backend = ratatui::backend::TestBackend::new(20, 10);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.render_pane_frame(frame, rect, true, " title ")).unwrap();
+            let buffer = term.backend().buffer();
+            assert_eq!(buffer.cell((rect.x, rect.y)).unwrap().fg, expected, "attention state owns the focused pane border");
+            let title_cell = buffer.cell((rect.x + 1, rect.y)).unwrap();
+            assert_eq!(title_cell.fg, view.current_theme().accent, "focused title keeps the focus accent");
+            assert!(title_cell.modifier.contains(Modifier::BOLD), "focused title remains bold alongside attention state");
+        }
+    }
+
+    #[test]
+    fn tab_agent_indicator_uses_attention_precedence_and_omits_idle() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Working),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Blocked),
+        ]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), Some(AgentStatus::Blocked));
+
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Done)]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), Some(AgentStatus::Done));
+
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), Some(AgentStatus::Working));
+
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), None);
+    }
+
+    #[test]
+    fn ai_pane_without_agent_info_still_reserves_tab_status_slot() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.is_ai = true;
+            pane.agent = None;
+        }
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert!(view.tab_has_agent(tab));
+        assert_eq!(view.tab_agent_indicator(tab), None);
+        view.update_tab_rects();
+        assert_eq!(view.tab_rects[0].1.width, 5);
+    }
+
+    #[test]
+    fn working_tab_renders_current_spinner_and_reserves_indicator_width() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        view.spinner_frame = 3;
+        view.update_tab_rects();
+        let (_, pill, close) = view.tab_rects[0];
+        assert_eq!(pill.width, 5);
+        assert_eq!(close.x, pill.x + 4);
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+        let buffer = term.backend().buffer();
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), SPINNER_FRAMES[3]);
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+    }
+
+    #[test]
+    fn narrow_agent_tabs_keep_the_status_slot_and_overflow_safely() {
+        let mut view = test_view();
+        view.cols = 40;
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        let first = layout.sessions[0].tabs[0].clone();
+        let mut second = first.clone();
+        second.id = 2;
+        second.name = "second".into();
+        layout.sessions[0].tabs = vec![first, second];
+        view.layout = Some(layout);
+
+        view.update_tab_rects();
+        let (_, pill, close) = view.tab_rects[0];
+        assert_eq!(pill.width, 5);
+        assert_eq!(close.x, pill.x + 4);
+        assert!(view.tab_right_arrow_rect().is_some(), "the second tab should overflow");
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+        let buffer = term.backend().buffer();
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+    }
+
+    #[test]
+    fn command_palette_filters_and_runs_the_selected_action() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        let matches = command_palette_matches(&view.keymap, "focus right");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(view.keymap[matches[0]].action, Action::Focus(Dir::Right));
+
+        let sidebar_was_open = view.sidebar_open;
+        view.open_keybind_overlay();
+        for ch in "toggle sidebar".chars() {
+            view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+        }
+        assert_eq!(command_palette_matches(&view.keymap, &view.keybind_overlay.input).len(), 1);
+        view.on_overlay_key(key(KeyCode::Enter)).unwrap();
+
+        assert!(!view.keybind_overlay.open);
+        assert_eq!(view.sidebar_open, !sidebar_was_open);
+    }
+
+    #[test]
+    fn command_palette_question_mark_is_searchable_input() {
+        let mut view = test_view();
+        view.open_keybind_overlay();
+        view.on_overlay_key(key(KeyCode::Char('?'))).unwrap();
+        assert!(view.keybind_overlay.open);
+        assert_eq!(view.keybind_overlay.input, "?");
+    }
+
+    #[test]
+    fn command_palette_is_compact_and_uses_readable_input_contrast() {
+        let mut view = test_view();
+        view.open_keybind_overlay();
+        for ch in "toggle".chars() {
+            view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+        }
+        let rect = view.keybind_overlay_rect().unwrap();
+        assert!(rect.height as u32 * 5 <= view.rows as u32 * 3, "palette must stay within 60% of the window");
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.draw(frame)).unwrap();
+        let cell = term.backend().buffer().cell((rect.x + 4, rect.y + 2)).unwrap();
+        assert_eq!(cell.symbol(), "t");
+        assert_eq!(cell.fg, RColor::Black);
+        assert_eq!(cell.bg, view.current_theme().input_bg);
+
+        let mut dark_input_theme = view.current_theme();
+        dark_input_theme.input_bg = RColor::Rgb(0x20, 0x22, 0x28);
+        assert_eq!(input_fg(&dark_input_theme), RColor::White, "dark custom inputs need light text");
     }
 
     #[test]
@@ -8564,6 +9820,27 @@ mod tests {
         assert!(view.agent_toasts.is_empty(), "expired toasts are dropped at render time");
     }
 
+    #[test]
+    fn github_result_updates_status_without_blocking_the_view() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        let workspace = view.active_session().unwrap().workspace.clone();
+        view.github_workspace = Some(workspace.clone());
+        view.github_query = Some(workspace.clone());
+        view.github_refresh_at = Instant::now() + GITHUB_REFRESH;
+        let expected = status_bar::GitHubStatus {
+            number: 15,
+            draft: false,
+            review_decision: Some("REVIEW_REQUIRED".to_string()),
+            checks: Some(status_bar::CheckState::Pending),
+        };
+        view.github_tx.send((workspace, Some(expected.clone()))).unwrap();
+
+        assert!(view.poll_github(Instant::now()));
+        assert_eq!(view.github_status, Some(expected));
+        assert!(view.github_query.is_none());
+    }
+
     /// Toasts stack downward from the tab bar in the default top-right anchor
     /// (newest at the top) and the stack caps at `MAX_AGENT_TOASTS`, dropping
     /// the oldest.
@@ -8707,7 +9984,24 @@ mod tests {
 
     #[test]
     fn fit_branch_name_truncates() {
-        assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/lo…");
+        assert_eq!(fit_branch_name("very/long/feature-branch-name", 8), "very/…me");
+        assert_eq!(fit_branch_name("feat/long-agent-inbox", 17), "feat/…agent-inbox");
+        assert_eq!(fit_branch_name("agent-inbox", 6), "age…ox");
+        assert_eq!(fit_branch_name("feat/agent-inbox", 0), "");
+        assert_eq!(fit_branch_name("feat/agent-inbox", 1), "…");
+        assert_eq!(fit_branch_name("feat/agent-inbox", 2), "f…");
+    }
+
+    #[test]
+    fn sidebar_label_middle_truncation_preserves_unicode_context() {
+        assert_eq!(fit_middle_label("project-name", 12), "project-name");
+        assert_eq!(fit_middle_label("project-name", 0), "");
+        assert_eq!(fit_middle_label("project-name", 1), "…");
+        assert_eq!(fit_middle_label("project-name", 2), "p…");
+        assert_eq!(fit_middle_label("project-name", 7), "pro…ame");
+        assert_eq!(fit_middle_label("café界面", 4), "ca…面");
+        assert_eq!(fit_middle_label("a-very-long-project-name", 9), "a-ve…name");
+        assert_eq!(fit_middle_label("worktree-with-a-long-name", 11), "workt…-name");
     }
 
     fn one_pane_layout() -> Layout {
@@ -8836,6 +10130,105 @@ mod tests {
     }
 
     #[test]
+    fn project_sidebar_renders_distinct_hierarchy_levels() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "workspace".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/kumo-workspace");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/kumo"));
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/ui".into(), ahead: 0, behind: 0 });
+        layout.active = Some("workspace".into());
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.recompute_geometry();
+
+        let rows = view.sidebar_rows();
+        let workspace_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::Worktree(0)).then_some(*y)).unwrap();
+        let branch_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::Branch(0, _)).then_some(*y)).unwrap();
+        let project_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::ProjectHeader { .. }).then_some(*y)).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        assert_eq!(buf.cell((3, project_y)).unwrap().symbol(), "▰");
+        assert_eq!(buf.cell((2, workspace_y)).unwrap().symbol(), "└");
+        assert_eq!(buf.cell((2, workspace_y)).unwrap().fg, view.current_theme().panel_muted);
+        assert_eq!(buf.cell((4, workspace_y)).unwrap().symbol(), "◆");
+        assert_eq!(buf.cell((view.effective_sidebar_width() - 2, workspace_y)).unwrap().symbol(), "●");
+        assert_eq!(buf.cell((1, workspace_y)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((5, branch_y)).unwrap().symbol(), "⎇");
+        assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
+        assert_eq!(buf.cell((0, workspace_y)).unwrap().symbol(), "┃");
+        assert_eq!(buf.cell((0, branch_y)).unwrap().symbol(), "┃");
+    }
+
+    #[test]
+    fn project_sidebar_highlights_only_the_active_workspace_path() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.active = Some("active".into());
+        layout.sessions[0].name = "active".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-active");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project-active"));
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/active".into(), ahead: 0, behind: 0 });
+
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "linked".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/project-active-linked");
+        linked.branch = Some(WireBranch { name: "feature/linked".into(), ahead: 0, behind: 0 });
+
+        let mut other = layout.sessions[0].clone();
+        other.name = "other".into();
+        other.workspace = std::path::PathBuf::from("/tmp/project-other");
+        other.project_root = Some(std::path::PathBuf::from("/tmp/project-other"));
+        other.branch = Some(WireBranch { name: "main".into(), ahead: 0, behind: 0 });
+
+        let active_project = session_project_key(&layout.sessions[0]);
+        let other_project = session_project_key(&other);
+        layout.sessions.extend([linked, other]);
+        view.project_order = vec![active_project.clone(), other_project.clone()];
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.recompute_geometry();
+
+        let rows = view.sidebar_rows();
+        let row_y = |predicate: &dyn Fn(&SidebarRow) -> bool| {
+            rows.iter().find_map(|(y, row)| predicate(row).then_some(*y)).unwrap()
+        };
+        let active_project_y = row_y(&|row| matches!(row, SidebarRow::ProjectHeader { key, .. } if key == &active_project));
+        let active_worktree_y = row_y(&|row| matches!(row, SidebarRow::Worktree(0)));
+        let active_branch_y = row_y(&|row| matches!(row, SidebarRow::Branch(0, _)));
+        let other_project_y = row_y(&|row| matches!(row, SidebarRow::ProjectHeader { key, .. } if key == &other_project));
+        let other_worktree_y = row_y(&|row| matches!(row, SidebarRow::Worktree(2)));
+        let other_branch_y = row_y(&|row| matches!(row, SidebarRow::Branch(2, _)));
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let active_bg = sidebar_active_bg(&view.current_theme());
+
+        for y in [active_project_y, active_worktree_y, active_branch_y] {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, active_bg, "active path background at y={y}");
+            assert_eq!(buf.cell((0, y)).unwrap().symbol(), "┃", "active path marker at y={y}");
+        }
+        assert!(buf.cell((5, active_project_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(buf.cell((6, active_worktree_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(buf.cell((7, active_branch_y)).unwrap().modifier.contains(Modifier::BOLD));
+
+        for y in [other_project_y, other_worktree_y, other_branch_y] {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, RColor::Reset, "inactive path background at y={y}");
+            assert_ne!(buf.cell((0, y)).unwrap().symbol(), "┃", "inactive path marker at y={y}");
+        }
+        assert!(!buf.cell((6, other_worktree_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(!buf.cell((7, other_branch_y)).unwrap().modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn project_sidebar_collapse_hides_only_that_project() {
         let mut view = test_view();
         let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
@@ -8934,6 +10327,27 @@ mod tests {
     }
 
     #[test]
+    fn active_tab_uses_primary_accent_and_stable_agent_slot_before_close() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        view.update_tab_rects();
+        let (_, pill, close) = view.tab_rects[0];
+        assert_eq!(pill.width, 5);
+        assert_eq!(close.x, pill.x + 4, "agent tabs reserve a stable status cell before close");
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+        let buffer = term.backend().buffer();
+        let theme = view.current_theme();
+        assert_eq!(buffer.cell((pill.x, pill.y)).unwrap().bg, theme.accent);
+        assert_eq!(buffer.cell((pill.x + 1, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 3, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+    }
+
+    #[test]
     fn tab_reorder_reserves_a_new_leading_indicator_column() {
         let mut view = test_view();
         view.cols = 120;
@@ -8998,6 +10412,7 @@ mod tests {
         view.layout = Some(layout);
         let project = session_project_key(&view.layout.as_ref().unwrap().sessions[0]);
         let first_key = session_worktree_key(&view.layout.as_ref().unwrap().sessions[0]);
+        let second_key = session_worktree_key(&view.layout.as_ref().unwrap().sessions[1]);
         let worktree_rows: Vec<u16> = view
             .sidebar_rows()
             .into_iter()
@@ -9010,7 +10425,7 @@ mod tests {
                 session_idx: 1,
             },
             source_y: worktree_rows[1],
-            target: SidebarReorderTarget::Worktree { project, worktree: first_key },
+            target: SidebarReorderTarget::Worktree { project: project.clone(), worktree: first_key.clone() },
             after: true,
             moved: true,
         };
@@ -9021,6 +10436,21 @@ mod tests {
         let visual_rows = view.sidebar_rows();
         assert!(visual_rows.iter().any(|(y, row)| *y == worktree_rows[1] && matches!(row, SidebarRow::DropIndicator)));
         assert!(visual_rows.iter().any(|(y, row)| *y == worktree_rows[1] + 1 && matches!(row, SidebarRow::Worktree(1))));
+
+        let after_last = SidebarReorderDrag {
+            source: SidebarReorderItem::Worktree { project: project.clone(), worktree: first_key, session_idx: 0 },
+            source_y: worktree_rows[0],
+            target: SidebarReorderTarget::Worktree { project, worktree: second_key },
+            after: true,
+            moved: true,
+        };
+        let insertion = view.sidebar_reorder_insertion_y(&after_last, &view.sidebar_rows_base()).unwrap();
+        assert!(insertion < view.project_sidebar_geometry().new_session_y);
+        view.sidebar_reorder_drag = Some(after_last);
+        let rows = view.sidebar_rows();
+        let new_session_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::NewSession).then_some(*y)).unwrap();
+        let drop_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::DropIndicator).then_some(*y)).unwrap();
+        assert_ne!(drop_y, new_session_y, "drop indicator must not cover the fixed action");
     }
 
     #[test]
