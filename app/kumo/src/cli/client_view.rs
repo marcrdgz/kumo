@@ -4597,12 +4597,14 @@ impl View {
         (blocked, done, working)
     }
 
-    /// Only agents that need a user decision occupy rows in the compact
-    /// inbox. Working agents remain visible in the header count.
+    /// Attention rows lead the compact inbox; working agents fill any
+    /// remaining slots. Idle and unknown agents stay in the full inbox.
     fn compact_agent_entries(&self) -> Vec<(usize, u64, String, AgentStatus)> {
         self.all_agent_entries()
             .into_iter()
-            .filter(|(_, _, _, status, _)| matches!(status, AgentStatus::Blocked | AgentStatus::Done))
+            .filter(|(_, _, _, status, _)| {
+                matches!(status, AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Working)
+            })
             .map(|(_, session, pane, status, name)| (session, pane, name, status))
             .collect()
     }
@@ -6227,7 +6229,7 @@ impl View {
                             x + 2,
                             y,
                             if self.is_last_project_worktree(i) { " " } else { "│" },
-                            Style::default().fg(theme.panel_sep).bg(bg),
+                            Style::default().fg(theme.panel_muted).bg(bg),
                         );
                         put(f, x + 5, y, "⎇", Style::default().fg(theme.panel_muted).bg(bg));
                     }
@@ -6378,7 +6380,12 @@ impl View {
                 }
                 SidebarRow::CompactAgent(i, _pid, name, status) => {
                     let (r, g, b) = kumo_core::theme::agent_status_color(status);
-                    let marker = if status == AgentStatus::Blocked { "!" } else { "✓" };
+                    let marker = match status {
+                        AgentStatus::Blocked => "!",
+                        AgentStatus::Done => "✓",
+                        AgentStatus::Working => self.spinner_char(),
+                        AgentStatus::Idle | AgentStatus::Unknown => "·",
+                    };
                     put(
                         f,
                         x + 2,
@@ -6494,9 +6501,9 @@ impl View {
                         x + 2,
                         y,
                         if self.is_last_project_worktree(i) { "└" } else { "├" },
-                        Style::default().fg(theme.panel_sep).bg(bg),
+                        Style::default().fg(theme.panel_muted).bg(bg),
                     );
-                    put(f, x + 3, y, "─", Style::default().fg(theme.panel_sep).bg(bg));
+                    put(f, x + 3, y, "─", Style::default().fg(theme.panel_muted).bg(bg));
                     put(
                         f,
                         x + 4,
@@ -8580,7 +8587,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(compact, vec![(2, AgentStatus::Blocked), (4, AgentStatus::Done)]);
+        assert_eq!(
+            compact,
+            vec![
+                (2, AgentStatus::Blocked),
+                (4, AgentStatus::Done),
+                (3, AgentStatus::Working),
+            ]
+        );
         assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
 
         view.sidebar_scroll.0 = u16::MAX;
@@ -8619,6 +8633,22 @@ mod tests {
         );
         assert!(view.sidebar_hit(0, geometry.divider_y));
         assert!(view.sidebar_drag.is_none(), "project inbox divider is not draggable");
+    }
+
+    #[test]
+    fn working_agents_fill_available_compact_inbox_rows() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let compact: Vec<_> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(_, row)| match row {
+                SidebarRow::CompactAgent(_, pid, _, status) => Some((pid, status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compact, vec![(1, AgentStatus::Working)]);
     }
 
     #[test]
@@ -9661,6 +9691,7 @@ mod tests {
 
         assert_eq!(buf.cell((3, project_y)).unwrap().symbol(), "▰");
         assert_eq!(buf.cell((2, workspace_y)).unwrap().symbol(), "└");
+        assert_eq!(buf.cell((2, workspace_y)).unwrap().fg, view.current_theme().panel_muted);
         assert_eq!(buf.cell((4, workspace_y)).unwrap().symbol(), "◆");
         assert_eq!(buf.cell((5, branch_y)).unwrap().symbol(), "⎇");
         assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
