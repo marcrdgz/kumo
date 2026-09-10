@@ -226,7 +226,7 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('b')), keys: "b", desc: "toggle the sidebar", group: Group::Chrome, action: Action::ToggleSidebar },
     BindingSpec { key: chord(KeyCode::Char('f')), keys: "f", desc: "filter worktrees in the project sidebar", group: Group::Chrome, action: Action::OpenSidebarFilter },
     BindingSpec { key: chord(KeyCode::Char('d')), keys: "d", desc: "detach (daemon keeps running)", group: Group::General, action: Action::Detach },
-    BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "focus the agent inbox (blocked · done · running)", group: Group::General, action: Action::AgentInbox },
+    BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "open the agent inbox", group: Group::General, action: Action::AgentInbox },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "open the searchable command palette", group: Group::General, action: Action::ShowKeybinds },
 ];
 
@@ -465,7 +465,7 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::EnterCopyMode => "enter copy-mode (vi scroll / search / yank)",
         Action::EnterCopyModeSearch => "search forward (enter copy-mode)",
         Action::OpenSidebarFilter => "filter worktrees in the project sidebar",
-        Action::AgentInbox => "focus the agent inbox (blocked · done · running)",
+        Action::AgentInbox => "open the agent inbox",
     }
 }
 
