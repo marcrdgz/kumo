@@ -72,9 +72,9 @@ const SESSION_POPUP_H: u16 = 7;
 const COPY_SEARCH_W: u16 = 50;
 const COPY_SEARCH_H: u16 = 5;
 
-fn tab_width(name: &str) -> u16 {
+fn tab_width(name: &str, has_agent_indicator: bool) -> u16 {
     let n = name.chars().count() as u16;
-    n + 2
+    n.saturating_add(2).saturating_add(if has_agent_indicator { 2 } else { 0 })
 }
 fn lighten(c: RColor, amt: u8) -> RColor {
     match c {
@@ -1413,6 +1413,69 @@ impl View {
         sess.tabs.get(n.saturating_sub(1)).map(|t| t.name.clone())
     }
 
+    /// Aggregate the AI state for a tab. The first value records whether the
+    /// tab has an agent at all; the second is the actionable status to render.
+    /// Idle and unknown agents keep the reserved slot blank. The precedence
+    /// mirrors the attention order used by the Agent Inbox.
+    fn tab_agent_state(&self, tab: &kumo_protocol::TabLayout) -> (bool, Option<AgentStatus>) {
+        fn visit(node: &LayoutNode, has_agent: &mut bool, found: &mut Option<AgentStatus>) {
+            if *found == Some(AgentStatus::Blocked) {
+                return;
+            }
+            match node {
+                LayoutNode::Pane(p) => {
+                    if !p.is_ai {
+                        return;
+                    }
+                    *has_agent = true;
+                    let Some(agent) = p.agent.as_ref() else { return };
+                    match agent.status {
+                        AgentStatus::Blocked => *found = Some(AgentStatus::Blocked),
+                        AgentStatus::Done => {
+                            if !matches!(*found, Some(AgentStatus::Blocked | AgentStatus::Done)) {
+                                *found = Some(AgentStatus::Done);
+                            }
+                        }
+                        AgentStatus::Working => {
+                            if found.is_none() {
+                                *found = Some(AgentStatus::Working);
+                            }
+                        }
+                        AgentStatus::Idle | AgentStatus::Unknown => {}
+                    }
+                }
+                LayoutNode::Split { a, b, .. } => {
+                    visit(a, has_agent, found);
+                    visit(b, has_agent, found);
+                }
+            }
+        }
+
+        let mut has_agent = false;
+        let mut found = None;
+        if let Some(root) = tab.root.as_deref() {
+            visit(root, &mut has_agent, &mut found);
+        }
+        (has_agent, found)
+    }
+
+    fn tab_agent_indicator(&self, tab: &kumo_protocol::TabLayout) -> Option<AgentStatus> {
+        self.tab_agent_state(tab).1
+    }
+
+    fn tab_has_agent(&self, tab: &kumo_protocol::TabLayout) -> bool {
+        self.tab_agent_state(tab).0
+    }
+
+    fn tab_agent_marker(&self, status: AgentStatus) -> &'static str {
+        match status {
+            AgentStatus::Blocked => "!",
+            AgentStatus::Done => "✓",
+            AgentStatus::Working => self.spinner_char(),
+            AgentStatus::Idle | AgentStatus::Unknown => "",
+        }
+    }
+
     fn tabs_area(&self) -> Rect {
         let w = self.effective_sidebar_width();
         let x = if self.sidebar_open { (w + 1).min(self.cols.saturating_sub(1)) } else { 0 };
@@ -1436,7 +1499,7 @@ impl View {
         let mut visible_end = self.tab_scroll;
         let avail_no_arrow = base_avail.saturating_sub(plus_reserve);
         for idx in self.tab_scroll..sess.tabs.len() {
-            let w = tab_width(&sess.tabs[idx].name) + 1;
+            let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
             if cur + w - 1 > avail_no_arrow { break; }
             cur += w;
             visible_end = idx + 1;
@@ -1464,7 +1527,7 @@ impl View {
             let mut cur: u16 = 0;
             let mut visible_end = scroll;
             for idx in scroll..sess.tabs.len() {
-                let w = tab_width(&sess.tabs[idx].name) + 1;
+                let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
                 if cur + w - 1 > avail { break; }
                 cur += w;
                 visible_end = idx + 1;
@@ -1476,7 +1539,7 @@ impl View {
                     let mut c: u16 = 0;
                     let mut e = s;
                     for idx in s..sess.tabs.len() {
-                        let w = tab_width(&sess.tabs[idx].name) + 1;
+                        let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
                         if c + w - 1 > av { break; }
                         c += w;
                         e = idx + 1;
@@ -1520,7 +1583,7 @@ impl View {
         let right_bound = (area.x as i32 + area.width as i32 - if has_right {1} else {0} - plus_w as i32 - 1).max(area.x as i32) as u16;
         for idx in self.tab_scroll..sess.tabs.len() {
             let tab = &sess.tabs[idx];
-            let w = tab_width(&tab.name);
+            let w = tab_width(&tab.name, self.tab_has_agent(tab));
             if cur_x + w > right_bound { break; }
             let pill = Rect::new(cur_x, area.y, w, 1);
             let close = Rect::new(cur_x + w - 1, area.y, 1, 1);
@@ -5923,6 +5986,14 @@ impl View {
         self.active_session()
             .and_then(|s| find_pane_in_session(s, pid))
             .map(|p| {
+                if p.is_ai {
+                    if let Some(agent) = p.agent.as_ref() {
+                        let name = agent.name.trim();
+                        if !name.is_empty() {
+                            return format!(" AI · {name} ");
+                        }
+                    }
+                }
                 let role = if p.is_ai { "AI" } else { "PTY" };
                 let title = p.title.trim();
                 if title.is_empty() { format!(" {role} ") } else { format!(" {role} · {title} ") }
@@ -5948,17 +6019,21 @@ impl View {
             return;
         }
         let theme = self.current_theme();
-        // A blocked AI pane glows orange even when it does not have focus.
-        let blocked = self.rects.iter().any(|(pid, r)| {
-            *r == rect
-                && self
-                    .active_session()
+        // Attention states own the border color even when the pane does not
+        // have focus, so a blocked or finished agent remains visible.
+        let agent_status = self.rects.iter().find_map(|(pid, r)| {
+            (*r == rect).then(|| {
+                self.active_session()
                     .and_then(|s| find_pane_in_session(s, *pid))
-                    .map(|p| p.agent.as_ref().map(|a| a.status == AgentStatus::Blocked).unwrap_or(false))
-                    .unwrap_or(false)
-        });
+                    .and_then(|p| p.agent.as_ref().map(|agent| agent.status))
+            })
+        }).flatten();
+        let blocked = agent_status == Some(AgentStatus::Blocked);
+        let done = agent_status == Some(AgentStatus::Done);
         let border = if blocked {
             theme.orange
+        } else if done {
+            theme.green
         } else if focused {
             theme.accent
         } else {
@@ -5974,6 +6049,8 @@ impl View {
                 Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD)
             } else if blocked {
                 Style::default().fg(theme.orange).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+            } else if done {
+                Style::default().fg(theme.green).bg(RColor::Reset).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg).bg(RColor::Reset)
             };
@@ -6014,6 +6091,8 @@ impl View {
             Style::default().fg(theme.accent).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         } else if blocked {
             Style::default().fg(theme.orange).bg(RColor::Reset).add_modifier(Modifier::BOLD)
+        } else if done {
+            Style::default().fg(theme.green).bg(RColor::Reset).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg).bg(RColor::Reset)
         };
@@ -6076,11 +6155,28 @@ impl View {
             } else {
                 Style::default().fg(fg).bg(pill_bg)
             };
-            // Draw the name, one spacer cell, then the persistent close action.
+            // Draw the name, optional aggregate agent state, then the
+            // persistent close action. The geometry reserves these cells too.
             let name = &tab.name;
             let max_w = pill.width.saturating_sub(1);
             let name_w = (name.chars().count() as u16).min(max_w);
             text(f, pill.x, pill.y, name, base_style, name_w);
+            if let Some(status) = self.tab_agent_indicator(tab) {
+                let marker = self.tab_agent_marker(status);
+                let marker_fg = if active {
+                    fg
+                } else {
+                    let (r, g, b) = kumo_core::theme::agent_status_color(status);
+                    RColor::Rgb(r, g, b)
+                };
+                put(
+                    f,
+                    pill.x + name_w + 1,
+                    pill.y,
+                    marker,
+                    Style::default().fg(marker_fg).bg(pill_bg).add_modifier(Modifier::BOLD),
+                );
+            }
             if is_hover {
                 let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
@@ -9102,17 +9198,136 @@ mod tests {
     fn pane_titles_expose_terminal_role() {
         let mut view = test_view();
         view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
-        assert!(view.pane_label(1).starts_with(" AI ·"));
+        assert_eq!(view.pane_label(1), " AI · agent1 ");
 
-        if let Some(session) = view.layout.as_mut().and_then(|layout| layout.sessions.first_mut()) {
-            if let Some(tab) = session.tabs.first_mut() {
-                if let Some(LayoutNode::Pane(pane)) = tab.root.as_deref_mut() {
-                    pane.is_ai = false;
-                    pane.agent = None;
-                }
-            }
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.title = "custom title".into();
+            pane.agent.as_mut().unwrap().name = "   ".into();
+        }
+        assert_eq!(view.pane_label(1), " AI · custom title ");
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.agent = None;
+            pane.is_ai = false;
         }
         assert!(view.pane_label(1).starts_with(" PTY ·"));
+    }
+
+    #[test]
+    fn pane_borders_prioritize_blocked_then_done_attention() {
+        let rect = Rect::new(2, 2, 12, 5);
+        for (status, expected) in [
+            (AgentStatus::Blocked, test_view().current_theme().orange),
+            (AgentStatus::Done, test_view().current_theme().green),
+        ] {
+            let mut view = test_view();
+            view.layout = Some(panes_layout(&[(1, status)]));
+            view.rects = vec![(1, rect)];
+            let backend = ratatui::backend::TestBackend::new(20, 10);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.render_pane_frame(frame, rect, true, " title ")).unwrap();
+            assert_eq!(term.backend().buffer().cell((rect.x, rect.y)).unwrap().fg, expected);
+        }
+    }
+
+    #[test]
+    fn tab_agent_indicator_uses_attention_precedence_and_omits_idle() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Working),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Blocked),
+        ]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), Some(AgentStatus::Blocked));
+
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Done)]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), Some(AgentStatus::Done));
+
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), Some(AgentStatus::Working));
+
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert_eq!(view.tab_agent_indicator(tab), None);
+    }
+
+    #[test]
+    fn ai_pane_without_agent_info_still_reserves_tab_status_slot() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.is_ai = true;
+            pane.agent = None;
+        }
+        let tab = &view.layout.as_ref().unwrap().sessions[0].tabs[0];
+        assert!(view.tab_has_agent(tab));
+        assert_eq!(view.tab_agent_indicator(tab), None);
+        view.update_tab_rects();
+        assert_eq!(view.tab_rects[0].1.width, 5);
+    }
+
+    #[test]
+    fn working_tab_renders_current_spinner_and_reserves_indicator_width() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        view.spinner_frame = 3;
+        view.update_tab_rects();
+        let (_, pill, close) = view.tab_rects[0];
+        assert_eq!(pill.width, 5);
+        assert_eq!(close.x, pill.x + 4);
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+        let buffer = term.backend().buffer();
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), SPINNER_FRAMES[3]);
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+    }
+
+    #[test]
+    fn narrow_agent_tabs_keep_the_status_slot_and_overflow_safely() {
+        let mut view = test_view();
+        view.cols = 40;
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        let first = layout.sessions[0].tabs[0].clone();
+        let mut second = first.clone();
+        second.id = 2;
+        second.name = "second".into();
+        layout.sessions[0].tabs = vec![first, second];
+        view.layout = Some(layout);
+
+        view.update_tab_rects();
+        let (_, pill, close) = view.tab_rects[0];
+        assert_eq!(pill.width, 5);
+        assert_eq!(close.x, pill.x + 4);
+        assert!(view.tab_right_arrow_rect().is_some(), "the second tab should overflow");
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+        let buffer = term.backend().buffer();
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
     }
 
     #[test]
@@ -9799,13 +10014,13 @@ mod tests {
     }
 
     #[test]
-    fn active_tab_uses_primary_accent_and_one_cell_before_close() {
+    fn active_tab_uses_primary_accent_and_stable_agent_slot_before_close() {
         let mut view = test_view();
         view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
         view.update_tab_rects();
         let (_, pill, close) = view.tab_rects[0];
-        assert_eq!(pill.width, 3);
-        assert_eq!(close.x, pill.x + 2, "one cell separates the one-character title and close action");
+        assert_eq!(pill.width, 5);
+        assert_eq!(close.x, pill.x + 4, "agent tabs reserve a stable status cell before close");
 
         let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
         let mut term = ratatui::Terminal::new(backend).unwrap();
@@ -9814,6 +10029,8 @@ mod tests {
         let theme = view.current_theme();
         assert_eq!(buffer.cell((pill.x, pill.y)).unwrap().bg, theme.accent);
         assert_eq!(buffer.cell((pill.x + 1, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 3, pill.y)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
     }
 
