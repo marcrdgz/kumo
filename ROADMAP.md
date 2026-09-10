@@ -31,7 +31,8 @@ persistent kumo.
 - ✅ Mouse SGR forwarding fix; git-cliff changelog pipeline
 - ✅ Rename the `d` binding from *detach* to *exit* until real detach lands
   (`app/cli/src/bindings.rs`, `app/daemon/src/app.rs`, `app/cli/src/client_view.rs`)
-- ✅ `leader+?` keybind showcase; the leader-mode status-bar hint is generated
+- ✅ Searchable, actionable `leader+?` command palette; filter by action, key,
+  or group, select with arrows/mouse, and run with Enter. The leader-mode status-bar hint is generated
   from the same table (`app/cli/src/bindings.rs`), so the two never drift
 
 ## 🧬 0.3.0 — Daemon core 
@@ -92,7 +93,7 @@ persistent kumo.
 - ✅ **Keymap data-driven**: the hard-coded `leader_command` dispatch
   (`app/daemon/src/app.rs`) is now a single keymap table in `app/cli/src/bindings.rs` — each
   entry a dispatch chord + action, and the same table feeds the dispatch, the
-  leader-mode hint, and the `leader+?` showcase, so they never drift. Bindings
+  leader-mode hint, and the `leader+?` command palette, so they never drift. Bindings
   are remappable from `config.toml` (`[keymap.bindings]`, e.g.
   `s = "split-vertical"`), with invalid chords/actions ignored after a warning.
   The **missing stock bindings** landed too: **keyboard resize**
@@ -372,7 +373,7 @@ Tightens the last gaps before the 1.0 freeze — **not a gate**, just polish so
   - **Keys & links**: plugins never declare chords — **users** wire plugin entries in their own `[keymap.bindings]` (`l = { plugin = "…", entry = "…" }`), visible in `leader+?`; no chord squatting. Link handlers intercept modified clicks before `open_url`, in manifest order.
   - **Marketplace site**: minimal static site — landing, `/docs/plugins/` authoring guide (trust model + event catalog), `/plugins` grid whose cards show **version/platforms/tags** (the index **parses manifests**, not just repo metadata) plus stars/language/last-push; a scheduled Action every 30 min indexes public repos tagged `topic:kumo-plugin` (no forks/archived) into a committed `index.json`; `kumo plugin search` reads the same index. Source resolution sits behind a trait from day one so a hosted/Docker-Hub-style registry can bolt on without breaking v1. Seed a `kumo-plugin-examples` cookbook. Trust model unchanged: plugins run as your user — install from sources you trust, preview and skim manifests first.
   - **Build order (phases)**: (0) manifest + validation + registry/lockfile + `add/rm/ls/dev/undev/check` → (1) protocol variants + async runner + env injection + `run/logs/where` + surface in context menu/palette → (2) trigger dispatcher at event sites + `boot` → (3) keybinding side-table + link interception → (4) `pane` entries (`tab`/`split`) → (5) site + indexer + `search` + examples repo. Each phase lands with `cargo test` + `cargo clippy` and an end-to-end `add → run` test against a fixture git repo.
-- **Command palette / fuzzy switcher** over sessions, actions (including plugin actions), and keybinds.
+- **Extend the command palette / fuzzy switcher** with sessions and plugin actions.
 - **tmux control-mode compatibility** so existing tooling (neovim, scripts) keeps working.
 - **Asciinema export**: record a pane's session to a file / stream. Subsumes
   tmux-style **pipe-pane** (cut from 0.6.0): capturing a pane's output to a

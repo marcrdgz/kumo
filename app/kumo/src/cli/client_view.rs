@@ -330,7 +330,10 @@ struct SettingsPanel {
 
 struct KeybindOverlay {
     open: bool,
-    scroll: u16,
+    input: String,
+    cursor: usize,
+    selected: usize,
+    scroll: usize,
 }
 
 struct WorktreePicker {
@@ -814,7 +817,7 @@ impl View {
             popup: Popup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
-            keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
+            keybind_overlay: KeybindOverlay { open: false, input: String::new(), cursor: 0, selected: 0, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
@@ -1617,7 +1620,7 @@ impl View {
             return Ok(());
         }
         if self.keybind_overlay.open {
-            self.on_overlay_key(key);
+            self.on_overlay_key(key)?;
             return Ok(());
         }
         if self.settings.open {
@@ -3727,50 +3730,113 @@ impl View {
 
     fn open_keybind_overlay(&mut self) {
         self.keybind_overlay.open = true;
+        self.keybind_overlay.input.clear();
+        self.keybind_overlay.cursor = 0;
+        self.keybind_overlay.selected = 0;
         self.keybind_overlay.scroll = 0;
         self.mark_dirty();
     }
 
-    fn on_overlay_key(&mut self, key: KeyEvent) {
-        if self.leader.is_leader(key) || key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
+    fn on_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.leader.is_leader(key) || key.code == KeyCode::Esc {
             self.keybind_overlay.open = false;
             self.mark_dirty();
-            return;
+            return Ok(());
         }
-        let max = self.keybind_overlay_scroll_max();
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.keybind_overlay.scroll = (self.keybind_overlay.scroll + 1).min(max);
+            KeyCode::Down | KeyCode::Tab => {
+                let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+                if len > 0 {
+                    self.keybind_overlay.selected = (self.keybind_overlay.selected + 1).min(len - 1);
+                }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.keybind_overlay.scroll = self.keybind_overlay.scroll.saturating_sub(1);
+            KeyCode::Up | KeyCode::BackTab => {
+                self.keybind_overlay.selected = self.keybind_overlay.selected.saturating_sub(1);
             }
-            KeyCode::Home => self.keybind_overlay.scroll = 0,
-            KeyCode::End => self.keybind_overlay.scroll = max,
+            KeyCode::Enter => {
+                let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
+                if let Some(index) = matches.get(self.keybind_overlay.selected).copied() {
+                    let action = self.keymap[index].action;
+                    self.keybind_overlay.open = false;
+                    self.run_action(action)?;
+                    return Ok(());
+                }
+            }
+            KeyCode::Backspace => {
+                if self.keybind_overlay.cursor > 0 {
+                    let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
+                    chars.remove(self.keybind_overlay.cursor - 1);
+                    self.keybind_overlay.input = chars.into_iter().collect();
+                    self.keybind_overlay.cursor -= 1;
+                    self.keybind_overlay.selected = 0;
+                    self.keybind_overlay.scroll = 0;
+                }
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
+                if self.keybind_overlay.cursor < chars.len() {
+                    chars.remove(self.keybind_overlay.cursor);
+                    self.keybind_overlay.input = chars.into_iter().collect();
+                    self.keybind_overlay.selected = 0;
+                    self.keybind_overlay.scroll = 0;
+                }
+            }
+            KeyCode::Left => self.keybind_overlay.cursor = self.keybind_overlay.cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.keybind_overlay.cursor = (self.keybind_overlay.cursor + 1).min(self.keybind_overlay.input.chars().count());
+            }
+            KeyCode::Home => self.keybind_overlay.cursor = 0,
+            KeyCode::End => self.keybind_overlay.cursor = self.keybind_overlay.input.chars().count(),
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+            {
+                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
+                chars.insert(self.keybind_overlay.cursor, c);
+                self.keybind_overlay.input = chars.into_iter().collect();
+                self.keybind_overlay.cursor += 1;
+                self.keybind_overlay.selected = 0;
+                self.keybind_overlay.scroll = 0;
+            }
             _ => {}
         }
+        self.normalize_command_palette_scroll();
         self.mark_dirty();
+        Ok(())
     }
 
-    fn keybind_overlay_scroll_max(&self) -> u16 {
-        let Some(dd) = self.keybind_overlay_rect() else { return 0 };
-        let lines = keybind_lines(&self.keymap).len();
-        let visible = dd.height.saturating_sub(4) as usize;
-        lines.saturating_sub(visible) as u16
+    fn normalize_command_palette_scroll(&mut self) {
+        let Some(dd) = self.keybind_overlay_rect() else { return };
+        let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+        self.keybind_overlay.selected = self.keybind_overlay.selected.min(len.saturating_sub(1));
+        let visible = dd.height.saturating_sub(5) as usize;
+        if self.keybind_overlay.selected < self.keybind_overlay.scroll {
+            self.keybind_overlay.scroll = self.keybind_overlay.selected;
+        } else if self.keybind_overlay.selected >= self.keybind_overlay.scroll + visible.max(1) {
+            self.keybind_overlay.scroll = self.keybind_overlay.selected + 1 - visible.max(1);
+        }
     }
 
     fn keybind_overlay_rect(&self) -> Option<Rect> {
         let (w, h) = (self.cols, self.rows);
         let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let max_desc = self.keymap.iter().map(|b| b.desc.chars().count()).max().unwrap_or(10) as u16;
+        let max_desc = self.keymap.iter().map(|b| palette_action_desc(b.action).chars().count()).max().unwrap_or(10) as u16;
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
-        let lines = keybind_lines(&self.keymap).len();
-        let height = ((lines + 4) as u16).min(h.saturating_sub(4)).max(3);
+        let lines = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+        let height = ((lines + 5) as u16).min(h.saturating_sub(4)).max(7);
         if w < width || h < height {
             return None;
         }
         Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
+    }
+
+    fn command_palette_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let rect = self.keybind_overlay_rect()?;
+        if x <= rect.x || x >= rect.right().saturating_sub(1) || y < rect.y + 3 || y >= rect.bottom().saturating_sub(2) {
+            return None;
+        }
+        let item = self.keybind_overlay.scroll + (y - (rect.y + 3)) as usize;
+        (item < command_palette_matches(&self.keymap, &self.keybind_overlay.input).len()).then_some(item)
     }
 
     fn on_settings_key(&mut self, key: KeyEvent) {
@@ -3870,12 +3936,33 @@ impl View {
             return Ok(());
         }
         if self.keybind_overlay.open {
-            if matches!(
-                m.kind,
-                MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-            ) {
-                self.keybind_overlay.open = false;
+            match m.kind {
+                MouseEventKind::ScrollDown => {
+                    let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+                    if len > 0 {
+                        self.keybind_overlay.selected = (self.keybind_overlay.selected + 1).min(len - 1);
+                        self.normalize_command_palette_scroll();
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.keybind_overlay.selected = self.keybind_overlay.selected.saturating_sub(1);
+                    self.normalize_command_palette_scroll();
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(item) = self.command_palette_item_at(x, y) {
+                        let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
+                        if let Some(keymap_idx) = matches.get(item).copied() {
+                            let action = self.keymap[keymap_idx].action;
+                            self.keybind_overlay.open = false;
+                            self.run_action(action)?;
+                        }
+                    } else if !self.keybind_overlay_rect().map(|rect| rect.contains(Position::new(x, y))).unwrap_or(false) {
+                        self.keybind_overlay.open = false;
+                    }
+                }
+                _ => {}
             }
+            self.mark_dirty();
             return Ok(());
         }
         if self.session_close_confirm.open {
@@ -6706,31 +6793,56 @@ impl View {
         draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-        text(f, dd.x + 2, dd.y + 1, "keybindings", title, inner_w);
-        let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let scroll = self.keybind_overlay.scroll as usize;
-        let body_top = dd.y + 2;
-        let body_bottom = dd.bottom() - 1;
-        for (i, line) in keybind_lines(&self.keymap).iter().skip(scroll).enumerate() {
-            let y = body_top + i as u16;
+        let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
+        text(f, dd.x + 2, dd.y + 1, &format!("commands · {}", matches.len()), title, inner_w);
+
+        let input = Rect::new(dd.x + 2, dd.y + 2, inner_w, 1);
+        fill(f, input, theme.input_bg);
+        put(f, input.x, input.y, "›", Style::default().fg(theme.secondary).bg(theme.input_bg).add_modifier(Modifier::BOLD));
+        let query_style = Style::default().fg(theme.fg).bg(theme.input_bg);
+        if self.keybind_overlay.input.is_empty() {
+            text(f, input.x + 2, input.y, "type to filter actions…", Style::default().fg(theme.panel_muted).bg(theme.input_bg), input.width.saturating_sub(2));
+        } else {
+            let field_w = input.width.saturating_sub(2) as usize;
+            let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w);
+            let visible: String = self.keybind_overlay.input.chars().skip(start).take(field_w).collect();
+            text(f, input.x + 2, input.y, &visible, query_style, field_w as u16);
+        }
+        let field_w = input.width.saturating_sub(2) as usize;
+        let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w);
+        let cursor_x = input.x + 2 + self.keybind_overlay.cursor.saturating_sub(start) as u16;
+        if cursor_x < input.right() {
+            let symbol = self.keybind_overlay.input.chars().nth(self.keybind_overlay.cursor).unwrap_or(' ').to_string();
+            put(f, cursor_x, input.y, &symbol, query_style.add_modifier(Modifier::REVERSED));
+        }
+
+        let max_keys = self.keymap.iter().map(|b| bindings::chord_display(b.key).chars().count()).max().unwrap_or(4) as u16;
+        let body_top = dd.y + 3;
+        let body_bottom = dd.bottom() - 2;
+        if matches.is_empty() {
+            text(f, dd.x + 2, body_top, "no matching commands", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
+        }
+        for (row, keymap_idx) in matches.iter().copied().skip(self.keybind_overlay.scroll).enumerate() {
+            let i = self.keybind_overlay.scroll + row;
+            let b = &self.keymap[keymap_idx];
+            let y = body_top + row as u16;
             if y >= body_bottom {
                 break;
             }
-            match line {
-                KbLine::Header(label) => {
-                    let st = Style::default().fg(theme.orange).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-                    text(f, dd.x + 2, y, label, st, inner_w);
-                }
-                KbLine::Bind(b) => {
-                    let keys = Style::default().fg(theme.accent).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-                    let desc = Style::default().fg(theme.fg).bg(theme.panel_sep);
-                    text(f, dd.x + 2, y, &b.keys, keys, max_keys);
-                    text(f, dd.x + 2 + max_keys + 2, y, &b.desc, desc, inner_w.saturating_sub(max_keys + 2));
-                }
+            let selected = i == self.keybind_overlay.selected;
+            let bg = if selected { lighten(theme.panel_sep, 28) } else { theme.panel_sep };
+            fill(f, Rect::new(dd.x + 1, y, dd.width.saturating_sub(2), 1), bg);
+            if selected {
+                put(f, dd.x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));
             }
+            let keys = Style::default().fg(if selected { theme.secondary } else { theme.accent }).bg(bg).add_modifier(Modifier::BOLD);
+            let desc = Style::default().fg(if selected { theme.fg } else { theme.panel_muted }).bg(bg);
+            let chord = bindings::chord_display(b.key);
+            text(f, dd.x + 2, y, &chord, keys, max_keys);
+            text(f, dd.x + 2 + max_keys + 2, y, palette_action_desc(b.action), desc, inner_w.saturating_sub(max_keys + 2));
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.bottom() - 2, "j/k: scroll · esc / ?: close", footer, inner_w);
+        text(f, dd.x + 2, dd.bottom() - 2, "↑/↓ select · enter run · esc close", footer, inner_w);
     }
 
     fn render_settings(&self, f: &mut Frame) {
@@ -7415,6 +7527,18 @@ impl View {
     where
         B::Error: Send + Sync + 'static,
     {
+        if self.keybind_overlay.open {
+            if let Some(rect) = self.keybind_overlay_rect() {
+                let field_w = rect.width.saturating_sub(4) as usize;
+                let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w.saturating_sub(2));
+                let x = rect.x + 4 + self.keybind_overlay.cursor.saturating_sub(start) as u16;
+                if x < rect.right().saturating_sub(2) {
+                    terminal.set_cursor_position((x, rect.y + 2))?;
+                    terminal.show_cursor()?;
+                    return Ok(());
+                }
+            }
+        }
         if self.popup.open {
             if let Some((x, y)) = self.name_popup_input_cursor() {
                 terminal.set_cursor_position((x, y))?;
@@ -7719,32 +7843,58 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
     }
 }
 
-/// One display row of the keybind showcase: a group header or a binding.
-enum KbLine<'a> {
-    Header(&'a str),
-    Bind(&'a Binding),
+fn palette_action_desc(action: Action) -> &'static str {
+    match action {
+        Action::Focus(Dir::Left) => "focus pane left",
+        Action::Focus(Dir::Down) => "focus pane down",
+        Action::Focus(Dir::Up) => "focus pane up",
+        Action::Focus(Dir::Right) => "focus pane right",
+        Action::Resize(kumo_core::layout::ResizeDir::Left) => "resize pane left",
+        Action::Resize(kumo_core::layout::ResizeDir::Down) => "resize pane down",
+        Action::Resize(kumo_core::layout::ResizeDir::Up) => "resize pane up",
+        Action::Resize(kumo_core::layout::ResizeDir::Right) => "resize pane right",
+        Action::JumpSession(1) => "jump to session 1",
+        Action::JumpSession(2) => "jump to session 2",
+        Action::JumpSession(3) => "jump to session 3",
+        Action::JumpSession(4) => "jump to session 4",
+        Action::JumpSession(5) => "jump to session 5",
+        Action::JumpSession(6) => "jump to session 6",
+        Action::JumpSession(7) => "jump to session 7",
+        Action::JumpSession(8) => "jump to session 8",
+        Action::JumpSession(9) => "jump to session 9",
+        Action::JumpTab(1) => "jump to tab 1",
+        Action::JumpTab(2) => "jump to tab 2",
+        Action::JumpTab(3) => "jump to tab 3",
+        Action::JumpTab(4) => "jump to tab 4",
+        Action::JumpTab(5) => "jump to tab 5",
+        Action::JumpTab(6) => "jump to tab 6",
+        Action::JumpTab(7) => "jump to tab 7",
+        Action::JumpTab(8) => "jump to tab 8",
+        Action::JumpTab(9) => "jump to tab 9",
+        Action::JumpSession(_) => "jump to session",
+        Action::JumpTab(_) => "jump to tab",
+        other => bindings::action_desc(other),
+    }
 }
 
-fn keybind_lines<'a>(keymap: &'a [Binding]) -> Vec<KbLine<'a>> {
-    let mut lines = Vec::new();
-    for group in bindings::Group::ALL {
-        let mut pushed = false;
-        let mut last_keys: Option<&str> = None;
-        for b in keymap {
-            if b.group == group {
-                if !pushed {
-                    lines.push(KbLine::Header(group.label()));
-                    pushed = true;
-                }
-                if last_keys == Some(b.keys.as_str()) {
-                    continue;
-                }
-                last_keys = Some(&b.keys);
-                lines.push(KbLine::Bind(b));
-            }
-        }
-    }
-    lines
+fn command_palette_matches(keymap: &[Binding], query: &str) -> Vec<usize> {
+    let needles: Vec<String> = query.split_whitespace().map(str::to_ascii_lowercase).collect();
+    keymap
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            let haystack = format!(
+                "{} {} {} {} {}",
+                bindings::action_id(binding.action),
+                palette_action_desc(binding.action),
+                binding.group.label(),
+                bindings::chord_display(binding.key),
+                binding.keys
+            )
+            .to_ascii_lowercase();
+            needles.iter().all(|needle| haystack.contains(needle)).then_some(index)
+        })
+        .collect()
 }
 
 /// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).
@@ -7896,7 +8046,7 @@ mod tests {
             popup: Popup { open: false, target: None, name: String::new(), cursor: 0, error: None, hover: None },
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
-            keybind_overlay: KeybindOverlay { open: false, scroll: 0 },
+            keybind_overlay: KeybindOverlay { open: false, input: String::new(), cursor: 0, selected: 0, scroll: 0 },
             settings: SettingsPanel { open: false, tab: 0, selected: 0 },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
@@ -8481,6 +8631,35 @@ mod tests {
             }
         }
         assert!(view.pane_label(1).starts_with(" PTY ·"));
+    }
+
+    #[test]
+    fn command_palette_filters_and_runs_the_selected_action() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        let matches = command_palette_matches(&view.keymap, "focus right");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(view.keymap[matches[0]].action, Action::Focus(Dir::Right));
+
+        let sidebar_was_open = view.sidebar_open;
+        view.open_keybind_overlay();
+        for ch in "toggle sidebar".chars() {
+            view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+        }
+        assert_eq!(command_palette_matches(&view.keymap, &view.keybind_overlay.input).len(), 1);
+        view.on_overlay_key(key(KeyCode::Enter)).unwrap();
+
+        assert!(!view.keybind_overlay.open);
+        assert_eq!(view.sidebar_open, !sidebar_was_open);
+    }
+
+    #[test]
+    fn command_palette_question_mark_is_searchable_input() {
+        let mut view = test_view();
+        view.open_keybind_overlay();
+        view.on_overlay_key(key(KeyCode::Char('?'))).unwrap();
+        assert!(view.keybind_overlay.open);
+        assert_eq!(view.keybind_overlay.input, "?");
     }
 
     #[test]
