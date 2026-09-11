@@ -613,30 +613,34 @@ mod tests {
     #[test]
     fn codex_manifest_classifies_common_states() {
         let rules = agent_from(include_str!("rules/codex.toml"), "codex").unwrap();
-        let blocked = snap("Do you want to continue?\n❯ yes", "", "gpt-5");
-        assert!(rules.blocked(&blocked), "selected answer confirms weak prompt");
+        let blocked = snap(
+            "Would you like to run the following command?\n❯ 1. Yes, proceed",
+            "Press enter to confirm or esc to cancel",
+            "action required",
+        );
+        assert!(rules.blocked(&blocked), "live question footer blocks");
 
-        let quoted_prompt = snap("the agent asked: would you like to continue?", "", "gpt-5");
+        let quoted_prompt = snap(
+            "The transcript says `allow command?` and quotes `press enter to confirm or esc to cancel`.",
+            "Ask Codex to do anything",
+            "action required",
+        );
         assert!(
             !rules.blocked(&quoted_prompt),
-            "weak wording without answer chrome is not a live blocker"
+            "question wording in the transcript is not a live blocker"
         );
+        assert!(rules.idle(&quoted_prompt), "attention title without a live footer is idle");
 
-        let trust = snap(
-            "> You are in ~/code/kumo\nDo you trust the contents of this directory?",
-            "",
-            "gpt-5",
-        );
+        let trust_text = "> You are in ~/code/kumo\nDo you trust the contents of this directory?";
+        let trust = snap(trust_text, trust_text, "gpt-5");
         assert!(rules.blocked(&trust), "startup trust dialog blocks");
 
-        let update = snap(
-            "Update available!\nUpdate now\nSkip until next version\nPress enter to continue",
-            "",
-            "gpt-5",
-        );
+        let update_text = "Update available!\nUpdate now\nSkip until next version\nPress enter to continue";
+        let update = snap(update_text, update_text, "gpt-5");
         assert!(rules.blocked(&update), "startup update dialog blocks");
 
-        let incomplete_update = snap("Update available!\nUpdate now\nPress enter to continue", "", "gpt-5");
+        let incomplete_update_text = "Update available!\nUpdate now\nPress enter to continue";
+        let incomplete_update = snap(incomplete_update_text, incomplete_update_text, "gpt-5");
         assert!(
             !rules.blocked(&incomplete_update),
             "ordinary update output is not the startup confirmation"
@@ -651,6 +655,17 @@ mod tests {
 
         let footer_working = snap("", "• Working (esc to interrupt)", "gpt-5");
         assert!(rules.working(&footer_working), "live working footer matches");
+
+        let working_with_quoted_question = snap(
+            "Earlier output mentions `allow command?` and `enter to submit answer`.",
+            "• Working (esc to interrupt)",
+            "⠋ gpt-5",
+        );
+        assert!(
+            !rules.blocked(&working_with_quoted_question),
+            "question wording in active transcript does not override working"
+        );
+        assert!(rules.working(&working_with_quoted_question));
 
         let idle = snap("", "", "gpt-5");
         assert!(rules.idle(&idle));
