@@ -466,6 +466,12 @@ impl Pane {
         Some(name.strip_suffix(".exe").unwrap_or(name))
     }
 
+    /// The process-discovered agent identifier, without the explicit kind
+    /// override installed by `agent start`.
+    pub fn detected_agent_rule_id(&self) -> Option<String> {
+        self.detected_ai_name.as_deref().map(normalize_agent_kind)
+    }
+
     /// Remember a CLI selected by `kumo agent start` so its state rules apply
     /// before the asynchronous process scan completes.
     pub fn set_agent_kind(&mut self, kind: &str) {
@@ -940,6 +946,13 @@ impl Pane {
     }
 }
 
+/// Normalize an executable/path to the identifier used by detection manifests.
+pub(crate) fn normalize_agent_kind(command: &str) -> String {
+    let file = command.rsplit('/').next().unwrap_or(command);
+    let name = file.split_whitespace().next().unwrap_or(file);
+    name.strip_suffix(".exe").unwrap_or(name).to_string()
+}
+
 fn rgb(c: ColorRgb) -> RColor {
     RColor::Rgb(c.r, c.g, c.b)
 }
@@ -1006,7 +1019,8 @@ impl ProcessSnapshot {
             }
             if let Some(name) = self.names.get(&pid) {
                 let base = name.rsplit('/').next().unwrap_or(name);
-                if AI_CLI_NAMES.contains(&base) {
+                let rule_id = normalize_agent_kind(base);
+                if AI_CLI_NAMES.contains(&base) || crate::daemon::agents::is_known_agent_kind(&rule_id) {
                     return Some(name.clone());
                 }
             }

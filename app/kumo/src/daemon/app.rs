@@ -331,14 +331,17 @@ impl App {
 
         self.panes.clear();
         self.sessions.clear();
+        self.agent_aliases.clear();
         let (cols, rows) = DEFAULT_PANE_DIMS;
         let saved_active = state.active;
         for (i, saved) in state.sessions.into_iter().enumerate() {
             let sid = self.next_session_id();
             for sp in saved.panes {
+                let saved_id = sp.id;
+                let agent_alias = sp.agent_alias.clone();
                 let mut pane = Pane::spawn(
                     sid,
-                    sp.id,
+                    saved_id,
                     sp.shell,
                     sp.program,
                     Some(sp.cwd.clone()),
@@ -349,7 +352,10 @@ impl App {
                     &self.theme,
                 )?;
                 pane.custom_name = sp.custom_name;
-                self.panes.insert(sp.id, pane);
+                self.panes.insert(saved_id, pane);
+                if let Some(alias) = agent_alias {
+                    self.agent_aliases.insert(saved_id, alias);
+                }
             }
             let mut tabs = Vec::new();
             for saved_tab in saved.tabs {
@@ -403,6 +409,7 @@ impl App {
 
         self.panes.clear();
         self.sessions.clear();
+        self.agent_aliases.clear();
         let saved_active = state.active;
         for (i, saved) in state.sessions.into_iter().enumerate() {
             let sid = self.next_session_id();
@@ -412,9 +419,11 @@ impl App {
                     missing.push(sp.id);
                     continue;
                 };
+                let saved_id = sp.id;
+                let agent_alias = sp.agent_alias.clone();
                 let mut pane = Pane::resume(
                     sid,
-                    sp.id,
+                    saved_id,
                     sp.shell,
                     sp.program,
                     sp.cwd.clone(),
@@ -429,7 +438,10 @@ impl App {
                     &self.theme,
                 )?;
                 pane.custom_name = sp.custom_name;
-                self.panes.insert(sp.id, pane);
+                self.panes.insert(saved_id, pane);
+                if let Some(alias) = agent_alias {
+                    self.agent_aliases.insert(saved_id, alias);
+                }
             }
             let mut tabs = Vec::new();
             for saved_tab in saved.tabs {
@@ -497,6 +509,7 @@ impl App {
                     program: pane.program.clone(),
                     cwd: pane.cwd.clone(),
                     custom_name: pane.custom_name.clone(),
+                    agent_alias: self.agent_aliases.get(&pid).cloned(),
                     master_fd: pane.pty.raw_fd().map(|fd| fd as i64),
                     child_pid: pane.pty.process_id().map(|p| p as i64),
                     cols: pane.pty.cols,
@@ -701,20 +714,58 @@ impl App {
         for w in kumo_core::worktrees::copy_worktreeinclude(&root, &path) {
             log::warn!("kumo: {w}");
         }
-        self.new_session_in_workspace(branch.clone(), path.clone())
-            .map_err(|e| format!("{e:#}"))?;
+        if let Err(error) = self.new_session_in_workspace(branch.clone(), path.clone()) {
+            // `add_worktree_from` creates both the checkout and (for a new
+            // branch) the branch before the PTY-backed session is opened. If
+            // spawning that first pane fails, roll back both pieces so a
+            // retry does not get stuck on a stale checkout or branch.
+            let mut cleanup_errors = Vec::new();
+            if let Err(cleanup) = kumo_core::worktrees::remove_worktree(&root, &path, true) {
+                cleanup_errors.push(format!("worktree removal: {cleanup:#}"));
+            }
+            if let Err(cleanup) = kumo_core::worktrees::delete_branch(&root, &branch, true) {
+                cleanup_errors.push(format!("branch removal: {cleanup:#}"));
+            }
+            let message = format!("{error:#}");
+            if cleanup_errors.is_empty() {
+                return Err(message);
+            }
+            return Err(format!("{message}; cleanup failed: {}", cleanup_errors.join("; ")));
+        }
         // Lightweight checkpoint seed
         let _ = kumo_core::worktree_meta::seed(&path, Some(branch.clone()), note.map(|s| s.to_string()), is_ai);
-        // Chain agent start into the new pane (non-fatal)
+        // Chain agent start into the new pane. The worktree/session remain
+        // available for inspection if startup fails, but the failure must be
+        // visible to the caller rather than silently looking successful.
         if let Some(kind) = agent.filter(|s| !s.trim().is_empty()) {
             // New session is the last one after new_session_in_workspace
-            if let Some(new_sess) = self.sessions.last() {
-                let pane_id = new_sess.active_tab().tree.focus;
-                let sess_name = new_sess.name.clone();
-                match self.agent_start(&sess_name, pane_id, kind, &[]) {
-                    Ok(msg) if msg.starts_with("error:") => log::warn!("kumo: agent start in new worktree: {msg}"),
-                    Err(e) => log::warn!("kumo: agent start failed: {e:#}"),
-                    _ => {}
+            let Some(new_sess) = self.sessions.last() else {
+                return Err(format!(
+                    "created worktree {branch:?} at {} but could not locate its new session for agent {kind:?}",
+                    path.display()
+                ));
+            };
+            let pane_id = new_sess.active_tab().tree.focus;
+            let sess_name = new_sess.name.clone();
+            match self.agent_start(&sess_name, pane_id, kind, &[]) {
+                Ok(msg) if msg.starts_with("error:") => {
+                    return Err(format!(
+                        "created worktree {branch:?} at {} but agent {kind:?} failed to start: {}",
+                        path.display(),
+                        msg.trim_start_matches("error:").trim()
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "created worktree {branch:?} at {} but agent {kind:?} failed to start: {error:#}",
+                        path.display()
+                    ));
+                }
+                Ok(msg) => {
+                    return Err(format!(
+                        "created worktree {branch:?} at {} but agent {kind:?} failed to start: {msg}",
+                        path.display()
+                    ));
                 }
             }
         }
@@ -1341,6 +1392,15 @@ impl App {
         self.panes.get(&pane_id).and_then(|p| p.pty.process_id())
     }
 
+    /// Observe the process-discovered kind and raw lifecycle state used by an
+    /// asynchronous `agent start` readiness waiter. The explicit kind set by
+    /// the command is deliberately excluded from the first value: it must not
+    /// make a shell appear ready before process discovery sees the agent.
+    pub(crate) fn agent_start_observation(&self, pane_id: u64) -> Option<(Option<String>, AgentStatus)> {
+        let pane = self.panes.get(&pane_id)?;
+        Some((pane.detected_agent_rule_id(), pane.agent_status()))
+    }
+
     /// Text sources for `kumo agent read`.
     pub(crate) fn pane_read_text(&mut self, pane_id: u64, source: kumo_protocol::AgentReadSource) -> Option<String> {
         let pane = self.panes.get_mut(&pane_id)?;
@@ -1526,9 +1586,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn agent_start_rejects_unknown_kind_and_rename_rejects_shell() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("agent-contract-cfg");
+        let home = scratch("agent-contract-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let mut app = App::new(Launch::New(None)).unwrap();
+        let session = app.sessions[0].name.clone();
+        let pane = app.sessions[0].active_tab().tree.focus;
+
+        let rename = app.agent_rename(&session, pane, "worker").unwrap();
+        assert!(rename.contains("not an agent pane"));
+        let start = app.agent_start(&session, pane, "not-a-loaded-agent", &[]).unwrap();
+        assert!(start.starts_with("error: unknown agent kind"));
+
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Make a temp git repo on branch `main`. Returns the working tree path.
     fn temp_git_repo() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kumo-wt-app-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kumo-wt-app-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let run = |args: &[&str]| {
             assert!(std::process::Command::new("git").args(args).status().unwrap().success(), "{args:?}");
@@ -1555,6 +1643,15 @@ mod tests {
         let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
         assert_eq!(app.sessions.len(), 1);
 
+        // Protocol callers may provide a relative path; the daemon resolves
+        // it against the target session workspace.
+        let session = app.sessions[0].name.clone();
+        let current = app
+            .worktree_current(&session, Some(std::path::Path::new(".")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.path, repo.join("."));
+
         // Creating a worktree opens a new session in it, named after the branch.
         app.new_worktree_session(0, "feat/test").unwrap();
         assert_eq!(app.sessions.len(), 2, "a worktree creates a new session");
@@ -1578,6 +1675,38 @@ mod tests {
         assert!(wt_path.join("untracked.txt").exists());
         app.remove_worktree_at(&wt_path, true, Some(&repo)).unwrap();
         assert_eq!(app.sessions.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn failed_worktree_session_rolls_back_checkout_and_branch() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("wt-rollback-cfg");
+        let home = scratch("wt-rollback-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let repo = temp_git_repo();
+        let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
+        app.shell = "/definitely/missing-kumo-shell".to_string();
+
+        let result = app.new_worktree_session(0, "feat/rollback");
+        assert!(result.is_err(), "invalid shell must prevent session creation");
+        assert_eq!(app.sessions.len(), 1, "failed creation must not add a session");
+
+        let path = kumo_core::worktrees::worktree_path(&repo, "feat/rollback");
+        assert!(!path.exists(), "failed creation must remove its checkout");
+        let branch = std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "show-ref", "--verify", "--quiet", "refs/heads/feat/rollback"])
+            .status()
+            .unwrap();
+        assert!(!branch.success(), "failed creation must remove its new branch");
 
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&cfg);

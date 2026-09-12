@@ -269,6 +269,13 @@ pub(crate) fn reload_agent_rules() {
     rules::reload_rules();
 }
 
+/// Whether `id` names one of the currently loaded bundled or user-provided
+/// detection manifests. Agent startup uses this to reject a kind that could
+/// never become ready instead of waiting for the timeout.
+pub(crate) fn is_known_agent_kind(id: &str) -> bool {
+    rules::with_rules(|r| r.agents.iter().any(|agent| agent.id == id))
+}
+
 /// Text of `screen` below its last horizontal rule (a run of box-drawing
 /// dashes), where Claude Code renders the live prompt and approval forms.
 fn after_last_rule(screen: &str) -> String {    let mut start = 0usize;
@@ -300,6 +307,13 @@ mod tests {
             footer: footer.to_string(),
             title: title.to_string(),
         }
+    }
+
+    #[test]
+    fn known_agent_kind_uses_loaded_manifests() {
+        assert!(is_known_agent_kind("claude"));
+        assert!(is_known_agent_kind("codex"));
+        assert!(!is_known_agent_kind("not-a-loaded-agent"));
     }
 
     #[test]

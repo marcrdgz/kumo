@@ -38,11 +38,24 @@ struct OutputWaiter {
     pinned_pid: Option<u32>,
 }
 
+/// One `kumo agent start` readiness waiter. The command is injected into an
+/// existing shell pane, then the daemon waits for process discovery and a
+/// non-unknown lifecycle signal before replying to the client.
+#[derive(Debug)]
+struct AgentStartWaiter {
+    client_id: usize,
+    pane_id: u64,
+    kind: String,
+    deadline: Instant,
+    pinned_pid: Option<u32>,
+}
+
 /// Registry of all pending server-owned waits.
 pub struct WaitRegistry {
     next_id: u64,
     agent: HashMap<u64, AgentWaiter>,
     output: HashMap<u64, OutputWaiter>,
+    starts: HashMap<u64, AgentStartWaiter>,
 }
 
 impl WaitRegistry {
@@ -51,7 +64,32 @@ impl WaitRegistry {
             next_id: 1,
             agent: HashMap::new(),
             output: HashMap::new(),
+            starts: HashMap::new(),
         }
+    }
+
+    /// Add a readiness waiter for an agent launched in an existing pane.
+    pub fn add_agent_start(
+        &mut self,
+        client_id: usize,
+        pane_id: u64,
+        kind: String,
+        timeout_ms: u64,
+        pinned_pid: Option<u32>,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.starts.insert(
+            id,
+            AgentStartWaiter {
+                client_id,
+                pane_id,
+                kind,
+                deadline: Instant::now() + Duration::from_millis(timeout_ms),
+                pinned_pid,
+            },
+        );
+        id
     }
 
     /// Add an agent-status waiter. Returns its id. The caller must have
@@ -128,6 +166,7 @@ impl WaitRegistry {
     pub fn cancel_client(&mut self, client_id: usize) {
         self.agent.retain(|_, w| w.client_id != client_id);
         self.output.retain(|_, w| w.client_id != client_id);
+        self.starts.retain(|_, w| w.client_id != client_id);
     }
 
     /// Remove all waiters targeting `pane_id` (pane closed).
@@ -135,6 +174,75 @@ impl WaitRegistry {
     pub fn cancel_pane(&mut self, pane_id: u64) {
         self.agent.retain(|_, w| w.pane_id != pane_id);
         self.output.retain(|_, w| w.pane_id != pane_id);
+        self.starts.retain(|_, w| w.pane_id != pane_id);
+    }
+
+    /// Evaluate readiness waiters. `detected_kind` must come from the process
+    /// scan, not the explicit kind set at injection time, so a shell prompt
+    /// cannot satisfy the wait before the requested agent is running.
+    pub fn poll_agent_starts(
+        &mut self,
+        pane_id: u64,
+        detected_kind: Option<&str>,
+        status: AgentStatus,
+        current_pid: Option<u32>,
+    ) -> Vec<(usize, DaemonEvent)> {
+        let mut done_ids = Vec::new();
+        let mut out = Vec::new();
+        for (id, w) in &self.starts {
+            if w.pane_id != pane_id {
+                continue;
+            }
+            if let (Some(pinned), Some(cur)) = (w.pinned_pid, current_pid) {
+                if pinned != cur {
+                    out.push((
+                        w.client_id,
+                        DaemonEvent::Error {
+                            code: "agent_replaced".into(),
+                            message: format!("pane {pane_id} occupant changed (was {pinned}, now {cur})"),
+                        },
+                    ));
+                    done_ids.push(*id);
+                    continue;
+                }
+            } else if w.pinned_pid.is_some() && current_pid.is_none() {
+                out.push((
+                    w.client_id,
+                    DaemonEvent::Error {
+                        code: "agent_replaced".into(),
+                        message: format!("pane {pane_id} occupant unknown"),
+                    },
+                ));
+                done_ids.push(*id);
+                continue;
+            }
+            if status == AgentStatus::Blocked {
+                out.push((
+                    w.client_id,
+                    DaemonEvent::Error {
+                        code: "agent_not_ready".into(),
+                        message: format!("agent {} is blocked during startup", w.kind),
+                    },
+                ));
+                done_ids.push(*id);
+                continue;
+            }
+            if detected_kind.is_some_and(|detected| detected == w.kind)
+                && matches!(status, AgentStatus::Working | AgentStatus::Idle | AgentStatus::Done)
+            {
+                out.push((
+                    w.client_id,
+                    DaemonEvent::Reply {
+                        message: format!("started {} in pane {pane_id}", w.kind),
+                    },
+                ));
+                done_ids.push(*id);
+            }
+        }
+        for id in done_ids {
+            self.starts.remove(&id);
+        }
+        out
     }
 
     /// Evaluate agent waiters for `pane_id` whose status just changed to `status`.
@@ -216,6 +324,16 @@ impl WaitRegistry {
                     done_ids.push(*id);
                     continue;
                 }
+            } else if w.pinned_pid.is_some() && current_pid.is_none() {
+                out.push((
+                    w.client_id,
+                    DaemonEvent::Error {
+                        code: "agent_replaced".into(),
+                        message: format!("pane {pane_id} occupant unknown"),
+                    },
+                ));
+                done_ids.push(*id);
+                continue;
             }
             let matched = if w.is_regex {
                 if let Some(re) = &w.regex {
@@ -250,6 +368,7 @@ impl WaitRegistry {
         let now = Instant::now();
         let mut done_agent = Vec::new();
         let mut done_output = Vec::new();
+        let mut done_starts = Vec::new();
         let mut out = Vec::new();
         for (id, w) in &self.agent {
             if let Some(dl) = w.deadline {
@@ -284,17 +403,32 @@ impl WaitRegistry {
                 }
             }
         }
+        for (id, w) in &self.starts {
+            if now >= w.deadline {
+                out.push((
+                    w.client_id,
+                    DaemonEvent::Error {
+                        code: "timeout".into(),
+                        message: format!("timed out waiting for agent {} in pane {}", w.kind, w.pane_id),
+                    },
+                ));
+                done_starts.push(*id);
+            }
+        }
         for id in done_agent {
             self.agent.remove(&id);
         }
         for id in done_output {
             self.output.remove(&id);
         }
+        for id in done_starts {
+            self.starts.remove(&id);
+        }
         out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.agent.is_empty() && self.output.is_empty()
+        self.agent.is_empty() && self.output.is_empty() && self.starts.is_empty()
     }
 
     pub fn has_agent_waiters(&self, pane_id: u64) -> bool {
@@ -303,6 +437,10 @@ impl WaitRegistry {
 
     pub fn has_output_waiters(&self, pane_id: u64) -> bool {
         self.output.values().any(|w| w.pane_id == pane_id)
+    }
+
+    pub fn has_agent_starts(&self, pane_id: u64) -> bool {
+        self.starts.values().any(|w| w.pane_id == pane_id)
     }
 
     /// Drain waiters whose pane no longer exists. Returns `(client_id, pane_id)` for callers to error.
@@ -322,11 +460,21 @@ impl WaitRegistry {
                 remove_output.push(*id);
             }
         }
+        let mut remove_starts = Vec::new();
+        for (id, w) in &self.starts {
+            if !live.contains(&w.pane_id) {
+                dead.push((w.client_id, w.pane_id));
+                remove_starts.push(*id);
+            }
+        }
         for id in remove_agent {
             self.agent.remove(&id);
         }
         for id in remove_output {
             self.output.remove(&id);
+        }
+        for id in remove_starts {
+            self.starts.remove(&id);
         }
         dead
     }
@@ -391,8 +539,47 @@ mod tests {
         r.add_agent_wait(1, "s".into(), 1, AgentWaitKind::Blocked, None, None);
         r.add_output_wait(1, "s".into(), 1, "hi".into(), false, None, None).unwrap();
         r.add_agent_wait(2, "s".into(), 2, AgentWaitKind::Idle, None, None);
+        r.add_agent_start(2, 3, "claude".into(), 1000, None);
         r.cancel_client(1);
         assert_eq!(r.agent.len(), 1);
         assert_eq!(r.output.len(), 0);
+        assert_eq!(r.starts.len(), 1);
+    }
+
+    #[test]
+    fn start_wait_requires_detected_kind_and_ready_status() {
+        let mut r = WaitRegistry::new();
+        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100));
+        assert!(r.poll_agent_starts(42, None, AgentStatus::Idle, Some(100)).is_empty());
+        assert!(r.poll_agent_starts(42, Some("codex"), AgentStatus::Working, Some(100)).is_empty());
+        let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Working, Some(100));
+        assert!(matches!(&out[0].1, DaemonEvent::Reply { message } if message.contains("started claude")));
+    }
+
+    #[test]
+    fn start_wait_reports_blocked_replacement_and_timeout() {
+        let mut r = WaitRegistry::new();
+        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100));
+        let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Blocked, Some(100));
+        assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "agent_not_ready"));
+
+        let mut r = WaitRegistry::new();
+        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100));
+        let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Working, Some(101));
+        assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "agent_replaced"));
+
+        let mut r = WaitRegistry::new();
+        r.add_agent_start(1, 42, "claude".into(), 0, None);
+        std::thread::sleep(Duration::from_millis(1));
+        let out = r.poll_timeouts();
+        assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "timeout"));
+    }
+
+    #[test]
+    fn output_wait_missing_pid_is_replacement() {
+        let mut r = WaitRegistry::new();
+        r.add_output_wait(1, "s".into(), 7, "ready".into(), false, None, Some(100)).unwrap();
+        let out = r.poll_output(7, "ready", None);
+        assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "agent_replaced"));
     }
 }

@@ -27,6 +27,7 @@ const KUMO_AGENT_SKILL: &str = include_str!("../../../../skills/kumo/SKILL.md");
 enum PaneRef {
     Id(u64),
     Spec(String),
+    Alias(String),
 }
 
 /// A composite position `s1:t2:p3`, `kumo:t2:p1`, `t2:p1` (session from `-s`),
@@ -139,14 +140,14 @@ enum CliCmd {
 }
 
 /// `-p` value or a positional selector: all-digits = stable numeric id,
-/// anything with `:` = composite spec.
+/// anything with `:` = composite spec, and other names = agent aliases.
 fn parse_pane_ref(v: &str) -> Option<PaneRef> {
     if let Ok(n) = v.parse::<u64>() {
         Some(PaneRef::Id(n))
     } else if v.contains(':') {
         Some(PaneRef::Spec(v.to_string()))
     } else {
-        None
+        (!v.is_empty()).then(|| PaneRef::Alias(v.to_string()))
     }
 }
 
@@ -263,6 +264,9 @@ fn run_inner(args: &[String]) -> Result<()> {
                         None => None,
                     }
                 }
+                Some(PaneRef::Alias(_)) => {
+                    anyhow::bail!("pane list does not accept an agent alias; use a tab or composite selector")
+                }
             };
             if json {
                 let tabs = sessions
@@ -307,6 +311,7 @@ fn run_inner(args: &[String]) -> Result<()> {
         }
         CliCmd::WorktreeCurrent { session, path } => {
             let sess = resolve_session(&mut stream, session)?;
+            let path = path.map(resolve_cli_worktree_path);
             kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess.clone(), path: path.clone() })?;
             stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
             loop {
@@ -364,14 +369,14 @@ fn run_inner(args: &[String]) -> Result<()> {
         }
         CliCmd::WorktreeOpen { session, path } => {
             let sess = resolve_session(&mut stream, session)?;
-            let cmd = Command::WorktreeOpen { session: sess, path };
+            let cmd = Command::WorktreeOpen { session: sess, path: resolve_cli_worktree_path(path) };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
             read_reply(&mut stream, json)?;
             Ok(())
         }
         CliCmd::WorktreeRemove { session, path, force } => {
             let sess = resolve_session(&mut stream, session)?;
-            let cmd = Command::WorktreeRemove { session: sess, path, force };
+            let cmd = Command::WorktreeRemove { session: sess, path: resolve_cli_worktree_path(path), force };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
             read_reply(&mut stream, json)?;
             Ok(())
@@ -379,7 +384,7 @@ fn run_inner(args: &[String]) -> Result<()> {
         CliCmd::WorktreeSet { session, path, comment, status } => {
             let sess = resolve_session(&mut stream, session)?;
             let pbuf = if let Some(p) = path {
-                p
+                resolve_cli_worktree_path(p)
             } else {
                 // Default to session workspace
                 let sessions = fetch_session_list(&mut stream)?;
@@ -570,8 +575,9 @@ fn run_inner(args: &[String]) -> Result<()> {
             };
 
             // Waiter commands need a long read timeout (agent wait up to 120s, output wait 30s)
-            let is_waiter = matches!(command, Command::AgentWait{..} | Command::AgentPrompt{wait: Some(_), ..} | Command::PaneWaitOutput{..});
+            let is_waiter = matches!(command, Command::AgentStart{..} | Command::AgentWait{..} | Command::AgentPrompt{wait: Some(_), ..} | Command::PaneWaitOutput{..});
             let timeout_ms = match &command {
+                Command::AgentStart{..} => 30_000,
                 Command::AgentWait{ timeout_ms, ..} => timeout_ms.unwrap_or(30_000),
                 Command::AgentPrompt{ wait: Some(_), timeout_ms, ..} => timeout_ms.unwrap_or(120_000),
                 Command::PaneWaitOutput{ timeout_ms, ..} => timeout_ms.unwrap_or(30_000),
@@ -691,10 +697,9 @@ fn parse_pane(args: &[String]) -> Result<CliCmd> {
                     if tab.is_some() {
                         anyhow::bail!("pane list takes one tab filter (got {:?} after -t)", positional[i]);
                     }
-                    tab = parse_pane_ref(&positional[i]).or_else(|| {
-                        // `t2` (tab-only composite) has no colon; accept it here.
-                        CompositeSpec::parse(&positional[i]).ok().map(|_| PaneRef::Spec(positional[i].clone()))
-                    });
+                    // `t2` (tab-only composite) has no colon, so parse the
+                    // composite before treating a bare name as an alias.
+                    tab = CompositeSpec::parse(&positional[i]).ok().map(|_| PaneRef::Spec(positional[i].clone()));
                     i += 1;
                 }
             }
@@ -1307,6 +1312,7 @@ fn split_options(args: &[String]) -> (Option<String>, Option<PaneRef>, Vec<Strin
                     pane = match v.parse::<u64>() {
                         Ok(n) => Some(PaneRef::Id(n)),
                         Err(_) if v.contains(':') => Some(PaneRef::Spec(v.clone())),
+                        Err(_) if !v.is_empty() => Some(PaneRef::Alias(v.clone())),
                         Err(_) => None,
                     };
                     i += 2;
@@ -1545,6 +1551,17 @@ fn connect_daemon() -> Result<UnixStream> {
     })
 }
 
+/// Worktree paths are interpreted by the CLI from the caller's current
+/// directory. Avoid canonicalizing here: a path may not exist yet, and Git
+/// can still resolve lexical `..` components when it receives the absolute
+/// path.
+fn resolve_cli_worktree_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    std::env::current_dir().map(|cwd| cwd.join(&path)).unwrap_or(path)
+}
+
 /// Ask the daemon for the active session name (used when a command targets
 /// "the current session" without `-s`).
 fn resolve_session(stream: &mut UnixStream, session: Option<String>) -> Result<String> {
@@ -1591,6 +1608,35 @@ fn resolve_pane_ref(stream: &mut UnixStream, session: &str, pane: &PaneRef) -> R
             let sessions = fetch_session_list(stream)?;
             resolve_spec_pane(&sessions, &spec, session).map(|(id, _)| id)
         }
+        PaneRef::Alias(alias) => {
+            let sessions = fetch_session_list(stream)?;
+            resolve_agent_alias(&sessions, session, alias)
+        }
+    }
+}
+
+/// Resolve a persisted/displayed agent alias within one session. Keeping this
+/// pure makes the not-found and ambiguity contract deterministic and testable
+/// without opening a daemon socket.
+fn resolve_agent_alias(
+    sessions: &[kumo_protocol::SessionInfo],
+    session: &str,
+    alias: &str,
+) -> Result<u64> {
+    let target = sessions
+        .iter()
+        .find(|candidate| candidate.name == session)
+        .ok_or_else(|| anyhow::anyhow!("no session {session:?}"))?;
+    let matches: Vec<u64> = target
+        .agents
+        .iter()
+        .filter(|agent| agent.name == alias)
+        .map(|agent| agent.pane_id)
+        .collect();
+    match matches.as_slice() {
+        [pane_id] => Ok(*pane_id),
+        [] => anyhow::bail!("no agent alias {alias:?} in session {session:?}"),
+        _ => anyhow::bail!("agent alias {alias:?} is ambiguous in session {session:?}"),
     }
 }
 
@@ -2043,6 +2089,48 @@ mod tests {
         assert_eq!(s.session_index, Some(3));
         assert_eq!(s.tab, Some(2));
         assert_eq!(s.pane, Some(1));
+    }
+
+    #[test]
+    fn pane_ref_preserves_numeric_and_composite_selectors_and_accepts_aliases() {
+        assert!(matches!(parse_pane_ref("42"), Some(PaneRef::Id(42))));
+        assert!(matches!(
+            parse_pane_ref("s1:t2:p3"),
+            Some(PaneRef::Spec(spec)) if spec == "s1:t2:p3"
+        ));
+        assert!(matches!(
+            parse_pane_ref("worker"),
+            Some(PaneRef::Alias(alias)) if alias == "worker"
+        ));
+    }
+
+    #[test]
+    fn agent_alias_resolution_is_deterministic() {
+        let mut session = fixture_session("kumo", &[10, 11]);
+        session.agents[0].name = "worker".into();
+        assert_eq!(resolve_agent_alias(&[session.clone()], "kumo", "worker").unwrap(), 10);
+        assert!(resolve_agent_alias(&[session.clone()], "kumo", "missing")
+            .unwrap_err()
+            .to_string()
+            .contains("no agent alias"));
+
+        let mut duplicate = session.agents[0].clone();
+        duplicate.pane_id = 11;
+        session.agents.push(duplicate);
+        assert!(resolve_agent_alias(&[session], "kumo", "worker")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn worktree_cli_paths_are_absolute_without_canonicalizing() {
+        let relative = resolve_cli_worktree_path(PathBuf::from("../worktrees/feature"));
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("../worktrees/feature"));
+
+        let absolute = PathBuf::from("/tmp/kumo-worktree");
+        assert_eq!(resolve_cli_worktree_path(absolute.clone()), absolute);
     }
 
     #[test]

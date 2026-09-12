@@ -111,6 +111,10 @@ pub struct SavedPane {
     pub program: Option<(String, Vec<String>)>,
     pub cwd: PathBuf,
     pub custom_name: Option<String>,
+    /// Stable agent alias set by `kumo agent rename`, retained across daemon
+    /// restart/update while the pane survives.
+    #[serde(default)]
+    pub agent_alias: Option<String>,
     #[serde(default)]
     pub master_fd: Option<i64>,
     #[serde(default)]
@@ -297,6 +301,7 @@ mod tests {
                         program: None,
                         cwd: PathBuf::from("/work"),
                         custom_name: None,
+                        agent_alias: None,
                         master_fd: None,
                         child_pid: None,
                         cols: 80,
@@ -311,6 +316,7 @@ mod tests {
                         program: Some(("opencode".into(), Vec::new())),
                         cwd: PathBuf::from("/work"),
                         custom_name: Some("ai".into()),
+                        agent_alias: Some("worker".into()),
                         master_fd: None,
                         child_pid: None,
                         cols: 80,
@@ -337,6 +343,7 @@ mod tests {
         assert_eq!(s.name, "session-1");
         assert_eq!(s.panes.len(), 2);
         assert_eq!(s.panes[1].program, Some(("opencode".into(), Vec::new())));
+        assert_eq!(s.panes[1].agent_alias.as_deref(), Some("worker"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -424,6 +431,7 @@ mod tests {
         assert_eq!(s.tabs[0].focus, 100);
         assert_eq!(s.panes[0].id, 100);
         assert_eq!(s.panes[1].id, 200);
+        assert_eq!(s.panes[1].agent_alias.as_deref(), Some("worker"));
         assert!(matches!(s.tabs[0].tree, SavedNode::Split { ref a, ref b, .. }
             if matches!(**a, SavedNode::Pane { id: 100 }) && matches!(**b, SavedNode::Pane { id: 200 })));
     }

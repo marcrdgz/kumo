@@ -25,6 +25,27 @@ use crate::daemon::pty::Pty;
 /// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
 const RESIZE_STEP: f32 = 0.05;
 
+/// Quote one argument for the existing interactive POSIX shell in a pane.
+/// Single quotes preserve every byte meaningful to the shell; an embedded
+/// quote is represented by closing the quote, emitting an escaped quote, and
+/// reopening it. The caller still appends the command terminator separately.
+pub(crate) fn shell_quote_posix(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 /// The editor used by MENU `config`: `$VISUAL`, then `$EDITOR` (command
 /// strings may carry args, e.g. `code --wait`), then `vi`.
 fn config_editor() -> (String, Vec<String>) {
@@ -416,17 +437,16 @@ impl App {
         if kind.is_empty() {
             return Ok("kind cannot be empty".to_string());
         }
-        // Build command line: `kind` + args, shell-escaped naively (args with spaces quoted)
-        let mut cmd = kind.to_string();
+        let rule_id = crate::daemon::pane::normalize_agent_kind(kind);
+        if !crate::daemon::agents::is_known_agent_kind(&rule_id) {
+            return Ok(format!("error: unknown agent kind {rule_id:?} (no agent-detection manifest loaded)"));
+        }
+        // The agent is launched by the existing interactive shell, so quote
+        // every token rather than trying to escape only spaces/double quotes.
+        let mut cmd = shell_quote_posix(kind);
         for a in args {
             cmd.push(' ');
-            if a.contains(' ') || a.contains('"') {
-                cmd.push('"');
-                cmd.push_str(&a.replace('"', "\\\""));
-                cmd.push('"');
-            } else {
-                cmd.push_str(a);
-            }
+            cmd.push_str(&shell_quote_posix(a));
         }
         cmd.push('\r');
         if let Some(pane) = self.panes.get_mut(&pane_id) {
@@ -443,8 +463,8 @@ impl App {
         Ok(format!("started {kind} in pane {pane_id}"))
     }
 
-    /// `kumo agent rename <pane> <name>`: live alias so scripts reference agents
-    /// by name. No persistence — ephemeral per daemon.
+    /// `kumo agent rename <pane> <name>`: persistent alias so scripts reference
+    /// agents by name instead of pane id.
     pub(crate) fn agent_rename(&mut self, session: &str, pane_id: u64, name: &str) -> Result<String> {
         let Some(s) = self.sessions.iter().find(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
@@ -452,12 +472,31 @@ impl App {
         if !s.contains_pane(pane_id) {
             return Ok(format!("no pane {pane_id} in {session:?}"));
         }
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return Ok(format!("no pane {pane_id} in {session:?}"));
+        };
+        if !pane.is_ai_cli() {
+            return Ok(format!("pane {pane_id} is not an agent pane"));
+        }
         let name = name.trim().to_string();
         if name.is_empty() {
             return Ok("name cannot be empty".to_string());
         }
         if name.len() > 64 {
             return Ok("name too long (max 64)".to_string());
+        }
+        if name.contains(':') {
+            return Ok("name cannot contain ':' (reserved for pane positions)".to_string());
+        }
+        if name.parse::<u64>().is_ok() {
+            return Ok("name cannot be numeric (reserved for pane ids)".to_string());
+        }
+        if self
+            .agent_aliases
+            .iter()
+            .any(|(&pid, alias)| pid != pane_id && alias == &name)
+        {
+            return Ok(format!("agent alias {name:?} is already in use"));
         }
         self.agent_aliases.insert(pane_id, name.clone());
         self.bump_layout_version();
@@ -770,13 +809,29 @@ impl App {
         }
     }
 
+    /// Resolve a worktree argument against the target session's workspace.
+    /// CLI clients normally send an absolute path, but protocol callers may
+    /// send a relative one; keeping this fallback in the daemon makes all
+    /// clients agree on the same target without a protocol change.
+    fn resolve_worktree_path(&self, session: &str, path: &std::path::Path) -> Result<PathBuf> {
+        let Some(workspace) = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone()) else {
+            return Err(anyhow!("no session {session:?}"));
+        };
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace.join(path)
+        })
+    }
+
     /// Remove a worktree directory and optionally its branch (ephemeral preview when `!force`).
     pub(crate) fn worktree_remove(&mut self, session: &str, path: &std::path::Path, force: bool) -> Result<String> {
         if !self.sessions.iter().any(|s| s.name == session) {
             return Ok(format!("no session {session:?}"));
         }
+        let target = self.resolve_worktree_path(session, path)?;
         let ws = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone());
-        match self.remove_worktree_at(path, force, ws.as_deref()) {
+        match self.remove_worktree_at(&target, force, ws.as_deref()) {
             Ok(msg) => Ok(msg),
             Err(e) => Ok(format!("error: {e}")),
         }
@@ -793,6 +848,7 @@ impl App {
         if !self.sessions.iter().any(|s| s.name == session) {
             return Ok(format!("no session {session:?}"));
         }
+        let target = self.resolve_worktree_path(session, path)?;
         // Validate status via protocol helper
         let status_norm: Option<Option<String>> = match status {
             None => None,
@@ -814,11 +870,11 @@ impl App {
         let s_arg = status_norm;
         // When both flag-absent, just query
         if c_arg.is_none() && s_arg.is_none() {
-            return Ok(format!("no change for {}", path.display()));
+            return Ok(format!("no change for {}", target.display()));
         }
-        match kumo_core::worktree_meta::set(path, c_arg, s_arg, None, None) {
+        match kumo_core::worktree_meta::set(&target, c_arg, s_arg, None, None) {
             Ok(cp) => {
-                let msg = format!("set {} comment={:?} status={:?}", path.display(), cp.comment, cp.status);
+                let msg = format!("set {} comment={:?} status={:?}", target.display(), cp.comment, cp.status);
                 Ok(msg)
             }
             Err(e) => Ok(format!("error: {e}")),
@@ -830,7 +886,10 @@ impl App {
         let Some(ws) = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone()) else {
             return Ok(None);
         };
-        let target = path.map(|p| p.to_path_buf()).unwrap_or(ws.clone());
+        let target = match path {
+            Some(path) => self.resolve_worktree_path(session, path)?,
+            None => ws.clone(),
+        };
         let branch = kumo_core::worktrees::list_worktrees(&target).ok().and_then(|list| {
             let canon = std::fs::canonicalize(&target).ok();
             list.into_iter().find(|w| {
@@ -869,8 +928,9 @@ impl App {
         if !self.sessions.iter().any(|s| s.name == session) {
             return Ok(format!("no session {session:?}"));
         }
-        self.open_session_in_worktree(path, None)?;
-        Ok(format!("opened {path:?}"))
+        let target = self.resolve_worktree_path(session, path)?;
+        self.open_session_in_worktree(&target, None)?;
+        Ok(format!("opened {target:?}"))
     }
 
     /// Apply theme `idx` daemon-side: re-color every pane's terminal emulator
@@ -994,5 +1054,33 @@ fn marker_wire(agent: &str, kind: &str, m: agents::MarkerMatch) -> AgentMarkerMa
         kind: kind.to_string(),
         marker: m.marker.to_string(),
         region,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote_posix;
+
+    #[test]
+    fn shell_quote_posix_handles_hostile_arguments() {
+        for value in [
+            "claude",
+            "two words",
+            "quote\"and'apos",
+            "back\\slash",
+            "$HOME; echo injected",
+            "$(touch /tmp/nope) *",
+            "line\nbreak",
+            "",
+        ] {
+            let quoted = shell_quote_posix(value);
+            assert!(quoted.starts_with('\''));
+            assert!(quoted.ends_with('\''));
+            if value.contains('\'') {
+                assert!(quoted.contains("'\\''"));
+            }
+        }
+        assert_eq!(shell_quote_posix(""), "''");
+        assert_eq!(shell_quote_posix("don't"), "'don'\\''t'");
     }
 }

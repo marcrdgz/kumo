@@ -25,6 +25,10 @@ use super::{App, Launch};
 use crate::daemon::frames;
 use kumo_core::protocol::{AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
 
+/// Maximum time the daemon waits for process discovery plus a lifecycle marker
+/// after `agent start` injects a command into an existing shell pane.
+const AGENT_START_TIMEOUT_MS: u64 = 30_000;
+
 #[cfg(unix)]
 static TERM_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -532,8 +536,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             let code = if msg.contains("agent_not_ready") { "agent_not_ready" } else { "error" };
                             let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: code.into(), message: msg });
                         }
+                        Ok(msg) if msg.starts_with("started ") => {
+                            let pinned = app.pane_os_pid(pane_id);
+                            let expected = crate::daemon::pane::normalize_agent_kind(&kind);
+                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned);
+                        }
                         Ok(msg) => {
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: msg });
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error {
+                                code: "agent_start_failed".into(),
+                                message: msg,
+                            });
                         }
                         Err(e) => {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "error".into(), message: format!("{e:#}") });
@@ -665,6 +677,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             // Evaluate per-pane waiters
             let pids: Vec<u64> = app.panes.keys().copied().collect();
             for pid in pids {
+                if waits.has_agent_starts(pid) {
+                    if let Some((detected_kind, status)) = app.agent_start_observation(pid) {
+                        wait_events.extend(waits.poll_agent_starts(
+                            pid,
+                            detected_kind.as_deref(),
+                            status.into(),
+                            app.pane_os_pid(pid),
+                        ));
+                    }
+                }
                 if let Some(status) = waits.has_agent_waiters(pid).then(|| app.current_agent_status(pid)).flatten() {
                     wait_events.extend(waits.poll_agent(pid, status.into(), app.pane_os_pid(pid)));
                 }
