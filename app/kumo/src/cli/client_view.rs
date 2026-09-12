@@ -26,6 +26,7 @@ use kumo_protocol::{
     SessionLayout, SplitDir, ToastKind, WireBranch, WireCell, WireWorktree,
 };
 
+use crate::cli::agent_skill::{self, AGENT_SKILL_TARGETS, AgentSkillStatus, AgentSkillTarget};
 use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
@@ -57,6 +58,9 @@ const AGENT_TOAST_W: u16 = 34;
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Interval between spinner frames (~8 fps).
 const SPINNER_PERIOD: Duration = Duration::from_millis(120);
+/// Keep the progress state visible long enough to be perceived before the
+/// small local file write completes.
+const SKILL_INSTALL_MIN_VISIBLE: Duration = Duration::from_millis(350);
 /// GitHub is useful ambient context, but should never become a hot API poll.
 const GITHUB_REFRESH: Duration = Duration::from_secs(60);
 /// Right-aligned badge drawn on a zoomed pane's top border.
@@ -341,6 +345,7 @@ struct CtxMenu {
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsTab {
     Appearance,
+    Agents,
     About,
 }
 
@@ -348,18 +353,39 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             SettingsTab::Appearance => "appearance",
+            SettingsTab::Agents => "agents",
             SettingsTab::About => "about",
         }
     }
 }
 
-const SETTINGS_TABS: [SettingsTab; 2] = [SettingsTab::Appearance, SettingsTab::About];
+const SETTINGS_TABS: [SettingsTab; 3] = [
+    SettingsTab::Appearance,
+    SettingsTab::Agents,
+    SettingsTab::About,
+];
 
 struct SettingsPanel {
     open: bool,
     tab: usize,
     selected: usize,
+    skill_installing: Option<(AgentSkillTarget, AgentSkillAction, Instant)>,
+    skill_result: Option<SkillInstallResult>,
+    skill_feedback: Option<(AgentSkillTarget, bool, String)>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentSkillAction {
+    Install,
+    Update,
+    Uninstall,
+}
+
+type SkillInstallResult = (
+    AgentSkillTarget,
+    AgentSkillAction,
+    std::result::Result<PathBuf, String>,
+);
 
 struct KeybindOverlay {
     open: bool,
@@ -694,6 +720,8 @@ pub struct View {
     github_refresh_at: Instant,
     github_tx: Sender<(PathBuf, Option<status_bar::GitHubStatus>)>,
     github_rx: Receiver<(PathBuf, Option<status_bar::GitHubStatus>)>,
+    skill_install_tx: Sender<SkillInstallResult>,
+    skill_install_rx: Receiver<SkillInstallResult>,
     /// Current frame of the agent-activity spinner.
     spinner_frame: usize,
     /// When to advance the spinner next (kept ~8 fps, not per loop tick).
@@ -827,6 +855,7 @@ impl View {
         let rem = (60 - now_secs).max(1) as u64;
         let clock_next = Instant::now() + Duration::from_secs(rem);
         let (github_tx, github_rx) = mpsc::channel();
+        let (skill_install_tx, skill_install_rx) = mpsc::channel();
         let sidebar_width = kumo_core::config::sidebar().width.unwrap_or_else(|| {
             if kumo_core::config::sidebar().layout == SidebarLayout::Project { PROJECT_DEFAULT_WIDTH } else { SIDEBAR_WIDTH }
         }).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
@@ -853,7 +882,14 @@ impl View {
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
             keybind_overlay: KeybindOverlay { open: false, input: String::new(), cursor: 0, selected: 0, scroll: 0 },
-            settings: SettingsPanel { open: false, tab: 0, selected: kumo_core::theme::DEFAULT_THEME_IDX },
+            settings: SettingsPanel {
+                open: false,
+                tab: 0,
+                selected: kumo_core::theme::DEFAULT_THEME_IDX,
+                skill_installing: None,
+                skill_result: None,
+                skill_feedback: None,
+            },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
@@ -902,6 +938,8 @@ impl View {
             github_refresh_at: Instant::now(),
             github_tx,
             github_rx,
+            skill_install_tx,
+            skill_install_rx,
             spinner_frame: 0,
             spinner_next: Instant::now(),
         };
@@ -936,6 +974,9 @@ impl View {
     /// equivalent of the daemon's forced frame.
     pub fn has_transient(&mut self) -> bool {
         let now = Instant::now();
+        if self.poll_agent_skill_install(now) {
+            return true;
+        }
         if self.poll_github(now) {
             return true;
         }
@@ -968,6 +1009,41 @@ impl View {
             return true;
         }
         false
+    }
+
+    fn poll_agent_skill_install(&mut self, now: Instant) -> bool {
+        while let Ok(result) = self.skill_install_rx.try_recv() {
+            self.settings.skill_result = Some(result);
+        }
+
+        let Some((target, action, started)) = self.settings.skill_installing else {
+            return false;
+        };
+        if now.duration_since(started) < SKILL_INSTALL_MIN_VISIBLE {
+            return true;
+        }
+        let Some((result_target, result_action, result)) = self.settings.skill_result.take() else {
+            return true;
+        };
+        if result_target != target || result_action != action {
+            self.settings.skill_result = Some((result_target, result_action, result));
+            return true;
+        }
+
+        self.settings.skill_installing = None;
+        self.settings.skill_feedback = Some(match result {
+            Ok(path) => {
+                let message = match action {
+                    AgentSkillAction::Install => format!("installed at {}", path.display()),
+                    AgentSkillAction::Update => format!("updated at {}", path.display()),
+                    AgentSkillAction::Uninstall => format!("removed from {}", path.display()),
+                };
+                (target, true, message)
+            }
+            Err(error) => (target, false, error),
+        });
+        self.mark_dirty();
+        true
     }
 
     fn poll_github(&mut self, now: Instant) -> bool {
@@ -3626,6 +3702,7 @@ impl View {
                 self.settings.open = true;
                 self.settings.tab = 0;
                 self.settings.selected = self.theme_idx;
+                self.settings.skill_feedback = None;
             }
             "detach" => {
                 let _ = self.send(&Command::Detach);
@@ -3909,18 +3986,19 @@ impl View {
                 self.settings_set_tab(self.settings.tab.saturating_sub(1));
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if tab == SettingsTab::Appearance {
-                    self.settings.selected = (self.settings.selected + 1).min(self.themes_len().saturating_sub(1));
-                }
+                let len = match tab {
+                    SettingsTab::Appearance => self.themes_len(),
+                    SettingsTab::Agents => AGENT_SKILL_TARGETS.len(),
+                    SettingsTab::About => 0,
+                };
+                self.settings.selected = (self.settings.selected + 1).min(len.saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if tab == SettingsTab::Appearance {
+                if tab != SettingsTab::About {
                     self.settings.selected = self.settings.selected.saturating_sub(1);
                 }
             }
-            KeyCode::Enter if tab == SettingsTab::Appearance => {
-                let _ = self.send(&Command::SetTheme { idx: self.settings.selected });
-            }
+            KeyCode::Enter => self.settings_activate_item(self.settings.selected),
             _ => {}
         }
         self.mark_dirty();
@@ -3933,6 +4011,44 @@ impl View {
         self.settings.tab = idx;
         self.settings.selected =
             if SETTINGS_TABS[idx] == SettingsTab::Appearance { self.theme_idx } else { 0 };
+    }
+
+    fn settings_activate_item(&mut self, idx: usize) {
+        match SETTINGS_TABS.get(self.settings.tab).copied().unwrap_or(SettingsTab::Appearance) {
+            SettingsTab::Appearance => {
+                let _ = self.send(&Command::SetTheme { idx });
+            }
+            SettingsTab::Agents => self.toggle_agent_skill(idx),
+            SettingsTab::About => {}
+        }
+    }
+
+    fn toggle_agent_skill(&mut self, idx: usize) {
+        if self.settings.skill_installing.is_some() {
+            return;
+        }
+        let Some(&target) = AGENT_SKILL_TARGETS.get(idx) else {
+            return;
+        };
+        let action = match target.status() {
+            AgentSkillStatus::Missing => AgentSkillAction::Install,
+            AgentSkillStatus::Outdated => AgentSkillAction::Update,
+            AgentSkillStatus::Current => AgentSkillAction::Uninstall,
+        };
+        self.settings.skill_installing = Some((target, action, Instant::now()));
+        self.settings.skill_result = None;
+        self.settings.skill_feedback = None;
+        let tx = self.skill_install_tx.clone();
+        std::thread::spawn(move || {
+            let result = match action {
+                AgentSkillAction::Install | AgentSkillAction::Update => {
+                    agent_skill::install(target)
+                }
+                AgentSkillAction::Uninstall => agent_skill::uninstall(target),
+            }
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send((target, action, result));
+        });
     }
 
     // ------------------------------------------------------------------
@@ -4162,7 +4278,7 @@ impl View {
                     }
                     if let Some(i) = self.settings_item_at(x, y) {
                         self.settings.selected = i;
-                        let _ = self.send(&Command::SetTheme { idx: i });
+                        self.settings_activate_item(i);
                         return Ok(());
                     }
                     if self.settings_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
@@ -5869,15 +5985,18 @@ impl View {
     }
 
     fn settings_item_at(&self, x: u16, y: u16) -> Option<usize> {
-        if SETTINGS_TABS.get(self.settings.tab).copied() != Some(SettingsTab::Appearance) {
-            return None;
-        }
         let content = self.settings_content_rect()?;
-        let len = self.themes_len();
-        (0..len).position(|i| {
-            let item = Rect::new(content.x, content.y + 1 + i as u16, content.width, 1);
-            item.contains(Position::new(x, y))
-        })
+        match SETTINGS_TABS.get(self.settings.tab).copied()? {
+            SettingsTab::Appearance => (0..self.themes_len()).position(|i| {
+                let item = Rect::new(content.x, content.y + 1 + i as u16, content.width, 1);
+                item.contains(Position::new(x, y))
+            }),
+            SettingsTab::Agents => (0..AGENT_SKILL_TARGETS.len()).position(|i| {
+                let item = Rect::new(content.x, content.y + 3 + (i as u16 * 2), content.width, 2);
+                item.contains(Position::new(x, y))
+            }),
+            SettingsTab::About => None,
+        }
     }
 
     fn update_notice_lines(&self) -> Option<(String, String)> {
@@ -7340,10 +7459,23 @@ impl View {
         }
         match SETTINGS_TABS.get(self.settings.tab).copied().unwrap_or(SettingsTab::Appearance) {
             SettingsTab::Appearance => self.render_settings_appearance(f, dd),
+            SettingsTab::Agents => self.render_settings_agents(f, dd),
             SettingsTab::About => self.render_settings_about(f, dd),
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.bottom() - 2, "j/k: move · h/l: tab · enter: apply · esc: close", footer, dd.width.saturating_sub(4));
+        let action = if SETTINGS_TABS.get(self.settings.tab) == Some(&SettingsTab::Agents) {
+            "install/update/remove"
+        } else {
+            "apply"
+        };
+        text(
+            f,
+            dd.x + 2,
+            dd.bottom() - 2,
+            &format!("j/k: move · h/l: tab · enter: {action} · esc: close"),
+            footer,
+            dd.width.saturating_sub(4),
+        );
     }
 
     fn render_settings_appearance(&self, f: &mut Frame, dd: Rect) {
@@ -7385,6 +7517,94 @@ impl View {
             if active && content.width as usize >= SWATCHES.len() + 18 + 8 {
                 let ix = content.x + content.width - SWATCHES.len() as u16 - 7;
                 text(f, ix, y, "in use", Style::default().fg(theme.panel_muted).bg(bg), 6);
+            }
+        }
+    }
+
+    fn render_settings_agents(&self, f: &mut Frame, dd: Rect) {
+        let theme = self.current_theme();
+        let Some(content) = self.settings_content_rect() else { return };
+        let label = Style::default().fg(theme.secondary).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+        text(f, content.x, content.y, "agent skill", label, content.width);
+        text(
+            f,
+            content.x,
+            content.y + 1,
+            "click to install/update · installed removes",
+            Style::default().fg(theme.panel_muted).bg(theme.panel_sep),
+            content.width,
+        );
+
+        for (i, target) in AGENT_SKILL_TARGETS.iter().copied().enumerate() {
+            let y = content.y + 3 + (i as u16 * 2);
+            if y + 1 >= dd.bottom().saturating_sub(2) {
+                break;
+            }
+            let selected = i == self.settings.selected;
+            let bg = if selected { lighten(theme.panel_sep, 28) } else { theme.panel_sep };
+            fill(f, Rect::new(content.x, y, content.width, 2), bg);
+            let active_action = self
+                .settings
+                .skill_installing
+                .and_then(|(active, action, _)| (active == target).then_some(action));
+            let (marker, status, status_color) = if let Some(action) = active_action {
+                let status = match action {
+                    AgentSkillAction::Install => "installing…",
+                    AgentSkillAction::Update => "updating…",
+                    AgentSkillAction::Uninstall => "uninstalling…",
+                };
+                ("◌", status, RColor::Yellow)
+            } else {
+                match target.status() {
+                    AgentSkillStatus::Current => ("●", "installed", RColor::Green),
+                    AgentSkillStatus::Outdated => ("●", "update available", RColor::Yellow),
+                    AgentSkillStatus::Missing => ("○", "not installed", theme.panel_muted),
+                }
+            };
+            let mut name_style = Style::default().fg(theme.fg).bg(bg);
+            if selected {
+                name_style = name_style.add_modifier(Modifier::BOLD);
+            }
+            text(f, content.x, y, marker, Style::default().fg(status_color).bg(bg), 1);
+            text(f, content.x + 2, y, target.label(), name_style, content.width.saturating_sub(2));
+            let status_width = status.chars().count() as u16;
+            if content.width > status_width + 4 {
+                text(
+                    f,
+                    content.right().saturating_sub(status_width),
+                    y,
+                    status,
+                    Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD),
+                    status_width,
+                );
+            }
+            let display_path = target
+                .display_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+            text(
+                f,
+                content.x + 2,
+                y + 1,
+                &display_path,
+                Style::default().fg(theme.panel_muted).bg(bg),
+                content.width.saturating_sub(2),
+            );
+        }
+
+        if let Some((_, success, message)) = &self.settings.skill_feedback {
+            let y = content.y + 3 + (AGENT_SKILL_TARGETS.len() as u16 * 2) + 1;
+            if y < dd.bottom().saturating_sub(2) {
+                text(
+                    f,
+                    content.x,
+                    y,
+                    message,
+                    Style::default()
+                        .fg(if *success { RColor::Green } else { RColor::Red })
+                        .bg(theme.panel_sep),
+                    content.width,
+                );
             }
         }
     }
@@ -8526,6 +8746,7 @@ mod tests {
 
     fn test_view() -> View {
         let (github_tx, github_rx) = mpsc::channel();
+        let (skill_install_tx, skill_install_rx) = mpsc::channel();
         View {
             out: UnixStream::pair().unwrap().1,
             cols: 80,
@@ -8548,7 +8769,14 @@ mod tests {
             menu: Menu { open: false, selected: 0 },
             ctx_menu: CtxMenu { open: false, x: 0, y: 0, selected: 0, target: CtxTarget::Pane(0) },
             keybind_overlay: KeybindOverlay { open: false, input: String::new(), cursor: 0, selected: 0, scroll: 0 },
-            settings: SettingsPanel { open: false, tab: 0, selected: 0 },
+            settings: SettingsPanel {
+                open: false,
+                tab: 0,
+                selected: 0,
+                skill_installing: None,
+                skill_result: None,
+                skill_feedback: None,
+            },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
@@ -8597,6 +8825,8 @@ mod tests {
             github_refresh_at: Instant::now() + Duration::from_secs(60),
             github_tx,
             github_rx,
+            skill_install_tx,
+            skill_install_rx,
             spinner_frame: 0,
             spinner_next: Instant::now(),
         }
@@ -10506,5 +10736,60 @@ mod tests {
         view.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
         assert!(!view.sidebar_filter_active);
         assert!(view.sidebar_filter.is_empty());
+    }
+
+    #[test]
+    fn settings_agent_skill_tab_renders_targets_and_installing_state() {
+        let mut view = test_view();
+        view.settings.open = true;
+        view.settings.tab = SETTINGS_TABS
+            .iter()
+            .position(|tab| *tab == SettingsTab::Agents)
+            .unwrap();
+        view.settings.skill_installing = Some((
+            AgentSkillTarget::Codex,
+            AgentSkillAction::Install,
+            Instant::now(),
+        ));
+        let content = view.settings_content_rect().unwrap();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| view.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = |y| {
+            (content.x..content.right())
+                .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(line(content.y + 3).contains("Codex"));
+        assert!(line(content.y + 3).contains("installing"));
+        assert!(line(content.y + 5).contains("Claude Code"));
+        assert!(line(content.y + 7).contains("Gemini CLI"));
+        assert!(line(content.y + 9).contains("OpenCode"));
+    }
+
+    #[test]
+    fn agent_skill_install_result_moves_from_installing_to_installed() {
+        let mut view = test_view();
+        let target = AgentSkillTarget::Codex;
+        view.settings.skill_installing = Some((
+            target,
+            AgentSkillAction::Install,
+            Instant::now() - SKILL_INSTALL_MIN_VISIBLE - Duration::from_millis(1),
+        ));
+        view.skill_install_tx
+            .send((
+                target,
+                AgentSkillAction::Install,
+                Ok(PathBuf::from("/tmp/kumo-skill/SKILL.md")),
+            ))
+            .unwrap();
+
+        assert!(view.poll_agent_skill_install(Instant::now()));
+        assert!(view.settings.skill_installing.is_none());
+        assert!(matches!(
+            &view.settings.skill_feedback,
+            Some((AgentSkillTarget::Codex, true, message)) if message.contains("installed at")
+        ));
     }
 }

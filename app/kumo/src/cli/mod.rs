@@ -1,3 +1,5 @@
+#[cfg(unix)]
+pub mod agent_skill;
 pub mod bindings;
 pub mod chrome;
 #[cfg(unix)]

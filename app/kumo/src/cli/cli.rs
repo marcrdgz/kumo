@@ -17,7 +17,7 @@ use kumo_protocol::{
     WireKeyEvent, WireModifiers,
 };
 
-const KUMO_AGENT_SKILL: &str = include_str!("../../../../skills/kumo/SKILL.md");
+use crate::cli::agent_skill::{self, KUMO_AGENT_SKILL};
 
 /// A pane selector: the stable numeric id, or a composite `s1:t2:p3` /
 /// `kumo:t2:p3` spec (1-based indexes; the session part may be a name).
@@ -197,10 +197,7 @@ fn run_inner(args: &[String]) -> Result<()> {
     let cmd = parse(&filtered_args)?;
     if let CliCmd::AgentSkill { output } = &cmd {
         if let Some(path) = output {
-            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, KUMO_AGENT_SKILL)?;
+            agent_skill::install_to(path)?;
             if json {
                 print_json(&serde_json::json!({"ok": true, "path": path}))?;
             } else {
