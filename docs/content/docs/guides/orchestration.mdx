@@ -249,13 +249,11 @@ All waits are **server-owned and event-driven**: the CLI blocks on the socket, t
 Kumo ships its orchestration instructions inside the binary, so they always
 match the installed CLI:
 
-```sh
-kumo agent skill
-kumo agent skill --output .agents/skills/kumo/SKILL.md
-```
+<AgentSkillInstaller />
 
-The command does not require a running daemon. Use the destination appropriate
-for the agent harness you want to configure.
+The command does not require a running daemon. The selector installs the skill
+at user scope, making it available across projects. Run `kumo agent skill`
+without `--output` to print the bundled instructions instead.
 
 ## Minimal inline prompt
 

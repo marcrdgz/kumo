@@ -41,6 +41,26 @@ The generator writes only what differs from the defaults, in canonical form.
 Paste the result into `~/.config/kumo/config.toml`; the daemon reloads it
 automatically. `kumo reload` remains available for an explicit refresh.
 
+## Install the agent skill
+
+`ai-cmd` chooses which AI CLI Kumo starts. Install Kumo's bundled skill in that
+agent as a separate, one-time step so it can discover panes, wait without
+polling, read terminal output, and coordinate other agents. Choose your agent
+and run the generated command:
+
+<AgentSkillInstaller />
+
+The skill is embedded in the `kumo` binary, so the installed instructions match
+your CLI version. Re-run the same command after updating Kumo to refresh it.
+`kumo agent skill` without `--output` prints the skill instead.
+
+You can manage the same targets from **MENU → settings → agents**. Select an
+agent and press Enter (or click it) to install the skill; selecting an installed
+skill removes its `SKILL.md`. **Update available** means the file exists but its
+contents differ from the skill bundled with the running Kumo version—usually
+because Kumo was upgraded, but also possibly because the file was edited. The
+update action replaces that file with the bundled version.
+
 ## Reference
 
 <TypeTable
