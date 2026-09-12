@@ -217,6 +217,81 @@ accurate states, event-driven waits, and isolated worktrees — with a small,
 machine-friendly control surface so agents can drive kumo themselves
 (`app/kumo/src/cli/cli.rs`, `crates/kumo-protocol`).
 
+> 🚧 **Current: `v0.7.0-prerelease.1`; one P0 blocker remains in the
+> Delegate Task agent-start handoff.** Isolated worktrees, checkpoints, and the
+> standalone orchestration primitives are implemented; release hygiene and
+> validation follow once that handoff is fixed. Keep the stable release narrow
+> instead of adding another large product surface.
+>
+> The release's primary user journey is **Delegate Task**: enter a task, create
+> an isolated worktree, start the selected agent, wait until it is ready, submit
+> the task, and return to the Inbox when the agent blocks or finishes.
+
+### Stable-release status
+
+**P0 — one blocker remains:**
+
+- ⬜ **Delegate Task / Create & run flow (P0 blocker)**: worktree creation and
+  checkpoint seeding are in place, but `new_worktree_session_ext` currently
+  treats the successful return from `agent_start` as an error and does not
+  connect that chained launch to the server-owned readiness wait. Consequently
+  `create --ai --agent ...` can report failure after launching the agent and
+  cannot yet guarantee that task submission waits for readiness. Reuse the
+  readiness-gated handoff and return an honest success or failure; this is the
+  single remaining P0 blocker.
+- ✅ **Standalone readiness-gated `agent start`**: a server-owned,
+  occupant-pinned startup wait succeeds only after the expected agent kind is
+  detected and ready, with deterministic `agent_not_ready`, `agent_replaced`,
+  and timeout errors.
+- ✅ **Durable agent names**: `agent rename` aliases persist through saved state
+  and remap through daemon restart/update so automation targets remain stable.
+- ✅ **Checkpoint loop in the TUI**: the worktree details/editor exposes the
+  full comment, status selection, save/clear actions, and **Ask agent to update
+  checkpoint**. Cards and pickers refresh from daemon replies so humans and
+  agents see one state.
+- ✅ **Detection confidence corpus**: captured `idle`, `working`, and `blocked`
+  fixtures plus negative transcript cases cover every first-class agent. The
+  corpus is validated through `kumo agent explain --json` and records the
+  tested agent versions.
+- ✅ **Delegate Task / worktree workflow coverage**: the real daemon/CLI test
+  matrix exercises `create --ai → agent start ready → task submitted →
+  blocked/done → checkpoint set/current/list → remove`, including `--from`,
+  startup timeout/replacement, branch/path collisions, dirty or unmerged
+  removal, daemon restart, shared dirs, and `.worktreeinclude`; the successful
+  chained-agent run remains gated by the P0 blocker above.
+- ✅ **Upgrade/reconnect smoke test**: multiple live agents and two attached
+  clients survive the resume path with PTYs, scrollback, aliases, waits,
+  checkpoints, and the five-state model intact on macOS and Linux release
+  artifacts.
+
+**P1 — release hygiene:**
+
+- ⬜ Update the user docs and changelog for the worktree/checkpoint surface;
+  remove the stale docs claim that OSC 133 lands in 0.7.0.
+- ⬜ Soak a real three-agent session for a working day: parallel prompts, one
+  blocked agent, one completed agent, detach/reattach, worktree cleanup, and
+  config hot reload. Fix correctness regressions; move polish to 0.8.0.
+- ⬜ Run the mandatory release gate cleanly:
+  `cargo build --workspace`, `cargo test --workspace`, and
+  `cargo clippy --workspace`, then replace the prerelease version and publish.
+  The `main` baseline is at 413 tests as of 2026-09-12; this working tree has
+  uncommitted changes, so repeat the gate on the exact release commit and
+  artifacts.
+
+### Product boundary
+
+The 0.7 promise is a fast, terminal-native ADE: delegate work to isolated
+agents, observe reliable lifecycle state, handle blocked/done agents from one
+Inbox, and exchange lightweight checkpoints. A broader work lifecycle
+(task-source integrations, diff annotation, review, ship, and archive) belongs
+after 0.7.0 or in plugins; kumo does not become an embedded editor, browser, or
+project-management suite in this release.
+
+After 0.7.0, the useful orchestration gaps are semantic lifecycle hooks plus
+native agent session identity, richer `recent-unwrapped --lines N` transcript
+reads, and validated logical `agent send-keys` — reliability work, not more
+orchestration syntax.
+
 **Agent state model v2**:
 - ✅ **Five states** — `working · blocked · idle · done · unknown`
   (`app/kumo/src/daemon/agents/mod.rs`). `done` is *finished-but-unseen*: an
@@ -266,10 +341,10 @@ it, and it's the core of agent-to-agent work.
   daemon already owns the screen buffer, and ghostty's screen buffer **holds the
   alternate screen** — full-screen agent transcripts (claude / codex) read
   directly from the buffer, no mouse-scroll transcript scraping (`app.rs: pane_read_text`). `--source traceback` today falls back to `form`/120 rows; structured command-boundary reads stay deferred.
-- ✅ **`kumo agent start --kind <codex|…> --pane <id>`** `[-- <args>]` + **`agent rename`**: launches an
-  agent in an existing shell pane and returns once detection shows it ready
-  (`agent_not_ready` when it starts blocked); `agent rename` adds live aliases
-  so scripts reference agents by name, not pane id (`commands.rs: start/rename`); `agent broadcast` fans a prompt via `send-keys` path (`--filter`).
+- ✅ **`kumo agent start --kind <codex|…> --pane <id>`** `[-- <args>]` +
+  **`agent rename`**: startup is readiness-gated and occupant-pinned; aliases
+  persist and remap across daemon restart/update (`commands.rs: start/rename`,
+  `waits.rs`, `state.rs`).
 - ✅ **`kumo pane wait-output <pane> --regex`**: one-shot output waiter (no
   polling, `regex` crate, `bad_regex` on compile error) — what the verify loop and parallel agents wait on; `agent read` + `wait-output` hold alt-screen intact.
 - ✅ **Per-agent detection rules** (`agent-detection/<agent>.toml`, user-dir
@@ -284,27 +359,37 @@ it, and it's the core of agent-to-agent work.
   0.7.0; remote manifest updates defer to 0.8.0.
 
 **Isolated worktrees for parallel agents**:
-- **`kumo worktree create --ai [--branch feature/x] [--from main|#1234|branch|url] [--note "..."] [--agent claude]`** (explicit): create an **ephemeral worktree**
+- ✅ **`kumo worktree create --ai [--branch feature/x] [--from main|#1234|branch|url] [--note "..."] [--agent claude]`** (explicit): create an **ephemeral worktree**
   for an agent — isolated branch + directory so parallel agents never step on
   each other's files; `kumo worktree rm` removes the directory and branch
   (kept branches that still hold unmerged commits surface for review, then
-  force-delete). `--branch` overrides the derived `kumo/<name>` branch,
+  force-delete). `--branch` overrides the derived `<name-slug>` branch,
   `--from` resolves the start point (branch, `#1234` / GitHub URL, or commit — GitHub first, Jira later),
   `--note` seeds the lightweight checkpoint comment, and `--agent` chains
   `kumo agent start --kind <agent>` into the new pane. Uses the existing
-  worktree plumbing (`app/kumo/src/daemon/worktrees.rs`,
+  worktree plumbing (`crates/kumo-core/src/worktrees.rs`,
   `crates/kumo-protocol: WorktreeCreate/Open/List`); the generic `kumo worktree create/open`
   without `--ai` stays for normal worktrees. The same fields surface in the
   **New workspace / New worktree TUI** (`app/kumo/src/cli/client_view.rs: WorktreePicker`,
   `app/kumo/src/daemon/app.rs: new_worktree_session`): a single `Create from`
-  input with `Inteligente · GitHub · Jira · Rama · Nombre` tabs (type a name, `#1234`,
-  branch, or GitHub/GitLab URL — Jira deferred), plus `Branch name` override,
+  input with `Smart · GitHub · Branch · Name` tabs (type a name, `#1234`,
+  branch, or GitHub/GitLab URL; Jira is deferred), plus `Branch name` override,
   `Note`, and `Agent` picker in the advanced drawer; `Worktree padre` / `Sparse checkout`
   stay deferred.
-- **Shared gitignored paths**: per-repo `[worktree] shared-dirs` (e.g. `node_modules`, `.cache` — symlink, APFS clone-copy on macOS when available) plus a repo-root `.worktreeinclude` for copy-on-create files (e.g. `.env`, `.vscode/settings.json` — literal paths, `#` comments, only gitignored sources). `shared-dirs` is config-owned; `.worktreeinclude` is repo-owned and committed.
+- ✅ **Shared gitignored paths**: per-repo `[worktree] shared-dirs` (e.g. `node_modules`, `.cache` — symlink, APFS clone-copy on macOS when available) plus a repo-root `.worktreeinclude` for copy-on-create files (e.g. `.env`, `.vscode/settings.json` — literal paths, `#` comments, only gitignored sources). `shared-dirs` is config-owned; `.worktreeinclude` is repo-owned and committed.
 
 **Lightweight checkpoints** (replaces heavy snapshots/rollback):
-- **`kumo worktree set --comment "..." --status todo|in-progress|in-review|completed --json`** + **`kumo worktree current --json`**: each worktree carries a free-text comment + card status visible in the UI — a status snapshot of what the worktree is doing right now. Agents update it from the CLI; `kumo worktree list --json` surfaces it. Good moments: finished a slice, confirmed/refuted a hypothesis, hit a blocker, transitioning phase. Keep the first line action-oriented; read before clobbering user-written context.
+- ✅ **Backend and agent CLI**: `kumo worktree set --comment "..." --status
+  todo|in-progress|in-review|completed --json`, `current`, and `list` persist the
+  checkpoint and expose it to agents. `create --note` seeds the comment; the
+  worktree picker renders the status and a short selected-row comment and can
+  clear both.
+- ✅ **Human ↔ agent TUI loop**: the TUI exposes full checkpoint display,
+  editing and status selection after creation, plus **Ask agent to update**.
+  The create dialog keeps the task prompt separate from the checkpoint note
+  and submits it after the chosen agent becomes ready. Good checkpoint moments
+  include finishing a slice, proving a hypothesis, hitting a blocker, or moving
+  to review; agents read existing user context before updating it.
 
 **Machine surface for agents**:
 - ✅ **`--json` on all control commands** + **`KUMO_SOCKET_PATH` / `KUMO_BIN_PATH` injection**: the daemon socket is exposed to spawned panes so agents drive their own workspace layouts natively (`app/kumo/src/daemon/pty.rs`); can be disabled in config. `kumo worktree current/list/set --json` and `kumo session|pane|agent --json` make the TUI scriptable without duplicating the bincode wire.
@@ -325,20 +410,19 @@ it, and it's the core of agent-to-agent work.
   from config or plugins) defer to 0.9.0 with the plugin system.
 
 **Also in 0.7.0**:
-- **Broadcast prompt to agents** (`leader+B`, `kumo agent broadcast`): fan one
-  prompt out to every AI pane in the tab/session over the existing `send-keys`
-  wire path (`app/kumo/src/cli/cli.rs`), filterable by agent status; the TUI
-  action reuses the prompt popup and lives in the data-driven bindings table
-  (`app/kumo/src/cli/bindings.rs`), so it shows up in `leader+?` and the
-  leader hint automatically. Replaces tmux's sync-input: same "drive many
-  panes at once" need, without the stray-keystroke footgun of raw input
-  mirroring. (moved here from 0.6.0)
+- ✅ **Broadcast prompt CLI primitive** (`kumo agent broadcast`): fan one prompt
+  out to every AI pane in a session over the existing prompt-injection path,
+  filterable by agent status. This replaces raw sync-input for automation. The
+  daemon and CLI ship in 0.7; a dedicated TUI popup is not part of the stable
+  release gate.
 - ✅ **Config hot-reload file watcher** (deferred from 0.5.0): watch the config
   file and reload theme/config live — extends the manual `kumo reload` (0.4.0)
   so themes are instantly tweakable without a restart. (moved here from 0.6.0)
 
-**Deferred from 0.7.0**: declarative agent-view queries (→ 0.9.0 plugin
-system), remote/update-checked agent-detection manifests (→ 0.8.0),
+**Deferred from 0.7.0**: a dedicated TUI broadcast prompt and `leader+B`
+binding (revisit after validating demand for the CLI primitive), declarative
+agent-view queries (→ 0.9.0 plugin system), remote/update-checked
+agent-detection manifests (→ 0.8.0),
 structured traceback / OSC 133 command boundaries + shell snippet installer (→ 0.8.0),
 compose-prompt aggregator + auto-attach context + `kumo rollback` branch-switch
 snapshots + declarative `layout export/apply` (dropped — superseded by
@@ -349,9 +433,24 @@ JSON/MCP lands post-1.0), `verify loop leader+r` (→ 0.8.0; `pane wait-output`
 primitive already ships), `sync-input` stays cut (broadcast supersedes it),
 `pipe-pane` stays 0.9.0.
 
-## 🛡️ 0.8.0 — Stability
+## 🛡️ 0.8.0 — Stability & ADE reliability
 
 - Hardening of `SIGCHLD`/`SIGWINCH`, stable macOS + Linux CI (`cargo clippy`/`test` green), complete config docs, deprecation of legacy `~/.kumo`.
+- **Semantic agent integration contract**: optional local hooks/plugins can
+  report lifecycle state and native session identity over the socket. A pane
+  has one explicit status authority at a time; when a healthy integration is
+  active, screen rules do not compete with it. Screen manifests remain the
+  zero-setup fallback. This avoids classifier drift and lets kumo restore an
+  agent through its own resume mechanism after the process itself exits, not
+  only preserve a live PTY during `kumo update`.
+- **Reliable long transcript reads**: add `agent read --source recent-unwrapped
+  --lines N`, collecting alternate-screen history only while the agent is idle
+  and restoring its viewport afterwards. `visible`, `detection`, output waits,
+  and reads of working/blocked agents stay passive.
+- **Logical agent input**: `kumo agent send-keys <agent> <key>...` validates the
+  complete key sequence before writing anything and handles `enter`, `esc`,
+  arrows, and modifier chords. Keep `agent prompt` for text submission and
+  reserve `send-keys` for deliberate interaction with approval/question UIs.
 - **Config diagnostics**: `kumo doctor` / `kumo config check` validates `config.toml` (TOML syntax, unknown keys, invalid leader/chords, duplicate bindings, bad `fixed-cwd`) and surfaces the "ignored after warning" cases that are silent today.
 - **Keymap conflict detection**: duplicate chords across bindings warn and the last-wins rule is documented; covered by the diagnostics above and the 1.0 keymap-stability gate.
 - **Agent-detection manifest refresh** (deferred from 0.7.0): `kumo reload`/`kumo update` refresh bundled `agent-detection/<agent>.toml` rules, with an **opt-in** background remote manifest check (default off — rules stay local-first and versioned).
@@ -374,6 +473,11 @@ Tightens the last gaps before the 1.0 freeze — **not a gate**, just polish so
   - **Marketplace site**: minimal static site — landing, `/docs/plugins/` authoring guide (trust model + event catalog), `/plugins` grid whose cards show **version/platforms/tags** (the index **parses manifests**, not just repo metadata) plus stars/language/last-push; a scheduled Action every 30 min indexes public repos tagged `topic:kumo-plugin` (no forks/archived) into a committed `index.json`; `kumo plugin search` reads the same index. Source resolution sits behind a trait from day one so a hosted/Docker-Hub-style registry can bolt on without breaking v1. Seed a `kumo-plugin-examples` cookbook. Trust model unchanged: plugins run as your user — install from sources you trust, preview and skim manifests first.
   - **Build order (phases)**: (0) manifest + validation + registry/lockfile + `add/rm/ls/dev/undev/check` → (1) protocol variants + async runner + env injection + `run/logs/where` + surface in context menu/palette → (2) trigger dispatcher at event sites + `boot` → (3) keybinding side-table + link interception → (4) `pane` entries (`tab`/`split`) → (5) site + indexer + `search` + examples repo. Each phase lands with `cargo test` + `cargo clippy` and an end-to-end `add → run` test against a fixture git repo.
 - **Extend the command palette / fuzzy switcher** with sessions and plugin actions.
+- **Worktree review loop** (separate from checkpoints): a terminal-native
+  changed-files/diff view, comments anchored to file + line/hunk, unresolved /
+  resolved state, and **Send review notes to agent** that batches every open
+  comment into one contextual prompt. Start read-only plus annotations; staging,
+  commit/push, AI attribution, and an embedded code editor are later layers.
 - **tmux control-mode compatibility** so existing tooling (neovim, scripts) keeps working.
 - **Asciinema export**: record a pane's session to a file / stream. Subsumes
   tmux-style **pipe-pane** (cut from 0.6.0): capturing a pane's output to a
