@@ -942,6 +942,14 @@ impl App {
             return Ok(format!("no such theme #{idx}"));
         }
         let theme = all[idx].clone();
+        // A custom theme's display name is user-controlled, while its config
+        // selector is the stable `custom` value.
+        let selected_name = if idx == kumo_core::theme::THEMES.len() {
+            "custom"
+        } else {
+            theme.name.as_str()
+        };
+        kumo_core::config::save_theme_name(selected_name)?;
         for pane in self.panes.values_mut() {
             pane.apply_theme_owned(&theme);
         }

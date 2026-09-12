@@ -1,9 +1,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
+
+use anyhow::{Context, Result};
+use toml_edit::{value, DocumentMut, Item, Table};
 
 // ---------------------------------------------------------------------------
 // Directory resolution (XDG-style, Ghostty-like)
@@ -1502,6 +1506,125 @@ pub fn theme_name() -> Option<String> {
     cached_config().theme
 }
 
+/// Persist the selected theme in the canonical TOML configuration.
+///
+/// Existing TOML is edited structurally, retaining unrelated settings,
+/// comments, and formatting. Invalid TOML is left untouched.
+pub fn save_theme_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    anyhow::ensure!(!name.is_empty(), "theme name cannot be empty");
+
+    let path = config_file_toml();
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("failed to read {}", path.display())),
+    };
+    let mut document = source
+        .parse::<DocumentMut>()
+        .with_context(|| format!("refusing to overwrite invalid TOML in {}", path.display()))?;
+
+    match document.get_mut("theme") {
+        None => {
+            let mut section = Table::new();
+            section["name"] = value(name);
+            document["theme"] = Item::Table(section);
+        }
+        Some(theme) if theme.is_table() => theme["name"] = value(name),
+        Some(theme) if theme.is_inline_table() => {
+            theme
+                .as_inline_table_mut()
+                .expect("inline table checked above")
+                .insert("name", name.into());
+        }
+        Some(theme) if theme.is_value() => *theme = value(name),
+        Some(_) => anyhow::bail!("cannot persist the theme: `theme` is not a TOML value or table"),
+    }
+
+    write_config_toml_atomically(&path, document.to_string().as_bytes())?;
+    invalidate_cache();
+    Ok(())
+}
+
+fn write_config_toml_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    // Resolve links before creating the replacement. Renaming over `path`
+    // would replace a symlink itself instead of updating the user's target.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)
+            .with_context(|| format!("failed to resolve config symlink {}", path.display()))?,
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    };
+    let existing_permissions = std::fs::metadata(&target).ok().map(|meta| meta.permissions());
+    let parent = target
+        .parent()
+        .context("configuration path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = target.with_extension(format!("toml.tmp-{}-{nonce}", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .with_context(|| format!("failed to create temporary config {}", temp.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("failed to write temporary config {}", temp.display()))?;
+        drop(file);
+        if let Some(permissions) = existing_permissions {
+            std::fs::set_permissions(&temp, permissions)
+                .with_context(|| format!("failed to preserve permissions on {}", target.display()))?;
+        }
+        replace_file_atomically(&temp, &target).with_context(|| {
+            format!(
+                "failed to replace {} with temporary config {}",
+                target.display(),
+                temp.display()
+            )
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn replace_file_atomically(temp: &Path, target: &Path) -> Result<()> {
+    std::fs::rename(temp, target).map_err(Into::into)
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(temp: &Path, target: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let temp: Vec<u16> = temp.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH. MoveFileExW keeps
+    // replacement atomic while also supporting an existing destination.
+    let ok = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), 0x1 | 0x8) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_file_atomically(temp: &Path, target: &Path) -> Result<()> {
+    std::fs::rename(temp, target).map_err(Into::into)
+}
+
 /// Custom theme defined in `[theme.custom]` if present.
 pub fn custom_theme() -> Option<crate::theme::OwnedTheme> {
     cached_config().custom_theme
@@ -2354,6 +2477,125 @@ mod tests {
             EnvGuard::set("SHELL", "/bin/zsh"),
         );
         assert_eq!(default_shell(), "/bin/bash", "deprecated top-level shell must keep working");
+    }
+
+    #[test]
+    fn save_theme_name_preserves_existing_toml_sections() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("save-theme");
+        let home = scratch_dir("home-save-theme");
+        let path = cfg_dir.join("config.toml");
+        write(&path, "# Keep this comment.\n[terminal]\nshell = \"/bin/fish\"\n\n[theme]\n# Keep the custom palette.\nname = \"Dracula\"\n[theme.custom]\nname = \"Personal\"\naccent = \"#123456\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        save_theme_name("Tokyo Night").unwrap();
+
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(saved.contains("# Keep this comment."));
+        assert!(saved.contains("shell = \"/bin/fish\""));
+        assert!(saved.contains("# Keep the custom palette."));
+        assert!(saved.contains("name = \"Personal\""));
+        assert_eq!(theme_name().as_deref(), Some("Tokyo Night"));
+        assert_eq!(theme_index(), 7);
+    }
+
+    #[test]
+    fn save_theme_name_creates_canonical_toml_file() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("save-theme-new");
+        let home = scratch_dir("home-save-theme-new");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        save_theme_name("Dracula").unwrap();
+
+        assert_eq!(std::fs::read_to_string(cfg_dir.join("config.toml")).unwrap(), "[theme]\nname = \"Dracula\"\n");
+        assert_eq!(theme_name().as_deref(), Some("Dracula"));
+    }
+
+    #[test]
+    fn save_theme_name_replaces_existing_toml_file() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("save-theme-repeat");
+        let home = scratch_dir("home-save-theme-repeat");
+        let path = cfg_dir.join("config.toml");
+        write(&path, "[theme]\nname = \"Dracula\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        save_theme_name("Tokyo Night").unwrap();
+        save_theme_name("Nord").unwrap();
+
+        assert!(std::fs::read_to_string(path).unwrap().contains("name = \"Nord\""));
+        assert_eq!(theme_name().as_deref(), Some("Nord"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_theme_name_preserves_symlink_and_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("save-theme-symlink");
+        let home = scratch_dir("home-save-theme-symlink");
+        let target = cfg_dir.join("tracked-config.toml");
+        let path = cfg_dir.join("config.toml");
+        write(&target, "[theme]\nname = \"Dracula\"\n");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &path).unwrap();
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        save_theme_name("Tokyo Night").unwrap();
+
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert!(std::fs::read_to_string(target).unwrap().contains("name = \"Tokyo Night\""));
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn save_theme_name_never_replaces_invalid_toml() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("save-theme-invalid");
+        let home = scratch_dir("home-save-theme-invalid");
+        let path = cfg_dir.join("config.toml");
+        let invalid = "[theme\nname = \"Dracula\"\n";
+        write(&path, invalid);
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        assert!(save_theme_name("Tokyo Night").is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn save_theme_name_selects_custom_theme_by_its_canonical_selector() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("save-custom-theme");
+        let home = scratch_dir("home-save-custom-theme");
+        let path = cfg_dir.join("config.toml");
+        write(&path, "[theme]\nname = \"Dracula\"\n[theme.custom]\nname = \"Personal Palette\"\naccent = \"#123456\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        save_theme_name("custom").unwrap();
+
+        assert_eq!(theme_name().as_deref(), Some("custom"));
+        assert_eq!(theme_index(), crate::theme::THEMES.len());
+        assert!(std::fs::read_to_string(path).unwrap().contains("name = \"Personal Palette\""));
     }
 
     #[test]

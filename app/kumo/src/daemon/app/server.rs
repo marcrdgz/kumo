@@ -332,16 +332,21 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
                 Command::SetTheme { idx } => {
-                    let reply = app.set_theme(idx).unwrap_or_else(|e| format!("error: {e:#}"));
+                    let reply = match app.set_theme(idx) {
+                        Ok(reply) => {
+                            // Broadcast only after the selection was persisted and applied.
+                            let custom = app.active_wire_theme();
+                            for client in clients.values_mut() {
+                                let _ = client.tx.try_send(DaemonEvent::Theme {
+                                    idx: app.theme_idx,
+                                    custom: custom.clone(),
+                                });
+                            }
+                            reply
+                        }
+                        Err(error) => format!("error: {error:#}"),
+                    };
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
-                    // Broadcast the new chrome colors so every client re-colors.
-                    let custom = app.active_wire_theme();
-                    for client in clients.values_mut() {
-                        let _ = client.tx.try_send(DaemonEvent::Theme {
-                            idx: app.theme_idx,
-                            custom: custom.clone(),
-                        });
-                    }
                 }
                 Command::OpenConfig { session } => {
                     let reply = app.open_config_in_session(&session).unwrap_or_else(|e| format!("error: {e:#}"));
