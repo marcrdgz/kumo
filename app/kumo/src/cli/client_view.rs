@@ -6011,11 +6011,16 @@ impl View {
                         }
                     }
                 }
-                let role = if p.is_ai { "AI" } else { "PTY" };
                 let title = p.title.trim();
-                if title.is_empty() { format!(" {role} ") } else { format!(" {role} · {title} ") }
+                if p.is_ai {
+                    if title.is_empty() { " AI ".to_string() } else { format!(" AI · {title} ") }
+                } else if title.is_empty() {
+                    " ".to_string()
+                } else {
+                    format!(" {title} ")
+                }
             })
-            .unwrap_or_else(|| " PTY · pane ".to_string())
+            .unwrap_or_else(|| " pane ".to_string())
     }
 
     fn pane_title(&self, pid: u64, focused: bool, rect: Rect) -> String {
@@ -9413,7 +9418,7 @@ mod tests {
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).
         assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((28, 1)).unwrap().symbol(), "P", "plain shell pane should expose its PTY role");
+        assert_eq!(buf.cell((28, 1)).unwrap().symbol(), "s", "plain shell pane should expose its title");
         let title_cell = buf.cell((28, 1)).unwrap();
         assert_eq!(title_cell.fg, view.current_theme().accent);
         assert_eq!(title_cell.bg, RColor::Reset, "focused pane title must not add a competing accent fill");
@@ -9424,7 +9429,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_titles_expose_terminal_role() {
+    fn pane_titles_preserve_ai_prefix_but_plain_titles_stand_alone() {
         let mut view = test_view();
         view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
         assert_eq!(view.pane_label(1), " AI · agent1 ");
@@ -9450,7 +9455,17 @@ mod tests {
             pane.agent = None;
             pane.is_ai = false;
         }
-        assert!(view.pane_label(1).starts_with(" PTY ·"));
+        assert_eq!(view.pane_label(1), " custom title ");
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.title = "   ".into();
+        }
+        assert_eq!(view.pane_label(1), " ");
     }
 
     #[test]
