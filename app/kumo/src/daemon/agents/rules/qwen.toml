@@ -1,0 +1,28 @@
+# Qwen Code follows Gemini CLI's terminal interaction model closely, but keeps
+# its own manifest so users can override it independently as the UI evolves.
+[agent]
+id = "qwen"
+
+[[blocked]]
+tests = [{ region = "footer", contains-any = [
+  "allow execution?",
+  "do you want to proceed?",
+  "press enter to confirm",
+  "waiting for approval",
+] }]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+[[working]]
+tests = [{ region = "footer", contains-any = [
+  "esc to cancel",
+  "esc to interrupt",
+  "press esc to cancel",
+] }]
+
+[[idle]]
+tests = [{ region = "footer", contains-any = [
+  "type your message",
+  "enter a prompt",
+  "type a message",
+] }]

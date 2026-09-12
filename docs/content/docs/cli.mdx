@@ -46,6 +46,12 @@ icon: 🛠️
 | `kumo agent start --kind <agent> --pane <PANE> [-- <args>] [-s SESSION]` | Launch an agent in an existing shell pane; returns once detection shows ready |
 | `kumo agent rename <PANE> <NAME> [-s SESSION]` | Live alias for a pane so scripts can reference agents by name |
 | `kumo agent broadcast "TEXT" [-s SESSION] [--filter STATUS]` | Fan one prompt out to every AI pane (optionally filtered by status) |
+| `kumo agent skill [--output PATH]` | Print the bundled Kumo orchestration skill, or install it at PATH; does not require a daemon |
+
+Add `--json` to any control command for machine-readable output. Successful
+mutations use an `{ "ok": true }` envelope; failures use
+`{ "ok": false, "error": { "code", "message" } }`. Lists and reads retain
+their typed fields (`sessions`, `tabs`, `agents`, `worktrees`, `text`, and so on).
 
 **PANE addressing** — a stable numeric pane id, or a composite position
 (`1-based` indexes, session may be a name):

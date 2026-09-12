@@ -38,7 +38,8 @@ sound = true            # audible chime on blocked/finished transitions
 <ConfigBuilder />
 
 The generator writes only what differs from the defaults, in canonical form.
-Paste the result into `~/.config/kumo/config.toml` and run `kumo reload`.
+Paste the result into `~/.config/kumo/config.toml`; the daemon reloads it
+automatically. `kumo reload` remains available for an explicit refresh.
 
 ## Reference
 
@@ -118,7 +119,9 @@ Overrides follow the usual conventions:
 
 ## Live reload
 
-`kumo reload` (or MENU → `reload`) re-reads the config and applies `shell`,
+The daemon watches the canonical, flat, and legacy config files plus
+`agent-detection/*.toml`, then applies the same reload path automatically.
+`kumo reload` (or MENU → `reload`) triggers it explicitly. Reload applies `shell`,
 `ai-cmd`, `leader`, and `keymap.bindings` live to panes spawned from then on.
 `new-cwd`, `[notifications] position`, and `[notifications] sound` apply
 instantly. MENU → `config` opens the config

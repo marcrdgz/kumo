@@ -14,7 +14,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::sync::Arc;
 
@@ -127,6 +127,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let mut pane_cursors: HashMap<u64, Option<(u16, u16)>> = HashMap::new();
     let mut waits = super::waits::WaitRegistry::new();
     let mut kill = false;
+    let mut config_fingerprint = kumo_core::config::config_fingerprint();
+    let mut last_config_check = Instant::now();
 
     loop {
         #[cfg(unix)]
@@ -200,23 +202,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     kill = true;
                 }
                 Command::ReloadConfig => {
-                    let prev_idx = app.theme_idx;
-                    let prev_theme = app.theme.clone();
-                    app.reload_config();
-                    let _ = send_to(
-                        &mut clients,
-                        id,
-                        &DaemonEvent::ConfigReloaded { notice: "config reloaded".to_string() },
-                    );
-                    if app.theme_idx != prev_idx || app.theme.name != prev_theme.name || app.theme.palette != prev_theme.palette {
-                        let custom = app.active_wire_theme();
-                        for client in clients.values_mut() {
-                            let _ = client.tx.try_send(DaemonEvent::Theme {
-                                idx: app.theme_idx,
-                                custom: custom.clone(),
-                            });
-                        }
-                    }
+                    reload_config(&mut app, &mut clients, Some(id));
+                    config_fingerprint = kumo_core::config::config_fingerprint();
                 }
                 Command::Restart => {
                     // `kumo update` swapped the binary on disk: restart this
@@ -284,8 +271,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items });
                         }
                         Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error {
+                                code: "worktree_list_failed".to_string(),
+                                message: format!("{e:#}"),
+                            });
                             let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items: Vec::new() });
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
                         }
                     }
                 }
@@ -295,8 +285,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items });
                         }
                         Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error {
+                                code: "worktree_list_failed".to_string(),
+                                message: format!("{e:#}"),
+                            });
                             let _ = send_to(&mut clients, id, &DaemonEvent::Worktrees { items: Vec::new() });
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
                         }
                     }
                 }
@@ -326,8 +319,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             let _ = send_to(&mut clients, id, &DaemonEvent::WorktreeCurrent { info });
                         }
                         Err(e) => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error {
+                                code: "worktree_current_failed".to_string(),
+                                message: format!("{e:#}"),
+                            });
                             let _ = send_to(&mut clients, id, &DaemonEvent::WorktreeCurrent { info: None });
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {e:#}") });
                         }
                     }
                 }
@@ -610,6 +606,20 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: notice.clone() });
             }
         }
+
+        // Config files are tiny and edits are rare, so a content poll keeps
+        // hot reload portable without another watcher thread or platform-
+        // specific dependency. Debouncing at 250 ms also avoids reloading an
+        // editor's temporary rename/write sequence more than once.
+        if last_config_check.elapsed() >= Duration::from_millis(250) {
+            last_config_check = Instant::now();
+            let current = kumo_core::config::config_fingerprint();
+            if current != config_fingerprint {
+                config_fingerprint = current;
+                reload_config(&mut app, &mut clients, None);
+                log::info!("daemon: configuration reloaded after file change");
+            }
+        }
         // Agent lifecycle notifications: a corner toast for every attached
         // viewer. No OS notification channel anymore — transient toasts are
         // the (gentler) replacement; the audible chime still covers detached
@@ -780,6 +790,37 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     }
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+/// Apply the same live reload path for an explicit CLI request and the file
+/// watcher. Automatic reloads notify attached viewers; an explicit reload only
+/// replies to its requesting client, preserving the one-shot CLI contract.
+fn reload_config(app: &mut App, clients: &mut HashMap<usize, Client>, requester: Option<usize>) {
+    let prev_idx = app.theme_idx;
+    let prev_theme = app.theme.clone();
+    app.reload_config();
+    let notice = DaemonEvent::ConfigReloaded {
+        notice: "config reloaded".to_string(),
+    };
+    if let Some(id) = requester {
+        let _ = send_to(clients, id, &notice);
+    } else {
+        for client in clients.values_mut().filter(|client| client.welcomed) {
+            let _ = client.tx.try_send(notice.clone());
+        }
+    }
+    if app.theme_idx != prev_idx
+        || app.theme.name != prev_theme.name
+        || app.theme.palette != prev_theme.palette
+    {
+        let custom = app.active_wire_theme();
+        for client in clients.values_mut().filter(|client| client.welcomed) {
+            let _ = client.tx.try_send(DaemonEvent::Theme {
+                idx: app.theme_idx,
+                custom: custom.clone(),
+            });
+        }
+    }
 }
 
 /// Prepare an in-place daemon restart for `kumo update`: snapshot the live

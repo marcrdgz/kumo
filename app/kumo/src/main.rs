@@ -178,6 +178,7 @@ fn print_help() {
     println!("    kumo agent status  (aliases: list, ls)");
     println!("    kumo agent kill -p PANE [-s SESSION]");
     println!("    kumo agent explain [PANE] [-s SESSION]");
+    println!("    kumo agent skill [--output PATH]");
     println!();
     println!("WORKTREES:");
     println!("    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [-s SESSION] [--json]");
@@ -189,6 +190,7 @@ fn print_help() {
     println!();
     println!("OTHER:");
     println!("    kumo ls / kill / reload / server restart");
+    println!("\nAdd --json to any control command for machine-readable output.");
     println!();
     println!("Add -h/--help to any command for its own usage, e.g. `kumo pane -h`.");
     println!("The daemon (`kumo daemon`) runs in the background and owns your panes;");

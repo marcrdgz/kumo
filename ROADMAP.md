@@ -227,7 +227,7 @@ machine-friendly control surface so agents can drive kumo themselves
   markers, not the no-signal fallback). The Inbox (below) and the sidebar
   rollup key off `done` — needing attention, not yet seen — and focusing a
   pane marks its agent seen.
-- **Lifecycle detection for `codex · gemini · qwen · aider · cody · swe · coco`**
+- ✅ **Lifecycle detection for `codex · gemini · qwen · aider · cody · swe · coco`**
   (today auto-listed, always idle): the same detection path (screen markers /
   OSC title spinner) promotes each to a **first-class state** instead of a
   silent always-idle row — every supported agent at minimum reports working, so
@@ -307,8 +307,8 @@ it, and it's the core of agent-to-agent work.
 - **`kumo worktree set --comment "..." --status todo|in-progress|in-review|completed --json`** + **`kumo worktree current --json`**: each worktree carries a free-text comment + card status visible in the UI — a status snapshot of what the worktree is doing right now. Agents update it from the CLI; `kumo worktree list --json` surfaces it. Good moments: finished a slice, confirmed/refuted a hypothesis, hit a blocker, transitioning phase. Keep the first line action-oriented; read before clobbering user-written context.
 
 **Machine surface for agents**:
-- **`--json` on all control commands** + **`KUMO_SOCKET_PATH` / `KUMO_BIN_PATH` injection**: the daemon socket is exposed to spawned panes so agents drive their own workspace layouts natively (`app/kumo/src/daemon/pty.rs`); can be disabled in config. `kumo worktree current/list/set --json` and `kumo session|pane|agent --json` make the TUI scriptable without duplicating the bincode wire.
-- **Agent skill file** (`kumo-agents.md`, installed with the binary): teaches claude / codex / opencode how to orchestrate kumo natively — spawn, wait, read, set checkpoints. Agents stop firing keystrokes and start orchestrating. (The MCP server stays post-1.0; this layer is its foundation.)
+- ✅ **`--json` on all control commands** + **`KUMO_SOCKET_PATH` / `KUMO_BIN_PATH` injection**: the daemon socket is exposed to spawned panes so agents drive their own workspace layouts natively (`app/kumo/src/daemon/pty.rs`); can be disabled in config. `kumo worktree current/list/set --json` and `kumo session|pane|agent --json` make the TUI scriptable without duplicating the bincode wire.
+- ✅ **Bundled agent skill** (`skills/kumo/SKILL.md`, compiled into the binary): `kumo agent skill` prints it and `--output PATH` installs it in a harness-specific skill directory. It teaches agents to spawn, wait, read, and set checkpoints without polling. (The MCP server stays post-1.0; this layer is its foundation.)
 
 - ✅ **Agent Inbox View** (on the v2 state model): one unified tab aggregating
   `blocked · done · running` with direct keyboard navigation to actionable
@@ -333,7 +333,7 @@ it, and it's the core of agent-to-agent work.
   leader hint automatically. Replaces tmux's sync-input: same "drive many
   panes at once" need, without the stray-keystroke footgun of raw input
   mirroring. (moved here from 0.6.0)
-- **Config hot-reload file watcher** (deferred from 0.5.0): watch the config
+- ✅ **Config hot-reload file watcher** (deferred from 0.5.0): watch the config
   file and reload theme/config live — extends the manual `kumo reload` (0.4.0)
   so themes are instantly tweakable without a restart. (moved here from 0.6.0)
 

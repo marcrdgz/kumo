@@ -546,6 +546,7 @@ pub struct AgentInfo {
 
 /// Wire copy of the daemon's `AgentStatus`: the AI agent's lifecycle state.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     /// Actively producing output (working on a task).
     Working,
@@ -585,6 +586,7 @@ impl AgentStatus {
 
 /// The `until` predicate for `Command::AgentWait` / `AgentPrompt --wait`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentWaitKind {
     Blocked,
     Done,
@@ -624,6 +626,7 @@ impl AgentWaitKind {
 
 /// Source selector for `Command::AgentRead`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentReadSource {
     Visible,
     Recent,
@@ -714,6 +717,7 @@ pub struct AgentStatusLine {
 
 /// The evidence region a marker was found in, for `kumo agent explain`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum EvidenceRegion {
     /// The recent screen-buffer tail (200 rows pinned to the buffer bottom).
     Screen,
@@ -754,6 +758,7 @@ pub struct AgentMarkerMatch {
 
 /// Why a pane reads its reported status — for `kumo agent explain`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentIdleReason {
     /// Explicit idle markers matched (listed in the report).
     IdleMarkers,

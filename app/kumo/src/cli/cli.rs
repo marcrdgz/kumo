@@ -17,6 +17,8 @@ use kumo_protocol::{
     WireKeyEvent, WireModifiers,
 };
 
+const KUMO_AGENT_SKILL: &str = include_str!("../../../../skills/kumo/SKILL.md");
+
 /// A pane selector: the stable numeric id, or a composite `s1:t2:p3` /
 /// `kumo:t2:p3` spec (1-based indexes; the session part may be a name).
 /// Composite specs are resolved client-side via a `SessionList` round trip —
@@ -124,12 +126,13 @@ enum CliCmd {
     AgentStart { session: Option<String>, pane: PaneRef, kind: String, args: Vec<String> },
     AgentRename { session: Option<String>, pane: PaneRef, name: String },
     AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
-    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, note: Option<String>, agent: Option<String>, is_ai: bool, name: Option<String>, json: bool },
+    AgentSkill { output: Option<PathBuf> },
+    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, note: Option<String>, agent: Option<String>, is_ai: bool, name: Option<String> },
     WorktreeOpen { session: Option<String>, path: PathBuf },
     WorktreeRemove { session: Option<String>, path: PathBuf, force: bool },
-    WorktreeSet { session: Option<String>, path: Option<PathBuf>, comment: Option<String>, status: Option<String>, json: bool },
-    WorktreeCurrent { session: Option<String>, path: Option<PathBuf>, json: bool },
-    WorktreeList { session: Option<String>, json: bool },
+    WorktreeSet { session: Option<String>, path: Option<PathBuf>, comment: Option<String>, status: Option<String> },
+    WorktreeCurrent { session: Option<String>, path: Option<PathBuf> },
+    WorktreeList { session: Option<String> },
     Kill,
     Reload,
     Restart,
@@ -148,7 +151,16 @@ fn parse_pane_ref(v: &str) -> Option<PaneRef> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    run_inner(args).map_err(friendly_protocol_error)
+    let (json, _) = extract_global_json(args);
+    let result = run_inner(args).map_err(friendly_protocol_error);
+    if json {
+        if let Err(error) = &result {
+            let message = error.to_string();
+            let (code, detail) = split_error(&message);
+            print_json(&error_json(code, detail))?;
+        }
+    }
+    result
 }
 
 /// A bincode decode failure against a running daemon means a binary version
@@ -180,7 +192,27 @@ fn run_inner(args: &[String]) -> Result<()> {
             return Ok(());
         }
     }
-    let cmd = parse(args)?;
+    let (json, filtered_args) = extract_global_json(args);
+    let cmd = parse(&filtered_args)?;
+    if let CliCmd::AgentSkill { output } = &cmd {
+        if let Some(path) = output {
+            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, KUMO_AGENT_SKILL)?;
+            if json {
+                print_json(&serde_json::json!({"ok": true, "path": path}))?;
+            } else {
+                println!("installed Kumo agent skill at {}", path.display());
+            }
+        } else if json {
+            print_json(&serde_json::json!({"skill": KUMO_AGENT_SKILL}))?;
+        } else {
+            print!("{KUMO_AGENT_SKILL}");
+        }
+        return Ok(());
+    }
+
     let mut stream = connect_daemon()?;
 
     // Tab/pane/worktree list are special: they need round trips.
@@ -192,7 +224,17 @@ fn run_inner(args: &[String]) -> Result<()> {
             loop {
                 match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
                     Ok(DaemonEvent::SessionList { sessions }) => {
-                        print_tab_list(&sessions, &target);
+                        if json {
+                            let tabs = sessions
+                                .iter()
+                                .find(|session| session.name == target)
+                                .ok_or_else(|| anyhow::anyhow!("no session {target:?}"))?
+                                .tabs
+                                .as_slice();
+                            print_json(&serde_json::json!({"session": target, "tabs": tabs}))?;
+                        } else {
+                            print_tab_list(&sessions, &target);
+                        }
                         return Ok(());
                     }
                     Ok(_) => continue,
@@ -222,10 +264,22 @@ fn run_inner(args: &[String]) -> Result<()> {
                     }
                 }
             };
-            print_pane_list(&sessions, &target, tab_id);
+            if json {
+                let tabs = sessions
+                    .iter()
+                    .find(|session| session.name == target)
+                    .ok_or_else(|| anyhow::anyhow!("no session {target:?}"))?
+                    .tabs
+                    .iter()
+                    .filter(|item| tab_id.is_none() || tab_id == Some(item.id))
+                    .collect::<Vec<_>>();
+                print_json(&serde_json::json!({"session": target, "tabs": tabs}))?;
+            } else {
+                print_pane_list(&sessions, &target, tab_id);
+            }
             Ok(())
         }
-        CliCmd::WorktreeList { session, json } => {
+        CliCmd::WorktreeList { session } => {
             let sess = resolve_session(&mut stream, session)?;
             kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeList { session: sess.clone() })?;
             stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
@@ -233,16 +287,17 @@ fn run_inner(args: &[String]) -> Result<()> {
                 match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
                     Ok(DaemonEvent::Worktrees { items }) => {
                         if json {
-                            let j = serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into());
-                            println!("{}", j);
+                            print_json(&serde_json::json!({"worktrees": items}))?;
                         } else {
                             print_worktree_list(&items);
                         }
                         return Ok(());
                     }
                     Ok(DaemonEvent::Reply { message }) if message.starts_with("error:") => {
-                        eprintln!("{}", message);
-                        return Ok(());
+                        anyhow::bail!(message);
+                    }
+                    Ok(DaemonEvent::Error { code, message }) => {
+                        anyhow::bail!("{code}: {message}");
                     }
                     Ok(_) => continue,
                     Err(e) if is_timeout(&e) => anyhow::bail!("no reply from daemon for worktree list"),
@@ -250,7 +305,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 }
             }
         }
-        CliCmd::WorktreeCurrent { session, path, json } => {
+        CliCmd::WorktreeCurrent { session, path } => {
             let sess = resolve_session(&mut stream, session)?;
             kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess.clone(), path: path.clone() })?;
             stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
@@ -258,8 +313,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
                     Ok(DaemonEvent::WorktreeCurrent { info }) => {
                         if json {
-                            let j = serde_json::to_string_pretty(&info).unwrap_or_else(|_| "null".into());
-                            println!("{}", j);
+                            print_json(&serde_json::json!({"worktree": info}))?;
                         } else if let Some(wt) = info {
                             println!("{}  {}  {}  {}", wt.path.display(), wt.branch.as_deref().unwrap_or("(detached)"), wt.status.as_deref().unwrap_or("-"), wt.comment.as_deref().unwrap_or(""));
                         } else {
@@ -268,8 +322,10 @@ fn run_inner(args: &[String]) -> Result<()> {
                         return Ok(());
                     }
                     Ok(DaemonEvent::Reply { message }) if message.starts_with("error:") => {
-                        eprintln!("{}", message);
-                        return Ok(());
+                        anyhow::bail!(message);
+                    }
+                    Ok(DaemonEvent::Error { code, message }) => {
+                        anyhow::bail!("{code}: {message}");
                     }
                     Ok(_) => continue,
                     Err(e) if is_timeout(&e) => anyhow::bail!("no reply from daemon for worktree current"),
@@ -277,7 +333,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 }
             }
         }
-        CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name, json } => {
+        CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
             let sess = resolve_session(&mut stream, session)?;
             let br = branch.unwrap_or_default();
             let cmd = Command::WorktreeCreate { session: sess.clone(), branch: br, from, note, agent, is_ai, name };
@@ -287,13 +343,13 @@ fn run_inner(args: &[String]) -> Result<()> {
                 loop {
                     match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
                         Ok(DaemonEvent::Reply { message }) => {
-                            let j = serde_json::json!({"message": message});
-                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            if message.starts_with("error:") {
+                                anyhow::bail!(message);
+                            }
+                            print_json(&reply_json(&message))?;
                             return Ok(());
                         }
                         Ok(DaemonEvent::Error { code, message }) => {
-                            let j = serde_json::json!({"error": code, "message": message});
-                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
                             anyhow::bail!("{code}: {message}");
                         }
                         Ok(_) => continue,
@@ -302,7 +358,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                     }
                 }
             } else {
-                read_reply(&mut stream)?;
+                read_reply(&mut stream, false)?;
                 Ok(())
             }
         }
@@ -310,17 +366,17 @@ fn run_inner(args: &[String]) -> Result<()> {
             let sess = resolve_session(&mut stream, session)?;
             let cmd = Command::WorktreeOpen { session: sess, path };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
-            read_reply(&mut stream)?;
+            read_reply(&mut stream, json)?;
             Ok(())
         }
         CliCmd::WorktreeRemove { session, path, force } => {
             let sess = resolve_session(&mut stream, session)?;
             let cmd = Command::WorktreeRemove { session: sess, path, force };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
-            read_reply(&mut stream)?;
+            read_reply(&mut stream, json)?;
             Ok(())
         }
-        CliCmd::WorktreeSet { session, path, comment, status, json } => {
+        CliCmd::WorktreeSet { session, path, comment, status } => {
             let sess = resolve_session(&mut stream, session)?;
             let pbuf = if let Some(p) = path {
                 p
@@ -339,8 +395,6 @@ fn run_inner(args: &[String]) -> Result<()> {
                     match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
                         Ok(DaemonEvent::Reply { message }) => break message,
                         Ok(DaemonEvent::Error { code, message }) => {
-                            let j = serde_json::json!({"error": code, "message": message});
-                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
                             anyhow::bail!("{code}: {message}");
                         }
                         Ok(_) => continue,
@@ -348,27 +402,28 @@ fn run_inner(args: &[String]) -> Result<()> {
                         Err(e) => return Err(e),
                     }
                 };
+                if reply_msg.starts_with("error:") {
+                    anyhow::bail!(reply_msg);
+                }
                 // Fetch current for JSON surface
                 kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess, path: Some(pbuf.clone()) })?;
                 stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
                 loop {
                     match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
                         Ok(DaemonEvent::WorktreeCurrent { info }) => {
-                            let j = serde_json::json!({"message": reply_msg, "worktree": info});
-                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            print_json(&serde_json::json!({"ok": true, "message": reply_msg, "worktree": info}))?;
                             return Ok(());
                         }
                         Ok(_) => continue,
                         Err(e) if is_timeout(&e) => {
-                            let j = serde_json::json!({"message": reply_msg});
-                            println!("{}", serde_json::to_string_pretty(&j).unwrap());
+                            print_json(&serde_json::json!({"ok": true, "message": reply_msg}))?;
                             return Ok(());
                         }
                         Err(e) => return Err(e),
                     }
                 }
             } else {
-                read_reply(&mut stream)?;
+                read_reply(&mut stream, false)?;
                 Ok(())
             }
         }
@@ -505,6 +560,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                     let session = resolve_session(&mut stream, session)?;
                     Command::AgentBroadcast { session, text, filter }
                 }
+                CliCmd::AgentSkill { .. } => unreachable!(),
                 CliCmd::WorktreeCreate { .. } => unreachable!(),
                 CliCmd::WorktreeOpen { .. } => unreachable!(),
                 CliCmd::WorktreeRemove { .. } => unreachable!(),
@@ -524,9 +580,13 @@ fn run_inner(args: &[String]) -> Result<()> {
             kumo_core::protocol::write_framed(&mut stream, &command)?;
             if is_waiter {
                 // Waiters block: use timeout + 5s buffer
-                read_reply_with_timeout(&mut stream, Duration::from_millis(timeout_ms + 5000))
+                read_reply_with_timeout(
+                    &mut stream,
+                    Duration::from_millis(timeout_ms + 5000),
+                    json,
+                )
             } else {
-                read_reply(&mut stream)
+                read_reply(&mut stream, json)
             }
         }
     }
@@ -698,6 +758,24 @@ fn parse_agent(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
         anyhow::bail!("missing agent subcommand (see `kumo agent -h`)");
     };
+    if sub == "skill" {
+        let mut output = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--output" | "-o" => {
+                    output = Some(PathBuf::from(need(args, i + 1, "a path after --output")?));
+                    i += 2;
+                }
+                value if value.starts_with("--output=") => {
+                    output = Some(PathBuf::from(value.trim_start_matches("--output=")));
+                    i += 1;
+                }
+                other => anyhow::bail!("unknown agent skill option {other:?}"),
+            }
+        }
+        return Ok(CliCmd::AgentSkill { output });
+    }
     // For agent subcommands we parse manually to support --until/--wait/--timeout etc
     // Extract common session/pane from -s/-p wherever they appear, plus positional.
     let (session_opt, pane_opt, positional) = split_options(args);
@@ -1007,21 +1085,17 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
         anyhow::bail!("missing worktree subcommand (see `kumo worktree -h`)");
     };
-    // Detect --json anywhere (global for worktree subcommands)
-    let has_json = args.iter().any(|a| a == "--json");
-    let filtered_args: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
-    let sub = filtered_args.first().map(|s| s.as_str()).unwrap_or(sub);
     // Extract -s/--session wherever present
     let mut session: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut i = 1;
-    while i < filtered_args.len() {
-        match filtered_args[i].as_str() {
+    while i < args.len() {
+        match args[i].as_str() {
             "-s" | "--session" => {
-                if let Some(v) = filtered_args.get(i+1) { session = Some(v.clone()); }
+                if let Some(v) = args.get(i+1) { session = Some(v.clone()); }
                 i += 2;
             }
-            _ => { rest.push(filtered_args[i].clone()); i+=1; }
+            _ => { rest.push(args[i].clone()); i+=1; }
         }
     }
     match sub {
@@ -1101,7 +1175,7 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             }
             // For --ai with no branch and no name and no from, daemon will fallback to wt-work — allow but ensure at least one source
             // If branch is None and name is None and from/branch empty, we still allow (derive_branch fallback).
-            Ok(CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name, json: has_json })
+            Ok(CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name })
         }
         "open" => {
             let path = rest.first().cloned().ok_or_else(|| anyhow::anyhow!("worktree open needs PATH"))?;
@@ -1160,7 +1234,7 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             if !comment_set && !status_set {
                 anyhow::bail!("worktree set needs --comment and/or --status");
             }
-            Ok(CliCmd::WorktreeSet { session, path, comment, status, json: has_json })
+            Ok(CliCmd::WorktreeSet { session, path, comment, status })
         }
         "current" => {
             let mut path: Option<PathBuf> = None;
@@ -1179,14 +1253,14 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                     _ => { anyhow::bail!("unknown worktree current flag {:?}", rest[j]); }
                 }
             }
-            Ok(CliCmd::WorktreeCurrent { session, path, json: has_json })
+            Ok(CliCmd::WorktreeCurrent { session, path })
         }
         "list" | "ls" => {
             // Optional --path filter not needed; just session filtering. Accept stray positional as session override? No, -s handles.
             if !rest.is_empty() {
                 anyhow::bail!("worktree list takes no positional args (use -s SESSION)");
             }
-            Ok(CliCmd::WorktreeList { session, json: has_json })
+            Ok(CliCmd::WorktreeList { session })
         }
         other => anyhow::bail!("unknown worktree subcommand {other:?}"),
     }
@@ -1309,6 +1383,7 @@ USAGE:
 
 OPTIONS:
     --name NAME    name the new session (defaults to the workspace name)
+    --json         machine-readable JSON output
 ";
 
 const PANE_HELP: &str = "\
@@ -1330,6 +1405,7 @@ OPTIONS:
     --ai                    start the new pane with the AI agent program
     --regex                 treat PATTERN as a regex (otherwise substring)
     --timeout DURATION      how long to wait (e.g. 30s, 500ms, 2m; default 30s)
+    --json                  machine-readable JSON output
 
 send-keys: KEYS... are typed into the pane (plain text plus tokens such as
 Enter, Tab, Esc, Left, Up, PageDown — see `kumo pane send-keys` KEYS).
@@ -1359,6 +1435,7 @@ USAGE:
     kumo agent start --kind <agent> --pane <PANE> [-- <args>] [-s SESSION]
     kumo agent rename <PANE> <NAME> [-s SESSION]
     kumo agent broadcast \"TEXT\" [-s SESSION] [--filter blocked|idle|...]
+    kumo agent skill [--output PATH]
 
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
@@ -1369,6 +1446,8 @@ OPTIONS:
     --kind KIND             for `start`: agent kind (claude|codex|...)
     --timeout DURATION      how long to wait (e.g. 30s, 500ms; wait=30s, prompt --wait=120s)
     --filter STATUS         for `broadcast`: only agents with that status
+    --output PATH           write the bundled Kumo skill to PATH
+    --json                  machine-readable JSON output
 
 PANE is a stable numeric id or a composite position (see `kumo pane -h`):
 s1:t2:p3, kumo:t2:p1, or t2:p1 with -s.
@@ -1385,6 +1464,8 @@ prompt: bracketed-paste aware submit; `--wait` races submit+wait in one
 server request and refuses when already blocked.
 read: the daemon owns the screen buffer (including alt-screen); with --source
 traceback returns the last prompt block (fallback to form region).
+skill: prints the bundled agent-orchestration skill without requiring a daemon;
+use --output to install it in a harness-specific skills directory.
 ";
 
 const TAB_HELP: &str = "\
@@ -1400,6 +1481,7 @@ USAGE:
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
     --name NAME             name the new tab (defaults to the workspace name)
+    --json                  machine-readable JSON output
 ";
 
 const WORKTREE_HELP: &str = "\
@@ -1563,61 +1645,160 @@ fn resolve_spec_pane(
 
 /// Read the daemon's reply and print it. A short read timeout covers commands
 /// that produce no reply (focus/resize): those simply exit.
-fn read_reply(stream: &mut UnixStream) -> Result<()> {
-    read_reply_with_timeout(stream, Duration::from_millis(800))
+fn read_reply(stream: &mut UnixStream, json: bool) -> Result<()> {
+    read_reply_with_timeout(stream, Duration::from_millis(800), json)
 }
 
-fn read_reply_with_timeout(stream: &mut UnixStream, timeout: Duration) -> Result<()> {
+fn read_reply_with_timeout(stream: &mut UnixStream, timeout: Duration, json: bool) -> Result<()> {
     stream.set_read_timeout(Some(timeout))?;
     loop {
         match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
             Ok(DaemonEvent::Reply { message }) => {
-                println!("{message}");
+                if message.starts_with("error:") {
+                    anyhow::bail!(message);
+                }
+                if json {
+                    print_json(&reply_json(&message))?;
+                } else {
+                    println!("{message}");
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::Restarting) => {
-                println!("daemon restarting…");
+                if json {
+                    print_json(&serde_json::json!({"ok": true, "message": "daemon restarting"}))?;
+                } else {
+                    println!("daemon restarting…");
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::ConfigReloaded { notice }) => {
-                println!("{notice}");
+                if json {
+                    print_json(&serde_json::json!({"ok": true, "message": notice}))?;
+                } else {
+                    println!("{notice}");
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::SessionList { sessions }) => {
-                print_session_list(&sessions);
+                if json {
+                    print_json(&serde_json::json!({"sessions": sessions}))?;
+                } else {
+                    print_session_list(&sessions);
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::AgentStatus { agents }) => {
-                print_agent_status(&agents);
+                if json {
+                    print_json(&serde_json::json!({"agents": agents}))?;
+                } else {
+                    print_agent_status(&agents);
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::AgentExplain { report }) => {
-                print_agent_explain(&report);
+                if json {
+                    print_json(&serde_json::json!({"report": report}))?;
+                } else {
+                    print_agent_explain(&report);
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::AgentWaitResult { pane_id, status }) => {
-                println!("pane {pane_id} is {}", status.label());
+                if json {
+                    print_json(&serde_json::json!({"pane_id": pane_id, "status": status.label()}))?;
+                } else {
+                    println!("pane {pane_id} is {}", status.label());
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::AgentReadResult { pane_id, source, text, truncated }) => {
-                if truncated {
-                    eprintln!("(truncated at 512 KiB, pane {pane_id} source {})", source.label());
+                if json {
+                    print_json(&serde_json::json!({
+                        "pane_id": pane_id,
+                        "source": source.label(),
+                        "text": text,
+                        "truncated": truncated,
+                    }))?;
+                } else {
+                    if truncated {
+                        eprintln!("(truncated at 512 KiB, pane {pane_id} source {})", source.label());
+                    }
+                    println!("{text}");
                 }
-                println!("{text}");
                 return Ok(());
             }
             Ok(DaemonEvent::PaneWaitResult { pane_id, matched }) => {
-                println!("pane {pane_id} matched: {matched}");
+                if json {
+                    print_json(&serde_json::json!({"pane_id": pane_id, "matched": matched}))?;
+                } else {
+                    println!("pane {pane_id} matched: {matched}");
+                }
                 return Ok(());
             }
             Ok(DaemonEvent::Error { code, message }) => {
-                eprintln!("error: {code}: {message}");
+                if !json {
+                    eprintln!("error: {code}: {message}");
+                }
                 anyhow::bail!("{code}: {message}");
             }
+            Ok(DaemonEvent::Shutdown) => {
+                if json {
+                    print_json(&serde_json::json!({"ok": true, "message": "daemon stopped"}))?;
+                }
+                return Ok(());
+            }
             Ok(_) => continue,
-            Err(e) if is_timeout(&e) => return Ok(()),
+            Err(e) if is_timeout(&e) => {
+                if json {
+                    print_json(&serde_json::json!({"ok": true}))?;
+                }
+                return Ok(());
+            }
             Err(e) => return Err(e),
         }
+    }
+}
+
+fn print_json(value: &serde_json::Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn extract_global_json(args: &[String]) -> (bool, Vec<String>) {
+    let mut json = false;
+    let mut after_separator = false;
+    let mut filtered = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg == "--" {
+            after_separator = true;
+            filtered.push(arg.clone());
+        } else if !after_separator && arg == "--json" {
+            json = true;
+        } else {
+            filtered.push(arg.clone());
+        }
+    }
+    (json, filtered)
+}
+
+fn reply_json(message: &str) -> serde_json::Value {
+    if let Some(detail) = message.strip_prefix("error:").map(str::trim) {
+        error_json("error", detail)
+    } else {
+        serde_json::json!({"ok": true, "message": message})
+    }
+}
+
+fn error_json(code: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({"ok": false, "error": {"code": code, "message": message}})
+}
+
+fn split_error(message: &str) -> (&str, &str) {
+    let trimmed = message.strip_prefix("error:").map(str::trim).unwrap_or(message);
+    match trimmed.split_once(':') {
+        Some((code, detail)) if !code.contains(char::is_whitespace) => (code, detail.trim()),
+        _ => ("error", trimmed),
     }
 }
 
@@ -1914,5 +2095,53 @@ mod tests {
         assert!(resolve_spec_pane(&sessions, &CompositeSpec::parse("kumo:t1:p3").unwrap(), "kumo").is_err());
         assert!(resolve_spec_pane(&sessions, &CompositeSpec::parse("kumo:t2:p1").unwrap(), "kumo").is_err());
         assert!(resolve_spec_pane(&sessions, &CompositeSpec::parse("nope:t1:p1").unwrap(), "kumo").is_err());
+    }
+
+    #[test]
+    fn json_contract_uses_stable_success_and_error_envelopes() {
+        assert_eq!(
+            reply_json("created pane 7"),
+            serde_json::json!({"ok": true, "message": "created pane 7"})
+        );
+        assert_eq!(
+            reply_json("error: pane missing"),
+            serde_json::json!({
+                "ok": false,
+                "error": {"code": "error", "message": "pane missing"}
+            })
+        );
+        assert_eq!(split_error("timeout: agent did not finish"), ("timeout", "agent did not finish"));
+        assert_eq!(serde_json::to_value(AgentStatus::Blocked).unwrap(), "blocked");
+    }
+
+    #[test]
+    fn global_json_flag_preserves_literal_prompt_arguments() {
+        let args = vec![
+            "agent".into(),
+            "prompt".into(),
+            "1".into(),
+            "--json".into(),
+            "--".into(),
+            "keep".into(),
+            "--json".into(),
+        ];
+        let (json, filtered) = extract_global_json(&args);
+        assert!(json);
+        assert_eq!(
+            filtered,
+            vec!["agent", "prompt", "1", "--", "keep", "--json"]
+        );
+    }
+
+    #[test]
+    fn bundled_skill_is_valid_and_available_without_a_daemon() {
+        assert!(KUMO_AGENT_SKILL.starts_with("---\nname: kumo\n"));
+        assert!(KUMO_AGENT_SKILL.contains("KUMO_BIN_PATH"));
+        match parse_agent(&["skill".into(), "--output".into(), "target/skill.md".into()]).unwrap() {
+            CliCmd::AgentSkill { output } => {
+                assert_eq!(output, Some(PathBuf::from("target/skill.md")));
+            }
+            _ => panic!("agent skill must parse without a daemon command"),
+        }
     }
 }

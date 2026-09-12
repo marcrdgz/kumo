@@ -1,0 +1,26 @@
+# Sourcegraph Cody CLI lifecycle detection.
+[agent]
+id = "cody"
+
+[[blocked]]
+tests = [{ region = "footer", contains-any = [
+  "confirm to continue",
+  "waiting for approval",
+  "do you want to proceed?",
+] }]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+[[working]]
+tests = [{ region = "footer", contains-any = [
+  "esc to interrupt",
+  "ctrl-c to interrupt",
+  "press esc to cancel",
+] }]
+
+[[idle]]
+tests = [{ region = "footer", contains-any = [
+  "type your message",
+  "enter a prompt",
+  "cody>",
+] }]

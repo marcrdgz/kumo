@@ -244,7 +244,20 @@ All waits are **server-owned and event-driven**: the CLI blocks on the socket, t
 * **Bracketed paste is automatic**: you do not need to send `ESC[200~` yourself — `agent prompt` does it when the pane has the mode enabled.
 * **Keep reads small**: `recent` is ~16 KiB; pipe through `grep`/`tail` rather than dumping the whole buffer into context.
 
-## Minimal skill prompt for your agent
+## Bundled agent skill
+
+Kumo ships its orchestration instructions inside the binary, so they always
+match the installed CLI:
+
+```sh
+kumo agent skill
+kumo agent skill --output .agents/skills/kumo/SKILL.md
+```
+
+The command does not require a running daemon. Use the destination appropriate
+for the agent harness you want to configure.
+
+## Minimal inline prompt
 
 Paste this into any agent that runs inside kumo (opencode, claude, codex):
 

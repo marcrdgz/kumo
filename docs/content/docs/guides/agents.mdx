@@ -80,23 +80,20 @@ finished = true         # toast when an agent finishes / goes idle
 **Process** detection (name + workspace) works for every agent below;
 **lifecycle** detection (working / blocked / idle) is per-agent:
 
-### Fully implemented
+### Bundled lifecycle rules
 
 - `opencode` — permission dialogs, question prompt, prompt-footer signals
 - `claude` — approval forms, permission prompts, OSC-title spinner
-
-### Auto-listed until it gets rules
-
 - `codex` · `gemini` · `qwen` · `aider` · `cody` · `swe` · `coco`
 
-These are detected by name and listed in the sidebar, but read **unknown**
-until a detection-rules file describes their UI (see below) — no kumo release
-is needed to promote one to a first-class working/blocked/idle state.
+When none of an agent's explicit markers match, it reads **unknown**, never a
+fabricated idle state. Use `kumo agent explain` and a user override to tune a
+CLI version whose terminal chrome has changed.
 
 ## Custom detection rules (`agent-detection/<agent>.toml`)
 
 The lifecycle classifiers are **data-driven** (`0.7.0`): kumo ships rule
-manifests for `claude` and `opencode` (built into the binary), and reads
+manifests for every supported agent above (built into the binary), and reads
 per-agent overrides from your config dir:
 
 ```
@@ -105,7 +102,8 @@ per-agent overrides from your config dir:
 
 A file for an agent kumo already knows **replaces** its bundled rules; a file
 for any other agent id **adds** it. Rules load at daemon start and are re-read
-on `kumo reload`. Invalid files (bad id charset, unknown region, test with
+automatically when the file changes (or explicitly with `kumo reload`). Invalid
+files (bad id charset, unknown region, test with
 more than one matcher) are warned about and skipped — detection never crashes
 and keeps the bundled defaults.
 

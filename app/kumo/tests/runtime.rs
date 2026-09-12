@@ -121,3 +121,53 @@ fn real_exec_restart_reaps_exited_shell() {
     daemon.wait_exit();
     assert!(!daemon.root.join("kumo/kumo.sock").exists());
 }
+
+#[test]
+fn config_file_changes_reload_the_running_daemon() {
+    let mut daemon = Daemon::start();
+    let mut stream = daemon.connect();
+    std::fs::write(
+        daemon.root.join("config"),
+        "shell = /bin/sh\nupdate-check = false\nnew-cwd = current\ntheme = dracula\n",
+    )
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut reloaded = false;
+    let mut theme_after_reload = false;
+    while Instant::now() < deadline && !theme_after_reload {
+        match read_framed::<DaemonEvent>(&mut stream).unwrap() {
+            DaemonEvent::ConfigReloaded { .. } => reloaded = true,
+            DaemonEvent::Theme { .. } if reloaded => theme_after_reload = true,
+            _ => {}
+        }
+    }
+    assert!(reloaded, "the config watcher did not notify the client");
+    assert!(theme_after_reload, "the changed theme was not applied live");
+
+    send(&mut stream, Command::KillServer);
+    daemon.wait_exit();
+}
+
+#[test]
+fn control_cli_emits_parseable_json() {
+    let mut daemon = Daemon::start();
+    // Wait until the daemon has bound and completed its attach handshake.
+    drop(daemon.connect());
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_kumo"))
+        .args(["session", "list", "--json"])
+        .env("KUMO_CONFIG_DIR", &daemon.root)
+        .env("XDG_RUNTIME_DIR", &daemon.root)
+        .env("XDG_STATE_HOME", &daemon.root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sessions = value["sessions"].as_array().expect("sessions array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["active"], true);
+
+    let mut stream = daemon.connect();
+    send(&mut stream, Command::KillServer);
+    daemon.wait_exit();
+}

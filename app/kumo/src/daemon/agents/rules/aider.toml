@@ -1,0 +1,26 @@
+# Aider is primarily line-oriented. Restrict all signals to the live footer so
+# commands or questions retained in its transcript do not become stale state.
+[agent]
+id = "aider"
+
+[[blocked]]
+tests = [{ region = "footer", contains-any = [
+  "allow this command?",
+  "run shell command?",
+  "add it to the chat?",
+] }]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+[[working]]
+tests = [{ region = "footer", contains-any = [
+  "ctrl-c to interrupt",
+  "esc to interrupt",
+  "waiting for",
+] }]
+
+[[idle]]
+tests = [{ region = "footer", contains-any = [
+  "ask for changes",
+  "aider>",
+] }]

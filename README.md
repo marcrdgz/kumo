@@ -138,20 +138,22 @@ conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,
 
 ## Agents
 
-Kumo auto-detects any AI CLI running inside a pane and lists it in the
-sidebar. **Process** detection (name + workspace) works for every agent below;
-**lifecycle** detection (working / blocked / idle) is per-agent and currently
-only **opencode** and **claude** are fully implemented — every other agent is
-listed but always shown as idle.
+Kumo auto-detects supported AI CLIs running inside a pane and lists them in the
+sidebar. Lifecycle rules are bundled for every agent below and may be replaced
+or extended from `~/.config/kumo/agent-detection/*.toml`.
 
-### ✅ Implemented — full lifecycle detection
+### ✅ Implemented — bundled lifecycle detection
 
 - `opencode` — permission dialogs, question prompt, prompt-footer signals
 - `claude` — approval forms, permission prompts, OSC-title spinner
-
-### 🧭 ToDo / Not Implemented Yet — auto-listed, status always idle
-
 - `codex` · `gemini` · `qwen` · `aider` · `cody` · `swe` · `coco`
+
+Rules are deliberately conservative: when no explicit live marker matches,
+the pane remains `unknown` instead of being guessed idle or blocked.
+
+Run `kumo agent explain PANE` to inspect the evidence behind a state. Run
+`kumo agent skill` to print the bundled orchestration skill, or install it with
+`kumo agent skill --output PATH`.
 
 ## 🛠️ Requirements
 

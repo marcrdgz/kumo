@@ -263,7 +263,8 @@ pub(crate) fn explain_for(snap: &Snapshot, agent_id: Option<&str>) -> Explanatio
 }
 
 /// Re-read `config_dir()/agent-detection/*.toml` user overrides. Called on
-/// daemon start and `kumo reload`; bundled defaults persist for invalid files.
+/// daemon start, file-change hot reload, and `kumo reload`; bundled defaults
+/// persist for invalid files.
 pub(crate) fn reload_agent_rules() {
     rules::reload_rules();
 }

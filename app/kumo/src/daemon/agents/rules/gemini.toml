@@ -1,0 +1,28 @@
+# Gemini CLI lifecycle detection. Rules are evaluated only after the pane's
+# process tree identifies `gemini`, so prompt phrases cannot affect other CLIs.
+[agent]
+id = "gemini"
+
+[[blocked]]
+tests = [{ region = "footer", contains-any = [
+  "allow execution?",
+  "do you want to proceed?",
+  "press enter to confirm",
+  "waiting for approval",
+] }]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+[[working]]
+tests = [{ region = "footer", contains-any = [
+  "esc to cancel",
+  "esc to interrupt",
+  "press esc to cancel",
+] }]
+
+[[idle]]
+tests = [{ region = "footer", contains-any = [
+  "type your message",
+  "enter a prompt",
+  "type a message",
+] }]

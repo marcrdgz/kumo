@@ -1,0 +1,26 @@
+# Coco CLI lifecycle detection.
+[agent]
+id = "coco"
+
+[[blocked]]
+tests = [{ region = "footer", contains-any = [
+  "waiting for approval",
+  "confirm to continue",
+  "do you want to proceed?",
+] }]
+
+[[working]]
+tests = [{ region = "title", spinner = "braille" }]
+[[working]]
+tests = [{ region = "footer", contains-any = [
+  "esc to interrupt",
+  "ctrl-c to interrupt",
+  "press esc to cancel",
+] }]
+
+[[idle]]
+tests = [{ region = "footer", contains-any = [
+  "type your message",
+  "enter a prompt",
+  "coco>",
+] }]

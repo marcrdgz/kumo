@@ -1,10 +1,11 @@
 //! Data-driven agent-detection rules (`agent-detection/<agent>.toml`).
 //!
 //! The bundled manifests (in `rules/`) express the built-in classifiers —
-//! claude, opencode — as TOML so third-party agents (codex, gemini, ...) get
+//! supported agents as TOML so third-party agents get
 //! accurate state **without a kumo release**: drop a `<id>.toml` into the user
-//! config dir (`config_dir()/agent-detection`) and it loads on daemon start
-//! and on `kumo reload`. The engine is deliberately local-only in 0.7.0.
+//! config dir (`config_dir()/agent-detection`) and it loads on daemon start,
+//! after file changes, and on `kumo reload`. The engine is deliberately
+//! local-only in 0.7.0.
 //!
 //! # Schema
 //!
@@ -483,6 +484,12 @@ const BUNDLED: &[(&str, &str)] = &[
         "codex",
         include_str!("rules/codex.toml"),
     ),
+    ("gemini", include_str!("rules/gemini.toml")),
+    ("qwen", include_str!("rules/qwen.toml")),
+    ("aider", include_str!("rules/aider.toml")),
+    ("cody", include_str!("rules/cody.toml")),
+    ("swe", include_str!("rules/swe.toml")),
+    ("coco", include_str!("rules/coco.toml")),
 ];
 
 /// Parse the bundled manifests. They are compile-time constants, so a parse
@@ -607,6 +614,15 @@ mod tests {
         for (id, src) in BUNDLED {
             let man = toml::from_str::<Manifest>(src).expect("bundled toml parses");
             compile(man, Some(id)).expect("bundled manifest validates");
+        }
+    }
+
+    #[test]
+    fn every_bundled_agent_has_a_working_signal() {
+        let working = snap("", "⠋", "⠋ working");
+        for (id, src) in BUNDLED {
+            let rules = agent_from(src, id).unwrap();
+            assert!(rules.working(&working), "{id} lacks a common live working signal");
         }
     }
 
