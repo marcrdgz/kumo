@@ -217,28 +217,29 @@ accurate states, event-driven waits, and isolated worktrees — with a small,
 machine-friendly control surface so agents can drive kumo themselves
 (`app/kumo/src/cli/cli.rs`, `crates/kumo-protocol`).
 
-> 🚧 **Current: `v0.7.0-prerelease.1`; one P0 blocker remains in the
-> Delegate Task agent-start handoff.** Isolated worktrees, checkpoints, and the
-> standalone orchestration primitives are implemented; release hygiene and
-> validation follow once that handoff is fixed. Keep the stable release narrow
-> instead of adding another large product surface.
+> 🚧 **Current: `v0.7.0-prerelease.1`; one P0 blocker remains in the optional
+> worktree agent-start handoff.** Isolated worktrees, checkpoints, and the
+> standalone orchestration primitives are implemented; automatic task
+> submission and the full chained Delegate Task flow move to `v0.7.1`.
+> Release hygiene and validation remain for 0.7.0; keep the stable release
+> narrow instead of adding another large product surface.
 >
-> The release's primary user journey is **Delegate Task**: enter a task, create
-> an isolated worktree, start the selected agent, wait until it is ready, submit
-> the task, and return to the Inbox when the agent blocks or finishes.
+> The release's primary user journey is **Create & coordinate**: create an
+> isolated worktree, optionally start a selected agent, observe it in the Inbox,
+> and coordinate it with waits, prompts, reads, and lightweight checkpoints.
 
 ### Stable-release status
 
 **P0 — one blocker remains:**
 
-- ⬜ **Delegate Task / Create & run flow (P0 blocker)**: worktree creation and
+- ⬜ **Optional worktree agent start (P0 blocker)**: worktree creation and
   checkpoint seeding are in place, but `new_worktree_session_ext` currently
   treats the successful return from `agent_start` as an error and does not
   connect that chained launch to the server-owned readiness wait. Consequently
-  `create --ai --agent ...` can report failure after launching the agent and
-  cannot yet guarantee that task submission waits for readiness. Reuse the
-  readiness-gated handoff and return an honest success or failure; this is the
-  single remaining P0 blocker.
+  `create --ai --agent ...` can report failure after launching the optional
+  agent. Fix the success/error handoff in 0.7.0; readiness-gated chained launch
+  and automatic task submission are tracked in 0.7.1. This is the single
+  remaining P0 blocker.
 - ✅ **Standalone readiness-gated `agent start`**: a server-owned,
   occupant-pinned startup wait succeeds only after the expected agent kind is
   detected and ready, with deterministic `agent_not_ready`, `agent_replaced`,
@@ -253,12 +254,11 @@ machine-friendly control surface so agents can drive kumo themselves
   fixtures plus negative transcript cases cover every first-class agent. The
   corpus is validated through `kumo agent explain --json` and records the
   tested agent versions.
-- ✅ **Delegate Task / worktree workflow coverage**: the real daemon/CLI test
-  matrix exercises `create --ai → agent start ready → task submitted →
-  blocked/done → checkpoint set/current/list → remove`, including `--from`,
-  startup timeout/replacement, branch/path collisions, dirty or unmerged
-  removal, daemon restart, shared dirs, and `.worktreeinclude`; the successful
-  chained-agent run remains gated by the P0 blocker above.
+- ✅ **Isolated worktree and checkpoint coverage**: the daemon/CLI test matrix
+  covers worktree creation, checkpoint set/current/list, and removal, including
+  `--from`, branch/path collisions, dirty or unmerged removal, daemon restart,
+  shared dirs, and `.worktreeinclude`; the full chained Delegate Task E2E is
+  tracked in 0.7.1.
 - ✅ **Upgrade/reconnect smoke test**: multiple live agents and two attached
   clients survive the resume path with PTYs, scrollback, aliases, waits,
   checkpoints, and the five-state model intact on macOS and Linux release
@@ -266,28 +266,30 @@ machine-friendly control surface so agents can drive kumo themselves
 
 **P1 — release hygiene:**
 
-- ⬜ Update the user docs and changelog for the worktree/checkpoint surface;
-  remove the stale docs claim that OSC 133 lands in 0.7.0.
+- ✅ **User docs**: document the worktree/checkpoint surface and remove the
+  stale claim that OSC 133 lands in 0.7.0.
+- ⬜ **Changelog regeneration**: regenerate the changelog as part of the
+  explicitly planned `cargo release 0.7.0` step.
 - ⬜ Soak a real three-agent session for a working day: parallel prompts, one
   blocked agent, one completed agent, detach/reattach, worktree cleanup, and
   config hot reload. Fix correctness regressions; move polish to 0.8.0.
 - ⬜ Run the mandatory release gate cleanly:
   `cargo build --workspace`, `cargo test --workspace`, and
   `cargo clippy --workspace`, then replace the prerelease version and publish.
-  The `main` baseline is at 413 tests as of 2026-09-12; this working tree has
-  uncommitted changes, so repeat the gate on the exact release commit and
-  artifacts.
+  The current tree passes 414 tests as of 2026-09-13; repeat the gate on the
+  exact release commit and artifacts.
 
 ### Product boundary
 
-The 0.7 promise is a fast, terminal-native ADE: delegate work to isolated
-agents, observe reliable lifecycle state, handle blocked/done agents from one
-Inbox, and exchange lightweight checkpoints. A broader work lifecycle
+The 0.7 promise is a fast, terminal-native ADE: create isolated worktrees,
+optionally start agents, observe reliable lifecycle state, handle blocked/done
+agents from one Inbox, and exchange lightweight checkpoints. Automatic task
+submission after readiness is a 0.7.1 patch objective. A broader work lifecycle
 (task-source integrations, diff annotation, review, ship, and archive) belongs
-after 0.7.0 or in plugins; kumo does not become an embedded editor, browser, or
+after 0.7.1 or in plugins; kumo does not become an embedded editor, browser, or
 project-management suite in this release.
 
-After 0.7.0, the useful orchestration gaps are semantic lifecycle hooks plus
+After 0.7.1, the useful orchestration gaps are semantic lifecycle hooks plus
 native agent session identity, richer `recent-unwrapped --lines N` transcript
 reads, and validated logical `agent send-keys` — reliability work, not more
 orchestration syntax.
@@ -365,8 +367,9 @@ it, and it's the core of agent-to-agent work.
   (kept branches that still hold unmerged commits surface for review, then
   force-delete). `--branch` overrides the derived `<name-slug>` branch,
   `--from` resolves the start point (branch, `#1234` / GitHub URL, or commit — GitHub first, Jira later),
-  `--note` seeds the lightweight checkpoint comment, and `--agent` chains
-  `kumo agent start --kind <agent>` into the new pane. Uses the existing
+  `--note` seeds the lightweight checkpoint comment, and optional `--agent`
+  requests `kumo agent start --kind <agent>` in the new pane (the chained
+  handoff remains the P0 blocker above). Uses the existing
   worktree plumbing (`crates/kumo-core/src/worktrees.rs`,
   `crates/kumo-protocol: WorktreeCreate/Open/List`); the generic `kumo worktree create/open`
   without `--ai` stays for normal worktrees. The same fields surface in the
@@ -386,10 +389,10 @@ it, and it's the core of agent-to-agent work.
   clear both.
 - ✅ **Human ↔ agent TUI loop**: the TUI exposes full checkpoint display,
   editing and status selection after creation, plus **Ask agent to update**.
-  The create dialog keeps the task prompt separate from the checkpoint note
-  and submits it after the chosen agent becomes ready. Good checkpoint moments
-  include finishing a slice, proving a hypothesis, hitting a blocker, or moving
-  to review; agents read existing user context before updating it.
+  Worktree creation can seed a checkpoint note; automatic task prompt
+  submission after agent readiness is tracked in 0.7.1. Good checkpoint
+  moments include finishing a slice, proving a hypothesis, hitting a blocker,
+  or moving to review; agents read existing user context before updating it.
 
 **Machine surface for agents**:
 - ✅ **`--json` on all control commands** + **`KUMO_SOCKET_PATH` / `KUMO_BIN_PATH` injection**: the daemon socket is exposed to spawned panes so agents drive their own workspace layouts natively (`app/kumo/src/daemon/pty.rs`); can be disabled in config. `kumo worktree current/list/set --json` and `kumo session|pane|agent --json` make the TUI scriptable without duplicating the bincode wire.
@@ -432,6 +435,24 @@ snapshots + declarative `layout export/apply` (dropped — superseded by
 JSON/MCP lands post-1.0), `verify loop leader+r` (→ 0.8.0; `pane wait-output`
 primitive already ships), `sync-input` stays cut (broadcast supersedes it),
 `pipe-pane` stays 0.9.0.
+
+## 🔧 0.7.1 — Delegate Task handoff
+
+The 0.7.1 patch release completes the deferred automatic task handoff without
+adding another orchestration surface to 0.7.0:
+
+- ⬜ **Readiness-gated chained launch**: route `new_worktree_session_ext`'s
+  optional `--agent` through the server-owned, occupant-pinned readiness wait;
+  return deterministic success, `agent_not_ready`, `agent_replaced`, and
+  timeout results without reporting a successful launch as an error.
+- ⬜ **Task field and prompt submission**: keep the user task separate from the
+  checkpoint note, submit the task prompt only after the selected agent is
+  ready, and refresh the daemon/TUI state from the resulting reply.
+- ⬜ **Full Delegate Task E2E**: exercise
+  `create --ai --agent → agent ready → task submitted → blocked/done →
+  checkpoint set/current/list → remove`, including startup timeout/replacement,
+  branch/path collisions, dirty or unmerged removal, daemon restart, shared
+  dirs, and `.worktreeinclude`.
 
 ## 🛡️ 0.8.0 — Stability & ADE reliability
 
