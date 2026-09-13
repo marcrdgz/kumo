@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.7.0
+
+### 🚀 Features
+
+- *(agents)* Kumo agent explain + pane-id discovery (#6)
+- *(agents)* Data-driven agent-detection rules with user-dir overrides
+- *(agents)* Reload agent rules and adapt explain to owned markers
+- *(agents)* Agent orchestration primitives (wait, prompt, read, start, broadcast, pane wait-output) (#7)
+- *(sidebar)* Project layout with inline agents, finder and resizable width (#8)
+- *(agents)* Add codex detection (#14)
+- *(ui)* Improve project and tab navigation (#15)
+- *(ui)* Improve workspace navigation and agent awareness (#16)
+- *(ade)* Complete agent automation surface
+- *(config)* Persist selected theme safely
+- *(agents)* Manage bundled skill installations
+
+### 🐛 Bug Fixes
+
+- *(vt)* Match vendored terminal ABI and apply scrollback limit
+- *(vt)* Restore modes via TERMINAL_OPT_MODE not data id
+- *(cli)* Remove unused mut in agent toast test
+- *(docs)* Correct agent status colors — blue is working, green is done
+- *(worktree)* Flatten branch slashes and add checkpoint clear in TUI
+- *(runtime)* Keep agent terminals reliable across viewers and restart (#12)
+- *(agents)* Detect codex questions from live footer
+- *(ade)* Harden agent and worktree workflows
+- *(ui)* Remove pty role from pane labels
+- *(worktrees)* Support symlinks on windows
+
+### ⚙️ Miscellaneous Tasks
+
+- *(agents)* Add engineering agent configuration
 ## v0.7.0-prerelease.1
 
 ### 🚀 Features
@@ -20,6 +52,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(ci)* Restrict release workflow to tags on main
+- Release 0.7.0-prerelease.1
 ## v0.6.0
 
 ### 🚀 Features
