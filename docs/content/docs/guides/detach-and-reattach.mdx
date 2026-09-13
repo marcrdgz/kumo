@@ -31,6 +31,5 @@ user's client is rejected, fail closed.
 
 `kumo update` swaps the binary and the daemon restarts **in place**
 (`daemon --resume`), inheriting the live terminals from a transient resume
-file — running agents survive the update, and attached terminals auto-reconnect
-over the fresh socket. Screens come back fresh; a full screen+scrollback
-restore is planned for 0.6.0 (see the [roadmap](/docs/roadmap)).
+file — running agents survive the update, attached terminals auto-reconnect
+over the fresh socket, and each pane restores its screen and scrollback.

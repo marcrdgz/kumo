@@ -59,6 +59,22 @@ for details about paths and update detection.
 - <kbd>leader+n</kbd> / <kbd>leader+p</kbd> — cycle sessions
 - <kbd>leader+1…9</kbd> — jump to the session at that sidebar position
 
+## Give an agent an isolated worktree
+
+Create an ephemeral checkout and start an agent in its new session:
+
+```sh
+kumo worktree create --ai fix-login --agent claude --note "Investigate auth tests"
+kumo agent status
+kumo agent wait -p 42 --until idle
+kumo agent prompt -p 42 "Fix the failing auth tests" --wait idle
+```
+
+In 0.7.0, `--agent` starts the agent but does not submit a task automatically;
+the explicit `agent prompt` is required. Automatic task submission in the
+create flow is planned for 0.7.1. See [Orchestration](/docs/guides/orchestration)
+for checkpoints, `--from`, shared directories, and cleanup.
+
 ## Orchestrate agents (and dev servers)
 
 Every `kumo` command is an API an AI inside a pane can use — no SDK:

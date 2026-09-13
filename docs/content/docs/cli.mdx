@@ -22,6 +22,35 @@ icon: 🛠️
 | `kumo tab new [WORKSPACE] [--name NAME]` | Create a tab (window) in a session |
 | `kumo tab focus TAB` / `kumo tab kill TAB` / `kumo tab rename TAB NAME` | Manage tabs |
 
+### Worktrees
+
+| Command | Description |
+| --- | --- |
+| `kumo worktree create BRANCH [-s SESSION]` | Create a regular Git worktree from the session's repository and open it in a new session |
+| `kumo worktree create --ai [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent KIND] [-s SESSION]` | Create an isolated worktree for agent work; derive a branch from `NAME` (or use `--branch`), optionally start from a branch/commit/PR ref, seed a checkpoint note, and start an agent |
+| `kumo worktree list [-s SESSION]` | List the repository's main and linked worktrees |
+| `kumo worktree current [PATH] [-s SESSION]` | Show the checkpoint for the session's current worktree, or for `PATH` |
+| `kumo worktree set [PATH] [--comment TEXT] [--status STATUS] [-s SESSION]` | Set or update a checkpoint (`todo`, `in-progress`, `in-review`, or `completed`) |
+| `kumo worktree open PATH [-s SESSION]` | Open an existing worktree in a new session, or focus its existing session |
+| `kumo worktree rm PATH [-f|--force] [-s SESSION]` | Remove a worktree; without `--force`, preserve a branch with unmerged commits for review |
+
+The `--ai` form creates an ephemeral isolated checkout. `--from` accepts a
+local branch, remote branch, commit, `#1234`, or a GitHub/GitLab pull or merge
+request URL; Jira references are not supported yet. `--agent KIND` starts the
+selected agent in the new pane, but **does not submit a task automatically**.
+Wait for readiness and submit the task explicitly:
+
+```sh
+kumo worktree create --ai fix-login --agent claude --note "Investigate auth tests"
+kumo agent status
+kumo agent wait -p 42 --until idle --timeout 60s
+kumo agent prompt -p 42 "Fix the failing auth tests" --wait idle --timeout 10m
+kumo worktree set --status in-review --comment "Tests pass; ready for review"
+```
+
+Automatic task submission after creation, including the fully chained
+create→start→ready→prompt flow, is planned for 0.7.1.
+
 ### Panes
 
 | Command | Description |
@@ -82,7 +111,7 @@ kumo agent prompt -p 42 "fix the failing test" --wait idle --timeout 120s
 # read what the agent actually sees (daemon owns the alt-screen buffer)
 kumo agent read -p 42 --source visible
 kumo agent read -p 42 --source recent        # last ~16 KiB of output
-kumo agent read -p 42 --source traceback     # last prompt block (OSC 133 / form fallback)
+kumo agent read -p 42 --source traceback     # last prompt block (form / tail fallback)
 
 # wait for any pane's output (dev server, test suite, build)
 kumo pane wait-output -p 42 "Ready on" --timeout 30s

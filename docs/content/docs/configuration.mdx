@@ -31,6 +31,10 @@ x = "close-pane"
 [notifications]
 position = "top-right"  # top-left | bottom-right | bottom-left | center | off
 sound = true            # audible chime on blocked/finished transitions
+
+[worktree]
+shared-dirs = ["node_modules", ".cache"] # gitignored dirs shared by worktrees
+expose-socket = true    # pass KUMO_SOCKET_PATH and KUMO_BIN_PATH to panes
 ```
 
 ## Config builder
@@ -60,6 +64,33 @@ skill removes its `SKILL.md`. **Update available** means the file exists but its
 contents differ from the skill bundled with the running Kumo version—usually
 because Kumo was upgraded, but also possibly because the file was edited. The
 update action replaces that file with the bundled version.
+
+## Worktree isolation
+
+The optional `[worktree]` section controls what new isolated worktrees share
+with the primary checkout:
+
+| Key | Description |
+| --- | --- |
+| `shared-dirs` | Relative, gitignored directories to link into each new worktree (for example `node_modules` or `.cache`). Absolute paths and paths containing `..` are ignored. Missing, non-directory, or non-gitignored sources are skipped with a warning. |
+| `expose-socket` | When `true` (the default), panes receive `KUMO_SOCKET_PATH` and `KUMO_BIN_PATH` so an agent can drive its own Kumo session. |
+
+For files that should be copied rather than shared, add a `.worktreeinclude`
+file at the repository root. Put one literal, relative, gitignored path per
+line; blank lines and lines beginning with `#` are ignored. Globs, negations,
+absolute paths, and paths containing `..` are skipped. For example:
+
+```text
+# Local configuration copied into each isolated checkout
+.env
+.vscode/settings.json
+```
+
+These paths are copied when `kumo worktree create --ai` creates a checkout.
+
+The current 0.7 flow starts an agent when `--agent` is supplied, but does not
+send a task automatically. After the agent is ready, submit work explicitly
+with `kumo agent prompt`; automatic task submission is planned for 0.7.1.
 
 ## Reference
 
@@ -94,6 +125,16 @@ update action replaces that file with the bundled version.
       description:
         'Width of the sidebar in columns when `layout = "project"` (draggable live, clamped 20..50). Honored on `kumo reload`.',
       default: '`28` (`25` for other layouts)',
+    },
+    'worktree.shared-dirs': {
+      description:
+        'Relative, gitignored directories to share with new isolated worktrees (for example `node_modules` or `.cache`).',
+      default: 'empty',
+    },
+    'worktree.expose-socket': {
+      description:
+        'Pass `KUMO_SOCKET_PATH` and `KUMO_BIN_PATH` to processes spawned in panes.',
+      default: '`true`',
     },
     'update-check': {
       description:

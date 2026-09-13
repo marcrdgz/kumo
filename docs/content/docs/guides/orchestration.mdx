@@ -101,7 +101,7 @@ kumo agent read <PANE> [--source <SOURCE>] [-s SESSION]
 | `visible` | The viewport as the daemon sees it (what is on screen right now) |
 | `recent` | Last ~16 KiB of output (ring tail) — good for recent logs |
 | `detection` | Raw signal regions as `screen / form / footer / title` — for debugging detection |
-| `traceback` | Last prompt block: `form` (below last rule) or last 120 rows if empty — structured traceback until OSC 133 lands |
+| `traceback` | Last prompt block: `form` (below last rule) or last 120 rows if empty — structured command boundaries are planned for 0.8 |
 
 The daemon **owns the screen buffer including the alt-screen** (ghostty's buffer holds it), so full-screen agent transcripts (claude/codex) read directly without mouse-scroll scraping.
 
@@ -148,6 +148,43 @@ kumo agent broadcast "echo broadcast-ok" -s myproj --filter blocked
 * `rename` sets a live alias so scripts reference agents by name, not id.
 * `broadcast` fans the prompt over the existing `send-keys` wire path to every AI pane in the session; `--filter` restricts to `working|blocked|idle|done|unknown`.
 
+## Isolated worktrees and checkpoints
+
+Use an AI worktree when an agent should work in its own checkout and branch:
+
+```sh
+kumo worktree create --ai fix-login \
+  --agent claude \
+  --from main \
+  --note "Investigate the authentication tests" \
+  -s myproj
+```
+
+`--ai` creates an ephemeral worktree and opens a session for it. The
+positional `NAME` is slugged into a branch unless `--branch` supplies an
+explicit branch. `--from` accepts a local or remote branch, commit, `#1234`,
+or a GitHub/GitLab pull or merge request URL. Jira references are not supported
+yet. `--agent KIND` starts the selected agent in the new pane; it does not send
+the task text.
+
+In 0.7, submit the task as a separate explicit step after startup:
+
+```sh
+kumo agent status -s myproj
+kumo agent wait -p 42 --until idle --timeout 60s
+kumo agent prompt -p 42 "Fix the failing authentication tests" --wait idle --timeout 10m
+kumo worktree set -s myproj --status in-review \
+  --comment "Tests pass; ready for review"
+```
+
+Inspect or clean up the worktree with `kumo worktree current`, `list`,
+`set`, `open`, and `rm`. `rm` keeps a branch with unmerged commits unless
+`--force` is supplied. Checkpoint statuses are `todo`, `in-progress`,
+`in-review`, and `completed`; `--note` on create seeds the checkpoint comment.
+
+Automatic task submission and the fully chained
+create→start→ready→prompt flow are planned for 0.7.1.
+
 ## Patterns (copy-paste)
 
 ### 1 — Dev server: run it, wait for ready, then read
@@ -165,7 +202,8 @@ kumo agent read -p $PANE --source recent | grep -i "ready"
 
 ### 2 — Verify loop: run tests, wait for result, feed failure back
 
-This is how `leader+r` (the coming verify loop) works — run the suite into a fresh split, `wait-output` on it, and only then feed the failure to the agent:
+Use the same primitives for a manual verify loop: run the suite into a fresh
+split, wait for its output, and only then feed the failure to the agent:
 
 ```sh
 SESSION=myproj
