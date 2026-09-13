@@ -11,7 +11,9 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
 use semver::Version;
 
 use crate::update;

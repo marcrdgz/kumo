@@ -5,6 +5,20 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path, _target_is_dir: bool) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path, target_is_dir: bool) -> std::io::Result<()> {
+    if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
 /// One worktree of a repository: its working-tree path and the branch checked
 /// out there. `branch` is `None` when the HEAD is detached.
 #[derive(Debug, Clone, PartialEq)]
@@ -428,7 +442,7 @@ pub fn wire_shared_dirs(repo_root: &Path, wt_path: &Path, shared_dirs: &[PathBuf
             // Also try clonefile(2) via `cp -c` without -R for files handled elsewhere; already covered.
         }
         // Fallback: symlink absolute source → dest
-        if let Err(e) = std::os::unix::fs::symlink(&src, &dst) {
+        if let Err(e) = create_symlink(&src, &dst, true) {
             warns.push(format!("symlink {:?} failed: {e}", dir));
         }
     }
@@ -500,7 +514,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             std::fs::copy(entry.path(), &dst_path)?;
         } else if ft.is_symlink() {
             if let Ok(target) = std::fs::read_link(entry.path()) {
-                let _ = std::os::unix::fs::symlink(target, dst_path);
+                let target_is_dir = std::fs::metadata(entry.path())
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(false);
+                let _ = create_symlink(&target, &dst_path, target_is_dir);
             }
         }
     }
