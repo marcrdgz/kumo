@@ -761,6 +761,7 @@ impl App {
                         path.display()
                     ));
                 }
+                Ok(msg) if msg.starts_with("started ") => {}
                 Ok(msg) => {
                     return Err(format!(
                         "created worktree {branch:?} at {} but agent {kind:?} failed to start: {msg}",
@@ -1676,6 +1677,45 @@ mod tests {
         app.remove_worktree_at(&wt_path, true, Some(&repo)).unwrap();
         assert_eq!(app.sessions.len(), 1);
 
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn worktree_session_with_agent_accepts_successful_start() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("wt-agent-cfg");
+        let home = scratch("wt-agent-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let repo = temp_git_repo();
+        let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
+
+        let result = app.new_worktree_session_ext(
+            0,
+            Some("feat/codex"),
+            None,
+            None,
+            Some("codex"),
+            true,
+            None,
+        );
+
+        assert_eq!(result.unwrap(), "feat/codex");
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(
+            std::fs::canonicalize(&app.sessions[1].workspace).unwrap(),
+            std::fs::canonicalize(kumo_core::worktrees::worktree_path(&repo, "feat/codex"))
+                .unwrap()
+        );
+
+        let wt_path = app.sessions[1].workspace.clone();
+        app.remove_worktree_at(&wt_path, true, Some(&repo)).unwrap();
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&home);
