@@ -4910,16 +4910,11 @@ impl View {
         let mut order: Vec<String> = Vec::new();
         if let Some(layout) = &self.layout {
             for (i, s) in layout.sessions.iter().enumerate() {
-                let root = s.project_root.as_deref().unwrap_or(&s.workspace);
                 let key = session_project_key(s);
                 if !map.contains_key(&key) {
                     order.push(key.clone());
                 }
-                let label = root
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| s.name.clone());
+                let label = project_label(s);
                 map.entry(key).or_insert_with(|| (label, Vec::new())).1.push(i);
             }
         }
@@ -7308,7 +7303,7 @@ impl View {
             let visible = self.agent_inbox_visible_rows();
             let start = self.agent_inbox_view_start();
             let selected = self.inbox.as_ref().map(|inbox| inbox.sel).unwrap_or(0).min(entries.len() - 1);
-            for (row, (_, session, _pane, status, name)) in entries.iter().skip(start).take(visible).enumerate() {
+            for (row, (_, session, pane, status, name)) in entries.iter().skip(start).take(visible).enumerate() {
                 let idx = start + row;
                 let y = rect.y + 3 + row as u16;
                 let active = idx == selected;
@@ -7336,7 +7331,14 @@ impl View {
                     marker,
                     Style::default().fg(RColor::Rgb(r, g, b)).bg(bg).add_modifier(Modifier::BOLD),
                 );
-                let label = format!("{name} · {}", self.session_name(*session));
+                let (_, tab) = Self::agent_pane_location(self.layout.as_ref(), *session, *pane);
+                let location = self
+                    .layout
+                    .as_ref()
+                    .and_then(|layout| layout.sessions.get(*session))
+                    .map(|session| agent_inbox_location_label(session, &tab))
+                    .unwrap_or_else(|| self.session_name(*session));
+                let label = format!("{name} · {location}");
                 let shown = fit_branch_name(&label, inner_w.saturating_sub(5) as usize);
                 text(
                     f,
@@ -7352,10 +7354,13 @@ impl View {
             let session_info = self.layout.as_ref().and_then(|layout| layout.sessions.get(*session));
             let workspace = session_info.map(|session| session.workspace.display().to_string()).unwrap_or_default();
             let (_, tab) = Self::agent_pane_location(self.layout.as_ref(), *session, *pane);
+            let location = session_info
+                .map(|session| agent_inbox_location_label(session, &tab))
+                .unwrap_or_else(|| self.session_name(*session));
             let detail_y = rect.bottom().saturating_sub(4);
             let separator = "─".repeat(inner_w as usize);
             text(f, rect.x + 2, detail_y.saturating_sub(1), &separator, Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
-            let detail = format!("{name} · {} · {}", status.label(), if tab.is_empty() { "pane" } else { &tab });
+            let detail = format!("{name} · {} · {location}", status.label());
             text(f, rect.x + 2, detail_y, &fit_branch_name(&detail, inner_w as usize), Style::default().fg(theme.fg).bg(theme.panel_sep), inner_w);
             text(f, rect.x + 2, detail_y + 1, &fit_branch_name(&workspace, inner_w as usize), Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
         }
@@ -8441,6 +8446,29 @@ fn session_project_key(session: &SessionLayout) -> String {
     )
 }
 
+/// Display label shared by project groups and agent context. A worktree uses
+/// its project's basename when available; standalone sessions use their
+/// workspace basename, then finally the session name.
+fn project_label(session: &SessionLayout) -> String {
+    session
+        .project_root
+        .as_deref()
+        .or(Some(session.workspace.as_path()))
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| session.name.clone())
+}
+
+/// Human-readable Agent Inbox hierarchy for a pane's session and tab.
+fn agent_inbox_location_label(session: &SessionLayout, tab: &str) -> String {
+    let mut parts = vec![project_label(session), session.name.clone()];
+    if !tab.is_empty() {
+        parts.push(tab.to_string());
+    }
+    parts.join(" › ")
+}
+
 fn session_worktree_key(session: &SessionLayout) -> String {
     kumo_core::ui_state::canonical_project_key(&session.workspace)
 }
@@ -9271,6 +9299,59 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|frame| view.render_agent_inbox(frame)).unwrap();
         assert_eq!(term.backend().buffer().cell((rect.x + 4, rect.y + 3)).unwrap().symbol(), "!");
+    }
+
+    #[test]
+    fn agent_inbox_renders_project_session_and_tab_context() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Blocked)]);
+        let session = &mut layout.sessions[0];
+        session.name = "feature".into();
+        session.workspace = PathBuf::from("/tmp/my-project/.worktrees/feature");
+        session.project_root = Some(PathBuf::from("/tmp/my-project"));
+        session.tabs[0].name = "implementation".into();
+        let Some(LayoutNode::Pane(pane)) = session.tabs[0].root.as_deref_mut() else {
+            unreachable!("test layout has one pane");
+        };
+        pane.agent.as_mut().unwrap().name = "codex".into();
+        view.layout = Some(layout);
+        view.open_inbox();
+
+        let rect = view.agent_inbox_rect().unwrap();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.render_agent_inbox(frame)).unwrap();
+        let row_text = |y: u16| -> String {
+            (rect.x..rect.right())
+                .filter_map(|x| term.backend().buffer().cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        assert!(
+            row_text(rect.y + 3).contains("codex · my-project › feature › implementation"),
+            "inbox row includes project, session, and tab"
+        );
+        assert!(
+            row_text(rect.bottom() - 4).contains("codex · blocked · my-project › feature › implementation"),
+            "selected detail retains status and the full hierarchy"
+        );
+        assert!(
+            row_text(rect.bottom() - 3).contains("/tmp/my-project/.worktrees/feature"),
+            "workspace path remains on its detail line"
+        );
+    }
+
+    #[test]
+    fn project_label_falls_back_to_workspace_then_session_name() {
+        let mut session = panes_layout(&[]).sessions.remove(0);
+        session.project_root = None;
+        session.workspace = PathBuf::from("/tmp/my-project/.worktrees/feature");
+        session.name = "fallback-session".into();
+        assert_eq!(project_label(&session), "feature");
+
+        session.workspace = PathBuf::from("/");
+        assert_eq!(project_label(&session), "fallback-session");
     }
 
     #[test]
