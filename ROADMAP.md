@@ -379,7 +379,7 @@ it, and it's the core of agent-to-agent work.
   branch, or GitHub/GitLab URL; Jira is deferred), plus `Branch name` override,
   `Note`, and `Agent` picker in the advanced drawer; `Worktree padre` / `Sparse checkout`
   stay deferred.
-- ✅ **Shared gitignored paths**: per-repo `[worktree] shared-dirs` (e.g. `node_modules`, `.cache` — symlink, APFS clone-copy on macOS when available) plus a repo-root `.worktreeinclude` for copy-on-create files (e.g. `.env`, `.vscode/settings.json` — literal paths, `#` comments, only gitignored sources). `shared-dirs` is config-owned; `.worktreeinclude` is repo-owned and committed.
+- ✅ **Shared gitignored paths**: per-repo `[worktree] shared-dirs` (e.g. `node_modules`, `.cache` — symlink, APFS clone-copy on macOS when available) plus a repo-root `.worktreeinclude` for copy-on-create files (e.g. `.env`, `app/**/.env`, `.vscode/settings.json` — gitignore pattern syntax, only gitignored sources). `shared-dirs` is config-owned; `.worktreeinclude` is repo-owned and committed.
 
 **Lightweight checkpoints** (replaces heavy snapshots/rollback):
 - ✅ **Backend and agent CLI**: `kumo worktree set --comment "..." --status

@@ -449,44 +449,65 @@ pub fn wire_shared_dirs(repo_root: &Path, wt_path: &Path, shared_dirs: &[PathBuf
     warns
 }
 
-/// Copy repo-root `.worktreeinclude` literal paths (gitignored only) into the new worktree.
-/// Returns warnings (non-fatal). Literal paths, `#` comments, blank lines.
+/// Copy paths selected by the repo-root `.worktreeinclude` into the new worktree.
+///
+/// The file uses gitignore pattern syntax (including globs, comments, and
+/// negations). Git expands the patterns so its matching semantics stay aligned
+/// with `.gitignore`; every result must also be ignored by the repository.
+/// Returns warnings for non-fatal failures.
 pub fn copy_worktreeinclude(repo_root: &Path, wt_path: &Path) -> Vec<String> {
     let mut warns = Vec::new();
     let inc = repo_root.join(".worktreeinclude");
-    let content = match std::fs::read_to_string(&inc) {
-        Ok(c) => c,
-        Err(_) => return warns, // No file → nothing to do
-    };
-    for (lineno, raw) in content.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        // Only literal paths — reject globs/negations per spec, warn
-        if line.contains('*') || line.contains('?') || line.starts_with('!') || line.contains('[') {
-            warns.push(format!(".worktreeinclude:{}: glob/negation {:?} skipped (literal paths only)", lineno + 1, line));
-            continue;
+    match std::fs::metadata(&inc) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            warns.push(".worktreeinclude is not a file — skipped".to_string());
+            return warns;
         }
-        let rel = PathBuf::from(line);
+        Err(_) => return warns, // No file → nothing to do
+    }
+
+    let output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["ls-files", "--others", "--ignored", "--exclude-from=.worktreeinclude", "-z", "--"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if stderr.is_empty() { "git ls-files failed" } else { &stderr };
+            warns.push(format!(".worktreeinclude pattern expansion failed: {detail}"));
+            return warns;
+        }
+        Err(error) => {
+            warns.push(format!(".worktreeinclude pattern expansion failed: git: {error}"));
+            return warns;
+        }
+    };
+
+    for raw in output.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        let rel = PathBuf::from(String::from_utf8_lossy(raw).into_owned());
         if rel.is_absolute() {
-            warns.push(format!(".worktreeinclude:{}: absolute path {:?} skipped", lineno + 1, line));
+            warns.push(format!(".worktreeinclude matched absolute path {:?} — skipped", rel));
             continue;
         }
         if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-            warns.push(format!(".worktreeinclude:{}: path with '..' {:?} skipped", lineno + 1, line));
+            warns.push(format!(".worktreeinclude matched path with '..' {:?} — skipped", rel));
             continue;
         }
         let src = repo_root.join(&rel);
         let dst = wt_path.join(&rel);
         if !src.exists() {
-            warns.push(format!(".worktreeinclude:{}: {:?} missing — skipped", lineno + 1, line));
+            warns.push(format!(".worktreeinclude matched {:?}, but it is missing — skipped", rel));
             continue;
         }
         if !is_gitignored(repo_root, &src) {
-            warns.push(format!(".worktreeinclude:{}: {:?} is not gitignored — skipped (only ignored sources)", lineno + 1, line));
+            warns.push(format!(".worktreeinclude matched {:?}, but it is not gitignored — skipped", rel));
             continue;
         }
         if dst.exists() {
-            warns.push(format!(".worktreeinclude:{}: {:?} already exists in worktree — kept", lineno + 1, line));
+            warns.push(format!(".worktreeinclude path {:?} already exists in worktree — kept", rel));
             continue;
         }
         if let Some(parent) = dst.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -496,7 +517,7 @@ pub fn copy_worktreeinclude(repo_root: &Path, wt_path: &Path) -> Vec<String> {
             std::fs::copy(&src, &dst).map(|_| ())
         };
         if let Err(e) = res {
-            warns.push(format!(".worktreeinclude:{}: copy {:?} failed: {e}", lineno + 1, line));
+            warns.push(format!(".worktreeinclude copy {:?} failed: {e}", rel));
         }
     }
     warns
@@ -771,6 +792,44 @@ mod tests {
         let warns = copy_worktreeinclude(&repo, &wt);
         assert!(wt.join(".env").exists(), "warns: {warns:?}");
         assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn copy_worktreeinclude_supports_gitignore_globs_and_negations() {
+        let repo = temp_repo();
+        for dir in ["app/web", "app/api", "app/fixtures", "other"] {
+            std::fs::create_dir_all(repo.join(dir)).unwrap();
+        }
+        for (path, value) in [
+            (".env", "ROOT=1"),
+            ("app/web/.env", "WEB=1"),
+            ("app/api/.env", "API=1"),
+            ("app/fixtures/.env", "FIXTURE=1"),
+            ("other/.env", "OTHER=1"),
+            ("app/web/.env.local", "LOCAL=1"),
+        ] {
+            std::fs::write(repo.join(path), value).unwrap();
+        }
+        std::fs::write(repo.join(".gitignore"), ".env\napp/**/.env\n").unwrap();
+        std::fs::write(
+            repo.join(".worktreeinclude"),
+            "/.env\napp/**/.env\n!app/fixtures/**\napp/**/.env.local\n",
+        )
+        .unwrap();
+
+        let wt = worktree_path(&repo, "feat/globs");
+        add_worktree(&repo, &wt, "feat/globs").unwrap();
+        let warns = copy_worktreeinclude(&repo, &wt);
+
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "ROOT=1");
+        assert_eq!(std::fs::read_to_string(wt.join("app/web/.env")).unwrap(), "WEB=1");
+        assert_eq!(std::fs::read_to_string(wt.join("app/api/.env")).unwrap(), "API=1");
+        assert!(!wt.join("app/fixtures/.env").exists(), "negated path must not be copied");
+        assert!(!wt.join("other/.env").exists(), "unmatched path must not be copied");
+        assert!(!wt.join("app/web/.env.local").exists(), "non-gitignored match must not be copied");
+        assert!(warns.iter().any(|warning| warning.contains("app/web/.env.local") && warning.contains("not gitignored")), "warns: {warns:?}");
+        let _ = std::fs::remove_dir_all(&wt);
         let _ = std::fs::remove_dir_all(&repo);
     }
 }

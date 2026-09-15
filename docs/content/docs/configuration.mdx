@@ -76,13 +76,15 @@ with the primary checkout:
 | `expose-socket` | When `true` (the default), panes receive `KUMO_SOCKET_PATH` and `KUMO_BIN_PATH` so an agent can drive its own Kumo session. |
 
 For files that should be copied rather than shared, add a `.worktreeinclude`
-file at the repository root. Put one literal, relative, gitignored path per
-line; blank lines and lines beginning with `#` are ignored. Globs, negations,
-absolute paths, and paths containing `..` are skipped. For example:
+file at the repository root. It uses the same pattern syntax as `.gitignore`,
+including `*`, `**`, `?`, character ranges, comments, root-anchored patterns,
+and `!` negations. Matching files must also be ignored by Git. For example:
 
 ```text
 # Local configuration copied into each isolated checkout
-.env
+/.env
+app/**/.env
+!app/fixtures/**
 .vscode/settings.json
 ```
 
