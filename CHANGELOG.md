@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.2
+
+### 🚀 Features
+
+- *(worktrees)* Add safe removal actions
 ## v0.7.1
 
 ### 🚀 Features
@@ -10,6 +15,10 @@
 ### 🐛 Bug Fixes
 
 - *(worktree)* Accept successful agent startup
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.7.1
 ## v0.7.0
 
 ### 🚀 Features
