@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.1
+
+### 🚀 Features
+
+- *(inbox)* Show project session and tab context
+- *(worktrees)* Support gitignore patterns in includes
+
+### 🐛 Bug Fixes
+
+- *(worktree)* Accept successful agent startup
 ## v0.7.0
 
 ### 🚀 Features
@@ -32,6 +42,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(agents)* Add engineering agent configuration
+- Release 0.7.0
 ## v0.7.0-prerelease.1
 
 ### 🚀 Features
