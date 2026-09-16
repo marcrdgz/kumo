@@ -107,6 +107,47 @@ pub fn main_worktree_path(ws: &Path) -> Option<PathBuf> {
     list_worktrees(ws).ok()?.first().map(|w| w.path.clone())
 }
 
+/// Whether `path` is the repository's primary worktree.
+///
+/// This uses Git's worktree metadata rather than inspecting `.git`: linked
+/// worktrees and the main checkout can both be represented reliably even when
+/// a repository uses unusual layouts.
+pub fn is_main_worktree(repo_root: &Path, path: &Path) -> Result<bool, String> {
+    let Some(main) = list_worktrees(repo_root)?.first().map(|w| w.path.clone()) else {
+        return Ok(false);
+    };
+    let main = std::fs::canonicalize(&main).unwrap_or(main);
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    Ok(main == path)
+}
+
+/// Classify a path against Git's registered worktrees. Returns the main
+/// worktree path and whether `path` is a registered linked worktree.
+pub fn classify_worktree(path: &Path) -> Result<(PathBuf, bool), String> {
+    let worktrees = list_worktrees(path)?;
+    let Some(main) = worktrees.first().map(|worktree| worktree.path.clone()) else {
+        return Err("repository has no worktrees".to_string());
+    };
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let is_linked = worktrees.iter().skip(1).any(|worktree| {
+        std::fs::canonicalize(&worktree.path)
+            .unwrap_or_else(|_| worktree.path.clone())
+            == target
+    });
+    Ok((main, is_linked))
+}
+
+/// Return the porcelain status entries for a worktree, including untracked
+/// files. An empty vector means the worktree is clean.
+pub fn dirty_worktree_entries(path: &Path) -> Result<Vec<String>, String> {
+    let out = git(path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// Parse `git worktree list --porcelain`: one blank-line-separated block per
 /// worktree, `worktree <path>` plus an optional `branch refs/heads/<name>`
 /// (absent for a detached HEAD). `bare`/`locked`/`prunable` markers are
@@ -586,6 +627,17 @@ pub fn delete_branch(repo_root: &Path, branch: &str, force: bool) -> Result<(), 
     Ok(())
 }
 
+/// Resolve the commit currently pointed at by a branch.
+pub fn branch_head(repo_root: &Path, branch: &str) -> Result<String, String> {
+    let out = git(repo_root, &["rev-parse", "--verify", &format!("{branch}^{{commit}}")])?;
+    let head = String::from_utf8_lossy(&out).trim().to_string();
+    if head.is_empty() {
+        Err(format!("could not resolve branch {branch:?}"))
+    } else {
+        Ok(head)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,12 +760,23 @@ mod tests {
             branches.contains(&Some("main".into())) && branches.contains(&Some("feat/wt".into())),
             "both the main and the new worktree are listed: {branches:?}"
         );
+        assert!(is_main_worktree(&repo, &repo).expect("main worktree classification succeeds"));
+        assert!(!is_main_worktree(&repo, &wt).expect("linked worktree classification succeeds"));
+        let (classified_main, classified_linked) = classify_worktree(&wt).expect("worktree classification succeeds");
+        assert_eq!(classified_main, std::fs::canonicalize(&repo).unwrap());
+        assert!(classified_linked);
+        assert!(dirty_worktree_entries(&wt).expect("clean status succeeds").is_empty());
+        std::fs::write(wt.join("unfinished.txt"), "local work").unwrap();
+        let dirty = dirty_worktree_entries(&wt).expect("dirty status succeeds");
+        assert!(dirty.iter().any(|entry| entry.contains("unfinished.txt")));
+        std::fs::remove_file(wt.join("unfinished.txt")).unwrap();
 
         // A duplicate branch name is rejected with the git error surfaced.
         let err = add_worktree(&repo, &worktree_path(&repo, "feat/wt2"), "feat/wt");
         assert!(err.is_err(), "creating an existing branch must fail");
         let err = err.unwrap_err();
         assert!(!err.trim().is_empty(), "the error carries git's stderr");
+        remove_worktree(&repo, &wt, true).expect("linked worktree cleanup succeeds");
         let _ = std::fs::remove_dir_all(&repo);
     }
 

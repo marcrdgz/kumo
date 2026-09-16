@@ -109,10 +109,14 @@ impl App {
                     root: t.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
                 }).collect();
                 let active = tabs.get(s.active_tab).cloned();
+                let (project_root, is_linked_worktree) = kumo_core::worktrees::classify_worktree(&s.workspace)
+                    .map(|(main, linked)| (Some(main), linked))
+                    .unwrap_or((None, false));
                 kumo_protocol::SessionLayout {
                     name: s.name.clone(),
                     workspace: s.workspace.clone(),
-                    project_root: kumo_core::worktrees::main_worktree_path(&s.workspace),
+                    project_root,
+                    is_linked_worktree,
                     active_tab: s.active_tab,
                     tabs,
                     branch: self.session_branch(i).map(Into::into),

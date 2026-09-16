@@ -475,6 +475,13 @@ struct SessionCloseConfirm {
     session_idx: usize,
     session_name: String,
     path: PathBuf,
+    mode: WorktreeRemovalMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorktreeRemovalMode {
+    Safe,
+    Force,
 }
 
 /// One agent-lifecycle corner toast pushed by the daemon (blocked / finished).
@@ -892,7 +899,7 @@ impl View {
             },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
-            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
+            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -3218,8 +3225,8 @@ impl View {
     fn session_close_confirm_button_rect(&self, is_yes: bool) -> Option<Rect> {
         let dd = self.session_close_confirm_rect()?;
         let y = dd.bottom().saturating_sub(2);
-        let yes_label = " Yes (y) ";
-        let no_label = " No (n) ";
+        let yes_label = " Remove (y) ";
+        let no_label = " Cancel (n) ";
         let yes_w = yes_label.chars().count() as u16 + 2;
         let no_w = no_label.chars().count() as u16 + 2;
         let total_w = yes_w + 1 + no_w;
@@ -3579,32 +3586,27 @@ impl View {
         }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let path = self.session_close_confirm.path.clone();
-                let name = self.session_close_confirm.session_name.clone();
-                // Need session name for WorktreeRemove: use active session? Use stored name's session? The command needs a session name for routing; use the session being closed.
-                let session = name.clone();
-                self.session_close_confirm.open = false;
-                // Remove worktree (also closes session)
-                let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                self.submit_worktree_removal();
                 self.mark_dirty();
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                let name = self.session_close_confirm.session_name.clone();
                 self.session_close_confirm.open = false;
-                let _ = self.send(&Command::SessionKill { name });
                 self.mark_dirty();
             }
             KeyCode::Enter => {
-                // Default to Yes (remove worktree)
-                let path = self.session_close_confirm.path.clone();
-                let name = self.session_close_confirm.session_name.clone();
-                let session = name.clone();
-                self.session_close_confirm.open = false;
-                let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                self.submit_worktree_removal();
                 self.mark_dirty();
             }
             _ => {}
         }
+    }
+
+    fn submit_worktree_removal(&mut self) {
+        let path = self.session_close_confirm.path.clone();
+        let session = self.session_close_confirm.session_name.clone();
+        let force = self.session_close_confirm.mode == WorktreeRemovalMode::Force;
+        self.session_close_confirm.open = false;
+        let _ = self.send(&Command::WorktreeRemove { session, path, force });
     }
 
     fn commit_name(&mut self) {
@@ -3720,9 +3722,44 @@ impl View {
                 &["rename", "unzoom", "split vertical", "split horizontal", "close"]
             }
             CtxTarget::Pane(_) => &["rename", "zoom", "split vertical", "split horizontal", "close"],
-            CtxTarget::Session(_) => &["rename", "new worktree", "open worktree", "close"],
+            CtxTarget::Session(idx)
+                if !self.layout.as_ref().and_then(|layout| layout.sessions.get(idx)).map(|session| session.is_linked_worktree).unwrap_or(false) =>
+            {
+                &["rename", "new worktree", "open worktree", "close session"]
+            }
+            CtxTarget::Session(_) => &[
+                "rename",
+                "new worktree",
+                "open worktree",
+                "close session",
+                "remove worktree",
+                "force remove worktree",
+            ],
             CtxTarget::Tab(_, _) => &["new tab", "rename", "close"],
         }
+    }
+
+    fn open_worktree_removal_confirm(&mut self, idx: usize, mode: WorktreeRemovalMode) {
+        let Some((session_name, workspace)) = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.sessions.get(idx))
+            .map(|session| (session.name.clone(), session.workspace.clone())) else { return };
+        if !self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.sessions.get(idx))
+            .map(|session| session.is_linked_worktree)
+            .unwrap_or(false)
+        {
+            self.notice = Some(("only a registered linked worktree can be removed".to_string(), Instant::now()));
+            return;
+        }
+        self.session_close_confirm.open = true;
+        self.session_close_confirm.session_idx = idx;
+        self.session_close_confirm.session_name = session_name;
+        self.session_close_confirm.path = workspace;
+        self.session_close_confirm.mode = mode;
     }
 
     fn open_ctx_menu(&mut self, x: u16, y: u16, target: CtxTarget) {
@@ -3818,7 +3855,7 @@ impl View {
                     let _ = self.send(&Command::SessionZoom { session });
                 }
             }
-            "close" => match target {
+            "close" | "close session" => match target {
                 CtxTarget::Pane(pid) => {
                     let session = self.active_session().map(|s| s.name.clone());
                     if let Some(session) = session {
@@ -3829,16 +3866,7 @@ impl View {
                     let sess = self.layout.as_ref().and_then(|l| l.sessions.get(idx));
                     if let Some(s) = sess {
                         let name = s.name.clone();
-                        let ws = s.workspace.clone();
-                        let is_worktree = std::fs::metadata(ws.join(".git")).map(|m| m.is_file()).unwrap_or(false);
-                        if is_worktree {
-                            self.session_close_confirm.open = true;
-                            self.session_close_confirm.session_idx = idx;
-                            self.session_close_confirm.session_name = name;
-                            self.session_close_confirm.path = ws;
-                        } else {
-                            let _ = self.send(&Command::SessionKill { name });
-                        }
+                        let _ = self.send(&Command::SessionKill { name });
                     }
                 }
                 CtxTarget::Tab(s_idx, t_idx) => {
@@ -3848,6 +3876,16 @@ impl View {
                     }
                 }
             },
+            "remove worktree" => {
+                if let CtxTarget::Session(idx) = target {
+                    self.open_worktree_removal_confirm(idx, WorktreeRemovalMode::Safe);
+                }
+            }
+            "force remove worktree" => {
+                if let CtxTarget::Session(idx) = target {
+                    self.open_worktree_removal_confirm(idx, WorktreeRemovalMode::Force);
+                }
+            }
             _ => {}
         }
         self.mark_dirty();
@@ -4142,20 +4180,14 @@ impl View {
             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                 if let Some(rect) = self.session_close_confirm_button_rect(true) {
                     if rect.contains(Position::new(x, y)) {
-                        let path = self.session_close_confirm.path.clone();
-                        let name = self.session_close_confirm.session_name.clone();
-                        let session = name.clone();
-                        self.session_close_confirm.open = false;
-                        let _ = self.send(&Command::WorktreeRemove { session, path, force: false });
+                        self.submit_worktree_removal();
                         self.mark_dirty();
                         return Ok(());
                     }
                 }
                 if let Some(rect) = self.session_close_confirm_button_rect(false) {
                     if rect.contains(Position::new(x, y)) {
-                        let name = self.session_close_confirm.session_name.clone();
                         self.session_close_confirm.open = false;
-                        let _ = self.send(&Command::SessionKill { name });
                         self.mark_dirty();
                         return Ok(());
                     }
@@ -7937,16 +7969,27 @@ impl View {
         draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-        text(f, dd.x + 2, dd.y + 1, "close session", title, inner_w);
-        let msg = "Do you want to remove the worktree? Yes(y) / No(n)".to_string();
+        let force = self.session_close_confirm.mode == WorktreeRemovalMode::Force;
+        let title_text = if force { "force remove worktree" } else { "remove worktree" };
+        text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
+        let msg = if force {
+            "This permanently removes local changes and the worktree branch. Continue?"
+        } else {
+            "Remove this worktree after closing its session?"
+        };
         let msg_style = Style::default().fg(theme.fg).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.y + 2, &msg, msg_style, inner_w);
+        text(f, dd.x + 2, dd.y + 2, msg, msg_style, inner_w);
         let path = self.session_close_confirm.path.display().to_string();
         let path_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         text(f, dd.x + 2, dd.y + 3, &path, path_style, inner_w);
         let hint = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.y + 4, "Yes removes the worktree folder and branch · No keeps it", hint, inner_w);
-        for (is_yes, label) in [(true, " Yes (y) "), (false, " No (n) ")] {
+        let hint_text = if force {
+            "Force bypasses dirty checks and deletes the branch · No cancels"
+        } else {
+            "Safe removal refuses dirty or untracked files · No cancels"
+        };
+        text(f, dd.x + 2, dd.y + 4, hint_text, hint, inner_w);
+        for (is_yes, label) in [(true, " Remove (y) "), (false, " Cancel (n) ")] {
             if let Some(rect) = self.session_close_confirm_button_rect(is_yes) {
                 let st = if is_yes {
                     Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
@@ -8807,7 +8850,7 @@ mod tests {
             },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
-            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new() },
+            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -8909,6 +8952,7 @@ mod tests {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp/work"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs,
                 focus,
@@ -9689,6 +9733,7 @@ mod tests {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -9949,6 +9994,7 @@ mod tests {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -9991,6 +10037,7 @@ mod tests {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -10049,6 +10096,7 @@ mod tests {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -10337,6 +10385,7 @@ mod tests {
                 name: "sess".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
                 focus: 1,
@@ -10418,6 +10467,64 @@ mod tests {
         // Unselected item rows carry the panel surface, not the selection bg.
         let theme = view.current_theme();
         assert_eq!(buf.cell((dd.x + 3, dd.y + 3)).unwrap().bg, theme.panel_sep);
+    }
+
+    #[test]
+    fn worktree_context_menu_separates_close_and_removal() {
+        let root = std::env::temp_dir().join(format!("kumo-tui-worktrees-{}", std::process::id()));
+        let linked_path = root.with_file_name(format!("{}-feature", root.file_name().unwrap().to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&linked_path);
+        std::fs::create_dir_all(&root).unwrap();
+        let run_git = |args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).status().unwrap().success(), "git {args:?}");
+        };
+        run_git(&["init", "-q", "-b", "main", root.to_str().unwrap()]);
+        run_git(&["-C", root.to_str().unwrap(), "config", "user.email", "t@t"]);
+        run_git(&["-C", root.to_str().unwrap(), "config", "user.name", "t"]);
+        run_git(&["-C", root.to_str().unwrap(), "commit", "-q", "--allow-empty", "-m", "initial"]);
+        run_git(&["-C", root.to_str().unwrap(), "worktree", "add", "-q", "-b", "feature", linked_path.to_str().unwrap()]);
+
+        let mut view = test_view();
+        let mut layout = one_pane_layout();
+        layout.sessions[0].workspace = root.clone();
+        layout.sessions[0].project_root = Some(root.clone());
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "feature".into();
+        linked.workspace = linked_path.clone();
+        linked.is_linked_worktree = true;
+        layout.sessions.push(linked);
+        let mut unregistered = layout.sessions[0].clone();
+        unregistered.name = "nested".into();
+        unregistered.workspace = root.join("subdir");
+        std::fs::create_dir_all(&unregistered.workspace).unwrap();
+        layout.sessions.push(unregistered);
+        view.layout = Some(layout);
+
+        view.ctx_menu.target = CtxTarget::Session(0);
+        assert_eq!(view.ctx_items(), &["rename", "new worktree", "open worktree", "close session"]);
+        view.ctx_menu.target = CtxTarget::Session(1);
+        assert!(view.ctx_items().contains(&"close session"));
+        assert!(view.ctx_items().contains(&"remove worktree"));
+        assert!(view.ctx_items().contains(&"force remove worktree"));
+        view.ctx_menu.target = CtxTarget::Session(2);
+        assert!(!view.ctx_items().contains(&"remove worktree"));
+        assert!(!view.ctx_items().contains(&"force remove worktree"));
+
+        run_git(&["-C", root.to_str().unwrap(), "worktree", "remove", "--force", linked_path.to_str().unwrap()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_removal_buttons_match_rendered_labels() {
+        let mut view = test_view();
+        view.session_close_confirm.open = true;
+        let remove = view.session_close_confirm_button_rect(true).unwrap();
+        let cancel = view.session_close_confirm_button_rect(false).unwrap();
+        assert_eq!(remove.width, " Remove (y) ".chars().count() as u16 + 2);
+        assert_eq!(cancel.width, " Cancel (n) ".chars().count() as u16 + 2);
+        assert_eq!(remove.y, cancel.y);
+        assert!(remove.right() < cancel.x);
     }
 
     #[test]

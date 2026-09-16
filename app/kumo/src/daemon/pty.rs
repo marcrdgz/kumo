@@ -82,6 +82,11 @@ pub struct Pty {
     pub cols: u16,
     pub rows: u16,
     pub shell: String,
+    /// On Unix, portable-pty starts each child with `setsid`, making the child
+    /// a session and process-group leader. Keep that id so descendants can be
+    /// signalled without consulting a foreground tty group later.
+    #[cfg(unix)]
+    process_group: Option<i32>,
 }
 
 /// Program to execute inside the PTY. When `program` is set it takes
@@ -143,6 +148,8 @@ impl Pty {
         }
 
         let child = pair.slave.spawn_command(cmd)?;
+        #[cfg(unix)]
+        let process_group = child.process_id().map(|pid| pid as i32);
         drop(pair.slave);
 
         let writer = pair.master.take_writer()?;
@@ -155,6 +162,8 @@ impl Pty {
             cols: spec.cols,
             rows: spec.rows,
             shell: spec.program.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| spec.shell.clone()),
+            #[cfg(unix)]
+            process_group,
         })
     }
 
@@ -189,6 +198,7 @@ impl Pty {
             cols,
             rows,
             shell,
+            process_group: child_pid,
         })
     }
 
@@ -285,6 +295,8 @@ impl Pty {
 
     /// Return the cleanup worker so shutdown can wait for reaping.
     pub fn kill_worker(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        #[cfg(unix)]
+        let process_group = self.process_group;
         // Take ownership of the child so we can move it into a waiter thread.
         #[cfg(unix)]
         let child = std::mem::replace(&mut self.child, PtyChild::Pid { pid: None });
@@ -296,6 +308,15 @@ impl Pty {
         match child {
             PtyChild::Spawned(mut c) => {
                 let _ = c.kill();
+                #[cfg(unix)]
+                if let Some(pgid) = process_group.filter(|pgid| *pgid > 1) {
+                    unsafe {
+                        // portable-pty's Unix backend calls setsid() before
+                        // exec, so this group contains the shell and children
+                        // spawned from it, while excluding the daemon.
+                        libc::kill(-pgid, libc::SIGTERM);
+                    }
+                }
                 std::thread::Builder::new()
                     .name("kumo-pty-killer".into())
                     .spawn(move || {
@@ -309,10 +330,14 @@ impl Pty {
                                 }
                                 Ok(None) => {
                                     #[cfg(unix)]
-                                    if let Some(pid) = c.process_id() {
+                                    if let Some(pgid) = process_group.filter(|pgid| *pgid > 1) {
                                         unsafe {
-                                            libc::kill(pid as i32, libc::SIGKILL);
+                                            libc::kill(-pgid, libc::SIGKILL);
                                         }
+                                    }
+                                    #[cfg(unix)]
+                                    if let Some(pid) = c.process_id() {
+                                        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
                                     }
                                     let _ = c.wait();
                                     break;

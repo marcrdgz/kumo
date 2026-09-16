@@ -397,6 +397,10 @@ pub struct SessionLayout {
     /// share this path, allowing clients to group them as one project.
     #[serde(default)]
     pub project_root: Option<std::path::PathBuf>,
+    /// True only when this session's workspace is a registered linked
+    /// worktree (the main checkout and ordinary directories are false).
+    #[serde(default)]
+    pub is_linked_worktree: bool,
     /// Index of the active tab in `tabs`.
     pub active_tab: usize,
     pub tabs: Vec<TabLayout>,
@@ -1474,6 +1478,7 @@ mod tests {
                 name: "session-1".into(),
                 workspace: std::path::PathBuf::from("/tmp"),
                 project_root: None,
+                is_linked_worktree: false,
                 active_tab: 0,
                 tabs: vec![TabLayout { id: 1, name: "1".into(), focus: 11, zoom: false, root: root.clone() }],
                 branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),

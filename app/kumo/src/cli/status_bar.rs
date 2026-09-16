@@ -639,6 +639,7 @@ mod tests {
             name: "s".into(),
             workspace: std::path::PathBuf::from("/tmp"),
             project_root: None,
+            is_linked_worktree: false,
             active_tab: 0,
             tabs: vec![TabLayout {
                 id: 1,
