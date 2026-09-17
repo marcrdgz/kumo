@@ -7805,8 +7805,8 @@ impl View {
         let is_create_focused = focus == WorktreeCreateFocus::CreateFrom;
         text(f, dd.x + 2, dd.y + 3, "Create from", input_label_style, inner_w);
         let input_rect = Rect::new(dd.x + 2, dd.y + 4, inner_w, 1);
-        let input_bg = if is_create_focused { theme.accent } else { theme.input_bg };
-        let field_fg = if is_create_focused { RColor::Black } else { input_fg(&theme) };
+        let input_bg = theme.input_bg;
+        let field_fg = input_fg(&theme);
         fill(f, input_rect, input_bg);
         // Placeholder / content
         let cf = &self.worktree_create.create_from;
@@ -7857,8 +7857,8 @@ impl View {
             let branch_focused = focus == WorktreeCreateFocus::BranchOverride;
             text(f, dd.x + 2, dd.y + 7, "Branch name override", input_label_style, inner_w);
             let br_rect = Rect::new(dd.x + 2, dd.y + 8, inner_w, 1);
-            let bg = if branch_focused { theme.accent } else { theme.input_bg };
-            let fg = if branch_focused { RColor::Black } else { input_fg(&theme) };
+            let bg = theme.input_bg;
+            let fg = input_fg(&theme);
             fill(f, br_rect, bg);
             let b = &self.worktree_create.branch_override;
             let bc = self.worktree_create.branch_cursor;
@@ -7883,8 +7883,8 @@ impl View {
             let note_focused = focus == WorktreeCreateFocus::Note;
             text(f, dd.x + 2, dd.y + 9, "Note", input_label_style, inner_w);
             let note_rect = Rect::new(dd.x + 2, dd.y + 10, inner_w, 1);
-            let nbg = if note_focused { theme.accent } else { theme.input_bg };
-            let nfg = if note_focused { RColor::Black } else { input_fg(&theme) };
+            let nbg = theme.input_bg;
+            let nfg = input_fg(&theme);
             fill(f, note_rect, nbg);
             let n = &self.worktree_create.note;
             let nc = self.worktree_create.note_cursor;
@@ -7909,8 +7909,8 @@ impl View {
             let agent_focused = focus == WorktreeCreateFocus::Agent;
             text(f, dd.x + 2, dd.y + 11, "Agent", input_label_style, inner_w);
             let ag_rect = Rect::new(dd.x + 2, dd.y + 12, inner_w, 1);
-            let abg = if agent_focused { theme.accent } else { theme.input_bg };
-            let afg = if agent_focused { RColor::Black } else { input_fg(&theme) };
+            let abg = theme.input_bg;
+            let afg = input_fg(&theme);
             fill(f, ag_rect, abg);
             let ag = &self.worktree_create.agent;
             let agc = self.worktree_create.agent_cursor;
@@ -9984,6 +9984,25 @@ mod tests {
         let mut dark_input_theme = view.current_theme();
         dark_input_theme.input_bg = RColor::Rgb(0x20, 0x22, 0x28);
         assert_eq!(input_fg(&dark_input_theme), RColor::White, "dark custom inputs need light text");
+    }
+
+    #[test]
+    fn worktree_create_uses_the_standard_input_background_when_focused() {
+        let mut view = test_view();
+        view.worktree_create.open = true;
+        view.worktree_create.create_from = "feature".into();
+        view.worktree_create.cursor = view.worktree_create.create_from.chars().count();
+        view.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+        let input = view.worktree_create_input_rect(WorktreeCreateFocus::CreateFrom).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.draw(frame)).unwrap();
+
+        let cell = term.backend().buffer().cell((input.x, input.y)).unwrap();
+        assert_eq!(cell.symbol(), "f");
+        assert_eq!(cell.bg, view.current_theme().input_bg);
+        assert_ne!(cell.bg, view.current_theme().accent);
     }
 
     #[test]
