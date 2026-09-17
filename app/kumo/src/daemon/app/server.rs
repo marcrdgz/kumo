@@ -23,7 +23,9 @@ use ratatui::buffer::Buffer;
 
 use super::{App, Launch};
 use crate::daemon::frames;
-use kumo_core::protocol::{AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
+use kumo_core::protocol::{
+    AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION, WorktreeBase,
+};
 
 /// Maximum time the daemon waits for process discovery plus a lifecycle marker
 /// after `agent start` injects a command into an existing shell pane.
@@ -297,9 +299,28 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         }
                     }
                 }
-                Command::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
-                    if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
-                        match app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref()) {
+                Command::WorktreeCreate { request } => {
+                    let from = match &request.base {
+                        WorktreeBase::CurrentHead | WorktreeBase::RepoDefault => None,
+                        WorktreeBase::GitRef(reference) => Some(reference.as_str()),
+                    };
+                    let agent = request.agent.as_ref().map(|agent| agent.kind.as_str());
+                    let branch = request.branch_override.as_deref().unwrap_or_default();
+                    if from.is_some()
+                        || request.checkpoint_note.is_some()
+                        || agent.is_some()
+                        || request.ephemeral
+                        || request.display_name.is_some()
+                    {
+                        match app.worktree_create_full(
+                            &request.session,
+                            branch,
+                            from,
+                            request.checkpoint_note.as_deref(),
+                            agent,
+                            request.ephemeral,
+                            request.display_name.as_deref(),
+                        ) {
                             Ok(outcome) => {
                                 if let Some(start) = outcome.pending_agent_start {
                                     let pinned = app.pane_os_pid(start.pane_id);
@@ -320,7 +341,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             }
                         }
                     } else {
-                        let reply = app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"));
+                        let reply = app.worktree_create(&request.session, branch).unwrap_or_else(|e| format!("error: {e:#}"));
                         let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                     }
                 }

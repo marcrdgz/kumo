@@ -22,8 +22,9 @@ use kumo_core::color::ColorRgb;
 use kumo_core::layout::{self, PaneGeom, TreeGeom};
 use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
-    AgentStatus, Command, CopyHit, DaemonEvent, Layout, LayoutNode, LinkRange, PaneFrame, ScrollState,
-    SessionLayout, SplitDir, ToastKind, WireBranch, WireCell, WireWorktree,
+    AgentLaunchRequest, AgentStatus, Command, CopyHit, DaemonEvent, Layout, LayoutNode, LinkRange,
+    PaneFrame, ScrollState, SessionLayout, SplitDir, ToastKind, WireBranch, WireCell, WireWorktree,
+    WorktreeBase, WorktreeCreateRequest,
 };
 
 use crate::cli::agent_skill::{self, AGENT_SKILL_TARGETS, AgentSkillStatus, AgentSkillTarget};
@@ -3572,8 +3573,17 @@ impl View {
             }
         }
         self.worktree_create.open = false;
-        let is_ai = true;
-        let _ = self.send(&Command::WorktreeCreate { session, branch, from: from_opt, note: note_opt, agent: agent_opt, is_ai, name: name_opt });
+        let _ = self.send(&Command::WorktreeCreate {
+            request: WorktreeCreateRequest {
+                session,
+                display_name: name_opt,
+                branch_override: (!branch.is_empty()).then_some(branch),
+                base: from_opt.map(WorktreeBase::GitRef).unwrap_or_default(),
+                checkpoint_note: note_opt,
+                agent: agent_opt.map(|kind| AgentLaunchRequest { kind }),
+                ephemeral: true,
+            },
+        });
         self.mark_dirty();
     }
 
@@ -3634,7 +3644,17 @@ impl View {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
                 self.popup.open = false;
-                let _ = self.send(&Command::WorktreeCreate { session, branch: name, from: None, note: None, agent: None, is_ai: false, name: None });
+                let _ = self.send(&Command::WorktreeCreate {
+                    request: WorktreeCreateRequest {
+                        session,
+                        display_name: None,
+                        branch_override: Some(name),
+                        base: WorktreeBase::CurrentHead,
+                        checkpoint_note: None,
+                        agent: None,
+                        ephemeral: false,
+                    },
+                });
             }
             Some(PopupTarget::RenamePane(pid)) => {
                 let session = self.active_session().map(|s| s.name.clone());

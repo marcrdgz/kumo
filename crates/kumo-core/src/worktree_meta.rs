@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -21,6 +21,15 @@ pub struct Checkpoint {
     /// Whether this was created via `kumo worktree create --ai` (ephemeral).
     #[serde(default)]
     pub is_ephemeral: bool,
+    /// User-facing task/workspace name supplied at creation time.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Git ref or commit used as the creation base (`HEAD` for legacy behavior).
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Agent requested when the worktree was created.
+    #[serde(default)]
+    pub created_with_agent: Option<String>,
     /// Unix millis when the entry was last touched.
     #[serde(default)]
     pub updated_at: u64,
@@ -59,13 +68,23 @@ fn key_for_path(path: &Path) -> String {
     }
 }
 
+fn parse_store(bytes: &[u8]) -> Option<Store> {
+    let mut store = serde_json::from_slice::<Store>(bytes).ok()?;
+    match store.version {
+        1 => {
+            store.version = VERSION;
+            Some(store)
+        }
+        VERSION => Some(store),
+        _ => None,
+    }
+}
+
 fn load_store() -> Store {
     let p = file();
     if let Ok(bytes) = std::fs::read(&p) {
-        if let Ok(s) = serde_json::from_slice::<Store>(&bytes) {
-            if s.version == VERSION {
-                return s;
-            }
+        if let Some(store) = parse_store(&bytes) {
+            return store;
         }
         // Corrupt/unknown version → start fresh (never crash daemon)
         log::warn!("kumo: worktree_meta: ignoring corrupt {} — starting fresh", p.display());
@@ -155,7 +174,13 @@ pub fn set(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     // GC: if every user field cleared, drop entry
-    let empty = entry.branch.is_none() && entry.comment.is_none() && entry.status.is_none() && !entry.is_ephemeral;
+    let empty = entry.branch.is_none()
+        && entry.comment.is_none()
+        && entry.status.is_none()
+        && !entry.is_ephemeral
+        && entry.display_name.is_none()
+        && entry.base_ref.is_none()
+        && entry.created_with_agent.is_none();
     if empty {
         store.entries.remove(&k);
         save_store(&store)?;
@@ -166,15 +191,36 @@ pub fn set(
     Ok(entry)
 }
 
-/// Convenience for `kumo worktree create --ai` seeding: set branch/comment/ephemeral at once.
-pub fn seed(path: &Path, branch: Option<String>, comment: Option<String>, is_ephemeral: bool) -> Result<(), String> {
-    set(
-        path,
-        Some(comment),
-        None,
-        Some(branch),
-        Some(is_ephemeral),
-    )?;
+/// Metadata captured atomically when a worktree is created.
+pub struct CreateMetadata {
+    pub branch: Option<String>,
+    pub comment: Option<String>,
+    pub is_ephemeral: bool,
+    pub display_name: Option<String>,
+    pub base_ref: Option<String>,
+    pub created_with_agent: Option<String>,
+}
+
+pub fn seed(path: &Path, metadata: CreateMetadata) -> Result<(), String> {
+    let mut store = load_store();
+    let key = key_for_path(path);
+    store.entries.insert(
+        key,
+        Checkpoint {
+            branch: metadata.branch.filter(|value| !value.trim().is_empty()),
+            comment: metadata.comment.filter(|value| !value.trim().is_empty()),
+            status: None,
+            is_ephemeral: metadata.is_ephemeral,
+            display_name: metadata.display_name.filter(|value| !value.trim().is_empty()),
+            base_ref: metadata.base_ref.filter(|value| !value.trim().is_empty()),
+            created_with_agent: metadata.created_with_agent.filter(|value| !value.trim().is_empty()),
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0),
+        },
+    );
+    save_store(&store)?;
     Ok(())
 }
 
@@ -231,7 +277,35 @@ mod tests {
         let _key = key_for_path(&wt);
         // Direct Store manipulation (isolated from global state_dir by not calling set/get which hit real file)
         let mut store = Store::default();
-        store.entries.insert(_key.clone(), Checkpoint { branch: Some("feat/a".into()), comment: Some("note".into()), status: Some("todo".into()), is_ephemeral: true, updated_at: 1 });
+        store.entries.insert(_key.clone(), Checkpoint {
+            branch: Some("feat/a".into()), comment: Some("note".into()), status: Some("todo".into()),
+            is_ephemeral: true, display_name: None, base_ref: None, created_with_agent: None,
+            updated_at: 1,
+        });
         assert_eq!(store.entries.get(&_key).unwrap().branch.as_deref(), Some("feat/a"));
+    }
+
+    #[test]
+    fn version_one_store_migrates_without_losing_checkpoints() {
+        let legacy = br#"{
+            "version": 1,
+            "entries": {
+                "/tmp/legacy": {
+                    "branch": "feat/legacy",
+                    "comment": "keep me",
+                    "status": "in-progress",
+                    "is_ephemeral": true,
+                    "updated_at": 42
+                }
+            }
+        }"#;
+
+        let store = parse_store(legacy).expect("v1 store must migrate");
+        let checkpoint = store.entries.get("/tmp/legacy").unwrap();
+        assert_eq!(store.version, VERSION);
+        assert_eq!(checkpoint.comment.as_deref(), Some("keep me"));
+        assert_eq!(checkpoint.display_name, None);
+        assert_eq!(checkpoint.base_ref, None);
+        assert_eq!(checkpoint.created_with_agent, None);
     }
 }

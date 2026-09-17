@@ -53,8 +53,9 @@ mod crossterm;
 /// `WorktreeCreate` with `from`/`note`/`agent`/`is_ai` and adds `WorktreeRemove`,
 /// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
 /// v13 adds the main Git worktree path to `SessionLayout` so clients can group
-/// linked worktrees under one project. v14 adds `TabMove`.
-pub const PROTOCOL_VERSION: u32 = 14;
+/// linked worktrees under one project. v14 adds `TabMove`. v15 replaces the
+/// flat worktree-create fields with a structured creation request.
+pub const PROTOCOL_VERSION: u32 = 15;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -476,6 +477,42 @@ impl WorktreeStatus {
             _ => None,
         }
     }
+}
+
+/// Git revision used as the starting point for a new worktree branch.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub enum WorktreeBase {
+    /// Preserve the historical behavior: branch from the source session's HEAD.
+    #[default]
+    CurrentHead,
+    /// Use the repository's configured/default base ref.
+    RepoDefault,
+    /// An explicit branch, commit, pull request shorthand, or hosted-review URL.
+    GitRef(String),
+}
+
+/// Agent requested as part of worktree creation.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AgentLaunchRequest {
+    pub kind: String,
+}
+
+/// Typed input for creating a worktree and its initial Kumo session.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WorktreeCreateRequest {
+    pub session: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub branch_override: Option<String>,
+    #[serde(default)]
+    pub base: WorktreeBase,
+    #[serde(default)]
+    pub checkpoint_note: Option<String>,
+    #[serde(default)]
+    pub agent: Option<AgentLaunchRequest>,
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// A startup update notice, keyed so the client can dismiss it.
@@ -983,25 +1020,7 @@ pub enum Command {
     },
     /// Create a git worktree (new branch from the repo HEAD) and open a fresh
     /// session inside it.
-    WorktreeCreate {
-        session: String,
-        branch: String,
-        /// Optional start point for the new branch (`--from`): branch, commit, `#1234`, or GitHub URL.
-        #[serde(default)]
-        from: Option<String>,
-        /// Optional checkpoint note seeded on creation (`--note`).
-        #[serde(default)]
-        note: Option<String>,
-        /// Optional agent to chain via `agent start` into the new pane (`--agent`).
-        #[serde(default)]
-        agent: Option<String>,
-        /// Ephemeral isolated worktree (`--ai`).
-        #[serde(default)]
-        is_ai: bool,
-        /// Workspace/task name (Nombre tab) used when `branch` override is empty — slugified to branch.
-        #[serde(default)]
-        name: Option<String>,
-    },
+    WorktreeCreate { request: WorktreeCreateRequest },
     /// Open the session already working in `path` (or create one) — the
     /// worktree picker's confirm.
     WorktreeOpen {
@@ -1508,6 +1527,17 @@ mod tests {
             Command::AgentSpawn { session: "session-1".into(), program: Some("opencode".into()) },
             Command::AgentStatus,
             Command::AgentExplain { session: "session-1".into(), pane_id: 42 },
+            Command::WorktreeCreate {
+                request: WorktreeCreateRequest {
+                    session: "session-1".into(),
+                    display_name: Some("fix login".into()),
+                    branch_override: None,
+                    base: WorktreeBase::GitRef("origin/main".into()),
+                    checkpoint_note: Some("investigate auth race".into()),
+                    agent: Some(AgentLaunchRequest { kind: "codex".into() }),
+                    ephemeral: true,
+                },
+            },
         ];
         for cmd in cmds {
             let mut buf = Vec::new();

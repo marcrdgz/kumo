@@ -13,8 +13,8 @@ use std::time::Duration;
 use anyhow::Result;
 
 use kumo_protocol::{
-    AgentReadSource, AgentStatus, AgentWaitKind, Command, DaemonEvent, SplitDir, WireKeyCode,
-    WireKeyEvent, WireModifiers,
+    AgentLaunchRequest, AgentReadSource, AgentStatus, AgentWaitKind, Command, DaemonEvent, SplitDir,
+    WireKeyCode, WireKeyEvent, WireModifiers, WorktreeBase, WorktreeCreateRequest,
 };
 
 use crate::cli::agent_skill::{self, KUMO_AGENT_SKILL};
@@ -337,8 +337,17 @@ fn run_inner(args: &[String]) -> Result<()> {
         }
         CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
             let sess = resolve_session(&mut stream, session)?;
-            let br = branch.unwrap_or_default();
-            let cmd = Command::WorktreeCreate { session: sess.clone(), branch: br, from, note, agent, is_ai, name };
+            let cmd = Command::WorktreeCreate {
+                request: WorktreeCreateRequest {
+                    session: sess.clone(),
+                    display_name: name,
+                    branch_override: branch,
+                    base: from.map(WorktreeBase::GitRef).unwrap_or_default(),
+                    checkpoint_note: note,
+                    agent: agent.map(|kind| AgentLaunchRequest { kind }),
+                    ephemeral: is_ai,
+                },
+            };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
             if json {
                 stream.set_read_timeout(Some(Duration::from_millis(5000)))?;

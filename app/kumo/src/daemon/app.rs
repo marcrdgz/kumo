@@ -744,7 +744,17 @@ impl App {
             return Err(format!("{message}; cleanup failed: {}", cleanup_errors.join("; ")));
         }
         // Lightweight checkpoint seed
-        let _ = kumo_core::worktree_meta::seed(&path, Some(branch.clone()), note.map(|s| s.to_string()), is_ai);
+        let _ = kumo_core::worktree_meta::seed(
+            &path,
+            kumo_core::worktree_meta::CreateMetadata {
+                branch: Some(branch.clone()),
+                comment: note.map(str::to_string),
+                is_ephemeral: is_ai,
+                display_name: name_hint.map(str::to_string),
+                base_ref: Some(resolved_from.clone().unwrap_or_else(|| "HEAD".to_string())),
+                created_with_agent: agent.map(crate::daemon::pane::normalize_agent_kind),
+            },
+        );
         // Chain agent start into the new pane. The worktree/session remain
         // available for inspection if startup fails, but the failure must be
         // visible to the caller rather than silently looking successful.
