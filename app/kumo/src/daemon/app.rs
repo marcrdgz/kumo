@@ -7,6 +7,7 @@ use anyhow::Result;
 use ratatui::buffer::Buffer;
 
 use kumo_core::layout::{LayoutTree, SplitDir};
+use kumo_core::protocol::WorktreeBase;
 use kumo_core::theme::OwnedTheme;
 use kumo_core::Launch;
 use crate::daemon::agents::AgentStatus;
@@ -681,7 +682,15 @@ impl App {
     /// a displayable error (kept in the popup) when the workspace is not a git
     /// repository or git rejects the branch/path.
     fn new_worktree_session(&mut self, idx: usize, branch: &str) -> Result<(), String> {
-        self.new_worktree_session_ext(idx, Some(branch), None, None, None, false, None)
+        self.new_worktree_session_ext(
+            idx,
+            Some(branch),
+            &WorktreeBase::CurrentHead,
+            None,
+            None,
+            false,
+            None,
+        )
             .map(|_| ())
     }
 
@@ -693,7 +702,7 @@ impl App {
         &mut self,
         idx: usize,
         branch_override: Option<&str>,
-        from: Option<&str>,
+        base: &WorktreeBase,
         note: Option<&str>,
         agent: Option<&str>,
         is_ai: bool,
@@ -705,6 +714,10 @@ impl App {
         let Some(root) = kumo_core::worktrees::repo_root(&session.workspace) else {
             return Err(format!("{} is not a git repository", session.workspace.display()));
         };
+        let from = match base {
+            WorktreeBase::GitRef(reference) => Some(reference.as_str()),
+            WorktreeBase::CurrentHead | WorktreeBase::RepoDefault => None,
+        };
         // Orca-aligned branch derivation (no `kumo/` prefix)
         let branch = kumo_core::worktrees::derive_branch(name_hint, from, branch_override)?;
         if branch.trim().is_empty() { return Err("branch name cannot be empty".into()); }
@@ -712,10 +725,14 @@ impl App {
         if path.exists() {
             return Err(format!("worktree path already exists: {}", path.display()));
         }
-        // Resolve --from to a commit-ish (Jira deferred returns Err)
-        let resolved_from = if let Some(f) = from.filter(|s| !s.trim().is_empty()) {
-            Some(kumo_core::worktrees::resolve_from(&root, f)?)
-        } else { None };
+        let resolved_from = match base {
+            WorktreeBase::CurrentHead => None,
+            WorktreeBase::RepoDefault => Some(kumo_core::worktrees::default_base_ref(
+                &root,
+                kumo_core::config::worktree_base_ref().as_deref(),
+            )?),
+            WorktreeBase::GitRef(reference) => Some(kumo_core::worktrees::resolve_from(&root, reference)?),
+        };
         kumo_core::worktrees::add_worktree_from(&root, &path, &branch, resolved_from.as_deref())?;
         // Shared gitignored dirs (symlink / APFS clone)
         let shared = kumo_core::config::worktree_shared_dirs();
@@ -1902,7 +1919,7 @@ mod tests {
         let result = app.new_worktree_session_ext(
             0,
             Some("feat/codex"),
-            None,
+            &WorktreeBase::CurrentHead,
             None,
             Some("codex"),
             true,

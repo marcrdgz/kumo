@@ -34,6 +34,7 @@ sound = true            # audible chime on blocked/finished transitions
 
 [worktree]
 shared-dirs = ["node_modules", ".cache"] # gitignored dirs shared by worktrees
+base-ref = "origin/main" # optional base for task-oriented worktrees
 expose-socket = true    # pass KUMO_SOCKET_PATH and KUMO_BIN_PATH to panes
 ```
 
@@ -73,6 +74,7 @@ with the primary checkout:
 | Key | Description |
 | --- | --- |
 | `shared-dirs` | Relative, gitignored directories to link into each new worktree (for example `node_modules` or `.cache`). Absolute paths and paths containing `..` are ignored. Missing, non-directory, or non-gitignored sources are skipped with a warning. |
+| `base-ref` | Optional Git ref used as the base for task-oriented worktrees. Without it, Kumo discovers `origin/HEAD`, then common `main`/`master` refs, and finally the current commit. An explicit `--from` still wins. |
 | `expose-socket` | When `true` (the default), panes receive `KUMO_SOCKET_PATH` and `KUMO_BIN_PATH` so an agent can drive its own Kumo session. |
 
 For files that should be copied rather than shared, add a `.worktreeinclude`
@@ -132,6 +134,11 @@ with `kumo agent prompt`; automatic task submission is planned for 0.7.1.
       description:
         'Relative, gitignored directories to share with new isolated worktrees (for example `node_modules` or `.cache`).',
       default: 'empty',
+    },
+    'worktree.base-ref': {
+      description:
+        'Git ref used as the base for task-oriented worktrees. When unset, Kumo discovers the repository default.',
+      default: 'auto-detected',
     },
     'worktree.expose-socket': {
       description:

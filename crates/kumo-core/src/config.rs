@@ -471,13 +471,15 @@ impl Default for StatusBarConfig {
 pub struct WorktreeConfig {
     /// Gitignored directories to symlink/clone-copy into each new worktree.
     pub shared_dirs: Vec<PathBuf>,
+    /// Preferred Git ref for task worktrees. Repository discovery is used when unset.
+    pub base_ref: Option<String>,
     /// Expose `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH` to spawned panes.
     pub expose_socket: bool,
 }
 
 impl Default for WorktreeConfig {
     fn default() -> Self {
-        Self { shared_dirs: Vec::new(), expose_socket: true }
+        Self { shared_dirs: Vec::new(), base_ref: None, expose_socket: true }
     }
 }
 
@@ -1004,6 +1006,9 @@ impl Config {
                 }
                 self.worktree.shared_dirs = out;
             }
+            if let Some(base_ref) = wt.base_ref {
+                self.worktree.base_ref = Some(base_ref.trim().to_string()).filter(|value| !value.is_empty());
+            }
             if let Some(v) = wt.expose_socket {
                 self.worktree.expose_socket = v;
             }
@@ -1175,6 +1180,8 @@ pub struct WorktreeRaw {
     pub shared_dirs: Option<Vec<String>>,
     #[serde(rename = "sharedDirs", alias = "sharedDirs")]
     _shared_dirs_camel: Option<Vec<String>>,
+    #[serde(rename = "base-ref", alias = "base_ref")]
+    pub base_ref: Option<String>,
     #[serde(rename = "expose-socket", alias = "expose_socket")]
     pub expose_socket: Option<bool>,
 }
@@ -1677,6 +1684,11 @@ pub fn status_bar_enabled() -> bool {
 /// Worktree shared-dirs (gitignored symlinks/clone-copies).
 pub fn worktree_shared_dirs() -> Vec<PathBuf> {
     cached_config().worktree.shared_dirs
+}
+
+/// Configured base ref for task worktrees, if any.
+pub fn worktree_base_ref() -> Option<String> {
+    cached_config().worktree.base_ref
 }
 
 /// Whether spawned panes receive `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH`.
@@ -2227,6 +2239,20 @@ mod tests {
         assert_eq!(default_shell(), "/opt/homebrew/bin/fish");
         assert!(!update_check_enabled());
         assert!(!agent_sound_enabled());
+    }
+
+    #[test]
+    fn worktree_base_ref_parses_from_toml() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-worktree-base");
+        let home = scratch_dir("home-worktree-base");
+        write(&cfg_dir.join("config.toml"), "[worktree]\nbase-ref = \"upstream/trunk\"\n");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+
+        assert_eq!(worktree_base_ref().as_deref(), Some("upstream/trunk"));
     }
 
     #[test]

@@ -337,12 +337,15 @@ fn run_inner(args: &[String]) -> Result<()> {
         }
         CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
             let sess = resolve_session(&mut stream, session)?;
+            let base = from.map(WorktreeBase::GitRef).unwrap_or_else(|| {
+                if is_ai || name.is_some() { WorktreeBase::RepoDefault } else { WorktreeBase::CurrentHead }
+            });
             let cmd = Command::WorktreeCreate {
                 request: WorktreeCreateRequest {
                     session: sess.clone(),
                     display_name: name,
                     branch_override: branch,
-                    base: from.map(WorktreeBase::GitRef).unwrap_or_default(),
+                    base,
                     checkpoint_note: note,
                     agent: agent.map(|kind| AgentLaunchRequest { kind }),
                     ephemeral: is_ai,

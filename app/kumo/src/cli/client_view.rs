@@ -3578,7 +3578,7 @@ impl View {
                 session,
                 display_name: name_opt,
                 branch_override: (!branch.is_empty()).then_some(branch),
-                base: from_opt.map(WorktreeBase::GitRef).unwrap_or_default(),
+                base: from_opt.map(WorktreeBase::GitRef).unwrap_or(WorktreeBase::RepoDefault),
                 checkpoint_note: note_opt,
                 agent: agent_opt.map(|kind| AgentLaunchRequest { kind }),
                 ephemeral: true,

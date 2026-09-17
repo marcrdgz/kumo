@@ -95,6 +95,35 @@ pub fn add_worktree_from(
     Ok(())
 }
 
+/// Resolve the stable base used for task-oriented worktrees.
+///
+/// A configured ref wins, followed by the remote's symbolic default branch,
+/// conventional remote/local default branches, and finally the exact current
+/// commit. The final SHA fallback avoids coupling creation to a branch name
+/// that may move between discovery and `git worktree add`.
+pub fn default_base_ref(repo_root: &Path, configured: Option<&str>) -> Result<String, String> {
+    if let Some(reference) = configured.map(str::trim).filter(|value| !value.is_empty()) {
+        return resolve_from(repo_root, reference);
+    }
+
+    if let Ok(out) = git(repo_root, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) {
+        let reference = String::from_utf8_lossy(&out).trim().to_string();
+        if !reference.is_empty() {
+            return Ok(reference);
+        }
+    }
+
+    for reference in ["origin/main", "origin/master", "main", "master"] {
+        if git(repo_root, &["rev-parse", "--verify", &format!("{reference}^{{commit}}")]).is_ok() {
+            return Ok(reference.to_string());
+        }
+    }
+
+    let out = git(repo_root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let commit = String::from_utf8_lossy(&out).trim().to_string();
+    if commit.is_empty() { Err("repository HEAD did not resolve to a commit".to_string()) } else { Ok(commit) }
+}
+
 /// All worktrees of the repository containing `ws`, main first then linked,
 /// parsed from `git worktree list --porcelain`. Includes the main worktree.
 pub fn list_worktrees(ws: &Path) -> Result<Vec<WorktreeInfo>, String> {
@@ -812,6 +841,20 @@ mod tests {
         let repo = temp_repo();
         let r = resolve_from(&repo, "main").unwrap();
         assert_eq!(r, "main");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn default_base_prefers_remote_main_over_current_branch() {
+        let repo = temp_repo();
+        let status = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "switch", "-q", "-c", "feature/current"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert_eq!(default_base_ref(&repo, None).unwrap(), "origin/main");
+        assert_eq!(default_base_ref(&repo, Some("main")).unwrap(), "main");
         let _ = std::fs::remove_dir_all(&repo);
     }
 

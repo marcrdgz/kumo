@@ -781,7 +781,7 @@ impl App {
         &mut self,
         session: &str,
         branch: &str,
-        from: Option<&str>,
+        base: &kumo_protocol::WorktreeBase,
         note: Option<&str>,
         agent: Option<&str>,
         is_ai: bool,
@@ -794,14 +794,18 @@ impl App {
             });
         };
         let branch_override = if branch.trim().is_empty() { None } else { Some(branch.trim()) };
-        let from = from.map(|s| s.trim()).filter(|s| !s.is_empty());
         let note = note.map(|s| s.trim()).filter(|s| !s.is_empty());
         let agent = agent.map(|s| s.trim()).filter(|s| !s.is_empty());
         let name = name.map(|s| s.trim()).filter(|s| !s.is_empty());
         // Generic path (no is_ai, no from/note/agent) with explicit branch -> keep old fast path
-        let use_ext = is_ai || from.is_some() || note.is_some() || agent.is_some() || name.is_some() || branch_override.is_none();
+        let use_ext = is_ai
+            || !matches!(base, kumo_protocol::WorktreeBase::CurrentHead)
+            || note.is_some()
+            || agent.is_some()
+            || name.is_some()
+            || branch_override.is_none();
         let res = if use_ext {
-            self.new_worktree_session_ext(idx, branch_override, from, note, agent, is_ai, name)
+            self.new_worktree_session_ext(idx, branch_override, base, note, agent, is_ai, name)
         } else {
             let b = branch_override.unwrap().to_string();
             self.new_worktree_session(idx, &b).map(|_| (b, None))
