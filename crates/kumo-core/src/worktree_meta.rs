@@ -30,6 +30,12 @@ pub struct Checkpoint {
     /// Agent requested when the worktree was created.
     #[serde(default)]
     pub created_with_agent: Option<String>,
+    /// Model requested for the initial agent launch.
+    #[serde(default)]
+    pub created_with_model: Option<String>,
+    /// Reasoning effort requested for the initial agent launch.
+    #[serde(default)]
+    pub created_with_effort: Option<String>,
     /// Unix millis when the entry was last touched.
     #[serde(default)]
     pub updated_at: u64,
@@ -180,7 +186,9 @@ pub fn set(
         && !entry.is_ephemeral
         && entry.display_name.is_none()
         && entry.base_ref.is_none()
-        && entry.created_with_agent.is_none();
+        && entry.created_with_agent.is_none()
+        && entry.created_with_model.is_none()
+        && entry.created_with_effort.is_none();
     if empty {
         store.entries.remove(&k);
         save_store(&store)?;
@@ -199,6 +207,8 @@ pub struct CreateMetadata {
     pub display_name: Option<String>,
     pub base_ref: Option<String>,
     pub created_with_agent: Option<String>,
+    pub created_with_model: Option<String>,
+    pub created_with_effort: Option<String>,
 }
 
 pub fn seed(path: &Path, metadata: CreateMetadata) -> Result<(), String> {
@@ -214,6 +224,8 @@ pub fn seed(path: &Path, metadata: CreateMetadata) -> Result<(), String> {
             display_name: metadata.display_name.filter(|value| !value.trim().is_empty()),
             base_ref: metadata.base_ref.filter(|value| !value.trim().is_empty()),
             created_with_agent: metadata.created_with_agent.filter(|value| !value.trim().is_empty()),
+            created_with_model: metadata.created_with_model.filter(|value| !value.trim().is_empty()),
+            created_with_effort: metadata.created_with_effort.filter(|value| !value.trim().is_empty()),
             updated_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as u64)
@@ -280,6 +292,7 @@ mod tests {
         store.entries.insert(_key.clone(), Checkpoint {
             branch: Some("feat/a".into()), comment: Some("note".into()), status: Some("todo".into()),
             is_ephemeral: true, display_name: None, base_ref: None, created_with_agent: None,
+            created_with_model: None, created_with_effort: None,
             updated_at: 1,
         });
         assert_eq!(store.entries.get(&_key).unwrap().branch.as_deref(), Some("feat/a"));
@@ -307,5 +320,7 @@ mod tests {
         assert_eq!(checkpoint.display_name, None);
         assert_eq!(checkpoint.base_ref, None);
         assert_eq!(checkpoint.created_with_agent, None);
+        assert_eq!(checkpoint.created_with_model, None);
+        assert_eq!(checkpoint.created_with_effort, None);
     }
 }

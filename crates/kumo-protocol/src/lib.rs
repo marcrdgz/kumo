@@ -54,8 +54,9 @@ mod crossterm;
 /// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
 /// v13 adds the main Git worktree path to `SessionLayout` so clients can group
 /// linked worktrees under one project. v14 adds `TabMove`. v15 replaces the
-/// flat worktree-create fields with a structured creation request.
-pub const PROTOCOL_VERSION: u32 = 15;
+/// flat worktree-create fields with a structured creation request. v16 adds
+/// model and reasoning-effort preferences to worktree agent launches.
+pub const PROTOCOL_VERSION: u32 = 16;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -495,6 +496,10 @@ pub enum WorktreeBase {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AgentLaunchRequest {
     pub kind: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Typed input for creating a worktree and its initial Kumo session.
@@ -1534,7 +1539,11 @@ mod tests {
                     branch_override: None,
                     base: WorktreeBase::GitRef("origin/main".into()),
                     checkpoint_note: Some("investigate auth race".into()),
-                    agent: Some(AgentLaunchRequest { kind: "codex".into() }),
+                    agent: Some(AgentLaunchRequest {
+                        kind: "codex".into(),
+                        model: Some("gpt-5.6-sol".into()),
+                        effort: Some("high".into()),
+                    }),
                     ephemeral: true,
                 },
             },

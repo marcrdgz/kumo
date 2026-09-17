@@ -7,7 +7,7 @@ use anyhow::Result;
 use ratatui::buffer::Buffer;
 
 use kumo_core::layout::{LayoutTree, SplitDir};
-use kumo_core::protocol::WorktreeBase;
+use kumo_core::protocol::{AgentLaunchRequest, WorktreeBase};
 use kumo_core::theme::OwnedTheme;
 use kumo_core::Launch;
 use crate::daemon::agents::AgentStatus;
@@ -704,7 +704,7 @@ impl App {
         branch_override: Option<&str>,
         base: &WorktreeBase,
         note: Option<&str>,
-        agent: Option<&str>,
+        agent: Option<&AgentLaunchRequest>,
         is_ai: bool,
         name_hint: Option<&str>,
     ) -> Result<(String, Option<PendingAgentStart>), String> {
@@ -769,14 +769,18 @@ impl App {
                 is_ephemeral: is_ai,
                 display_name: name_hint.map(str::to_string),
                 base_ref: Some(resolved_from.clone().unwrap_or_else(|| "HEAD".to_string())),
-                created_with_agent: agent.map(crate::daemon::pane::normalize_agent_kind),
+                created_with_agent: agent.map(|request| crate::daemon::pane::normalize_agent_kind(&request.kind)),
+                created_with_model: agent.and_then(|request| request.model.clone()),
+                created_with_effort: agent.and_then(|request| request.effort.clone()),
             },
         );
         // Chain agent start into the new pane. The worktree/session remain
         // available for inspection if startup fails, but the failure must be
         // visible to the caller rather than silently looking successful.
         let mut pending_agent_start = None;
-        if let Some(kind) = agent.filter(|s| !s.trim().is_empty()) {
+        if let Some(request) = agent.filter(|request| !request.kind.trim().is_empty()) {
+            let kind = request.kind.trim();
+            let args = commands::agent_launch_args(request)?;
             // New session is the last one after new_session_in_workspace
             let Some(new_sess) = self.sessions.last() else {
                 return Err(format!(
@@ -786,7 +790,7 @@ impl App {
             };
             let pane_id = new_sess.active_tab().tree.focus;
             let sess_name = new_sess.name.clone();
-            match self.agent_start(&sess_name, pane_id, kind, &[]) {
+            match self.agent_start(&sess_name, pane_id, kind, &args) {
                 Ok(msg) if msg.starts_with("error:") => {
                     return Err(format!(
                         "created worktree {branch:?} at {} but agent {kind:?} failed to start: {}",
@@ -1915,13 +1919,14 @@ mod tests {
         std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
         let repo = temp_git_repo();
         let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
+        let agent = AgentLaunchRequest { kind: "codex".into(), model: None, effort: None };
 
         let result = app.new_worktree_session_ext(
             0,
             Some("feat/codex"),
             &WorktreeBase::CurrentHead,
             None,
-            Some("codex"),
+            Some(&agent),
             true,
             None,
         );

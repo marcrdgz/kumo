@@ -46,6 +46,35 @@ pub(crate) fn shell_quote_posix(value: &str) -> String {
     quoted
 }
 
+/// Translate structured launch preferences into the native CLI flags used by
+/// the supported interactive agent harnesses. Model identifiers intentionally
+/// pass through because availability is account- and provider-dependent.
+pub(super) fn agent_launch_args(
+    request: &kumo_protocol::AgentLaunchRequest,
+) -> std::result::Result<Vec<String>, String> {
+    let kind = crate::daemon::pane::normalize_agent_kind(request.kind.trim());
+    let model = request.model.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let effort = request.effort.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let mut args = Vec::new();
+
+    if let Some(model) = model {
+        match kind.as_str() {
+            "claude" | "gemini" | "opencode" => args.extend(["--model".to_string(), model.to_string()]),
+            "codex" => args.extend(["-m".to_string(), model.to_string()]),
+            _ => return Err(format!("agent {kind:?} does not expose a supported model flag")),
+        }
+    }
+    if let Some(effort) = effort {
+        match kind.as_str() {
+            "claude" => args.extend(["--effort".to_string(), effort.to_string()]),
+            "codex" => args.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]),
+            "opencode" => args.extend(["--variant".to_string(), effort.to_string()]),
+            _ => return Err(format!("agent {kind:?} does not expose a supported effort flag")),
+        }
+    }
+    Ok(args)
+}
+
 /// The editor used by MENU `config`: `$VISUAL`, then `$EDITOR` (command
 /// strings may carry args, e.g. `code --wait`), then `vi`.
 fn config_editor() -> (String, Vec<String>) {
@@ -783,7 +812,7 @@ impl App {
         branch: &str,
         base: &kumo_protocol::WorktreeBase,
         note: Option<&str>,
-        agent: Option<&str>,
+        agent: Option<&kumo_protocol::AgentLaunchRequest>,
         is_ai: bool,
         name: Option<&str>,
     ) -> Result<WorktreeCreateOutcome> {
@@ -795,7 +824,7 @@ impl App {
         };
         let branch_override = if branch.trim().is_empty() { None } else { Some(branch.trim()) };
         let note = note.map(|s| s.trim()).filter(|s| !s.is_empty());
-        let agent = agent.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let agent = agent.filter(|request| !request.kind.trim().is_empty());
         let name = name.map(|s| s.trim()).filter(|s| !s.is_empty());
         // Generic path (no is_ai, no from/note/agent) with explicit branch -> keep old fast path
         let use_ext = is_ai
@@ -1080,7 +1109,8 @@ fn marker_wire(agent: &str, kind: &str, m: agents::MarkerMatch) -> AgentMarkerMa
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote_posix;
+    use super::{agent_launch_args, shell_quote_posix};
+    use kumo_protocol::AgentLaunchRequest;
 
     #[test]
     fn shell_quote_posix_handles_hostile_arguments() {
@@ -1103,5 +1133,38 @@ mod tests {
         }
         assert_eq!(shell_quote_posix(""), "''");
         assert_eq!(shell_quote_posix("don't"), "'don'\\''t'");
+    }
+
+    #[test]
+    fn structured_agent_preferences_use_native_cli_flags() {
+        let codex = AgentLaunchRequest {
+            kind: "codex".into(),
+            model: Some("gpt-5.6-sol".into()),
+            effort: Some("high".into()),
+        };
+        assert_eq!(
+            agent_launch_args(&codex).unwrap(),
+            ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"]
+        );
+
+        let claude = AgentLaunchRequest {
+            kind: "claude".into(),
+            model: Some("opus".into()),
+            effort: Some("max".into()),
+        };
+        assert_eq!(
+            agent_launch_args(&claude).unwrap(),
+            ["--model", "opus", "--effort", "max"]
+        );
+    }
+
+    #[test]
+    fn unsupported_agent_preferences_fail_before_launch() {
+        let request = AgentLaunchRequest {
+            kind: "gemini".into(),
+            model: None,
+            effort: Some("high".into()),
+        };
+        assert!(agent_launch_args(&request).unwrap_err().contains("effort"));
     }
 }

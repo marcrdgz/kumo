@@ -128,7 +128,7 @@ enum CliCmd {
     AgentRename { session: Option<String>, pane: PaneRef, name: String },
     AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
     AgentSkill { output: Option<PathBuf> },
-    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, note: Option<String>, agent: Option<String>, is_ai: bool, name: Option<String> },
+    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, note: Option<String>, agent: Option<String>, model: Option<String>, effort: Option<String>, is_ai: bool, name: Option<String> },
     WorktreeOpen { session: Option<String>, path: PathBuf },
     WorktreeRemove { session: Option<String>, path: PathBuf, force: bool },
     WorktreeSet { session: Option<String>, path: Option<PathBuf>, comment: Option<String>, status: Option<String> },
@@ -335,7 +335,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 }
             }
         }
-        CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
+        CliCmd::WorktreeCreate { session, branch, from, note, agent, model, effort, is_ai, name } => {
             let sess = resolve_session(&mut stream, session)?;
             let base = from.map(WorktreeBase::GitRef).unwrap_or_else(|| {
                 if is_ai || name.is_some() { WorktreeBase::RepoDefault } else { WorktreeBase::CurrentHead }
@@ -347,7 +347,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                     branch_override: branch,
                     base,
                     checkpoint_note: note,
-                    agent: agent.map(|kind| AgentLaunchRequest { kind }),
+                    agent: agent.map(|kind| AgentLaunchRequest { kind, model, effort }),
                     ephemeral: is_ai,
                 },
             };
@@ -1119,6 +1119,8 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             let mut from: Option<String> = None;
             let mut note: Option<String> = None;
             let mut agent: Option<String> = None;
+            let mut model: Option<String> = None;
+            let mut effort: Option<String> = None;
             let mut name: Option<String> = None;
             let mut positional: Vec<String> = Vec::new();
             let mut j = 0;
@@ -1157,6 +1159,22 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                         agent = Some(s.strip_prefix("--agent=").unwrap().to_string());
                         j+=1;
                     }
+                    "--model" => {
+                        model = Some(need(&rest, j+1, "a model after --model")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--model=") => {
+                        model = Some(s.strip_prefix("--model=").unwrap().to_string());
+                        j+=1;
+                    }
+                    "--effort" => {
+                        effort = Some(need(&rest, j+1, "an effort after --effort")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--effort=") => {
+                        effort = Some(s.strip_prefix("--effort=").unwrap().to_string());
+                        j+=1;
+                    }
                     s if !s.starts_with('-') => { positional.push(s.to_string()); j+=1; }
                     _ => { anyhow::bail!("unknown worktree create flag {:?}", rest[j]); }
                 }
@@ -1179,8 +1197,8 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                     }
                 }
                 // Warn if --ai flags were not set but from/note/agent given
-                if from.is_some() || note.is_some() || agent.is_some() {
-                    anyhow::bail!("--from/--note/--agent require --ai (try `kumo worktree create --ai ...`)");
+                if from.is_some() || note.is_some() || agent.is_some() || model.is_some() || effort.is_some() {
+                    anyhow::bail!("--from/--note/--agent/--model/--effort require --ai (try `kumo worktree create --ai ...`)");
                 }
             }
             // Validation: for generic, need branch
@@ -1189,7 +1207,10 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             }
             // For --ai with no branch and no name and no from, daemon will fallback to wt-work — allow but ensure at least one source
             // If branch is None and name is None and from/branch empty, we still allow (derive_branch fallback).
-            Ok(CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name })
+            if (model.is_some() || effort.is_some()) && agent.is_none() {
+                anyhow::bail!("--model/--effort require --agent");
+            }
+            Ok(CliCmd::WorktreeCreate { session, branch, from, note, agent, model, effort, is_ai, name })
         }
         "open" => {
             let path = rest.first().cloned().ok_or_else(|| anyhow::anyhow!("worktree open needs PATH"))?;
@@ -1503,7 +1524,7 @@ const WORKTREE_HELP: &str = "\
 kumo worktree — isolated worktrees for parallel agents
 
 USAGE:
-    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [-s SESSION] [--json]
+    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [--model MODEL] [--effort LEVEL] [-s SESSION] [--json]
     kumo worktree open PATH [-s SESSION]
     kumo worktree rm PATH [--force] [-s SESSION]
     kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]
@@ -1517,6 +1538,8 @@ OPTIONS:
     --from REF              start point: branch, commit, #1234, or GitHub URL
     --note NOTE             checkpoint note seeded on creation
     --agent AGENT           chain `kumo agent start --kind AGENT` into new pane
+    --model MODEL           launch the selected agent model
+    --effort LEVEL          launch reasoning effort (agent-dependent)
     --comment COMMENT       for `set`: free-text checkpoint
     --status STATUS         for `set`: todo|in-progress|in-review|completed
     --path PATH             worktree path (defaults to session workspace)

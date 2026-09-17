@@ -298,7 +298,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
                 Command::WorktreeCreate { request } => {
-                    let agent = request.agent.as_ref().map(|agent| agent.kind.as_str());
+                    let agent = request.agent.as_ref();
                     let branch = request.branch_override.as_deref().unwrap_or_default();
                     if !matches!(&request.base, kumo_protocol::WorktreeBase::CurrentHead)
                         || request.checkpoint_note.is_some()
