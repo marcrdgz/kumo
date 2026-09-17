@@ -48,6 +48,7 @@ struct AgentStartWaiter {
     kind: String,
     deadline: Instant,
     pinned_pid: Option<u32>,
+    ready_message: Option<String>,
 }
 
 /// Registry of all pending server-owned waits.
@@ -77,6 +78,18 @@ impl WaitRegistry {
         timeout_ms: u64,
         pinned_pid: Option<u32>,
     ) -> u64 {
+        self.add_agent_start_with_message(client_id, pane_id, kind, timeout_ms, pinned_pid, None)
+    }
+
+    pub fn add_agent_start_with_message(
+        &mut self,
+        client_id: usize,
+        pane_id: u64,
+        kind: String,
+        timeout_ms: u64,
+        pinned_pid: Option<u32>,
+        ready_message: Option<String>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.starts.insert(
@@ -87,6 +100,7 @@ impl WaitRegistry {
                 kind,
                 deadline: Instant::now() + Duration::from_millis(timeout_ms),
                 pinned_pid,
+                ready_message,
             },
         );
         id
@@ -233,7 +247,9 @@ impl WaitRegistry {
                 out.push((
                     w.client_id,
                     DaemonEvent::Reply {
-                        message: format!("started {} in pane {pane_id}", w.kind),
+                        message: w.ready_message
+                            .clone()
+                            .unwrap_or_else(|| format!("started {} in pane {pane_id}", w.kind)),
                     },
                 ));
                 done_ids.push(*id);
@@ -554,6 +570,24 @@ mod tests {
         assert!(r.poll_agent_starts(42, Some("codex"), AgentStatus::Working, Some(100)).is_empty());
         let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Working, Some(100));
         assert!(matches!(&out[0].1, DaemonEvent::Reply { message } if message.contains("started claude")));
+    }
+
+    #[test]
+    fn start_wait_can_report_the_parent_operation_on_readiness() {
+        let mut r = WaitRegistry::new();
+        r.add_agent_start_with_message(
+            1,
+            42,
+            "codex".into(),
+            10_000,
+            Some(100),
+            Some("created worktree and started codex".into()),
+        );
+        let out = r.poll_agent_starts(42, Some("codex"), AgentStatus::Idle, Some(100));
+        assert!(matches!(
+            &out[0].1,
+            DaemonEvent::Reply { message } if message == "created worktree and started codex"
+        ));
     }
 
     #[test]

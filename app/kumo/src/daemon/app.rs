@@ -99,6 +99,17 @@ impl Session {
 
 type AiScanResult = (Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>);
 
+pub(crate) struct PendingAgentStart {
+    pub pane_id: u64,
+    pub kind: String,
+    pub ready_message: String,
+}
+
+pub(crate) struct WorktreeCreateOutcome {
+    pub message: String,
+    pub pending_agent_start: Option<PendingAgentStart>,
+}
+
 #[allow(dead_code)]
 pub struct App {
     sessions: Vec<Session>,
@@ -687,7 +698,7 @@ impl App {
         agent: Option<&str>,
         is_ai: bool,
         name_hint: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<PendingAgentStart>), String> {
         let Some(session) = self.sessions.get(idx) else {
             return Err("no such session".to_string());
         };
@@ -737,6 +748,7 @@ impl App {
         // Chain agent start into the new pane. The worktree/session remain
         // available for inspection if startup fails, but the failure must be
         // visible to the caller rather than silently looking successful.
+        let mut pending_agent_start = None;
         if let Some(kind) = agent.filter(|s| !s.trim().is_empty()) {
             // New session is the last one after new_session_in_workspace
             let Some(new_sess) = self.sessions.last() else {
@@ -761,7 +773,16 @@ impl App {
                         path.display()
                     ));
                 }
-                Ok(msg) if msg.starts_with("started ") => {}
+                Ok(msg) if msg.starts_with("started ") => {
+                    pending_agent_start = Some(PendingAgentStart {
+                        pane_id,
+                        kind: crate::daemon::pane::normalize_agent_kind(kind),
+                        ready_message: format!(
+                            "created worktree {branch:?} at {} and started {kind} in pane {pane_id}",
+                            path.display()
+                        ),
+                    });
+                }
                 Ok(msg) => {
                     return Err(format!(
                         "created worktree {branch:?} at {} but agent {kind:?} failed to start: {msg}",
@@ -770,7 +791,7 @@ impl App {
                 }
             }
         }
-        Ok(branch)
+        Ok((branch, pending_agent_start))
     }
 
     /// Open the session already working in `path` (matching the exact path or
@@ -1878,7 +1899,11 @@ mod tests {
             None,
         );
 
-        assert_eq!(result.unwrap(), "feat/codex");
+        let (branch, pending) = result.unwrap();
+        assert_eq!(branch, "feat/codex");
+        let pending = pending.expect("agent startup must be readiness-gated by the server");
+        assert_eq!(pending.kind, "codex");
+        assert_eq!(pending.pane_id, app.sessions[1].active_tab().tree.focus);
         assert_eq!(app.sessions.len(), 2);
         assert_eq!(
             std::fs::canonicalize(&app.sessions[1].workspace).unwrap(),

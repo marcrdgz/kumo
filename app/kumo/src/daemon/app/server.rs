@@ -298,12 +298,31 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
                 Command::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
-                    let reply = if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
-                        app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"))
+                    if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
+                        match app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref()) {
+                            Ok(outcome) => {
+                                if let Some(start) = outcome.pending_agent_start {
+                                    let pinned = app.pane_os_pid(start.pane_id);
+                                    waits.add_agent_start_with_message(
+                                        id,
+                                        start.pane_id,
+                                        start.kind,
+                                        AGENT_START_TIMEOUT_MS,
+                                        pinned,
+                                        Some(start.ready_message),
+                                    );
+                                } else {
+                                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: outcome.message });
+                                }
+                            }
+                            Err(error) => {
+                                let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: format!("error: {error:#}") });
+                            }
+                        }
                     } else {
-                        app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"))
-                    };
-                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                        let reply = app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"));
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                    }
                 }
                 Command::WorktreeOpen { session, path } => {
                     let reply = app.worktree_open(&session, &path).unwrap_or_else(|e| format!("error: {e:#}"));

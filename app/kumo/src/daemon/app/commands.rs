@@ -16,7 +16,7 @@ use kumo_protocol::{
     EvidenceRegion, PaneInfo, SessionInfo, SplitDir, WireKeyEvent, WireNotice, WireWorktree,
 };
 
-use super::App;
+use super::{App, WorktreeCreateOutcome};
 use kumo_core::layout;
 use crate::daemon::agents::{self, AgentStatus, Snapshot};
 use crate::daemon::pane::Pane;
@@ -786,9 +786,12 @@ impl App {
         agent: Option<&str>,
         is_ai: bool,
         name: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<WorktreeCreateOutcome> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(WorktreeCreateOutcome {
+                message: format!("no session {session:?}"),
+                pending_agent_start: None,
+            });
         };
         let branch_override = if branch.trim().is_empty() { None } else { Some(branch.trim()) };
         let from = from.map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -801,11 +804,17 @@ impl App {
             self.new_worktree_session_ext(idx, branch_override, from, note, agent, is_ai, name)
         } else {
             let b = branch_override.unwrap().to_string();
-            self.new_worktree_session(idx, &b).map(|_| b)
+            self.new_worktree_session(idx, &b).map(|_| (b, None))
         };
         match res {
-            Ok(b) => Ok(format!("created worktree {b:?}")),
-            Err(e) => Ok(format!("error: {e}")),
+            Ok((branch, pending_agent_start)) => Ok(WorktreeCreateOutcome {
+                message: format!("created worktree {branch:?}"),
+                pending_agent_start,
+            }),
+            Err(error) => Ok(WorktreeCreateOutcome {
+                message: format!("error: {error}"),
+                pending_agent_start: None,
+            }),
         }
     }
 
