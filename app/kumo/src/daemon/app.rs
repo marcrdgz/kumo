@@ -688,6 +688,7 @@ impl App {
             &WorktreeBase::CurrentHead,
             None,
             None,
+            None,
             false,
             None,
         )
@@ -704,6 +705,7 @@ impl App {
         branch_override: Option<&str>,
         base: &WorktreeBase,
         note: Option<&str>,
+        task: Option<&kumo_core::protocol::WorktreeTaskReference>,
         agent: Option<&AgentLaunchRequest>,
         is_ai: bool,
         name_hint: Option<&str>,
@@ -718,6 +720,22 @@ impl App {
             WorktreeBase::GitRef(reference) => Some(reference.as_str()),
             WorktreeBase::CurrentHead | WorktreeBase::RepoDefault => None,
         };
+        let jira_issue = match task.map(|task| &task.provider) {
+            Some(kumo_core::protocol::WorktreeTaskProvider::Jira) => {
+                let task = task.expect("provider came from task");
+                let email = kumo_core::config::jira_email().unwrap_or_default();
+                let token = std::env::var("KUMO_JIRA_API_TOKEN").unwrap_or_default();
+                Some(kumo_core::jira::fetch_issue(
+                    &task.reference,
+                    kumo_core::config::jira_site().as_deref(),
+                    &email,
+                    &token,
+                )?)
+            }
+            None => None,
+        };
+        let task_name = jira_issue.as_ref().map(|issue| format!("{} {}", issue.key, issue.summary));
+        let name_hint = name_hint.or(task_name.as_deref());
         // Orca-aligned branch derivation (no `kumo/` prefix)
         let branch = kumo_core::worktrees::derive_branch(name_hint, from, branch_override)?;
         if branch.trim().is_empty() { return Err("branch name cannot be empty".into()); }
@@ -772,6 +790,10 @@ impl App {
                 created_with_agent: agent.map(|request| crate::daemon::pane::normalize_agent_kind(&request.kind)),
                 created_with_model: agent.and_then(|request| request.model.clone()),
                 created_with_effort: agent.and_then(|request| request.effort.clone()),
+                task_provider: jira_issue.as_ref().map(|_| "jira".to_string()),
+                task_reference: jira_issue.as_ref().map(|issue| issue.key.clone()),
+                task_url: jira_issue.as_ref().map(|issue| issue.url.clone()),
+                task_title: jira_issue.as_ref().map(|issue| issue.summary.clone()),
             },
         );
         // Chain agent start into the new pane. The worktree/session remain
@@ -1925,6 +1947,7 @@ mod tests {
             0,
             Some("feat/codex"),
             &WorktreeBase::CurrentHead,
+            None,
             None,
             Some(&agent),
             true,

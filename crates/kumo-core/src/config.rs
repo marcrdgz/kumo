@@ -477,6 +477,12 @@ pub struct WorktreeConfig {
     pub expose_socket: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JiraConfig {
+    pub site: Option<String>,
+    pub email: Option<String>,
+}
+
 impl Default for WorktreeConfig {
     fn default() -> Self {
         Self { shared_dirs: Vec::new(), base_ref: None, expose_socket: true }
@@ -518,6 +524,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     /// Worktree isolation (`[worktree]`).
     pub worktree: WorktreeConfig,
+    /// Jira Cloud lookup settings (`[jira]`). The API token remains environment-only.
+    pub jira: JiraConfig,
 }
 
 impl Default for Config {
@@ -536,6 +544,7 @@ impl Default for Config {
             status_bar: StatusBarConfig::default(),
             notifications: NotificationsConfig::default(),
             worktree: WorktreeConfig::default(),
+            jira: JiraConfig::default(),
         }
     }
 }
@@ -1013,6 +1022,10 @@ impl Config {
                 self.worktree.expose_socket = v;
             }
         }
+        if let Some(jira) = toml.jira {
+            self.jira.site = jira.site.map(|value| value.trim().trim_end_matches('/').to_string()).filter(|value| !value.is_empty());
+            self.jira.email = jira.email.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        }
         self.normalize_new_cwd();
     }
 }
@@ -1186,6 +1199,12 @@ pub struct WorktreeRaw {
     pub expose_socket: Option<bool>,
 }
 
+#[derive(Default, serde::Deserialize, Debug)]
+pub struct JiraRaw {
+    pub site: Option<String>,
+    pub email: Option<String>,
+}
+
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
 /// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
 #[derive(Default, serde::Deserialize)]
@@ -1215,6 +1234,8 @@ struct TomlConfig {
     notifications: Option<NotificationsRaw>,
     #[serde(rename = "worktree")]
     worktree: Option<WorktreeRaw>,
+    #[serde(rename = "jira")]
+    jira: Option<JiraRaw>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -1694,6 +1715,14 @@ pub fn worktree_base_ref() -> Option<String> {
 /// Whether spawned panes receive `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH`.
 pub fn worktree_expose_socket() -> bool {
     cached_config().worktree.expose_socket
+}
+
+pub fn jira_site() -> Option<String> {
+    std::env::var("KUMO_JIRA_SITE").ok().filter(|value| !value.trim().is_empty()).or_else(|| cached_config().jira.site)
+}
+
+pub fn jira_email() -> Option<String> {
+    std::env::var("KUMO_JIRA_EMAIL").ok().filter(|value| !value.trim().is_empty()).or_else(|| cached_config().jira.email)
 }
 
 /// Split a command line string into program + args (space separated).
@@ -2253,6 +2282,26 @@ mod tests {
         );
 
         assert_eq!(worktree_base_ref().as_deref(), Some("upstream/trunk"));
+    }
+
+    #[test]
+    fn jira_connection_settings_parse_without_a_token() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-jira");
+        let home = scratch_dir("home-jira");
+        write(
+            &cfg_dir.join("config.toml"),
+            "[jira]\nsite = \"https://acme.atlassian.net/\"\nemail = \"dev@example.com\"\n",
+        );
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::unset("KUMO_JIRA_SITE"),
+            EnvGuard::unset("KUMO_JIRA_EMAIL"),
+        );
+
+        assert_eq!(jira_site().as_deref(), Some("https://acme.atlassian.net"));
+        assert_eq!(jira_email().as_deref(), Some("dev@example.com"));
     }
 
     #[test]

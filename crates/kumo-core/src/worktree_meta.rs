@@ -36,6 +36,14 @@ pub struct Checkpoint {
     /// Reasoning effort requested for the initial agent launch.
     #[serde(default)]
     pub created_with_effort: Option<String>,
+    #[serde(default)]
+    pub task_provider: Option<String>,
+    #[serde(default)]
+    pub task_reference: Option<String>,
+    #[serde(default)]
+    pub task_url: Option<String>,
+    #[serde(default)]
+    pub task_title: Option<String>,
     /// Unix millis when the entry was last touched.
     #[serde(default)]
     pub updated_at: u64,
@@ -188,7 +196,11 @@ pub fn set(
         && entry.base_ref.is_none()
         && entry.created_with_agent.is_none()
         && entry.created_with_model.is_none()
-        && entry.created_with_effort.is_none();
+        && entry.created_with_effort.is_none()
+        && entry.task_provider.is_none()
+        && entry.task_reference.is_none()
+        && entry.task_url.is_none()
+        && entry.task_title.is_none();
     if empty {
         store.entries.remove(&k);
         save_store(&store)?;
@@ -209,6 +221,10 @@ pub struct CreateMetadata {
     pub created_with_agent: Option<String>,
     pub created_with_model: Option<String>,
     pub created_with_effort: Option<String>,
+    pub task_provider: Option<String>,
+    pub task_reference: Option<String>,
+    pub task_url: Option<String>,
+    pub task_title: Option<String>,
 }
 
 pub fn seed(path: &Path, metadata: CreateMetadata) -> Result<(), String> {
@@ -226,6 +242,10 @@ pub fn seed(path: &Path, metadata: CreateMetadata) -> Result<(), String> {
             created_with_agent: metadata.created_with_agent.filter(|value| !value.trim().is_empty()),
             created_with_model: metadata.created_with_model.filter(|value| !value.trim().is_empty()),
             created_with_effort: metadata.created_with_effort.filter(|value| !value.trim().is_empty()),
+            task_provider: metadata.task_provider.filter(|value| !value.trim().is_empty()),
+            task_reference: metadata.task_reference.filter(|value| !value.trim().is_empty()),
+            task_url: metadata.task_url.filter(|value| !value.trim().is_empty()),
+            task_title: metadata.task_title.filter(|value| !value.trim().is_empty()),
             updated_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as u64)
@@ -293,6 +313,7 @@ mod tests {
             branch: Some("feat/a".into()), comment: Some("note".into()), status: Some("todo".into()),
             is_ephemeral: true, display_name: None, base_ref: None, created_with_agent: None,
             created_with_model: None, created_with_effort: None,
+            task_provider: None, task_reference: None, task_url: None, task_title: None,
             updated_at: 1,
         });
         assert_eq!(store.entries.get(&_key).unwrap().branch.as_deref(), Some("feat/a"));
@@ -322,5 +343,6 @@ mod tests {
         assert_eq!(checkpoint.created_with_agent, None);
         assert_eq!(checkpoint.created_with_model, None);
         assert_eq!(checkpoint.created_with_effort, None);
+        assert_eq!(checkpoint.task_reference, None);
     }
 }

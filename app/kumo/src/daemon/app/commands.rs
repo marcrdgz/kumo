@@ -782,6 +782,9 @@ impl App {
                     comment: meta.as_ref().and_then(|m| m.comment.clone()),
                     status: meta.as_ref().and_then(|m| m.status.clone()),
                     is_ephemeral: meta.as_ref().map(|m| m.is_ephemeral).unwrap_or(false),
+                    task_reference: meta.as_ref().and_then(|m| m.task_reference.clone()),
+                    task_url: meta.as_ref().and_then(|m| m.task_url.clone()),
+                    task_title: meta.as_ref().and_then(|m| m.task_title.clone()),
                 }
             })
             .collect();
@@ -812,6 +815,7 @@ impl App {
         branch: &str,
         base: &kumo_protocol::WorktreeBase,
         note: Option<&str>,
+        task: Option<&kumo_protocol::WorktreeTaskReference>,
         agent: Option<&kumo_protocol::AgentLaunchRequest>,
         is_ai: bool,
         name: Option<&str>,
@@ -830,11 +834,12 @@ impl App {
         let use_ext = is_ai
             || !matches!(base, kumo_protocol::WorktreeBase::CurrentHead)
             || note.is_some()
+            || task.is_some()
             || agent.is_some()
             || name.is_some()
             || branch_override.is_none();
         let res = if use_ext {
-            self.new_worktree_session_ext(idx, branch_override, base, note, agent, is_ai, name)
+            self.new_worktree_session_ext(idx, branch_override, base, note, task, agent, is_ai, name)
         } else {
             let b = branch_override.unwrap().to_string();
             self.new_worktree_session(idx, &b).map(|_| (b, None))
@@ -961,6 +966,9 @@ impl App {
             comment: meta.as_ref().and_then(|m| m.comment.clone()),
             status: meta.as_ref().and_then(|m| m.status.clone()),
             is_ephemeral: meta.as_ref().map(|m| m.is_ephemeral).unwrap_or(false),
+            task_reference: meta.as_ref().and_then(|m| m.task_reference.clone()),
+            task_url: meta.as_ref().and_then(|m| m.task_url.clone()),
+            task_title: meta.as_ref().and_then(|m| m.task_title.clone()),
         }))
     }
 

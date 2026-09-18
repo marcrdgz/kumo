@@ -24,7 +24,7 @@ use kumo_core::theme::{self, OwnedTheme, THEMES};
 use kumo_protocol::{
     AgentLaunchRequest, AgentStatus, Command, CopyHit, DaemonEvent, Layout, LayoutNode, LinkRange,
     PaneFrame, ScrollState, SessionLayout, SplitDir, ToastKind, WireBranch, WireCell, WireWorktree,
-    WorktreeBase, WorktreeCreateRequest,
+    WorktreeBase, WorktreeCreateRequest, WorktreeTaskProvider, WorktreeTaskReference,
 };
 
 use crate::cli::agent_skill::{self, AGENT_SKILL_TARGETS, AgentSkillStatus, AgentSkillTarget};
@@ -3150,6 +3150,7 @@ impl View {
         for tab in [
             WorktreeCreateTab::Inteligente,
             WorktreeCreateTab::Github,
+            WorktreeCreateTab::Jira,
             WorktreeCreateTab::Rama,
             WorktreeCreateTab::Nombre,
         ] {
@@ -3551,16 +3552,23 @@ impl View {
         let agent = self.worktree_create.agent.trim().to_string();
         let agent_opt = if agent.is_empty() { None } else { Some(agent) };
         // Determine name/from based on tab and content
+        let mut task = None;
         let (name_opt, from_opt) = match self.worktree_create.tab {
             WorktreeCreateTab::Inteligente => {
-                if kumo_core::worktrees::parse_pr_number(&cf).is_some() || cf.contains("://") {
+                if kumo_core::jira::issue_key(&cf).is_some() {
+                    task = Some(WorktreeTaskReference { provider: WorktreeTaskProvider::Jira, reference: cf.clone() });
+                    (None, None)
+                } else if kumo_core::worktrees::parse_pr_number(&cf).is_some() || cf.contains("://") {
                     (None, Some(cf.clone()))
                 } else {
                     (Some(cf.clone()), None)
                 }
             }
             WorktreeCreateTab::Github => (None, Some(cf.clone())),
-            WorktreeCreateTab::Jira => (None, Some(cf.clone())),
+            WorktreeCreateTab::Jira => {
+                task = Some(WorktreeTaskReference { provider: WorktreeTaskProvider::Jira, reference: cf.clone() });
+                (None, None)
+            }
             WorktreeCreateTab::Rama => (None, Some(cf.clone())),
             WorktreeCreateTab::Nombre => (Some(cf.clone()), None),
         };
@@ -3580,6 +3588,7 @@ impl View {
                 branch_override: (!branch.is_empty()).then_some(branch),
                 base: from_opt.map(WorktreeBase::GitRef).unwrap_or(WorktreeBase::RepoDefault),
                 checkpoint_note: note_opt,
+                task,
                 agent: agent_opt.map(|kind| AgentLaunchRequest { kind, model: None, effort: None }),
                 ephemeral: true,
             },
@@ -3651,6 +3660,7 @@ impl View {
                         branch_override: Some(name),
                         base: WorktreeBase::CurrentHead,
                         checkpoint_note: None,
+                        task: None,
                         agent: None,
                         ephemeral: false,
                     },
@@ -7744,6 +7754,9 @@ impl View {
             if let Some(st) = &row.status {
                 branch_disp.push_str(&format!(" [{}]", st));
             }
+            if let Some(task) = &row.task_reference {
+                branch_disp.push_str(&format!(" · {task}"));
+            }
             if let Some(c) = &row.comment {
                 if !c.is_empty() && !sel {
                     // show comment suffix dimmed in path column when not selected
@@ -7801,6 +7814,7 @@ impl View {
         for tab in [
             WorktreeCreateTab::Inteligente,
             WorktreeCreateTab::Github,
+            WorktreeCreateTab::Jira,
             WorktreeCreateTab::Rama,
             WorktreeCreateTab::Nombre,
         ] {
@@ -10026,6 +10040,19 @@ mod tests {
     }
 
     #[test]
+    fn worktree_create_renders_the_jira_source_tab() {
+        let mut view = test_view();
+        view.worktree_create.open = true;
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| view.draw(frame)).unwrap();
+
+        let buffer = term.backend().buffer();
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("Jira"), "the Jira tab must be visible and selectable");
+    }
+
+    #[test]
     fn recompute_geometry_requests_pane_sizes() {
         let layout = Layout {
             active: Some("sess".into()),
@@ -10192,7 +10219,7 @@ mod tests {
             view.settings.open = true;
             view.worktree_picker.open = true;
             view.worktree_picker.items = vec![
-                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false, comment: None, status: None, is_ephemeral: false },
+                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false, comment: None, status: None, is_ephemeral: false, task_reference: None, task_url: None, task_title: None },
             ];
             view.pane_numbers = Some(Instant::now());
             view.update_notice = Some(("key".into(), "nightly".into()));

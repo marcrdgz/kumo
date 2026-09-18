@@ -55,8 +55,9 @@ mod crossterm;
 /// v13 adds the main Git worktree path to `SessionLayout` so clients can group
 /// linked worktrees under one project. v14 adds `TabMove`. v15 replaces the
 /// flat worktree-create fields with a structured creation request. v16 adds
-/// model and reasoning-effort preferences to worktree agent launches.
-pub const PROTOCOL_VERSION: u32 = 16;
+/// model and reasoning-effort preferences to worktree agent launches. v17
+/// adds linked task references for Jira-backed creation.
+pub const PROTOCOL_VERSION: u32 = 17;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -448,6 +449,12 @@ pub struct WireWorktree {
     /// True when created via `kumo worktree create --ai` (ephemeral, isolated).
     #[serde(default)]
     pub is_ephemeral: bool,
+    #[serde(default)]
+    pub task_reference: Option<String>,
+    #[serde(default)]
+    pub task_url: Option<String>,
+    #[serde(default)]
+    pub task_title: Option<String>,
 }
 
 /// Status for lightweight worktree checkpoints.
@@ -502,6 +509,17 @@ pub struct AgentLaunchRequest {
     pub effort: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub enum WorktreeTaskProvider {
+    Jira,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WorktreeTaskReference {
+    pub provider: WorktreeTaskProvider,
+    pub reference: String,
+}
+
 /// Typed input for creating a worktree and its initial Kumo session.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct WorktreeCreateRequest {
@@ -514,6 +532,8 @@ pub struct WorktreeCreateRequest {
     pub base: WorktreeBase,
     #[serde(default)]
     pub checkpoint_note: Option<String>,
+    #[serde(default)]
+    pub task: Option<WorktreeTaskReference>,
     #[serde(default)]
     pub agent: Option<AgentLaunchRequest>,
     #[serde(default)]
@@ -1539,6 +1559,10 @@ mod tests {
                     branch_override: None,
                     base: WorktreeBase::GitRef("origin/main".into()),
                     checkpoint_note: Some("investigate auth race".into()),
+                    task: Some(WorktreeTaskReference {
+                        provider: WorktreeTaskProvider::Jira,
+                        reference: "KUMO-42".into(),
+                    }),
                     agent: Some(AgentLaunchRequest {
                         kind: "codex".into(),
                         model: Some("gpt-5.6-sol".into()),

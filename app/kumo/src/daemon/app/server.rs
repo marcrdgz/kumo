@@ -302,6 +302,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let branch = request.branch_override.as_deref().unwrap_or_default();
                     if !matches!(&request.base, kumo_protocol::WorktreeBase::CurrentHead)
                         || request.checkpoint_note.is_some()
+                        || request.task.is_some()
                         || agent.is_some()
                         || request.ephemeral
                         || request.display_name.is_some()
@@ -311,6 +312,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             branch,
                             &request.base,
                             request.checkpoint_note.as_deref(),
+                            request.task.as_ref(),
                             agent,
                             request.ephemeral,
                             request.display_name.as_deref(),

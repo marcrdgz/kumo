@@ -36,6 +36,10 @@ sound = true            # audible chime on blocked/finished transitions
 shared-dirs = ["node_modules", ".cache"] # gitignored dirs shared by worktrees
 base-ref = "origin/main" # optional base for task-oriented worktrees
 expose-socket = true    # pass KUMO_SOCKET_PATH and KUMO_BIN_PATH to panes
+
+[jira]
+site = "https://your-company.atlassian.net"
+email = "you@example.com"
 ```
 
 ## Config builder
@@ -91,6 +95,15 @@ app/**/.env
 ```
 
 These paths are copied when `kumo worktree create --ai` creates a checkout.
+
+## Jira Cloud
+
+Set `[jira].site` and `[jira].email`, then expose an Atlassian API token as
+`KUMO_JIRA_API_TOKEN` to the Kumo daemon. `KUMO_JIRA_SITE` and
+`KUMO_JIRA_EMAIL` can override the file settings. Tokens are intentionally not
+read from `config.toml`. The Jira worktree tab and `worktree create --jira`
+use Jira Cloud REST API v3 to load the issue summary and derive the branch;
+the linked issue key, URL, and title are stored with the worktree metadata.
 
 The current 0.7 flow starts an agent when `--agent` is supplied, but does not
 send a task automatically. After the agent is ready, submit work explicitly

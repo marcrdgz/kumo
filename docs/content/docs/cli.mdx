@@ -27,7 +27,7 @@ icon: 🛠️
 | Command | Description |
 | --- | --- |
 | `kumo worktree create BRANCH [-s SESSION]` | Create a regular Git worktree from the session's repository and open it in a new session |
-| `kumo worktree create --ai [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent KIND] [--model MODEL] [--effort LEVEL] [-s SESSION]` | Create an isolated worktree for agent work; derive a branch from `NAME` (or use `--branch`), optionally start from a branch/commit/PR ref, seed a checkpoint note, and start an agent with model preferences |
+| `kumo worktree create --ai [NAME] [--branch BRANCH] [--from REF] [--jira ISSUE] [--note NOTE] [--agent KIND] [--model MODEL] [--effort LEVEL] [-s SESSION]` | Create an isolated worktree for agent work; derive a branch from a name or Jira issue (or use `--branch`), optionally start from a branch/commit/PR ref, seed a checkpoint note, and start an agent with model preferences |
 | `kumo worktree list [-s SESSION]` | List the repository's main and linked worktrees |
 | `kumo worktree current [PATH] [-s SESSION]` | Show the checkpoint for the session's current worktree, or for `PATH` |
 | `kumo worktree set [PATH] [--comment TEXT] [--status STATUS] [-s SESSION]` | Set or update a checkpoint (`todo`, `in-progress`, `in-review`, or `completed`) |

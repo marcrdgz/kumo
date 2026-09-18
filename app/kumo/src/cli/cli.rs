@@ -15,6 +15,7 @@ use anyhow::Result;
 use kumo_protocol::{
     AgentLaunchRequest, AgentReadSource, AgentStatus, AgentWaitKind, Command, DaemonEvent, SplitDir,
     WireKeyCode, WireKeyEvent, WireModifiers, WorktreeBase, WorktreeCreateRequest,
+    WorktreeTaskProvider, WorktreeTaskReference,
 };
 
 use crate::cli::agent_skill::{self, KUMO_AGENT_SKILL};
@@ -128,7 +129,7 @@ enum CliCmd {
     AgentRename { session: Option<String>, pane: PaneRef, name: String },
     AgentBroadcast { session: Option<String>, text: String, filter: Option<AgentStatus> },
     AgentSkill { output: Option<PathBuf> },
-    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, note: Option<String>, agent: Option<String>, model: Option<String>, effort: Option<String>, is_ai: bool, name: Option<String> },
+    WorktreeCreate { session: Option<String>, branch: Option<String>, from: Option<String>, jira: Option<String>, note: Option<String>, agent: Option<String>, model: Option<String>, effort: Option<String>, is_ai: bool, name: Option<String> },
     WorktreeOpen { session: Option<String>, path: PathBuf },
     WorktreeRemove { session: Option<String>, path: PathBuf, force: bool },
     WorktreeSet { session: Option<String>, path: Option<PathBuf>, comment: Option<String>, status: Option<String> },
@@ -335,7 +336,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 }
             }
         }
-        CliCmd::WorktreeCreate { session, branch, from, note, agent, model, effort, is_ai, name } => {
+        CliCmd::WorktreeCreate { session, branch, from, jira, note, agent, model, effort, is_ai, name } => {
             let sess = resolve_session(&mut stream, session)?;
             let base = from.map(WorktreeBase::GitRef).unwrap_or_else(|| {
                 if is_ai || name.is_some() { WorktreeBase::RepoDefault } else { WorktreeBase::CurrentHead }
@@ -347,6 +348,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                     branch_override: branch,
                     base,
                     checkpoint_note: note,
+                    task: jira.map(|reference| WorktreeTaskReference { provider: WorktreeTaskProvider::Jira, reference }),
                     agent: agent.map(|kind| AgentLaunchRequest { kind, model, effort }),
                     ephemeral: is_ai,
                 },
@@ -1117,6 +1119,7 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             let mut is_ai = false;
             let mut branch: Option<String> = None;
             let mut from: Option<String> = None;
+            let mut jira: Option<String> = None;
             let mut note: Option<String> = None;
             let mut agent: Option<String> = None;
             let mut model: Option<String> = None;
@@ -1141,6 +1144,14 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                     }
                     s if s.starts_with("--from=") => {
                         from = Some(s.strip_prefix("--from=").unwrap().to_string());
+                        j+=1;
+                    }
+                    "--jira" => {
+                        jira = Some(need(&rest, j+1, "an issue key or URL after --jira")?);
+                        j+=2;
+                    }
+                    s if s.starts_with("--jira=") => {
+                        jira = Some(s.strip_prefix("--jira=").unwrap().to_string());
                         j+=1;
                     }
                     "--note" | "--comment" => {
@@ -1197,7 +1208,7 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                     }
                 }
                 // Warn if --ai flags were not set but from/note/agent given
-                if from.is_some() || note.is_some() || agent.is_some() || model.is_some() || effort.is_some() {
+                if from.is_some() || jira.is_some() || note.is_some() || agent.is_some() || model.is_some() || effort.is_some() {
                     anyhow::bail!("--from/--note/--agent/--model/--effort require --ai (try `kumo worktree create --ai ...`)");
                 }
             }
@@ -1210,7 +1221,10 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
             if (model.is_some() || effort.is_some()) && agent.is_none() {
                 anyhow::bail!("--model/--effort require --agent");
             }
-            Ok(CliCmd::WorktreeCreate { session, branch, from, note, agent, model, effort, is_ai, name })
+            if jira.is_some() && from.is_some() {
+                anyhow::bail!("--jira and --from cannot be combined");
+            }
+            Ok(CliCmd::WorktreeCreate { session, branch, from, jira, note, agent, model, effort, is_ai, name })
         }
         "open" => {
             let path = rest.first().cloned().ok_or_else(|| anyhow::anyhow!("worktree open needs PATH"))?;
@@ -1524,7 +1538,7 @@ const WORKTREE_HELP: &str = "\
 kumo worktree — isolated worktrees for parallel agents
 
 USAGE:
-    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--note NOTE] [--agent AGENT] [--model MODEL] [--effort LEVEL] [-s SESSION] [--json]
+    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--jira ISSUE] [--note NOTE] [--agent AGENT] [--model MODEL] [--effort LEVEL] [-s SESSION] [--json]
     kumo worktree open PATH [-s SESSION]
     kumo worktree rm PATH [--force] [-s SESSION]
     kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]
@@ -1536,6 +1550,7 @@ OPTIONS:
     --ai                    isolated ephemeral worktree (never reuses files)
     --branch BRANCH         explicit branch (overrides derived name)
     --from REF              start point: branch, commit, #1234, or GitHub URL
+    --jira ISSUE            link a Jira issue key or browse URL and derive the branch
     --note NOTE             checkpoint note seeded on creation
     --agent AGENT           chain `kumo agent start --kind AGENT` into new pane
     --model MODEL           launch the selected agent model
@@ -1961,7 +1976,8 @@ fn print_worktree_list(items: &[kumo_protocol::WireWorktree]) {
         let status = wt.status.as_deref().unwrap_or("-");
         let comment = wt.comment.as_deref().unwrap_or("");
         let cmt = if comment.is_empty() { String::new() } else { format!(" · {}", comment) };
-        println!("{}  {}{}  status={}{}", wt.path.display(), branch, flags, status, cmt);
+        let task = wt.task_reference.as_deref().map(|key| format!(" · {key}")).unwrap_or_default();
+        println!("{}  {}{}  status={}{}{}", wt.path.display(), branch, flags, status, task, cmt);
     }
 }
 

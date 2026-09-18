@@ -349,7 +349,7 @@ pub fn resolve_from(repo_root: &Path, raw: &str) -> Result<String, String> {
     if s.is_empty() { return Err("empty --from".into()); }
     // Jira deferred (keys like ABC-1234 or jira URLs)
     if is_jira_ref(s) {
-        return Err("Jira issue linking is deferred — use a branch, commit, #1234, or GitHub URL".into());
+        return Err("Jira issues are task sources, not Git refs — use --jira or the Jira tab".into());
     }
     // Numeric PR short form #1234
     if let Some(num) = parse_pr_number(s).filter(|_| s.starts_with('#')) {

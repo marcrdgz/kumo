@@ -165,8 +165,9 @@ kumo worktree create --ai fix-login \
 `--ai` creates an ephemeral worktree and opens a session for it. The
 positional `NAME` is slugged into a branch unless `--branch` supplies an
 explicit branch. `--from` accepts a local or remote branch, commit, `#1234`,
-or a GitHub/GitLab pull or merge request URL. Jira references are not supported
-yet. `--agent KIND` starts the selected agent in the new pane; `--model` and
+or a GitHub/GitLab pull or merge request URL. `--jira PROJ-123` (or the Jira
+tab) loads a configured Jira Cloud issue, links it to the worktree, and derives
+the branch from its key and summary. `--agent KIND` starts the selected agent in the new pane; `--model` and
 `--effort` are translated to that harness's native flags. Kumo supports these
 preferences for Claude (`--model`, `--effort`), Codex (`-m`,
 `model_reasoning_effort`), and OpenCode (`--model`, `--variant`); Gemini

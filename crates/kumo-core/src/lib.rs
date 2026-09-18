@@ -11,6 +11,7 @@ pub mod config;
 pub mod daemon;
 pub mod launch;
 pub mod layout;
+pub mod jira;
 pub mod protocol;
 pub mod theme;
 pub mod update;
