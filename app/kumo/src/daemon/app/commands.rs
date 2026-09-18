@@ -1149,6 +1149,7 @@ mod tests {
             kind: "codex".into(),
             model: Some("gpt-5.6-sol".into()),
             effort: Some("high".into()),
+            initial_prompt: None,
         };
         assert_eq!(
             agent_launch_args(&codex).unwrap(),
@@ -1159,6 +1160,7 @@ mod tests {
             kind: "claude".into(),
             model: Some("opus".into()),
             effort: Some("max".into()),
+            initial_prompt: None,
         };
         assert_eq!(
             agent_launch_args(&claude).unwrap(),
@@ -1172,6 +1174,7 @@ mod tests {
             kind: "gemini".into(),
             model: None,
             effort: Some("high".into()),
+            initial_prompt: None,
         };
         assert!(agent_launch_args(&request).unwrap_err().contains("effort"));
     }

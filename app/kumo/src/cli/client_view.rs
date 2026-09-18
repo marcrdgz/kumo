@@ -3589,7 +3589,7 @@ impl View {
                 base: from_opt.map(WorktreeBase::GitRef).unwrap_or(WorktreeBase::RepoDefault),
                 checkpoint_note: note_opt,
                 task,
-                agent: agent_opt.map(|kind| AgentLaunchRequest { kind, model: None, effort: None }),
+                agent: agent_opt.map(|kind| AgentLaunchRequest { kind, model: None, effort: None, initial_prompt: None }),
                 ephemeral: true,
             },
         });

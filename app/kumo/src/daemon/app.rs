@@ -104,6 +104,7 @@ pub(crate) struct PendingAgentStart {
     pub pane_id: u64,
     pub kind: String,
     pub ready_message: String,
+    pub initial_prompt: Option<String>,
 }
 
 pub(crate) struct WorktreeCreateOutcome {
@@ -834,6 +835,7 @@ impl App {
                             "created worktree {branch:?} at {} and started {kind} in pane {pane_id}",
                             path.display()
                         ),
+                        initial_prompt: request.initial_prompt.clone().filter(|prompt| !prompt.trim().is_empty()),
                     });
                 }
                 Ok(msg) => {
@@ -1941,7 +1943,12 @@ mod tests {
         std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
         let repo = temp_git_repo();
         let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
-        let agent = AgentLaunchRequest { kind: "codex".into(), model: None, effort: None };
+        let agent = AgentLaunchRequest {
+            kind: "codex".into(),
+            model: None,
+            effort: None,
+            initial_prompt: Some("fix the failing test".into()),
+        };
 
         let result = app.new_worktree_session_ext(
             0,
@@ -1958,6 +1965,7 @@ mod tests {
         assert_eq!(branch, "feat/codex");
         let pending = pending.expect("agent startup must be readiness-gated by the server");
         assert_eq!(pending.kind, "codex");
+        assert_eq!(pending.initial_prompt.as_deref(), Some("fix the failing test"));
         assert_eq!(pending.pane_id, app.sessions[1].active_tab().tree.focus);
         assert_eq!(app.sessions.len(), 2);
         assert_eq!(

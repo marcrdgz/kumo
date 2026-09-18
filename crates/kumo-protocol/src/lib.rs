@@ -56,8 +56,9 @@ mod crossterm;
 /// linked worktrees under one project. v14 adds `TabMove`. v15 replaces the
 /// flat worktree-create fields with a structured creation request. v16 adds
 /// model and reasoning-effort preferences to worktree agent launches. v17
-/// adds linked task references for Jira-backed creation.
-pub const PROTOCOL_VERSION: u32 = 17;
+/// adds linked task references for Jira-backed creation. v18 adds a gated
+/// initial prompt to structured agent launches.
+pub const PROTOCOL_VERSION: u32 = 18;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -507,6 +508,8 @@ pub struct AgentLaunchRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -1567,6 +1570,7 @@ mod tests {
                         kind: "codex".into(),
                         model: Some("gpt-5.6-sol".into()),
                         effort: Some("high".into()),
+                        initial_prompt: Some("fix the race".into()),
                     }),
                     ephemeral: true,
                 },

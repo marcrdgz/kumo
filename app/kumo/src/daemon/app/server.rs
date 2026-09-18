@@ -130,6 +130,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let mut pane_bufs: HashMap<u64, Buffer> = HashMap::new();
     let mut pane_cursors: HashMap<u64, Option<(u16, u16)>> = HashMap::new();
     let mut waits = super::waits::WaitRegistry::new();
+    let mut pending_start_prompts: HashMap<(usize, u64), String> = HashMap::new();
     let mut kill = false;
     let mut config_fingerprint = kumo_core::config::config_fingerprint();
     let mut last_config_check = Instant::now();
@@ -200,6 +201,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 }
                 Command::Detach => {
                     waits.cancel_client(id);
+                    pending_start_prompts.retain(|(client_id, _), _| *client_id != id);
                     clients.remove(&id);
                 }
                 Command::KillServer => {
@@ -320,6 +322,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             Ok(outcome) => {
                                 if let Some(start) = outcome.pending_agent_start {
                                     let pinned = app.pane_os_pid(start.pane_id);
+                                    if let Some(prompt) = start.initial_prompt {
+                                        pending_start_prompts.insert((id, start.pane_id), prompt);
+                                    }
                                     waits.add_agent_start_with_message(
                                         id,
                                         start.pane_id,
@@ -715,17 +720,36 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         {
             let mut wait_events = Vec::new();
             wait_events.extend(waits.poll_timeouts());
+            pending_start_prompts.retain(|(_, pane_id), _| waits.has_agent_starts(*pane_id));
             // Evaluate per-pane waiters
             let pids: Vec<u64> = app.panes.keys().copied().collect();
             for pid in pids {
                 if waits.has_agent_starts(pid) {
                     if let Some((detected_kind, status)) = app.agent_start_observation(pid) {
-                        wait_events.extend(waits.poll_agent_starts(
+                        let start_events = waits.poll_agent_starts(
                             pid,
                             detected_kind.as_deref(),
                             status.into(),
                             app.pane_os_pid(pid),
-                        ));
+                        );
+                        for (client_id, event) in start_events {
+                            let prompt = pending_start_prompts.remove(&(client_id, pid));
+                            let event = match (event, prompt) {
+                                (DaemonEvent::Reply { message }, Some(prompt)) => {
+                                    match app.agent_prompt_inject(pid, &prompt) {
+                                        Ok(()) => DaemonEvent::Reply {
+                                            message: format!("{message} and submitted the initial prompt"),
+                                        },
+                                        Err(code) => DaemonEvent::Error {
+                                            code,
+                                            message: format!("agent started in pane {pid}, but the initial prompt was not submitted"),
+                                        },
+                                    }
+                                }
+                                (event, _) => event,
+                            };
+                            wait_events.push((client_id, event));
+                        }
                     }
                 }
                 if let Some(status) = waits.has_agent_waiters(pid).then(|| app.current_agent_status(pid)).flatten() {

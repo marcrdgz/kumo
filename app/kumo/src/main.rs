@@ -181,7 +181,7 @@ fn print_help() {
     println!("    kumo agent skill [--output PATH]");
     println!();
     println!("WORKTREES:");
-    println!("    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--jira ISSUE] [--note NOTE] [--agent AGENT] [--model MODEL] [--effort LEVEL] [-s SESSION] [--json]");
+    println!("    kumo worktree create [--ai] [NAME] [--branch BRANCH] [--from REF] [--jira ISSUE] [--note NOTE] [--agent AGENT] [--model MODEL] [--effort LEVEL] [--prompt TEXT] [-s SESSION] [--json]");
     println!("    kumo worktree open PATH [-s SESSION]");
     println!("    kumo worktree rm PATH [--force] [-s SESSION]");
     println!("    kumo worktree set [--path PATH] --comment COMMENT --status STATUS [-s SESSION] [--json]");

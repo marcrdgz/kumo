@@ -157,6 +157,7 @@ kumo worktree create --ai fix-login \
   --agent codex \
   --model gpt-5.6-sol \
   --effort high \
+  --prompt "Fix the failing authentication tests" \
   --from main \
   --note "Investigate the authentication tests" \
   -s myproj
@@ -172,10 +173,11 @@ the branch from its key and summary. `--agent KIND` starts the selected agent in
 preferences for Claude (`--model`, `--effort`), Codex (`-m`,
 `model_reasoning_effort`), and OpenCode (`--model`, `--variant`); Gemini
 supports model selection. Model identifiers pass through because availability
-depends on the account and provider. Worktree creation does not send the task
-text.
+depends on the account and provider. `--prompt` waits for process and lifecycle
+detection to report the agent ready, then submits the initial task through the
+same bracketed-paste-aware path as `kumo agent prompt`.
 
-In 0.7, submit the task as a separate explicit step after startup:
+You can still submit later tasks as separate orchestration steps:
 
 ```sh
 kumo agent status -s myproj
@@ -189,9 +191,6 @@ Inspect or clean up the worktree with `kumo worktree current`, `list`,
 `set`, `open`, and `rm`. `rm` keeps a branch with unmerged commits unless
 `--force` is supplied. Checkpoint statuses are `todo`, `in-progress`,
 `in-review`, and `completed`; `--note` on create seeds the checkpoint comment.
-
-Automatic task submission and the fully chained
-create→start→ready→prompt flow are planned for 0.7.1.
 
 ## Patterns (copy-paste)
 
