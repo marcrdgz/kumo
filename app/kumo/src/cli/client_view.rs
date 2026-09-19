@@ -4233,11 +4233,9 @@ impl View {
         if self.worktree_create.open {
             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                 if let Some(tab) = self.worktree_create_tab_at(x, y) {
-                    if tab != WorktreeCreateTab::Jira {
-                        self.worktree_create.tab = tab;
-                        self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
-                        self.mark_dirty();
-                    }
+                    self.worktree_create.tab = tab;
+                    self.worktree_create.focus = WorktreeCreateFocus::CreateFrom;
+                    self.mark_dirty();
                     return Ok(());
                 }
                 if let Some(rect) = self.worktree_create_input_rect(WorktreeCreateFocus::CreateFrom) {
@@ -10050,6 +10048,22 @@ mod tests {
         let buffer = term.backend().buffer();
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(text.contains("Jira"), "the Jira tab must be visible and selectable");
+    }
+
+    #[test]
+    fn worktree_create_selects_the_jira_source_tab() {
+        let mut view = test_view();
+        view.worktree_create.open = true;
+        let dialog = view.worktree_create_rect().unwrap();
+        let tabs_y = dialog.y + 2;
+        let jira_x = (dialog.x..dialog.right())
+            .find(|&x| view.worktree_create_tab_at(x, tabs_y) == Some(WorktreeCreateTab::Jira))
+            .expect("Jira tab should have a clickable cell");
+
+        view.on_mouse(mouse_click(jira_x, tabs_y)).unwrap();
+
+        assert_eq!(view.worktree_create.tab, WorktreeCreateTab::Jira);
+        assert_eq!(view.worktree_create.focus, WorktreeCreateFocus::CreateFrom);
     }
 
     #[test]
