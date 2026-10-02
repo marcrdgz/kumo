@@ -193,6 +193,7 @@ pub struct App {
 #[cfg_attr(unix, allow(dead_code))]
 impl App {
     fn new(launch: Launch) -> Result<App> {
+        kumo_core::config::invalidate_cache();
         let shell = kumo_core::config::default_shell();
         // Load user-dir agent-detection rules (bundled defaults otherwise).
         super::agents::reload_agent_rules();

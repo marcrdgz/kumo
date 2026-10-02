@@ -1199,6 +1199,7 @@ impl View {
                 self.notice = Some((notice, Instant::now()));
                 self.ensure_sidebar_tab_visible();
                 // Status bar is client-local but reloaded from the same config.
+                kumo_core::config::invalidate_cache();
                 let new_bar = kumo_core::config::status_bar();
                 let enabled_changed = new_bar.enabled != self.status_bar.enabled;
                 self.status_bar = new_bar;
