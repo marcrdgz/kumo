@@ -7,9 +7,10 @@
 
 use std::io;
 use std::io::{Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -27,6 +28,19 @@ use crossterm::terminal::{
 use kumo_core::Launch;
 use crate::cli::client_view::View;
 use kumo_core::protocol::{self, ClientKind, Command, DaemonEvent};
+
+/// Bound daemon-event memory while keeping the socket reader independent from
+/// terminal rendering speed. The reader retries full sends, so events remain
+/// FIFO and no pane-frame deltas are discarded.
+const EVENT_QUEUE_CAP: usize = 256;
+/// Maximum daemon events applied before local input gets a turn.
+const EVENT_BATCH_MAX: usize = 128;
+/// Maximum time spent applying one daemon-event batch before local input and
+/// rendering are serviced.
+const EVENT_BATCH_BUDGET: Duration = Duration::from_millis(4);
+/// Retry interval while the bounded event queue is full. The stop flag is
+/// checked between retries so teardown cannot wait on a blocked producer.
+const EVENT_QUEUE_RETRY: Duration = Duration::from_millis(1);
 
 pub fn run(launch: Launch) -> Result<()> {
     let path = kumo_core::config::ipc_socket_path();
@@ -121,7 +135,7 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
     // keep the connection "alive" from the reader's perspective).
     let write_half = stream.try_clone()?;
     write_half.set_read_timeout(Some(Duration::from_millis(200))).ok();
-    let (ev_tx, ev_rx) = mpsc::channel::<DaemonEvent>();
+    let (ev_tx, ev_rx) = mpsc::sync_channel::<DaemonEvent>(EVENT_QUEUE_CAP);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop2 = stop.clone();
     let reader = std::thread::spawn(move || reader_loop(write_half, ev_tx, stop2));
@@ -142,7 +156,11 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
                     if let Some(exit) = apply_daemon_event(&mut view, ev) {
                         return Ok(exit);
                     }
-                    while let Ok(ev) = ev_rx.try_recv() {
+                    let batch_started = Instant::now();
+                    let mut processed = 1usize;
+                    while processed < EVENT_BATCH_MAX && batch_started.elapsed() < EVENT_BATCH_BUDGET {
+                        let Ok(ev) = ev_rx.try_recv() else { break };
+                        processed += 1;
                         if let Some(exit) = apply_daemon_event(&mut view, ev) {
                             return Ok(exit);
                         }
@@ -179,8 +197,12 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
         }
     })();
 
-    // Release the reader thread before a reconnect spawns a new one.
+    // Close all client socket clones before joining the reader. The bounded
+    // producer checks `stop` between retries, while shutdown also wakes any
+    // pending socket read; both keep reconnect and clean detach deterministic.
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(view);
+    let _ = stream.shutdown(Shutdown::Both);
     let _ = reader.join();
 
     match result {
@@ -223,7 +245,7 @@ fn apply_daemon_event(view: &mut View, ev: DaemonEvent) -> Option<Exit> {
 /// clones keep the write end open, so a clean detach never yields EOF here).
 fn reader_loop(
     mut stream: UnixStream,
-    tx: mpsc::Sender<DaemonEvent>,
+    tx: SyncSender<DaemonEvent>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut reader = protocol::FrameReader::default();
@@ -248,10 +270,33 @@ fn reader_loop(
                     else {
                         return;
                     };
-                    if tx.send(msg).is_err() {
+                    if !send_event(&tx, msg, &stop) {
                         return;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Queue one daemon event without dropping it when the bounded FIFO is full.
+/// Returning the event from `TrySendError::Full` keeps ownership through every
+/// retry and preserves ordering across incremental pane frames and controls.
+fn send_event(
+    tx: &SyncSender<DaemonEvent>,
+    mut event: DaemonEvent,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    loop {
+        match tx.try_send(event) {
+            Ok(()) => return true,
+            Err(TrySendError::Disconnected(_)) => return false,
+            Err(TrySendError::Full(returned)) => {
+                event = returned;
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return false;
+                }
+                std::thread::sleep(EVENT_QUEUE_RETRY);
             }
         }
     }
@@ -292,4 +337,55 @@ fn wait_for_daemon(path: &std::path::Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(25));
     }
     anyhow::bail!("kumo daemon did not start in time")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn reply(n: usize) -> DaemonEvent {
+        DaemonEvent::Reply { message: n.to_string() }
+    }
+
+    fn reply_number(event: DaemonEvent) -> usize {
+        let DaemonEvent::Reply { message } = event else {
+            panic!("test queue contained an unexpected event");
+        };
+        message.parse().expect("reply message is a test sequence number")
+    }
+
+    #[test]
+    fn bounded_event_queue_retries_without_reordering_or_dropping() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(reply(0)).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let producer_stop = stop.clone();
+        let producer = std::thread::spawn(move || {
+            for n in 1..=64 {
+                assert!(send_event(&tx, reply(n), &producer_stop));
+            }
+        });
+
+        let mut received = Vec::new();
+        for _ in 0..=64 {
+            received.push(reply_number(rx.recv().unwrap()));
+        }
+        producer.join().unwrap();
+        assert_eq!(received, (0..=64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn bounded_event_queue_stops_retrying_when_shutdown_is_requested() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(reply(0)).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let producer_stop = stop.clone();
+        let producer = std::thread::spawn(move || send_event(&tx, reply(1), &producer_stop));
+
+        std::thread::sleep(EVENT_QUEUE_RETRY * 2);
+        stop.store(true, Ordering::Relaxed);
+        assert!(!producer.join().unwrap(), "full-queue producer must exit on shutdown");
+        assert_eq!(reply_number(rx.try_recv().unwrap()), 0);
+    }
 }
