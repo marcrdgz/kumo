@@ -162,6 +162,11 @@ pub struct App {
     ai_rx: mpsc::Receiver<AiScanResult>,
     /// Sender for background AI CLI scan jobs.
     ai_tx: mpsc::Sender<AiScanResult>,
+    /// Most recent process topology captured by the asynchronous AI scan.
+    /// Status metrics use this between scans, so topology can be up to
+    /// `AI_SCAN_INTERVAL` old; direct per-PID sampling still runs at the
+    /// 500 ms status cadence.
+    agent_process_snapshot: Option<crate::daemon::pane::ProcessSnapshot>,
     /// Receives agent lifecycle toasts raised by the status refresh; the
     /// server loop broadcasts them to attached viewers as corner toasts,
     /// falling back to a desktop notification when nobody is watching.
@@ -257,6 +262,7 @@ impl App {
             pending_branch_lookups: HashMap::new(),
             ai_rx,
             ai_tx,
+            agent_process_snapshot: None,
             toast_rx,
             toast_tx,
             ai_scan_in_progress: false,

@@ -128,9 +128,16 @@ impl App {
         // Drain completed background AI scans
         let mut ai_changed = false;
         while let Ok((snapshot, pane_pids)) = self.ai_rx.try_recv() {
+            let snapshot_ref = snapshot.as_ref();
             for (pane_id, pid) in pane_pids {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
-                    let name = match (&snapshot, pid) {
+                    // A scan may finish after the pane's shell has exited or
+                    // been replaced. Never apply the old process tree to a
+                    // pane whose root PID changed while it was in flight.
+                    if !scan_pid_is_current(pid, pane.pty.process_id()) {
+                        continue;
+                    }
+                    let name = match (snapshot_ref, pid) {
                         (Some(snap), Some(root)) => snap.ai_cli_in_tree(root),
                         _ => None,
                     };
@@ -147,6 +154,7 @@ impl App {
                     }
                 }
             }
+            self.agent_process_snapshot = snapshot;
             self.ai_scan_in_progress = false;
         }
         if ai_changed {
@@ -168,12 +176,17 @@ impl App {
                 .map(|(&id, pane)| (id, pane.pty.process_id()))
                 .collect();
             let tx = self.ai_tx.clone();
-            let _ = std::thread::Builder::new()
+            if std::thread::Builder::new()
                 .name("kumo-ai-scan".into())
                 .spawn(move || {
                     let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
                     let _ = tx.send((snapshot, pane_pids));
-                });
+                })
+                .is_err()
+            {
+                // A failed spawn must not wedge future process discovery.
+                self.ai_scan_in_progress = false;
+            }
         }
     }
     /// Re-check for a newer release at most every `UPDATE_REFRESH` so a
@@ -230,9 +243,12 @@ impl App {
             .keys()
             .map(|&pid| (pid, self.pane_is_focused(pid)))
             .collect();
-        // One process-table read for all AI panes this tick (the agent
-        // metrics are summed across each pane's whole process tree).
-        let process_table = crate::daemon::pane::ProcessSnapshot::capture();
+        // The process topology is captured by the asynchronous AI scan. Keep
+        // the 500 ms cadence for direct per-PID CPU/RSS sampling, but never
+        // run `ps` in this daemon hot loop. With no AI panes, there is no
+        // process work to do at all.
+        let has_ai_panes = self.panes.values().any(|pane| pane.is_ai_cli());
+        let process_table = cached_process_table(has_ai_panes, self.agent_process_snapshot.as_ref());
         for (&pid, pane) in self.panes.iter_mut() {
             if !pane.is_ai_cli() {
                 continue;
@@ -249,7 +265,7 @@ impl App {
             // metrics. `pid` here is the kumo pane id (u64); the os pid comes
             // from the pane's PTY child.
             let os_pid = pane.pty.process_id().unwrap_or(0);
-            let metrics = sample_agent_tree(&mut self.proc, os_pid, process_table.as_ref());
+            let metrics = sample_agent_tree(&mut self.proc, os_pid, process_table);
             if self.agent_proc_cache.get(&pid) != Some(&metrics) {
                 status_changed = true;
             }
@@ -416,6 +432,22 @@ fn sample_agent_tree(
     (cpu, rss)
 }
 
+/// Use the asynchronously captured process topology only when an AI pane
+/// needs metrics. This keeps a no-agent daemon from doing process work during
+/// the status refresh.
+fn cached_process_table(
+    has_ai_panes: bool,
+    snapshot: Option<&crate::daemon::pane::ProcessSnapshot>,
+) -> Option<&crate::daemon::pane::ProcessSnapshot> {
+    has_ai_panes.then_some(snapshot).flatten()
+}
+
+/// Whether an asynchronous scan still describes the pane's current PTY
+/// process. A changed PID means the result belongs to a replaced process.
+fn scan_pid_is_current(scanned: Option<u32>, current: Option<u32>) -> bool {
+    scanned == current
+}
+
 /// Apply the done/seen rule to a raw detection: an `Idle` result counts as
 /// `Done` (finished-but-unseen) when the previous state was Working or Done
 /// AND the pane is not focused. Any non-idle raw result supersedes Done
@@ -472,6 +504,22 @@ fn toast_message(kind: AlertKind, agent: &str, context: &str) -> (String, String
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn process_snapshot_cache_requires_ai_panes() {
+        let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
+        assert!(cached_process_table(false, snapshot.as_ref()).is_none());
+        assert_eq!(cached_process_table(true, snapshot.as_ref()).is_some(), snapshot.is_some());
+        assert!(cached_process_table(true, None).is_none());
+    }
+
+    #[test]
+    fn stale_ai_scan_pid_is_rejected() {
+        assert!(scan_pid_is_current(Some(42), Some(42)));
+        assert!(scan_pid_is_current(None, None));
+        assert!(!scan_pid_is_current(Some(42), Some(43)));
+        assert!(!scan_pid_is_current(Some(42), None));
+    }
 
     /// Make a temp git repo on branch `name` with a bare `origin` remote.
     /// Returns the working tree path. The upstream points at `origin/<name>`.
