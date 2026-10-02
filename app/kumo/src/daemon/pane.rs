@@ -642,10 +642,11 @@ impl Pane {
             }
             let line = composer_text.entry(row).or_default();
             line.push_str(rc.text);
-            if !rc.text.trim().is_empty() && rc.has_bg {
+            let blank = rc.text.trim().is_empty();
+            if !blank && rc.has_bg {
                 composer_bg.entry(row).or_insert_with(|| rgb(rc.bg));
             }
-            if rc.text.trim().is_empty() && rc.has_bg {
+            if blank && rc.has_bg {
                 codex_row_bg.entry(row).or_insert_with(|| rgb(rc.bg));
             }
         });
