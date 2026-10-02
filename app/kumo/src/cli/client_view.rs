@@ -1131,10 +1131,15 @@ impl View {
     }
 
     fn current_theme(&self) -> OwnedTheme {
-        self.all_themes()
-            .get(self.theme_idx)
-            .cloned()
-            .unwrap_or_else(|| OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX]))
+        if self.theme_idx < THEMES.len() {
+            OwnedTheme::from(THEMES[self.theme_idx])
+        } else if self.theme_idx == THEMES.len() {
+            self.custom_theme
+                .clone()
+                .unwrap_or_else(|| OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX]))
+        } else {
+            OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX])
+        }
     }
 
     #[allow(dead_code)]

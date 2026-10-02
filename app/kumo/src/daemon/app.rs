@@ -199,6 +199,11 @@ impl App {
         super::agents::reload_agent_rules();
         let (ai_prog, ai_args) = kumo_core::config::ai_command();
         let ai_prog = kumo_core::config::resolve_program(&ai_prog);
+        let custom_theme = kumo_core::config::custom_theme();
+        let (theme_idx, theme) = kumo_core::theme::selected_theme(
+            kumo_core::config::theme_index(),
+            custom_theme.as_ref(),
+        );
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let cwd = std::env::current_dir().ok();
         // Workspace for a fresh session: the explicit `kumo new [dir]` arg, else
@@ -242,17 +247,8 @@ impl App {
             pane_cache: HashMap::new(),
             pane_sizes: HashMap::new(),
             quit: false,
-            theme: {
-                let custom = kumo_core::config::custom_theme();
-                let idx = kumo_core::config::theme_index();
-                let all = kumo_core::theme::all_themes(custom.clone());
-                let idx = idx.min(all.len().saturating_sub(1));
-                all[idx].clone()
-            },
-            theme_idx: {
-                let custom = kumo_core::config::custom_theme();
-                kumo_core::config::theme_index().min(kumo_core::theme::all_themes(custom).len().saturating_sub(1))
-            },
+            theme,
+            theme_idx,
             update_notice: None,
             update_rx,
             update_tx,
@@ -968,17 +964,16 @@ impl App {
         self.ai = (ai_prog, ai_args);
         // Theme live-reload.
         let custom = kumo_core::config::custom_theme();
-        let all = kumo_core::theme::all_themes(custom.clone());
-        let idx = kumo_core::config::theme_index().min(all.len().saturating_sub(1));
-        if idx < all.len() {
-            let new_theme = all[idx].clone();
-            if idx != self.theme_idx || new_theme != self.theme {
-                for pane in self.panes.values_mut() {
-                    pane.apply_theme_owned(&new_theme);
-                }
-                self.theme = new_theme;
-                self.theme_idx = idx;
+        let (idx, new_theme) = kumo_core::theme::selected_theme(
+            kumo_core::config::theme_index(),
+            custom.as_ref(),
+        );
+        if idx != self.theme_idx || new_theme != self.theme {
+            for pane in self.panes.values_mut() {
+                pane.apply_theme_owned(&new_theme);
             }
+            self.theme = new_theme;
+            self.theme_idx = idx;
         }
     }
 
