@@ -632,14 +632,22 @@ impl Pane {
         let mut codex_row_bg: HashMap<usize, RColor> = HashMap::new();
         let mut composer_text: HashMap<usize, String> = HashMap::new();
         let mut composer_bg: HashMap<usize, RColor> = HashMap::new();
+        // Collect all composer metadata in one viewport pass. The blank-cell
+        // backgrounds are harmless to retain for non-Codex panes and avoid a
+        // second full scan once the visible placeholder has classified the
+        // pane as a Codex composer.
         self.vt.for_each_cell(|row, _col, rc, _selected, _row_dirty| {
             if row >= ah as usize {
                 return;
             }
             let line = composer_text.entry(row).or_default();
             line.push_str(rc.text);
-            if !rc.text.trim().is_empty() && rc.has_bg {
+            let blank = rc.text.trim().is_empty();
+            if !blank && rc.has_bg {
                 composer_bg.entry(row).or_insert_with(|| rgb(rc.bg));
+            }
+            if blank && rc.has_bg {
+                codex_row_bg.entry(row).or_insert_with(|| rgb(rc.bg));
             }
         });
         let placeholder_row = composer_text
@@ -647,17 +655,6 @@ impl Pane {
             .find_map(|(&row, text)| text.contains("Ask Codex to do anything").then_some(row));
         let codex_composer = self.agent_rule_id() == Some("codex") || placeholder_row.is_some();
         if codex_composer {
-            // Ghostty can keep the blank cells carrying the composer's
-            // background clean while marking only the prompt text dirty.
-            // Scan the complete viewport before resetting the cache, and add
-            // every row with an explicit blank/whitespace background anchor to the
-            // patch. This ensures all three composer rows are transmitted
-            // together when the composer is redrawn.
-            self.vt.for_each_cell(|row, _col, rc, _selected, _row_dirty| {
-                if row < ah as usize && rc.text.trim().is_empty() && rc.has_bg {
-                    codex_row_bg.entry(row).or_insert_with(|| rgb(rc.bg));
-                }
-            });
             // The initial placeholder is often the only non-empty cell in
             // the composer.  Its surrounding rows can be reported clean by
             // the render-state API even though Ghostty has painted them. Find

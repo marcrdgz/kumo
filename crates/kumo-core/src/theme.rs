@@ -447,6 +447,19 @@ pub fn all_themes(custom: Option<OwnedTheme>) -> Vec<OwnedTheme> {
     v
 }
 
+/// Select one theme without allocating the full picker list. The returned
+/// index is clamped exactly as the picker list would be indexed.
+pub fn selected_theme(index: usize, custom: Option<&OwnedTheme>) -> (usize, OwnedTheme) {
+    let last = THEMES.len() + usize::from(custom.is_some()) - 1;
+    let index = index.min(last);
+    let theme = if index == THEMES.len() {
+        custom.expect("custom index requires a custom theme").clone()
+    } else {
+        OwnedTheme::from(THEMES[index])
+    };
+    (index, theme)
+}
+
 /// Resolve the initial theme index from config. `selected` is the `theme = "..."` value.
 /// Returns the fallback `DEFAULT_THEME_IDX` when the name is unknown.
 pub fn resolve_theme_idx(selected: Option<&str>, custom: Option<&OwnedTheme>) -> usize {
@@ -484,6 +497,29 @@ fn rcolor_to_triplet(c: RColor, palette: &[ColorRgb; 16]) -> [u8; 3] {
 }
 fn triplet_to_rcolor(t: [u8; 3]) -> RColor {
     RColor::Rgb(t[0], t[1], t[2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_theme_matches_picker_order_and_fallbacks() {
+        let mut custom = OwnedTheme::from(THEMES[0]);
+        custom.name = "Custom".to_string();
+
+        let (built_in_idx, built_in) = selected_theme(1, Some(&custom));
+        assert_eq!(built_in_idx, 1);
+        assert_eq!(built_in.name, THEMES[1].name);
+
+        let (custom_idx, selected_custom) = selected_theme(THEMES.len(), Some(&custom));
+        assert_eq!(custom_idx, THEMES.len());
+        assert_eq!(selected_custom, custom);
+
+        let (fallback_idx, fallback) = selected_theme(usize::MAX, None);
+        assert_eq!(fallback_idx, THEMES.len() - 1);
+        assert_eq!(fallback.name, THEMES[THEMES.len() - 1].name);
+    }
 }
 
 /// Convert an `OwnedTheme` to the wire representation.

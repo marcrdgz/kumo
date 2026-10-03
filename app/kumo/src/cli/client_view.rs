@@ -1131,10 +1131,15 @@ impl View {
     }
 
     fn current_theme(&self) -> OwnedTheme {
-        self.all_themes()
-            .get(self.theme_idx)
-            .cloned()
-            .unwrap_or_else(|| OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX]))
+        if self.theme_idx < THEMES.len() {
+            OwnedTheme::from(THEMES[self.theme_idx])
+        } else if self.theme_idx == THEMES.len() {
+            self.custom_theme
+                .clone()
+                .unwrap_or_else(|| OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX]))
+        } else {
+            OwnedTheme::from(THEMES[theme::DEFAULT_THEME_IDX])
+        }
     }
 
     #[allow(dead_code)]
@@ -1199,6 +1204,7 @@ impl View {
                 self.notice = Some((notice, Instant::now()));
                 self.ensure_sidebar_tab_visible();
                 // Status bar is client-local but reloaded from the same config.
+                kumo_core::config::invalidate_cache();
                 let new_bar = kumo_core::config::status_bar();
                 let enabled_changed = new_bar.enabled != self.status_bar.enabled;
                 self.status_bar = new_bar;

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use toml_edit::{value, DocumentMut, Item, Table};
@@ -1281,60 +1281,84 @@ pub fn config_fingerprint() -> ConfigFingerprint {
 }
 
 struct CacheEntry {
-    config: Config,
+    config: Arc<Config>,
+    paths: Vec<PathBuf>,
     mtimes: HashMap<PathBuf, Option<SystemTime>>,
-    at: Instant,
+    checked_at: Instant,
 }
 
 static CONFIG_CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
+const CONFIG_CACHE_TTL: Duration = Duration::from_millis(250);
 
 #[cfg(test)]
-fn cached_config() -> Config {
+fn cached_config() -> Arc<Config> {
     // Tests mutate env/files under TEST_ENV_LOCK and expect immediate
     // visibility; bypass the mtime cache.
-    load_config()
+    Arc::new(load_config())
 }
 
 #[cfg(not(test))]
-fn cached_config() -> Config {
+fn cached_config() -> Arc<Config> {
+    cached_config_at(CONFIG_CACHE.get_or_init(|| Mutex::new(None)), Instant::now())
+}
+
+fn cached_config_at(cache: &Mutex<Option<CacheEntry>>, now: Instant) -> Arc<Config> {
     let paths = current_config_paths();
+    if let Some(entry) = cache.lock().unwrap().as_ref() {
+        if cache_entry_fresh(entry, &paths, now) {
+            return Arc::clone(&entry.config);
+        }
+    }
+
     let mut current_mtimes: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
     for p in &paths {
         current_mtimes.insert(p.clone(), std::fs::metadata(p).and_then(|m| m.modified()).ok());
     }
 
-    let cache = CONFIG_CACHE.get_or_init(|| Mutex::new(None));
-    // Fast path: check under lock
-    {
-        let guard = cache.lock().unwrap();
-        if let Some(entry) = guard.as_ref() {
-            if entry.mtimes == current_mtimes {
-                return entry.config.clone();
-            }
+    let mut guard = cache.lock().unwrap();
+    if let Some(entry) = guard.as_mut() {
+        if cache_entry_fresh(entry, &paths, now) {
+            return Arc::clone(&entry.config);
+        }
+        if entry.paths == paths && entry.mtimes == current_mtimes {
+            entry.checked_at = now;
+            return Arc::clone(&entry.config);
         }
     }
-    // Miss: load fresh (without holding lock)
-    let config = load_config();
+    drop(guard);
+
+    // The timestamp check only runs after the TTL expires. The parse itself
+    // stays outside the lock so a slow filesystem cannot block other readers.
+    let config = Arc::new(load_config());
     let mut guard = cache.lock().unwrap();
-    // Double-check after load (another thread may have filled)
-    if let Some(entry) = guard.as_ref() {
-        if entry.mtimes == current_mtimes {
-            return entry.config.clone();
+    if let Some(entry) = guard.as_mut() {
+        if cache_entry_fresh(entry, &paths, now) || (entry.paths == paths && entry.mtimes == current_mtimes) {
+            entry.checked_at = now;
+            return Arc::clone(&entry.config);
         }
     }
     *guard = Some(CacheEntry {
-        config: config.clone(),
+        config: Arc::clone(&config),
+        paths,
         mtimes: current_mtimes,
-        at: Instant::now(),
+        checked_at: now,
     });
     config
+}
+
+fn cache_entry_fresh(entry: &CacheEntry, paths: &[PathBuf], now: Instant) -> bool {
+    entry.paths == paths && now.saturating_duration_since(entry.checked_at) < CONFIG_CACHE_TTL
 }
 
 /// Invalidate the config cache (used by `kumo reload` and tests).
 pub fn invalidate_cache() {
     if let Some(cache) = CONFIG_CACHE.get() {
-        let _ = cache.lock().map(|mut g| *g = None);
+        clear_config_cache(cache);
     }
+}
+
+fn clear_config_cache(cache: &Mutex<Option<CacheEntry>>) {
+    let _ = cache.lock().map(|mut guard| *guard = None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,7 +1426,7 @@ fn unquote(v: &str) -> &str {
 /// (`ai_cmd`), then a built-in default of `opencode`.
 pub fn ai_command() -> (String, Vec<String>) {
     let cfg = cached_config();
-    cfg.ai_cmd.unwrap_or_else(|| (String::from("opencode"), Vec::new()))
+    cfg.ai_cmd.clone().unwrap_or_else(|| (String::from("opencode"), Vec::new()))
 }
 
 /// Working directory for the AI pane. Prefers the persisted workspace
@@ -1431,7 +1455,7 @@ pub fn ai_cwd() -> PathBuf {
 /// The user's login shell: the `shell` config key, else `$SHELL`, else bash.
 pub fn default_shell() -> String {
     let cfg = cached_config();
-    cfg.shell
+    cfg.shell.clone()
         .or_else(|| env_nonempty("SHELL"))
         .unwrap_or_else(|| "/bin/bash".to_string())
 }
@@ -1475,13 +1499,13 @@ pub fn toast_position() -> ToastPosition {
 /// The leader chord from the config (`leader = "ctrl+b"`), if set. `None`
 /// means the built-in default (Ctrl+B).
 pub fn leader() -> Option<String> {
-    cached_config().leader
+    cached_config().leader.clone()
 }
 
 /// `[keymap.bindings]` overrides: chord string → action id. Empty when the
 /// config sets no bindings (the stock keymap applies).
 pub fn keymap_bindings() -> HashMap<String, String> {
-    cached_config().keymap_bindings
+    cached_config().keymap_bindings.clone()
 }
 
 /// The resolved session working-directory policy (`[terminal] new-cwd`):
@@ -1493,7 +1517,7 @@ pub fn new_cwd() -> NewCwd {
         NewCwdMode::Follow => NewCwd::Follow,
         NewCwdMode::Current => NewCwd::Current,
         NewCwdMode::Home => NewCwd::Home,
-        NewCwdMode::Fixed => match cfg.fixed_cwd {
+        NewCwdMode::Fixed => match cfg.fixed_cwd.clone() {
             Some(p) if p.is_dir() => NewCwd::Fixed(p),
             _ => NewCwd::Current,
         },
@@ -1503,7 +1527,7 @@ pub fn new_cwd() -> NewCwd {
 /// Selected theme name from `config.toml` (`[theme] name = "..."` or flat `theme = "..."`).
 /// `None` means the built-in default.
 pub fn theme_name() -> Option<String> {
-    cached_config().theme
+    cached_config().theme.clone()
 }
 
 /// Persist the selected theme in the canonical TOML configuration.
@@ -1627,13 +1651,13 @@ fn replace_file_atomically(temp: &Path, target: &Path) -> Result<()> {
 
 /// Custom theme defined in `[theme.custom]` if present.
 pub fn custom_theme() -> Option<crate::theme::OwnedTheme> {
-    cached_config().custom_theme
+    cached_config().custom_theme.clone()
 }
 
 /// All themes including the optional custom theme at the end.
 pub fn all_themes() -> Vec<crate::theme::OwnedTheme> {
     let cfg = cached_config();
-    crate::theme::all_themes(cfg.custom_theme)
+    crate::theme::all_themes(cfg.custom_theme.clone())
 }
 
 /// Resolve the initial theme index, respecting `theme = "..."` and whether a
@@ -1646,27 +1670,27 @@ pub fn theme_index() -> usize {
 /// Sidebar configuration (`[sidebar]`). Clone used by clients to read order/
 /// visibility/border style.
 pub fn sidebar() -> SidebarConfig {
-    cached_config().sidebar
+    cached_config().sidebar.clone()
 }
 
 /// Sidebar border style.
 pub fn sidebar_borders() -> SidebarBorders {
-    cached_config().sidebar.borders
+    cached_config().sidebar.borders.clone()
 }
 
 /// Whether a sidebar section is visible (sessions/agents).
 pub fn sidebar_sections() -> SidebarSections {
-    cached_config().sidebar.sections
+    cached_config().sidebar.sections.clone()
 }
 
 /// Ordered sidebar sections permutation.
 pub fn sidebar_order() -> Vec<SidebarSection> {
-    cached_config().sidebar.order
+    cached_config().sidebar.order.clone()
 }
 
 /// Status bar configuration (`[status_bar]`).
 pub fn status_bar() -> StatusBarConfig {
-    cached_config().status_bar
+    cached_config().status_bar.clone()
 }
 
 /// Whether the status bar is enabled.
@@ -1676,7 +1700,7 @@ pub fn status_bar_enabled() -> bool {
 
 /// Worktree shared-dirs (gitignored symlinks/clone-copies).
 pub fn worktree_shared_dirs() -> Vec<PathBuf> {
-    cached_config().worktree.shared_dirs
+    cached_config().worktree.shared_dirs.clone()
 }
 
 /// Whether spawned panes receive `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH`.
@@ -1853,6 +1877,64 @@ mod tests {
             "[agent]\nid = 'gemini'\n",
         );
         assert_ne!(second, config_fingerprint());
+    }
+
+    #[test]
+    fn config_cache_reuses_entries_and_refreshes_after_ttl_or_invalidation() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_a = scratch_dir("cache-a");
+        let cfg_b = scratch_dir("cache-b");
+        let home = scratch_dir("cache-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_a.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let config_a = cfg_a.join("config");
+        write(&config_a, "shell = /bin/first\n");
+        std::fs::File::open(&config_a)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+            )
+            .unwrap();
+
+        let cache = Mutex::new(None);
+        let start = Instant::now();
+        let first = cached_config_at(&cache, start);
+        let reused = cached_config_at(&cache, start + Duration::from_millis(1));
+        assert!(
+            Arc::ptr_eq(&first, &reused),
+            "reads within the TTL share the parsed config"
+        );
+
+        write(&config_a, "shell = /bin/second\n");
+        std::fs::File::open(&config_a)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+            )
+            .unwrap();
+        let edited = cached_config_at(&cache, start + CONFIG_CACHE_TTL);
+        assert!(!Arc::ptr_eq(&first, &edited));
+        assert_eq!(edited.shell.as_deref(), Some("/bin/second"));
+
+        write(&cfg_b.join("config"), "shell = /bin/other\n");
+        let _switch = EnvGuard::set("KUMO_CONFIG_DIR", &cfg_b.to_string_lossy());
+        let switched = cached_config_at(&cache, start + CONFIG_CACHE_TTL);
+        assert!(
+            !Arc::ptr_eq(&edited, &switched),
+            "a config-directory change must bypass the TTL"
+        );
+        assert_eq!(switched.shell.as_deref(), Some("/bin/other"));
+
+        clear_config_cache(&cache);
+        let invalidated = cached_config_at(&cache, start + CONFIG_CACHE_TTL);
+        assert!(
+            !Arc::ptr_eq(&switched, &invalidated),
+            "explicit invalidation reloads immediately"
+        );
     }
 
     #[test]

@@ -1317,10 +1317,11 @@ pub enum DaemonEvent {
 
 /// Encode a message as a length-prefixed bincode payload.
 pub fn encode<T: serde::Serialize>(msg: &T) -> Result<Vec<u8>> {
-    let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
-    let mut out = Vec::with_capacity(payload.len() + 4);
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&payload);
+    let mut out = vec![0; 4];
+    bincode::serde::encode_into_std_write(msg, &mut out, bincode::config::standard())?;
+    let payload_len = out.len() - 4;
+    anyhow::ensure!(payload_len <= MAX_FRAME_LEN, "oversized protocol frame ({payload_len} bytes)");
+    out[..4].copy_from_slice(&(payload_len as u32).to_le_bytes());
     Ok(out)
 }
 
@@ -1340,22 +1341,33 @@ impl FrameReader {
     /// stream should be processed.
     pub fn push(&mut self, data: &[u8], out: &mut Vec<Vec<u8>>) -> bool {
         self.buf.extend_from_slice(data);
+        let mut cursor = 0;
         loop {
-            if self.buf.len() < 4 {
-                return false;
+            if self.buf.len() - cursor < 4 {
+                break;
             }
-            let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+            let len = u32::from_le_bytes([
+                self.buf[cursor],
+                self.buf[cursor + 1],
+                self.buf[cursor + 2],
+                self.buf[cursor + 3],
+            ]) as usize;
             if len > MAX_FRAME_LEN {
                 // Unrecoverable framing corruption; drop the connection.
                 self.buf.clear();
                 return true;
             }
-            if self.buf.len() < 4 + len {
-                return false;
+            let frame_end = cursor + 4 + len;
+            if self.buf.len() < frame_end {
+                break;
             }
-            out.push(self.buf[4..4 + len].to_vec());
-            self.buf.drain(..4 + len);
+            out.push(self.buf[cursor + 4..frame_end].to_vec());
+            cursor = frame_end;
         }
+        if cursor != 0 {
+            self.buf.drain(..cursor);
+        }
+        false
     }
 
     /// Whether the internal buffer is empty.
@@ -1391,20 +1403,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_reader_reassembles_frames() {
+    fn encode_matches_the_original_length_prefixed_bincode_wire_format() {
+        let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION };
+        let payload = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let mut expected = (payload.len() as u32).to_le_bytes().to_vec();
+        expected.extend_from_slice(&payload);
+        assert_eq!(encode(&msg).unwrap(), expected);
+    }
+
+    #[test]
+    fn encode_rejects_payloads_above_the_frame_limit() {
+        let msg = DaemonEvent::Reply { message: "x".repeat(MAX_FRAME_LEN) };
+        let error = encode(&msg).unwrap_err();
+        assert!(error.to_string().contains("oversized protocol frame"));
+    }
+
+    #[test]
+    fn frame_reader_accepts_every_header_and_payload_split() {
         let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION };
         let bytes = encode(&msg).unwrap();
+        let payload = bytes[4..].to_vec();
+        for split in 0..=bytes.len() {
+            let mut reader = FrameReader::default();
+            let mut out = Vec::new();
+            assert!(!reader.push(&bytes[..split], &mut out));
+            assert!(!reader.push(&bytes[split..], &mut out));
+            assert_eq!(out, vec![payload.clone()], "split at byte {split}");
+            assert!(reader.is_empty());
+        }
+    }
+
+    #[test]
+    fn frame_reader_keeps_partial_tails_and_appends_to_existing_output() {
+        let first = encode(&DaemonEvent::Shutdown).unwrap();
+        let second = encode(&DaemonEvent::Welcome { protocol: PROTOCOL_VERSION }).unwrap();
+        let third = encode(&DaemonEvent::UpdateNotice { notice: None }).unwrap();
+        let mut initial = Vec::new();
+        initial.extend_from_slice(&first);
+        initial.extend_from_slice(&second);
+        initial.extend_from_slice(&third[..2]);
+
+        let mut reader = FrameReader::default();
+        let mut out = vec![vec![0xff]];
+        assert!(!reader.push(&initial, &mut out));
+        assert_eq!(out, vec![vec![0xff], first[4..].to_vec(), second[4..].to_vec()]);
+        assert!(!reader.is_empty());
+
+        assert!(!reader.push(&third[2..], &mut out));
+        assert_eq!(out[3], third[4..]);
+        assert!(reader.is_empty());
+    }
+
+    #[test]
+    fn frame_reader_clears_oversized_frames_and_can_be_reused() {
         let mut reader = FrameReader::default();
         let mut out = Vec::new();
-        // Split across arbitrary chunk boundaries.
-        for chunk in bytes.chunks(3) {
-            reader.push(chunk, &mut out);
-        }
-        assert_eq!(out.len(), 1);
-        let decoded: DaemonEvent = bincode::serde::decode_from_slice(&out[0], bincode::config::standard())
-            .unwrap()
-            .0;
-        assert_eq!(decoded, msg);
+        let oversized = ((MAX_FRAME_LEN + 1) as u32).to_le_bytes();
+        assert!(reader.push(&oversized, &mut out));
+        assert!(out.is_empty());
+        assert!(reader.is_empty());
+
+        let valid = encode(&DaemonEvent::Shutdown).unwrap();
+        assert!(!reader.push(&valid, &mut out));
+        assert_eq!(out, vec![valid[4..].to_vec()]);
+        assert!(reader.is_empty());
     }
 
     #[test]
