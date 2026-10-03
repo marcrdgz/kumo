@@ -1,10 +1,19 @@
 # Changelog
 
+## v0.7.3
+
+### 🚜 Refactor
+
+- Improve runtime efficiency (#18)
 ## v0.7.2
 
 ### 🚀 Features
 
 - *(worktrees)* Add safe removal actions
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.7.2
 ## v0.7.1
 
 ### 🚀 Features
