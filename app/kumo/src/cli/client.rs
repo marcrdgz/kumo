@@ -41,6 +41,25 @@ const EVENT_BATCH_BUDGET: Duration = Duration::from_millis(4);
 /// Retry interval while the bounded event queue is full. The stop flag is
 /// checked between retries so teardown cannot wait on a blocked producer.
 const EVENT_QUEUE_RETRY: Duration = Duration::from_millis(1);
+/// Bound local input memory while keeping the crossterm reader independent
+/// from render speed. Key events are retried in order when this fills.
+const INPUT_QUEUE_CAP: usize = 128;
+/// Retry interval while the bounded input queue is full.
+const INPUT_QUEUE_RETRY: Duration = Duration::from_millis(1);
+/// Maximum local input events handled before daemon events get another turn.
+const INPUT_BATCH_MAX: usize = 128;
+/// Maximum time spent handling one local input batch.
+const INPUT_BATCH_BUDGET: Duration = Duration::from_millis(4);
+/// How often a stopped input reader checks its stop flag while no key arrives.
+const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(10);
+/// Keep client-local timers (clock, spinner and expiring overlays) moving.
+const RENDER_WAKE: Duration = Duration::from_millis(8);
+
+#[derive(Debug)]
+enum InputMessage {
+    Event(crossterm::event::Event),
+    Error(String),
+}
 
 pub fn run(launch: Launch) -> Result<()> {
     let path = kumo_core::config::ipc_socket_path();
@@ -128,6 +147,14 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
     )?;
 
+    // Finish all fallible terminal/view setup before starting worker threads.
+    // This keeps an initialization error from orphaning a producer that is
+    // already blocked on the socket or terminal input.
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
+    terminal.clear()?;
+    let mut view = View::new(stream.try_clone()?, cols, rows);
+    view.render_now(&mut terminal)?;
+
     // Daemon-event reader thread: forwards every frame the daemon pushes. It
     // wakes on a read timeout to check the stop flag, because the client's own
     // socket clones keep the write end open — the reader would otherwise block
@@ -136,64 +163,90 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
     let write_half = stream.try_clone()?;
     write_half.set_read_timeout(Some(Duration::from_millis(200))).ok();
     let (ev_tx, ev_rx) = mpsc::sync_channel::<DaemonEvent>(EVENT_QUEUE_CAP);
+    let (input_tx, input_rx) = mpsc::sync_channel::<InputMessage>(INPUT_QUEUE_CAP);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let main_thread = std::sync::Arc::new(std::thread::current());
     let stop2 = stop.clone();
-    let reader = std::thread::spawn(move || reader_loop(write_half, ev_tx, stop2));
+    let daemon_wake = main_thread.clone();
+    let reader = std::thread::spawn(move || {
+        reader_loop(write_half, ev_tx, stop2, daemon_wake.clone());
+        // Wake even when the socket closes without a final protocol frame.
+        wake_render_thread(&daemon_wake);
+    });
 
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
-    terminal.clear()?;
-
-    let mut view = View::new(stream.try_clone()?, cols, rows);
-    view.render_now(&mut terminal)?;
+    // Keep terminal input off the render thread. The reader wakes the render
+    // thread as soon as crossterm reports an event, so daemon traffic cannot
+    // add a fixed input polling delay.
+    let input_stop = stop.clone();
+    let input_wake = main_thread.clone();
+    let input_reader = std::thread::spawn(move || input_loop(input_tx, input_stop, input_wake));
 
     let result: Result<Exit> = (|| {
         loop {
-            // Daemon events: block for the first one (8ms keeps local input
-            // responsive), then drain everything already queued so a burst of
-            // pane frames costs a single render instead of one render per frame.
-            match ev_rx.recv_timeout(Duration::from_millis(8)) {
-                Ok(ev) => {
-                    if let Some(exit) = apply_daemon_event(&mut view, ev) {
-                        return Ok(exit);
-                    }
-                    let batch_started = Instant::now();
-                    let mut processed = 1usize;
-                    while processed < EVENT_BATCH_MAX && batch_started.elapsed() < EVENT_BATCH_BUDGET {
-                        let Ok(ev) = ev_rx.try_recv() else { break };
-                        processed += 1;
+            // Daemon events and local input are both drained without blocking.
+            // Bounded batches preserve responsiveness when a pane is emitting
+            // output or a key is held down.
+            let daemon_started = Instant::now();
+            let mut daemon_count = 0usize;
+            let mut daemon_disconnected = false;
+            while daemon_count < EVENT_BATCH_MAX && daemon_started.elapsed() < EVENT_BATCH_BUDGET {
+                match ev_rx.try_recv() {
+                    Ok(ev) => {
+                        daemon_count += 1;
                         if let Some(exit) = apply_daemon_event(&mut view, ev) {
                             return Ok(exit);
                         }
                     }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        daemon_disconnected = true;
+                        break;
+                    }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // The daemon closed the socket without a Shutdown frame
-                    // (abrupt exit): nothing left to render.
-                    return Ok(Exit::Clean);
+            }
+            let daemon_budget_hit = daemon_count == EVENT_BATCH_MAX || daemon_started.elapsed() >= EVENT_BATCH_BUDGET;
+            if daemon_disconnected {
+                return Ok(Exit::Clean);
+            }
+
+            let input_started = Instant::now();
+            let mut input_count = 0usize;
+            while input_count < INPUT_BATCH_MAX && input_started.elapsed() < INPUT_BATCH_BUDGET {
+                let Ok(msg) = input_rx.try_recv() else { break };
+                input_count += 1;
+                match msg {
+                    InputMessage::Event(crossterm::event::Event::Key(k)) => view.on_key(k)?,
+                    InputMessage::Event(crossterm::event::Event::Paste(text)) => view.on_paste(&text),
+                    InputMessage::Event(crossterm::event::Event::Mouse(m)) => view.on_mouse(m)?,
+                    InputMessage::Event(crossterm::event::Event::Resize(w, h)) => {
+                        view.on_resize(w, h)?;
+                        terminal.resize(ratatui::layout::Rect::new(0, 0, w.max(2), h.max(2)))?;
+                    }
+                    InputMessage::Event(_) => {}
+                    InputMessage::Error(message) => return Err(anyhow::anyhow!(message)),
                 }
+            }
+            let input_budget_hit = input_count == INPUT_BATCH_MAX || input_started.elapsed() >= INPUT_BATCH_BUDGET;
+            view.flush_wheel()?;
+            let transient = view.has_transient();
+            if view.dirty() || transient {
+                view.render_now(&mut terminal)?;
             }
             if view.detach_requested() {
                 return Ok(Exit::Clean);
             }
-            // Same for local input: apply every pending crossterm event, then
-            // render once for the whole batch.
-            while crossterm::event::poll(Duration::from_millis(0))? {
-                match crossterm::event::read()? {
-                    crossterm::event::Event::Key(k) => view.on_key(k)?,
-                    crossterm::event::Event::Paste(text) => view.on_paste(&text),
-                    crossterm::event::Event::Mouse(m) => view.on_mouse(m)?,
-                    crossterm::event::Event::Resize(w, h) => {
-                        view.on_resize(w, h)?;
-                        terminal.resize(ratatui::layout::Rect::new(0, 0, w.max(2), h.max(2)))?;
-                    }
-                    _ => {}
-                }
+
+            // A producer may have filled a batch while we were rendering. Do
+            // not park in that case; the next bounded batch gives the other
+            // queue a chance before more input is consumed.
+            if daemon_budget_hit || input_budget_hit {
+                continue;
             }
-            view.flush_wheel()?;
-            if view.dirty() || view.has_transient() {
-                view.render_now(&mut terminal)?;
-            }
+            // Keep the existing 8 ms timer cadence for client-local state.
+            // `has_transient` only reports currently visible overlays; it does
+            // not account for future clock/spinner deadlines or background
+            // results that can make the next frame dirty.
+            std::thread::park_timeout(RENDER_WAKE);
         }
     })();
 
@@ -203,7 +256,9 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     drop(view);
     let _ = stream.shutdown(Shutdown::Both);
+    main_thread.unpark();
     let _ = reader.join();
+    let _ = input_reader.join();
 
     match result {
         Ok(Exit::Restarting) => {
@@ -247,6 +302,7 @@ fn reader_loop(
     mut stream: UnixStream,
     tx: SyncSender<DaemonEvent>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake: std::sync::Arc<std::thread::Thread>,
 ) {
     let mut reader = protocol::FrameReader::default();
     let mut buf = [0u8; 8192];
@@ -270,13 +326,84 @@ fn reader_loop(
                     else {
                         return;
                     };
-                    if !send_event(&tx, msg, &stop) {
+                    if !send_event_and_wake(&tx, msg, &stop, &wake) {
                         return;
                     }
                 }
             }
         }
     }
+}
+
+/// Read crossterm input independently of rendering. `poll` wakes immediately
+/// for a key; its timeout only bounds how long teardown waits when the terminal
+/// is quiet so the stop flag is observed promptly.
+fn input_loop(
+    tx: mpsc::SyncSender<InputMessage>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake: std::sync::Arc<std::thread::Thread>,
+) {
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        match crossterm::event::poll(INPUT_POLL_TIMEOUT) {
+            Ok(false) => continue,
+            Ok(true) => match crossterm::event::read() {
+                Ok(event) => {
+                    if !send_input_and_wake(&tx, InputMessage::Event(event), &stop, &wake) {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let message = format!("terminal input failed: {error}");
+                    let _ = send_input_and_wake(&tx, InputMessage::Error(message), &stop, &wake);
+                    return;
+                }
+            },
+            Err(error) => {
+                let message = format!("terminal input polling failed: {error}");
+                let _ = send_input_and_wake(&tx, InputMessage::Error(message), &stop, &wake);
+                return;
+            }
+        }
+    }
+}
+
+fn wake_render_thread(wake: &std::thread::Thread) {
+    wake.unpark();
+}
+
+/// Queue local input without dropping or reordering events when rendering is
+/// temporarily slower than a held key stream.
+fn send_input(
+    tx: &mpsc::SyncSender<InputMessage>,
+    mut message: InputMessage,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    loop {
+        match tx.try_send(message) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(returned)) => {
+                message = returned;
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return false;
+                }
+                std::thread::sleep(INPUT_QUEUE_RETRY);
+            }
+        }
+    }
+}
+
+fn send_input_and_wake(
+    tx: &mpsc::SyncSender<InputMessage>,
+    message: InputMessage,
+    stop: &std::sync::atomic::AtomicBool,
+    wake: &std::thread::Thread,
+) -> bool {
+    if !send_input(tx, message, stop) {
+        return false;
+    }
+    wake_render_thread(wake);
+    true
 }
 
 /// Queue one daemon event without dropping it when the bounded FIFO is full.
@@ -300,6 +427,19 @@ fn send_event(
             }
         }
     }
+}
+
+fn send_event_and_wake(
+    tx: &SyncSender<DaemonEvent>,
+    event: DaemonEvent,
+    stop: &std::sync::atomic::AtomicBool,
+    wake: &std::thread::Thread,
+) -> bool {
+    if !send_event(tx, event, stop) {
+        return false;
+    }
+    wake_render_thread(wake);
+    true
 }
 
 /// Reconnect to the daemon socket, retrying while the restarted daemon comes
@@ -387,5 +527,51 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         assert!(!producer.join().unwrap(), "full-queue producer must exit on shutdown");
         assert_eq!(reply_number(rx.try_recv().unwrap()), 0);
+    }
+
+    #[test]
+    fn bounded_input_queue_stops_retrying_when_shutdown_is_requested() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(InputMessage::Event(crossterm::event::Event::FocusGained)).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let producer_stop = stop.clone();
+        let producer = std::thread::spawn(move || {
+            send_input(
+                &tx,
+                InputMessage::Event(crossterm::event::Event::FocusLost),
+                &producer_stop,
+            )
+        });
+
+        std::thread::sleep(INPUT_QUEUE_RETRY * 2);
+        stop.store(true, Ordering::Relaxed);
+        assert!(!producer.join().unwrap(), "full input queue must exit on shutdown");
+        assert!(matches!(rx.try_recv(), Ok(InputMessage::Event(crossterm::event::Event::FocusGained))));
+    }
+
+    #[test]
+    fn producer_wakes_a_parked_render_thread() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            std::thread::park();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        let wake = waiter.thread().clone();
+        let stop = AtomicBool::new(false);
+        let (input_tx, _input_rx) = mpsc::sync_channel(1);
+        assert!(send_input_and_wake(
+            &input_tx,
+            InputMessage::Event(crossterm::event::Event::FocusGained),
+            &stop,
+            &wake,
+        ));
+        done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("queued daemon event must wake the render thread");
+        waiter.join().unwrap();
     }
 }

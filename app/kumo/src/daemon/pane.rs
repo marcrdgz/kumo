@@ -400,8 +400,14 @@ impl Pane {
         let reader = pane.pty.reader()?;
         let tx = events_tx.clone();
         let pid = id;
+        // The daemon owns the terminal state and parks between iterations.
+        // Keep its handle in the PTY reader so output wakes the loop as soon
+        // as the event has been queued instead of waiting for the poll timer.
+        let daemon_thread = std::thread::current();
         Pty::read_loop(reader, move |data| {
-            let _ = tx.send(PtyEvent::Output { pane_id: pid, data });
+            if tx.send(PtyEvent::Output { pane_id: pid, data }).is_ok() {
+                daemon_thread.unpark();
+            }
         });
 
         Ok(pane)

@@ -122,6 +122,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     listener.set_nonblocking(true)?;
 
     let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Command)>(256);
+    // Reader threads wake this loop after queueing commands. The timeout below
+    // remains as a safety poll for signals, config changes, and listener work.
+    let daemon_thread = std::thread::current();
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
     let mut last_layout: Option<Arc<Layout>> = None;
@@ -161,9 +164,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 .name(format!("kumo-writer-{id}"))
                 .spawn(move || client_write_loop(stream, writer_rx));
             let tx = input_tx.clone();
+            let wake = daemon_thread.clone();
             let _ = std::thread::Builder::new()
                 .name(format!("kumo-reader-{id}"))
-                .spawn(move || client_read_loop(read_half, tx, id));
+                .spawn(move || client_read_loop(read_half, tx, id, wake));
             clients.insert(id, Client::new(writer_tx));
         }
 
@@ -804,10 +808,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             break;
         }
 
-        // Adaptive sleep: 2ms when there was work (pane frames/layout changed)
-        // for responsiveness, 10ms when idle to reduce wakeups from 250Hz to
-        // 100Hz. This replaces the fixed 4ms busy poll.
-        std::thread::sleep(Duration::from_millis(if idle { 10 } else { 2 }));
+        // Park between iterations instead of sleeping unconditionally. Client
+        // and PTY reader threads unpark us after queueing work, while these
+        // bounded timeouts preserve periodic polling when no producer wakes us.
+        std::thread::park_timeout(Duration::from_millis(if idle { 10 } else { 2 }));
     }
 
     // Start every cleanup together, then wait while all children are reaped.
@@ -930,7 +934,12 @@ fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<DaemonEvent>) {
 /// Read loop for one client: decodes frames and forwards them to the daemon's
 /// main loop (tagged with the client id). A closed socket yields a synthetic
 /// `Detach` so the writer is dropped.
-fn client_read_loop(mut stream: UnixStream, tx: mpsc::SyncSender<(usize, Command)>, id: usize) {
+fn client_read_loop(
+    mut stream: UnixStream,
+    tx: mpsc::SyncSender<(usize, Command)>,
+    id: usize,
+    daemon_thread: std::thread::Thread,
+) {
     let mut reader = kumo_core::protocol::FrameReader::default();
     let mut buf = [0u8; 8192];
     'outer: loop {
@@ -955,11 +964,14 @@ fn client_read_loop(mut stream: UnixStream, tx: mpsc::SyncSender<(usize, Command
                     if tx.send((id, msg)).is_err() {
                         break 'outer;
                     }
+                    daemon_thread.unpark();
                 }
             }
         }
     }
-    let _ = tx.send((id, Command::Detach));
+    if tx.send((id, Command::Detach)).is_ok() {
+        daemon_thread.unpark();
+    }
 }
 
 /// Bind the socket: remove a stale file, reject a live daemon, create parents.
@@ -1090,6 +1102,44 @@ mod tests {
                 pane_title_contains(a, needle) || pane_title_contains(b, needle)
             }
         }
+    }
+
+    #[test]
+    fn client_reader_unparks_server_and_reports_detach() {
+        // Drive the production client reader over a real Unix socket. The
+        // server thread parks before the framed command is written, so the
+        // command can only reach it promptly through client_read_loop's
+        // enqueue-then-unpark path. A generous deadline avoids measuring the
+        // scheduler; the assertion is about delivery and wake ownership.
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::sync_channel(2);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let (detach_tx, detach_rx) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let server_thread = std::thread::current();
+            ready_tx.send(server_thread.clone()).unwrap();
+            std::thread::park_timeout(Duration::from_secs(5));
+            let (id, command) = rx.recv_timeout(Duration::from_millis(500)).unwrap();
+            done_tx.send((id, command)).unwrap();
+            detach_tx.send(rx.recv_timeout(Duration::from_millis(500)).unwrap()).unwrap();
+        });
+
+        let server_thread = ready_rx.recv().unwrap();
+        let reader = std::thread::spawn(move || client_read_loop(server_stream, tx, 7, server_thread));
+        protocol::write_framed(&mut client, &Command::SessionList).unwrap();
+
+        let (id, command) = done_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        assert_eq!(id, 7);
+        assert!(matches!(command, Command::SessionList));
+
+        drop(client);
+        let (detach_id, detach) = detach_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        assert_eq!(detach_id, 7);
+        assert!(matches!(detach, Command::Detach));
+
+        reader.join().unwrap();
+        server.join().unwrap();
     }
 
     /// End-to-end: `kumo agent explain` answers over the socket with a
