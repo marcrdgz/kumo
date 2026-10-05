@@ -1,10 +1,19 @@
 # Changelog
 
+## v0.7.4
+
+### 🐛 Bug Fixes
+
+- *(input)* Wake client and daemon to reduce typing latency
 ## v0.7.3
 
 ### 🚜 Refactor
 
 - Improve runtime efficiency (#18)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.7.3
 ## v0.7.2
 
 ### 🚀 Features
