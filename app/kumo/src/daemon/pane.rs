@@ -700,10 +700,9 @@ impl Pane {
         // clickable, the same way a normal terminal highlights them.
         let mut row_texts: HashMap<usize, String> = HashMap::new();
 
-        self.vt.for_each_cell(|row, col, rc, selected, row_dirty| {
-            if !full && !row_dirty && !dirty.contains(&row) {
-                return;
-            }
+        self.vt.for_each_cell_filtered(
+            |row, row_dirty| full || row_dirty || dirty.contains(&row),
+            |row, col, rc, selected, _row_dirty| {
             if row >= ah as usize || col >= aw as usize {
                 return;
             }
@@ -794,7 +793,8 @@ impl Pane {
                     }
                 }
             }
-        });
+            },
+        );
 
         if focused && self.vt.cursor_visible() {
             if let Some((cx, cy)) = self.vt.cursor_pos() {
@@ -1639,6 +1639,27 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         assert!(text.contains("line one"), "static row lost: {text:?}");
         assert!(text.contains("line two"), "static row lost: {text:?}");
         assert!(text.contains("line three"), "new row missing: {text:?}");
+    }
+
+    #[test]
+    #[ignore = "local render benchmark; run with --ignored --nocapture"]
+    fn benchmark_partial_render_120x40() {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut pane = test_pane(false);
+        let mut buffer = Buffer::empty(area);
+        pane.feed(b"prompt> ");
+        pane.render_dirty(area, true, &mut buffer);
+
+        let start = Instant::now();
+        for _ in 0..500 {
+            pane.feed(b"x");
+            pane.render_dirty(area, true, &mut buffer);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "daemon render benchmark 120x40: total={elapsed:?} per_render={:?}",
+            elapsed / 500
+        );
     }
 
     #[test]

@@ -107,6 +107,49 @@ fn both_viewers_receive_incremental_output() {
 }
 
 #[test]
+#[ignore = "local end-to-end latency benchmark; run with --ignored --nocapture"]
+fn benchmark_pane_write_to_incremental_frame() {
+    const SAMPLES: usize = 32;
+
+    let mut daemon = Daemon::start();
+    let mut stream = daemon.connect();
+    let pane_id = daemon.pane(&mut stream);
+    send(&mut stream, Command::SubscribePane { pane_id });
+
+    // Consume the initial full frame so each sample measures only the command
+    // write, PTY echo/output, daemon tick, serialization, and socket receipt.
+    await_frame(&mut stream, true, "");
+
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for index in 0..SAMPLES {
+        let token = format!("KUMO_LATENCY_{index}_{}", std::process::id());
+        let command = format!("printf '%s\\n' '{token}'\n");
+        let started = Instant::now();
+        send(
+            &mut stream,
+            Command::PaneWrite { pane_id, bytes: command.into_bytes() },
+        );
+        await_frame(&mut stream, false, &token);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort_unstable();
+    let mean = samples.iter().copied().sum::<Duration>() / SAMPLES as u32;
+    let p50 = samples[SAMPLES / 2];
+    let p95 = samples[SAMPLES * 95 / 100];
+    eprintln!(
+        "pane write -> incremental frame latency (microseconds): mean={} p50={} p95={} max={}",
+        mean.as_micros(),
+        p50.as_micros(),
+        p95.as_micros(),
+        samples.last().unwrap().as_micros(),
+    );
+
+    send(&mut stream, Command::KillServer);
+    daemon.wait_exit();
+}
+
+#[test]
 fn real_exec_restart_reaps_exited_shell() {
     let mut daemon = Daemon::start();
     let mut stream = daemon.connect();

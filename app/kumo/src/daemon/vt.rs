@@ -2041,7 +2041,22 @@ impl Terminal {
     /// background. `selected` is true inside the terminal's active selection;
     /// `row_dirty` is true when the row changed since the last render-state
     /// update.
-    pub fn for_each_cell(&mut self, mut f: impl FnMut(usize, usize, &RenderCell<'_>, bool, bool)) {
+    pub fn for_each_cell(&mut self, f: impl FnMut(usize, usize, &RenderCell<'_>, bool, bool)) {
+        self.for_each_cell_filtered(|_, _| true, f);
+    }
+
+    /// Iterate cells from rows accepted by `should_visit`.
+    ///
+    /// The render state still visits every row to discover its dirty flag, but
+    /// it does not fetch a row's cell iterator or call the FFI-heavy
+    /// `read_cell` when the predicate rejects it. This matters for partial
+    /// redraws where one changed character should not require reading every
+    /// cell in an otherwise unchanged viewport.
+    pub fn for_each_cell_filtered(
+        &mut self,
+        mut should_visit: impl FnMut(usize, bool) -> bool,
+        mut f: impl FnMut(usize, usize, &RenderCell<'_>, bool, bool),
+    ) {
         unsafe {
             let mut iter: RowIteratorHandle = ptr::null_mut();
             if !ghostty_render_state_row_iterator_new(ptr::null(), &mut iter).is_ok() {
@@ -2066,13 +2081,10 @@ impl Terminal {
                     start_x: 0,
                     end_x: 0,
                 };
-                let mut cells_handle: RowCellsHandle = ptr::null_mut();
-
-                let keys = [ROW_DATA_DIRTY, ROW_DATA_SELECTION, ROW_DATA_CELLS];
-                let mut values: [*mut c_void; 3] = [
+                let keys = [ROW_DATA_DIRTY, ROW_DATA_SELECTION];
+                let mut values: [*mut c_void; 2] = [
                     &mut row_dirty as *mut bool as *mut c_void,
                     &mut row_sel as *mut RenderStateRowSelection as *mut c_void,
-                    &mut cells_handle as *mut RowCellsHandle as *mut c_void,
                 ];
                 let mut written: usize = 0;
                 let batch_ok = ghostty_render_state_row_get_multi(
@@ -2085,9 +2097,7 @@ impl Terminal {
                 .is_ok();
 
                 let sel_ok = batch_ok && written >= 2;
-                if batch_ok && written >= 3 {
-                    cells = cells_handle;
-                } else if !batch_ok {
+                if !batch_ok {
                     ghostty_render_state_row_get(
                         iter,
                         ROW_DATA_DIRTY,
@@ -2099,6 +2109,10 @@ impl Terminal {
                         &mut row_sel as *mut RenderStateRowSelection as *mut c_void,
                     );
                     let sel_ok_fallback = sel_res.is_ok();
+                    if !should_visit(row_idx, row_dirty) {
+                        row_idx += 1;
+                        continue;
+                    }
                     ghostty_render_state_row_get(
                         iter,
                         ROW_DATA_CELLS,
@@ -2117,6 +2131,17 @@ impl Terminal {
                     row_idx += 1;
                     continue;
                 }
+
+                if !should_visit(row_idx, row_dirty) {
+                    row_idx += 1;
+                    continue;
+                }
+
+                ghostty_render_state_row_get(
+                    iter,
+                    ROW_DATA_CELLS,
+                    &mut cells as *mut RowCellsHandle as *mut c_void,
+                );
 
                 let mut col_idx: usize = 0;
                 while ghostty_render_state_row_cells_next(cells) {
@@ -2284,6 +2309,25 @@ mod tests {
         let cells = collect(&mut t);
         let texts: Vec<&str> = cells.iter().map(|(_, _, s)| s.as_str()).collect();
         assert_eq!(texts, vec!["h", "e", "l", "l", "o"]);
+    }
+
+    #[test]
+    fn filtered_cells_only_materialize_selected_rows() {
+        let mut t = new_term(16, 4, 100);
+        t.write(b"first\r\nsecond");
+        t.refresh();
+        let mut rows = Vec::new();
+        let mut text = String::new();
+        t.for_each_cell_filtered(
+            |row, _row_dirty| row == 1,
+            |row, _col, rc, _selected, _row_dirty| {
+                rows.push(row);
+                text.push_str(rc.text);
+            },
+        );
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|&row| row == 1));
+        assert!(text.contains("second"));
     }
 
     #[test]

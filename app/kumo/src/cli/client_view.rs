@@ -8969,6 +8969,77 @@ mod tests {
         }
     }
 
+    fn render_bench_layout(pane_ids: &[u64]) -> Layout {
+        let mut root: Option<Box<LayoutNode>> = None;
+        for &pid in pane_ids {
+            let leaf = LayoutNode::Pane(kumo_protocol::LayoutPane {
+                id: pid,
+                title: format!("shell {pid}"),
+                cwd: std::path::PathBuf::from("/tmp/work"),
+                is_ai: false,
+                agent: None,
+                mouse_reporting: false,
+                alt_screen: false,
+            });
+            root = Some(match root.take() {
+                None => Box::new(leaf),
+                Some(a) => Box::new(LayoutNode::Split {
+                    id: pid + 10_000,
+                    dir: SplitDir::Vertical,
+                    ratio: 0.5,
+                    a,
+                    b: Box::new(leaf),
+                }),
+            });
+        }
+        let focus = pane_ids.first().copied().unwrap_or(1);
+        let root = root.unwrap_or_else(|| Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+            id: focus,
+            title: "shell".into(),
+            cwd: std::path::PathBuf::from("/tmp/work"),
+            is_ai: false,
+            agent: None,
+            mouse_reporting: false,
+            alt_screen: false,
+        })));
+        Layout {
+            active: Some("bench".into()),
+            sessions: vec![SessionLayout {
+                name: "bench".into(),
+                workspace: std::path::PathBuf::from("/tmp/work"),
+                project_root: None,
+                is_linked_worktree: false,
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout {
+                    id: 1,
+                    name: "1".into(),
+                    focus,
+                    zoom: false,
+                    root: Some(root.clone()),
+                }],
+                focus,
+                zoom: false,
+                branch: None,
+                root: Some(root),
+            }],
+        }
+    }
+
+    fn render_bench_frame(pid: u64, cols: u16, rows: u16, full: bool, row: u16, seed: u8) -> PaneFrame {
+        let row_cells = (0..cols)
+            .map(|col| cell(&char::from(b'a' + ((seed as usize + col as usize) % 26) as u8).to_string(), 1))
+            .collect();
+        PaneFrame {
+            pane_id: pid,
+            cols,
+            rows,
+            full,
+            rows_dirty: vec![kumo_protocol::RowPatch { row, cells: row_cells, links: vec![] }],
+            cursor: Some((seed as u16 % cols.max(1), row)),
+            scroll: None,
+        }
+    }
+
     #[test]
     fn agents_panel_groups_by_state_in_order() {
         let mut view = test_view();
@@ -9713,6 +9784,67 @@ mod tests {
         g.apply(&frame);
         assert_eq!(g.cells.len(), 3, "patch must not resize");
         assert_eq!(g.cells[2][0].text, "z");
+    }
+
+    #[test]
+    #[ignore = "local rendering benchmark; run with --ignored --nocapture"]
+    fn benchmark_echo_render_cost() {
+        fn run_case(cols: u16, rows: u16, pane_count: usize) -> (u128, u128, u128) {
+            let pane_ids: Vec<u64> = (1..=pane_count as u64).collect();
+            let mut view = test_view();
+            view.cols = cols;
+            view.rows = rows;
+            view.sidebar_open = false;
+            view.status_bar.enabled = false;
+            view.layout = Some(render_bench_layout(&pane_ids));
+            view.recompute_geometry();
+
+            // Populate every visible pane with a full frame first. Subsequent
+            // partial frames model the daemon's row patch after one echoed key.
+            let dimensions: Vec<(u64, u16, u16)> = view
+                .rects
+                .iter()
+                .map(|&(pid, rect)| {
+                    let inner = PaneGeom { pane_id: pid, rect }.inner();
+                    (pid, inner.width.max(1), inner.height.max(1))
+                })
+                .collect();
+            let backend = ratatui::backend::TestBackend::new(cols, rows);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            for &(pid, pane_cols, pane_rows) in &dimensions {
+                view.on_pane_frame(render_bench_frame(pid, pane_cols, pane_rows, true, 0, pid as u8));
+            }
+            terminal.draw(|frame| view.draw(frame)).unwrap();
+
+            let mut samples = Vec::with_capacity(200);
+            for i in 0..200u8 {
+                let (pid, pane_cols, pane_rows) = dimensions[(i as usize) % dimensions.len()];
+                view.on_pane_frame(render_bench_frame(
+                    pid,
+                    pane_cols,
+                    pane_rows,
+                    false,
+                    i as u16 % pane_rows.max(1),
+                    i,
+                ));
+                let started = Instant::now();
+                terminal.draw(|frame| view.draw(frame)).unwrap();
+                samples.push(started.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            let mean = samples.iter().sum::<u128>() / samples.len() as u128;
+            let p50 = samples[samples.len() / 2];
+            let p95 = samples[samples.len() * 95 / 100];
+            (mean, p50, p95)
+        }
+
+        let typical = run_case(120, 40, 1);
+        let large = run_case(240, 80, 4);
+        eprintln!(
+            "echo render benchmark (microseconds/frame): 120x40/1-pane mean={} p50={} p95={}; 240x80/4-pane mean={} p50={} p95={}",
+            typical.0, typical.1, typical.2, large.0, large.1, large.2,
+        );
+        std::hint::black_box((typical, large));
     }
 
     #[test]
