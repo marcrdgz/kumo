@@ -251,7 +251,7 @@ pub fn validate_branch_name(branch: &str) -> Result<(), String> {
 
 /// Derive the branch to create from the Orca-aligned inputs (no `kumo/` prefix):
 /// - explicit `branch_override` → validate and return it (name/derive ignored)
-/// - `name` (Nombre tab / CLI positional) → slug(name)
+/// - `name` (Name tab / CLI positional) → slug(name)
 /// - `from` is `#1234`/GitHub URL → `pr-1234` or headRefName when gh resolves it (caller should have attempted resolve)
 /// - fallback → `wt-<short>`
 ///
