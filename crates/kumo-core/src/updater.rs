@@ -286,6 +286,7 @@ pub fn update_desktop() -> Result<()> {
     bail!("desktop self-update is macOS-only")
 }
 
+#[cfg(target_os = "macos")]
 fn dmg_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -358,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn arm_maps_to_dmg_arch() {
         assert_eq!(dmg_arch(), if std::env::consts::ARCH == "aarch64" { "arm64" } else { "x86_64" });
     }
