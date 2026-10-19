@@ -62,6 +62,10 @@ const LOST_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a failed write waits for the reader to deliver a final
 /// `Shutdown`/`Detach` frame that may already be in flight.
 const LOST_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// A connection lost within this long of attaching counts toward the streak.
+const LOST_STREAK_WINDOW: Duration = Duration::from_secs(5);
+/// Give up after this many quick losses in a row instead of looping forever.
+const MAX_LOST_STREAK: u32 = 3;
 
 #[derive(Debug)]
 enum InputMessage {
@@ -107,30 +111,51 @@ fn workspace_for(launch: &Launch) -> Option<PathBuf> {
 fn client_loop(mut stream: UnixStream, pre: &[Command]) -> Result<()> {
     let mut pre = pre.to_vec();
     let mut notice = None;
+    // After `Restarting`/`Lost` the terminal stays in raw mode on the
+    // alternate screen (keyboard flags already popped) for a seamless
+    // reconnect; every error path from here must restore it.
+    let mut held = false;
+    let mut lost_streak = 0u32;
     loop {
-        match client_once(&mut stream, &pre, notice.take()) {
-            Ok(Exit::Clean) => return Ok(()),
-            Ok(Exit::Restarting) => {
+        let attached_at = Instant::now();
+        let exit = match client_once(&mut stream, &pre, notice.take()) {
+            Ok(exit) => exit,
+            Err(e) => {
+                if held {
+                    restore_terminal(false);
+                }
+                return Err(e);
+            }
+        };
+        held = true;
+        pre.clear();
+        match exit {
+            Exit::Clean => return Ok(()),
+            Exit::Restarting => {
                 // The daemon exec'd a new binary for `kumo update`; reconnect
                 // (with retries) and re-handshake, keeping the TUI intact.
-                stream = reconnect(RESTART_RECONNECT_TIMEOUT)
-                    .map_err(|_| anyhow::anyhow!("kumo daemon did not come back after the update restart"))?;
-                pre.clear();
+                stream = reconnect(RESTART_RECONNECT_TIMEOUT).map_err(|_| {
+                    restore_terminal(false);
+                    anyhow::anyhow!("kumo daemon did not come back after the update restart")
+                })?;
             }
-            Ok(Exit::Lost) => {
-                // A write to the daemon failed. A live daemon that dropped this
-                // connection accepts a fresh attach; a dead one fails fast.
-                match reconnect(LOST_RECONNECT_TIMEOUT) {
-                    Ok(s) => stream = s,
-                    Err(_) => {
-                        restore_terminal();
-                        anyhow::bail!("lost connection to the kumo daemon");
-                    }
+            Exit::Lost => {
+                // A daemon that stopped gracefully removes its socket; its
+                // final `Shutdown` frame may still have been dropped.
+                if !kumo_core::config::ipc_socket_path().exists() {
+                    restore_terminal(false);
+                    return Ok(());
                 }
-                pre.clear();
+                // Stop if a daemon keeps accepting and then dropping us.
+                lost_streak = if attached_at.elapsed() < LOST_STREAK_WINDOW { lost_streak + 1 } else { 1 };
+                let reconnected = if lost_streak > MAX_LOST_STREAK { None } else { reconnect(LOST_RECONNECT_TIMEOUT).ok() };
+                let Some(s) = reconnected else {
+                    restore_terminal(false);
+                    anyhow::bail!("lost connection to the kumo daemon");
+                };
+                stream = s;
                 notice = Some("connection to the kumo daemon was lost; reconnected");
             }
-            Err(e) => return Err(e),
         }
     }
 }
@@ -142,8 +167,8 @@ enum Exit {
     /// The daemon is restarting itself (`kumo update`); drop the socket and
     /// reconnect.
     Restarting,
-    /// A write to the daemon socket failed without a final protocol frame;
-    /// try to reconnect, else report the lost connection.
+    /// The daemon connection broke (failed write or EOF) without a final
+    /// protocol frame; try to reconnect, else report the lost connection.
     Lost,
 }
 
@@ -176,13 +201,23 @@ fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -
     // Finish all fallible terminal/view setup before starting worker threads.
     // This keeps an initialization error from orphaning a producer that is
     // already blocked on the socket or terminal input.
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
-    terminal.clear()?;
-    let mut view = View::new(stream.try_clone()?, cols, rows);
-    if let Some(notice) = notice {
-        view.show_notice(notice);
-    }
-    view.render_now(&mut terminal)?;
+    let setup = (|| -> Result<_> {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
+        terminal.clear()?;
+        let mut view = View::new(stream.try_clone()?, cols, rows);
+        if let Some(notice) = notice {
+            view.show_notice(notice);
+        }
+        view.render_now(&mut terminal)?;
+        Ok((terminal, view))
+    })();
+    let (mut terminal, mut view) = match setup {
+        Ok(ready) => ready,
+        Err(e) => {
+            restore_terminal(true);
+            return Err(e);
+        }
+    };
 
     // Daemon-event reader thread: forwards every frame the daemon pushes. It
     // wakes on a read timeout to check the stop flag, because the client's own
@@ -234,8 +269,10 @@ fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -
                 }
             }
             let daemon_budget_hit = daemon_count == EVENT_BATCH_MAX || daemon_started.elapsed() >= EVENT_BATCH_BUDGET;
+            // The reader stops on EOF without a final frame; any queued
+            // `Shutdown`/`Detach`/`Restarting` was already applied above.
             if daemon_disconnected {
-                return Ok(Exit::Clean);
+                return Ok(Exit::Lost);
             }
 
             let input_started = Instant::now();
@@ -311,22 +348,25 @@ fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -
             Ok(exit)
         }
         other => {
-            restore_terminal();
+            restore_terminal(true);
             other
         }
     }
 }
 
-/// Leave raw mode and the alternate screen. Idempotent, so the reconnect
-/// path can call it when it gives up after `client_once` kept them active.
-fn restore_terminal() {
+/// Leave raw mode and the alternate screen. `pop_keyboard_flags` is false
+/// when the reconnect path already popped this client's flags, so a level
+/// pushed by a parent program is never popped.
+fn restore_terminal(pop_keyboard_flags: bool) {
     let mut stdout = io::stdout();
+    if pop_keyboard_flags {
+        let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         stdout,
         crossterm::cursor::Show,
         crossterm::event::DisableMouseCapture,
         DisableBracketedPaste,
-        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();

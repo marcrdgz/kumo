@@ -62,7 +62,8 @@ impl<'a> TextInput<'a> {
                 *self.cursor = self.len();
                 false
             }
-            KeyCode::Char(c) if !ctrl => {
+            // Alt/Super chords are shortcuts (e.g. meta-prefixed keys), not text.
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
                 self.insert_str(&c.to_string());
                 true
             }
@@ -218,5 +219,6 @@ mod tests {
         assert_eq!(input.handle_key(key(KeyCode::Char('x'))), TextEdit::Changed);
         assert_eq!(input.handle_key(key(KeyCode::Enter)), TextEdit::Ignored);
         assert_eq!(input.handle_key(ctrl('a')), TextEdit::Ignored);
+        assert_eq!(input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT)), TextEdit::Ignored);
     }
 }
