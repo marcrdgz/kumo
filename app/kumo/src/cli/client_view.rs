@@ -525,29 +525,27 @@ struct Grid {
     /// Cached ratatui cells per row; `None` = stale, rebuilt lazily on render.
     /// Only dirty rows are rebuilt, avoiding O(cols × rows) work per frame.
     rendered: Vec<Option<Vec<ratatui::buffer::Cell>>>,
-    /// Rows that changed since the last render (from `PaneFrame.rows_dirty`).
-    dirty_rows: HashSet<u16>,
 }
 
 impl Grid {
-    fn apply(&mut self, frame: &PaneFrame) {
+    /// Patch the grid with `frame`, moving its rows in (the frame is consumed,
+    /// so a full frame never deep-copies every cell).
+    fn apply(&mut self, frame: PaneFrame) {
         if frame.full || self.cells.is_empty() {
             self.cols = frame.cols as usize;
             self.rows = frame.rows as usize;
             self.cells = vec![Vec::new(); self.rows];
             self.rendered = vec![None; self.rows];
-            self.dirty_rows = HashSet::new();
         }
-        for patch in &frame.rows_dirty {
+        for patch in frame.rows_dirty {
             if (patch.row as usize) < self.rows {
-                self.cells[patch.row as usize] = patch.cells.clone();
+                self.cells[patch.row as usize] = patch.cells;
                 // Invalidate the cached render for this row
                 if let Some(slot) = self.rendered.get_mut(patch.row as usize) {
                     *slot = None;
                 }
-                self.dirty_rows.insert(patch.row);
             }
-            self.links.insert(patch.row, patch.links.clone());
+            self.links.insert(patch.row, patch.links);
         }
         self.cursor = frame.cursor;
         self.scroll = frame.scroll;
@@ -1240,9 +1238,8 @@ impl View {
             scroll: None,
             links: HashMap::new(),
             rendered: Vec::new(),
-            dirty_rows: HashSet::new(),
         });
-        grid.apply(&frame);
+        grid.apply(frame);
         self.mark_dirty();
     }
 
@@ -3591,7 +3588,7 @@ mod tests {
 
     pub(super) fn cell(text: &str, width: u16) -> WireCell {
         WireCell {
-            text: text.to_string(),
+            text: text.into(),
             fg: None,
             bg: None,
             bold: false,
@@ -3604,7 +3601,7 @@ mod tests {
     }
 
     pub(super) fn grid() -> Grid {
-        Grid { cols: 4, rows: 3, cells: Vec::new(), cursor: None, scroll: None, links: HashMap::new(), rendered: Vec::new(), dirty_rows: HashSet::new() }
+        Grid { cols: 4, rows: 3, cells: Vec::new(), cursor: None, scroll: None, links: HashMap::new(), rendered: Vec::new() }
     }
 
     pub(super) fn test_view() -> View {
@@ -3982,7 +3979,7 @@ mod tests {
             cursor: Some((1, 1)),
             scroll: Some(ScrollState { offset: 0, total: 10, screen: 3 }),
         };
-        g.apply(&frame);
+        g.apply(frame.clone());
         assert_eq!(g.cells.len(), 3);
         assert_eq!(g.cells[0][0].text, "a");
         assert_eq!(g.cursor, Some((1, 1)));
@@ -3990,7 +3987,7 @@ mod tests {
         // A partial frame patches in place without resizing.
         frame.full = false;
         frame.rows_dirty = vec![kumo_protocol::RowPatch { row: 2, cells: vec![cell("z", 1)], links: vec![] }];
-        g.apply(&frame);
+        g.apply(frame);
         assert_eq!(g.cells.len(), 3, "patch must not resize");
         assert_eq!(g.cells[2][0].text, "z");
     }

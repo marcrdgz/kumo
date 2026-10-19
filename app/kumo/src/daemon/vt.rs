@@ -499,6 +499,11 @@ pub const ROW_CELLS_DATA_GRAPHEMES_UTF8: i32 = 9;
 /// OSC 8 hyperlink.
 pub const CELL_DATA_HAS_HYPERLINK: i32 = 7;
 
+/// Row data id for `ghostty_row_get` (page rows, not render-state rows):
+/// whether any cell in the row has a hyperlink. May report false positives,
+/// never false negatives.
+pub const PAGE_ROW_DATA_HYPERLINK: i32 = 5;
+
 // ---------------------------------------------------------------------------
 // C function declarations
 // ---------------------------------------------------------------------------
@@ -598,6 +603,8 @@ unsafe extern "C" {
         out_written: *mut usize,
     ) -> Result;
     fn ghostty_cell_get(cell: u64, data: i32, out: *mut c_void) -> Result;
+    fn ghostty_grid_ref_row(ref_: *const GridRef, out_row: *mut u64) -> Result;
+    fn ghostty_row_get(row: u64, data: i32, out: *mut c_void) -> Result;
     fn ghostty_grid_ref_hyperlink_uri(
         ref_: *const GridRef,
         buf: *mut u8,
@@ -1466,6 +1473,35 @@ impl Terminal {
             }
             buf.truncate(filled.min(buf.len()));
             Some(String::from_utf8_lossy(&buf).into_owned())
+        }
+    }
+
+    /// Whether viewport row `y` may contain OSC 8 hyperlink cells: one row-flag
+    /// lookup instead of a per-column `hyperlink_at` scan. Errs on the side of
+    /// `true`: the flag may be a false positive, and a failed flag read falls
+    /// back to the scan.
+    pub fn row_may_have_hyperlink(&self, y: u16) -> bool {
+        let mut ref_ = GridRef {
+            size: size_of::<GridRef>(),
+            node: ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+        unsafe {
+            if !ghostty_terminal_grid_ref(self.term, viewport_point(0, y as u32), &mut ref_).is_ok() {
+                return false;
+            }
+            let mut row: u64 = 0;
+            if !ghostty_grid_ref_row(&ref_, &mut row).is_ok() {
+                return true;
+            }
+            let mut hyperlink = true;
+            if !ghostty_row_get(row, PAGE_ROW_DATA_HYPERLINK, &mut hyperlink as *mut bool as *mut c_void)
+                .is_ok()
+            {
+                return true;
+            }
+            hyperlink
         }
     }
 
@@ -2542,6 +2578,8 @@ mod tests {
             ]
         );
         assert_eq!(t.hyperlink_at(0, 0).as_deref(), Some("https://example.com"));
+        assert!(t.row_may_have_hyperlink(0));
+        assert!(!t.row_may_have_hyperlink(1), "a row without OSC 8 cells skips the scan");
         assert_eq!(t.hyperlink_at(3, 0).as_deref(), Some("https://example.com"));
 
         // No hyperlink outside the link (or on a later line).

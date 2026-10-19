@@ -9,7 +9,6 @@
 //! `ratatui` and `kumo_core::color::ColorRgb`.
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 
 use kumo_protocol::{PaneFrame, RowPatch, ScrollState, WireCell};
 
@@ -68,6 +67,15 @@ pub(crate) fn row_cells(buf: &Buffer, row: u16, cols: u16, palette: &[ColorRgb; 
     out
 }
 
+/// Whether `row` contains a `://` scheme separator, the anchor of every
+/// plain-text URL; rows without one skip the (costly) row-text URL scan.
+fn row_has_url_scheme(buf: &Buffer, row: u16, cols: u16) -> bool {
+    let s = row as usize * cols as usize;
+    buf.content[s..s + cols as usize]
+        .windows(3)
+        .any(|w| w[0].symbol() == ":" && w[1].symbol() == "/" && w[2].symbol() == "/")
+}
+
 /// Whether any cell in `row` differs between the two buffers.
 fn row_changed(buf: &Buffer, last: &Buffer, row: u16, cols: u16) -> bool {
     let s = row as usize * cols as usize;
@@ -101,7 +109,7 @@ fn cell_from_ratatui(cell: &ratatui::buffer::Cell, palette: &[ColorRgb; 16]) -> 
         cell.cell_width()
     };
     WireCell {
-        text: cell.symbol().to_string(),
+        text: cell.symbol().into(),
         fg,
         bg,
         bold: m.contains(Modifier::BOLD),
@@ -128,7 +136,10 @@ pub(crate) fn pane_frame(
 ) -> PaneFrame {
     let cols = buf.area.width;
     let rows = buf.area.height;
-    let links = |row: u16| pane.map(|p| p.link_ranges(row)).unwrap_or_default();
+    let links = |row: u16| {
+        pane.map(|p| p.link_ranges(row, row_has_url_scheme(buf, row, cols)))
+            .unwrap_or_default()
+    };
     let full = last.map(|l| l.area != buf.area).unwrap_or(true);
     let rows_dirty: Vec<RowPatch> = if full {
         (0..rows)
@@ -152,18 +163,20 @@ pub(crate) fn pane_frame(
     PaneFrame { pane_id, cols, rows, full, rows_dirty, cursor, scroll }
 }
 
-/// Convert a `Rect`-scoped buffer (a pane cache) into a standalone buffer
-/// starting at (0,0), so a pane frame is always shipped as its own grid.
-pub(crate) fn detach_buffer(src: &Buffer) -> Buffer {
-    let w = src.area.width;
-    let h = src.area.height;
-    let mut out = Buffer::empty(Rect::new(0, 0, w, h));
-    for (i, cell) in src.content.iter().enumerate() {
-        if let Some(dst) = out.content.get_mut(i) {
-            *dst = cell.clone();
-        }
+/// Bring the diff baseline `last` up to date with `buf` after shipping `frame`
+/// (built from `buf`): only the rows the frame carried can differ, so copy
+/// those instead of cloning the whole grid every tick. A resize replaces the
+/// baseline outright.
+pub(crate) fn update_baseline(last: &mut Buffer, buf: &Buffer, frame: &PaneFrame) {
+    if last.area != buf.area {
+        *last = buf.clone();
+        return;
     }
-    out
+    let cols = buf.area.width as usize;
+    for patch in &frame.rows_dirty {
+        let s = patch.row as usize * cols;
+        last.content[s..s + cols].clone_from_slice(&buf.content[s..s + cols]);
+    }
 }
 
 #[cfg(test)]
@@ -209,14 +222,73 @@ mod tests {
     }
 
     #[test]
-    fn detach_buffer_relocates_to_origin() {
-        let mut src = Buffer::empty(Rect::new(10, 20, 3, 2));
-        src.cell_mut((10, 20)).unwrap().set_symbol("A");
-        src.cell_mut((11, 20)).unwrap().set_symbol("B");
-        let out = detach_buffer(&src);
-        assert_eq!((out.area.width, out.area.height), (3, 2));
-        let mut out = out;
-        assert_eq!(out.cell_mut((0, 0)).unwrap().symbol(), "A");
-        assert_eq!(out.cell_mut((1, 0)).unwrap().symbol(), "B");
+    fn update_baseline_catches_up_changed_rows_and_resizes() {
+        let mut last = Buffer::empty(Rect::new(0, 0, 4, 3));
+        let mut buf = last.clone();
+        buf.cell_mut((2, 1)).unwrap().set_symbol("X");
+        buf.cell_mut((0, 2)).unwrap().set_symbol("Y");
+        let frame = pane_frame(1, &buf, Some(&last), None, &palette(), None, None);
+        update_baseline(&mut last, &buf, &frame);
+        assert_eq!(last, buf);
+        // The next diff against the caught-up baseline is empty.
+        let frame = pane_frame(1, &buf, Some(&last), None, &palette(), None, None);
+        assert!(frame.rows_dirty.is_empty());
+
+        let resized = Buffer::empty(Rect::new(0, 0, 6, 2));
+        let frame = pane_frame(1, &resized, Some(&last), None, &palette(), None, None);
+        update_baseline(&mut last, &resized, &frame);
+        assert_eq!(last, resized);
+    }
+
+    fn filled(seed: u8) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                let c = b'a' + (x as u8).wrapping_add(y as u8).wrapping_add(seed) % 26;
+                buf.cell_mut((x, y)).unwrap().set_char(c as char);
+            }
+        }
+        buf
+    }
+
+    /// The daemon loop's per-frame work (serialize once, catch the baseline
+    /// up) versus each client writer's (encode the shared frame).
+    #[test]
+    #[ignore = "local frame pipeline benchmark; run with --ignored --nocapture"]
+    fn benchmark_pane_frame_pipeline_120x40() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        const SAMPLES: u32 = 500;
+        let base = filled(0);
+        let mut one_row = base.clone();
+        one_row.cell_mut((3, 5)).unwrap().set_char('#');
+        let cases = [
+            ("full", filled(1), false, 2usize),
+            ("all-rows diff", filled(1), true, 2),
+            ("one-row diff", one_row.clone(), true, 2),
+            ("one-row diff 1 client", one_row, true, 1),
+        ];
+        for (name, buf, diff, clients) in cases {
+            let (mut daemon, mut writers) = (Duration::ZERO, Duration::ZERO);
+            for _ in 0..SAMPLES {
+                let mut last = base.clone();
+                let started = Instant::now();
+                let frame = pane_frame(1, &buf, diff.then_some(&last), None, &palette(), None, None);
+                update_baseline(&mut last, &buf, &frame);
+                let event = Arc::new(kumo_protocol::DaemonEvent::PaneFrame { frame });
+                let queued: Vec<_> = (0..clients).map(|_| Arc::clone(&event)).collect();
+                daemon += started.elapsed();
+                let started = Instant::now();
+                for event in &queued {
+                    std::hint::black_box(kumo_protocol::encode(&**event).unwrap());
+                }
+                writers += started.elapsed();
+            }
+            eprintln!(
+                "pane frame pipeline 120x40 {name} ({clients} client(s)): daemon-loop={:?} writers={:?}",
+                daemon / SAMPLES,
+                writers / SAMPLES,
+            );
+        }
     }
 }

@@ -215,6 +215,7 @@ dependencies = [
  "itoa",
  "rustversion",
  "ryu",
+ "serde",
  "static_assertions",
 ]
 
@@ -762,6 +763,7 @@ version = "0.7.5"
 dependencies = [
  "anyhow",
  "bincode",
+ "compact_str",
  "crossterm",
  "serde",
 ]

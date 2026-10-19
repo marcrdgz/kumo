@@ -42,8 +42,10 @@ extern "C" fn handle_term(_: libc::c_int) {
 /// slow (or unread) client never blocks the daemon loop. A lagging client is
 /// flagged (layout / pane-frame retry) instead of being dropped; a genuinely
 /// dead connection is cleaned up by its reader thread (EOF -> `Detach`).
+/// Events are queued behind an `Arc` so a pane frame serialized once per tick
+/// is shared by every subscriber instead of deep-cloned per client.
 struct Client {
-    tx: mpsc::SyncSender<DaemonEvent>,
+    tx: mpsc::SyncSender<Arc<DaemonEvent>>,
     welcomed: bool,
     kind: ClientKind,
     /// `SubscribeLayout`: push `DaemonEvent::Layout` whenever it changes.
@@ -69,7 +71,7 @@ enum SendOutcome {
 }
 
 impl Client {
-    fn new(tx: mpsc::SyncSender<DaemonEvent>) -> Self {
+    fn new(tx: mpsc::SyncSender<Arc<DaemonEvent>>) -> Self {
         Self {
             tx,
             welcomed: false,
@@ -81,8 +83,8 @@ impl Client {
         }
     }
 
-    fn send_msg(&mut self, msg: DaemonEvent) -> SendOutcome {
-        match self.tx.try_send(msg) {
+    fn send_msg(&mut self, msg: impl Into<Arc<DaemonEvent>>) -> SendOutcome {
+        match self.tx.try_send(msg.into()) {
             Ok(()) => SendOutcome::Ok,
             Err(mpsc::TrySendError::Full(_)) => SendOutcome::Lagging,
             Err(mpsc::TrySendError::Disconnected(_)) => SendOutcome::Disconnected,
@@ -124,12 +126,19 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     prepare_socket(&path)?;
     let listener = UnixListener::bind(&path)?;
     set_socket_perms(&path)?;
-    listener.set_nonblocking(true)?;
 
     let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Command)>(256);
-    // Reader threads wake this loop after queueing commands. The timeout below
-    // remains as a safety poll for signals, config changes, and listener work.
+    // Reader and accept threads wake this loop after queueing work. The
+    // timeout below remains as a safety poll for signals, child exits, and
+    // config changes.
     let daemon_thread = std::thread::current();
+    let (conn_tx, conn_rx) = mpsc::channel::<UnixStream>();
+    {
+        let wake = daemon_thread.clone();
+        std::thread::Builder::new()
+            .name("kumo-accept".into())
+            .spawn(move || client_accept_loop(listener, conn_tx, wake))?;
+    }
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
     let mut last_layout: Option<Arc<Layout>> = None;
@@ -148,7 +157,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             kill = true;
         }
         // Accept new clients (each gets a reader thread + a writer thread).
-        while let Ok((stream, _)) = listener.accept() {
+        while let Ok(stream) = conn_rx.try_recv() {
             if clients.len() >= 32 {
                 log::warn!("daemon: rejecting client, too many clients ({} open)", clients.len());
                 continue;
@@ -157,12 +166,11 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 log::warn!("daemon: rejecting connection from a different user");
                 continue;
             }
-            // A socket accepted from a nonblocking listener can inherit
-            // O_NONBLOCK on some platforms; force blocking mode so the reader
-            // thread actually blocks (not spin on EAGAIN).
+            // Force blocking mode so the reader thread actually blocks (not
+            // spin on EAGAIN), whatever flags the accepted socket inherited.
             let _ = stream.set_nonblocking(false);
             let Ok(read_half) = stream.try_clone() else { continue };
-            let (writer_tx, writer_rx) = mpsc::sync_channel::<DaemonEvent>(8);
+            let (writer_tx, writer_rx) = mpsc::sync_channel::<Arc<DaemonEvent>>(8);
             let id = next_id;
             next_id += 1;
             let _ = std::thread::Builder::new()
@@ -226,7 +234,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     match restart_daemon(&app, &resume) {
                         Ok(_inheritance) => {
                             for client in clients.values_mut() {
-                                let _ = client.tx.try_send(DaemonEvent::Restarting);
+                                let _ = client.tx.try_send(DaemonEvent::Restarting.into());
                             }
                             std::thread::sleep(Duration::from_millis(100));
                             if let Err(e) = exec_new_binary(&resume) {
@@ -352,7 +360,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                                 let _ = client.tx.try_send(DaemonEvent::Theme {
                                     idx: app.theme_idx,
                                     custom: custom.clone(),
-                                });
+                                }.into());
                             }
                             reply
                         }
@@ -394,7 +402,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     app.dismiss_update(&key);
                     // Tell every client the banner is gone.
                     for client in clients.values_mut() {
-                        let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: None });
+                        let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: None }.into());
                     }
                 }
                 Command::SessionList => {
@@ -632,19 +640,23 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             app.update_notice = notice;
             let notice = app.update_status();
             for client in clients.values_mut() {
-                let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: notice.clone() });
+                let _ = client.tx.try_send(DaemonEvent::UpdateNotice { notice: notice.clone() }.into());
             }
         }
 
-        // Config files are tiny and edits are rare, so a content poll keeps
-        // hot reload portable without another watcher thread or platform-
-        // specific dependency. Debouncing at 250 ms also avoids reloading an
-        // editor's temporary rename/write sequence more than once.
+        // Config files are tiny and edits are rare, so a poll keeps hot reload
+        // portable without another watcher thread or platform-specific
+        // dependency; `refresh` only stats files whose size and mtime are
+        // unchanged. Debouncing at 250 ms also avoids reloading an editor's
+        // temporary rename/write sequence more than once.
         if last_config_check.elapsed() >= Duration::from_millis(250) {
             last_config_check = Instant::now();
-            let current = kumo_core::config::config_fingerprint();
-            if current != config_fingerprint {
-                config_fingerprint = current;
+            let current = config_fingerprint.refresh();
+            let changed = current != config_fingerprint;
+            // Keep the fresh stamps even when the contents match (e.g. a
+            // `touch`), so the next poll can skip re-reading the file.
+            config_fingerprint = current;
+            if changed {
                 reload_config(&mut app, &mut clients, None);
                 log::info!("daemon: configuration reloaded after file change");
             }
@@ -654,15 +666,15 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // the (gentler) replacement; the audible chime still covers detached
         // sessions.
         while let Ok(toast) = app.toast_rx.try_recv() {
-            let ev = DaemonEvent::Toast {
+            let ev = Arc::new(DaemonEvent::Toast {
                 pane_id: toast.pane_id,
                 kind: toast.kind.into(),
                 title: toast.title.clone(),
                 body: toast.body.clone(),
-            };
+            });
             for client in clients.values_mut() {
                 if client.welcomed {
-                    let _ = client.send_msg(ev.clone());
+                    let _ = client.send_msg(Arc::clone(&ev));
                 }
             }
         }
@@ -734,10 +746,12 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         // Every subscriber must diff against the same previous generation.
-        // Publish new baselines only after all subscribers have been served.
-        let mut next_bufs = HashMap::new();
+        // Catch the baselines up only after all subscribers have been served.
+        let mut baseline_updates = HashMap::new();
         let mut next_cursors = HashMap::new();
-        let mut prepared_frames = HashMap::new();
+        // Serialized once per (pane, full) and shared by every subscriber;
+        // the flag marks a diff with no dirty rows.
+        let mut prepared_frames: HashMap<(u64, bool), (bool, Arc<DaemonEvent>)> = HashMap::new();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
             if !client.welcomed {
@@ -777,17 +791,22 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 let scroll = pane.map(|p| super::ui::scroll_state(p.scrollbar_data()));
                 let palette = &app.theme.palette;
                 let full = was_pending || resized;
-                let frame = prepared_frames.entry((pid, full)).or_insert_with(|| {
-                    let buf = next_bufs.entry(pid).or_insert_with(|| frames::detach_buffer(cached));
+                let (unchanged, frame) = prepared_frames.entry((pid, full)).or_insert_with(|| {
                     let prev = if full { None } else { pane_bufs.get(&pid) };
-                    frames::pane_frame(pid, buf, prev, pane_cursor, palette, pane, scroll)
-                }).clone();
+                    let frame = frames::pane_frame(pid, cached, prev, pane_cursor, palette, pane, scroll);
+                    let unchanged = !frame.full && frame.rows_dirty.is_empty();
+                    let frame = Arc::new(DaemonEvent::PaneFrame { frame });
+                    // Either generation's frame (full or diff) covers every
+                    // row that differs from the baseline.
+                    baseline_updates.insert(pid, Arc::clone(&frame));
+                    (unchanged, frame)
+                });
                 let cursor_changed = pane_cursors.get(&pid) != Some(&pane_cursor);
-                if !frame.full && frame.rows_dirty.is_empty() && !cursor_changed {
+                if *unchanged && !cursor_changed {
                     continue;
                 }
                 next_cursors.insert(pid, pane_cursor);
-                match client.send_msg(DaemonEvent::PaneFrame { frame }) {
+                match client.send_msg(Arc::clone(frame)) {
                     SendOutcome::Ok => {}
                     SendOutcome::Lagging => {
                         client.pane_needs_full.insert(pid);
@@ -799,9 +818,21 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 }
             }
         }
-        pane_bufs.extend(next_bufs);
+        for (pid, event) in baseline_updates {
+            let (Some(cached), DaemonEvent::PaneFrame { frame }) = (app.pane_cache.get(&pid), &*event) else {
+                continue;
+            };
+            match pane_bufs.get_mut(&pid) {
+                Some(last) => frames::update_baseline(last, cached, frame),
+                None => {
+                    pane_bufs.insert(pid, cached.clone());
+                }
+            }
+        }
         pane_cursors.extend(next_cursors);
-        let idle = changed.is_empty() && !layout_changed && dead.is_empty() && waits.is_empty();
+        // A lagging client's retry is pending work too: keep polling briskly.
+        let retrying = clients.values().any(|c| c.pending_layout || !c.pane_needs_full.is_empty());
+        let idle = changed.is_empty() && !layout_changed && dead.is_empty() && waits.is_empty() && !retrying;
         for id in dead {
             waits.cancel_client(id);
             clients.remove(&id);
@@ -811,15 +842,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // session closes): stop the daemon.
         if app.quit || kill {
             for client in clients.values_mut() {
-                let _ = client.tx.try_send(DaemonEvent::Shutdown);
+                let _ = client.tx.try_send(DaemonEvent::Shutdown.into());
             }
             break;
         }
 
         // Park between iterations instead of sleeping unconditionally. Client
-        // and PTY reader threads unpark us after queueing work, while these
-        // bounded timeouts preserve periodic polling when no producer wakes us.
-        std::thread::park_timeout(Duration::from_millis(if idle { 10 } else { 2 }));
+        // reader, accept and PTY reader threads unpark us after queueing work,
+        // so the idle timeout only bounds the purely polled work (signals,
+        // child exits, config reload) and can stay long.
+        std::thread::park_timeout(Duration::from_millis(if idle { 50 } else { 2 }));
     }
 
     // Start every cleanup together, then wait while all children are reaped.
@@ -827,8 +859,33 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     for worker in cleanup {
         let _ = worker.join();
     }
+    // Wake the accept thread so it sees the closed queue and releases the
+    // listener (matters for in-process test daemons).
+    drop(conn_rx);
+    let _ = UnixStream::connect(&path);
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+/// Accept loop: hands each new connection to the daemon loop and wakes it, so
+/// connecting never waits for the loop's idle poll.
+fn client_accept_loop(
+    listener: UnixListener,
+    tx: mpsc::Sender<UnixStream>,
+    daemon_thread: std::thread::Thread,
+) {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if tx.send(stream).is_err() {
+                    break;
+                }
+                daemon_thread.unpark();
+            }
+            // Transient failures (EMFILE, ECONNABORTED): back off, don't spin.
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 /// Apply the same live reload path for an explicit CLI request and the file
@@ -845,7 +902,7 @@ fn reload_config(app: &mut App, clients: &mut HashMap<usize, Client>, requester:
         let _ = send_to(clients, id, &notice);
     } else {
         for client in clients.values_mut().filter(|client| client.welcomed) {
-            let _ = client.tx.try_send(notice.clone());
+            let _ = client.tx.try_send(notice.clone().into());
         }
     }
     if app.theme_idx != prev_idx
@@ -857,7 +914,7 @@ fn reload_config(app: &mut App, clients: &mut HashMap<usize, Client>, requester:
             let _ = client.tx.try_send(DaemonEvent::Theme {
                 idx: app.theme_idx,
                 custom: custom.clone(),
-            });
+            }.into());
         }
     }
 }
@@ -917,7 +974,7 @@ fn exec_new_binary(resume: &std::path::Path) -> Result<()> {
 /// Queue a message to one client (non-blocking).
 fn send_to(clients: &mut HashMap<usize, Client>, id: usize, msg: &DaemonEvent) -> Result<()> {
     if let Some(c) = clients.get_mut(&id) {
-        c.tx.try_send(msg.clone())?;
+        c.tx.try_send(Arc::new(msg.clone()))?;
     }
     Ok(())
 }
@@ -925,10 +982,10 @@ fn send_to(clients: &mut HashMap<usize, Client>, id: usize, msg: &DaemonEvent) -
 /// Writer loop for one client: drains its outgoing queue and writes frames to
 /// the socket. A client that stops reading blocks here (isolated in this
 /// thread) while the daemon loop keeps running and drops frames for it.
-fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<DaemonEvent>) {
+fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<Arc<DaemonEvent>>) {
     let mut writer = std::io::BufWriter::new(stream);
     while let Ok(msg) = rx.recv() {
-        if kumo_core::protocol::write_framed(&mut writer, &msg).is_err() {
+        if kumo_core::protocol::write_framed(&mut writer, &*msg).is_err() {
             break;
         }
         // Flush after each message to ensure timely delivery. The BufWriter
@@ -1414,7 +1471,9 @@ mod tests {
         let frame = loop {
             match next_event(&mut stream, Duration::from_secs(10), "PaneFrame") {
                 DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane => break frame,
-                DaemonEvent::Layout { .. } => continue,
+                // Config hot reload is asynchronous: tests that change the
+                // config env concurrently can trigger one at any point.
+                DaemonEvent::Layout { .. } | DaemonEvent::ConfigReloaded { .. } | DaemonEvent::Theme { .. } => continue,
                 other => panic!("unexpected event while waiting for a PaneFrame: {other:?}"),
             }
         };

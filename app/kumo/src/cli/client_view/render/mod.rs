@@ -314,49 +314,51 @@ fn render_pane_content(f: &mut Frame, pid: u64, rect: Rect, grid: &mut Grid, sel
     // Pre-compute selection corners once per frame (not per cell)
     // Only apply selection if this pane is the one being selected
     let sel_corners = selected.filter(|sel| sel.pane_id == pid).map(|sel| sel_corners(&sel));
-    for r in 0..grid.rows {
-        if r as u16 >= inner.height {
-            break;
+    // ratatui resets its back buffer on every draw, so every visible cell is
+    // blitted each frame; only the cached rows' rebuild is incremental.
+    let rows = grid.rows.min(inner.height as usize);
+    for r in 0..rows {
+        grid.get_rendered_row(r);
+    }
+    let grid = &*grid;
+    let buf = f.buffer_mut();
+    // Clip to the frame so each row maps onto one contiguous buffer slice.
+    let clip = inner.intersection(buf.area);
+    for r in 0..rows {
+        let y = inner.y + r as u16;
+        if clip.is_empty() || y < clip.y || y >= clip.bottom() {
+            continue;
         }
-        // Get link ranges for this row (if link mods are active)
-        // Clone before calling get_rendered_row() to avoid borrow conflicts
-        let row_links = if link_mods {
-            grid.links.get(&(r as u16)).cloned()
-        } else {
-            None
-        };
-        // Get the cached rendered row, rebuilding only if dirty
-        let Some(rendered_row) = grid.get_rendered_row(r) else {
+        let Some(Some(rendered_row)) = grid.rendered.get(r) else {
             continue;
         };
-        for (c, cell) in rendered_row.iter().enumerate() {
-            if c as u16 >= inner.width {
-                break;
-            }
+        let row_links = if link_mods { grid.links.get(&(r as u16)) } else { None };
+        let start = buf.index_of(clip.x, y);
+        let skip = (clip.x - inner.x) as usize;
+        let width = rendered_row.len().saturating_sub(skip).min(clip.width as usize);
+        let targets = &mut buf.content[start..start + width];
+        let cells = rendered_row.get(skip..).unwrap_or_default();
+        for (i, (target, cell)) in targets.iter_mut().zip(cells).enumerate() {
             // Skip continuation cells (wide character tails). Wide glyphs at
             // the pane's right edge are already clipped by the daemon, so the
             // grid never carries a wide glyph in the last column.
             if matches!(cell.diff_option, ratatui::buffer::CellDiffOption::Skip) {
                 continue;
             }
-            let x = inner.x + c as u16;
-            let y = inner.y + r as u16;
-            if let Some(target) = f.buffer_mut().cell_mut(Position::new(x, y)) {
-                // Clone the cached cell
-                *target = cell.clone();
-                
-                // Apply selection highlight (client-side overlay, not cached)
-                if let Some(((tr, tc), (br, bc))) = sel_corners {
-                    if (r as u16, c as u16) >= (tr, tc) && (r as u16, c as u16) <= (br, bc) {
-                        target.set_style(target.style().add_modifier(Modifier::REVERSED));
-                    }
+            let c = (skip + i) as u16;
+            target.clone_from(cell);
+
+            // Apply selection highlight (client-side overlay, not cached)
+            if let Some(((tr, tc), (br, bc))) = sel_corners {
+                if (r as u16, c) >= (tr, tc) && (r as u16, c) <= (br, bc) {
+                    target.set_style(target.style().add_modifier(Modifier::REVERSED));
                 }
-                
-                // Apply link underline (client-side overlay, not cached)
-                if let Some(links) = row_links.as_ref() {
-                    if links.iter().any(|l| (c as u16) >= l.start && (c as u16) < l.end) {
-                        target.set_style(target.style().add_modifier(Modifier::UNDERLINED));
-                    }
+            }
+
+            // Apply link underline (client-side overlay, not cached)
+            if let Some(links) = row_links {
+                if links.iter().any(|l| c >= l.start && c < l.end) {
+                    target.set_style(target.style().add_modifier(Modifier::UNDERLINED));
                 }
             }
         }
@@ -494,6 +496,44 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
 mod tests {
     use super::*;
     use crate::cli::client_view::tests::*;
+
+    #[test]
+    fn pane_blit_places_cells_with_selection_and_link_overlays() {
+        let mut view = test_view();
+        view.cols = 40;
+        view.rows = 10;
+        view.sidebar_open = false;
+        view.status_bar.enabled = false;
+        view.layout = Some(render_bench_layout(&[1]));
+        view.recompute_geometry();
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        view.on_pane_frame(PaneFrame {
+            pane_id: 1,
+            cols: inner.width,
+            rows: inner.height,
+            full: true,
+            rows_dirty: vec![kumo_protocol::RowPatch {
+                row: 1,
+                cells: vec![cell("\u{1f600}", 2), cell(" ", 0), cell("x", 1), cell("y", 1), cell("z", 1)],
+                links: vec![LinkRange { start: 3, end: 5, url: "https://example.com".into() }],
+            }],
+            cursor: None,
+            scroll: None,
+        });
+        view.sel = Some(Sel { pane_id: 1, start: (2, 1), end: (2, 1) });
+        view.link_mods = true;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 10)).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+
+        let buf = term.backend().buffer();
+        let at = |col: u16| &buf[(inner.x + col, inner.y + 1)];
+        assert_eq!(at(0).symbol(), "\u{1f600}");
+        assert_eq!((at(2).symbol(), at(3).symbol(), at(4).symbol()), ("x", "y", "z"));
+        assert!(at(2).modifier.contains(Modifier::REVERSED), "selected cell is reversed");
+        assert!(!at(2).modifier.contains(Modifier::UNDERLINED));
+        assert!(at(3).modifier.contains(Modifier::UNDERLINED) && at(4).modifier.contains(Modifier::UNDERLINED));
+        assert!(!at(3).modifier.contains(Modifier::REVERSED));
+    }
 
     #[test]
     #[ignore = "local rendering benchmark; run with --ignored --nocapture"]

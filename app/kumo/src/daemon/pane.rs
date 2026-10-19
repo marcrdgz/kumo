@@ -904,13 +904,16 @@ impl Pane {
     /// Every clickable link covering viewport row `row`, as column ranges:
     /// OSC 8 hyperlink runs first, then plain-text `scheme://` URLs. Streamed
     /// in `PaneFrame` rows so the client can underline links while a link
-    /// modifier is held and open them on click.
-    pub fn link_ranges(&self, row: u16) -> Vec<kumo_protocol::LinkRange> {
+    /// modifier is held and open them on click. `scan_text_urls = false` skips
+    /// the row-text extraction when the caller knows the row has no `://`.
+    pub fn link_ranges(&self, row: u16, scan_text_urls: bool) -> Vec<kumo_protocol::LinkRange> {
         let cols = self.vt.cols();
         let mut out: Vec<kumo_protocol::LinkRange> = Vec::new();
         // OSC 8 hyperlinks: contiguous columns sharing one URI form a run.
+        // Most rows have none, so check the row flag before the per-column scan.
+        let hyperlink_cols = if self.vt.row_may_have_hyperlink(row) { cols } else { 0 };
         let mut run: Option<(u16, String)> = None;
-        for col in 0..cols {
+        for col in 0..hyperlink_cols {
             let uri = self.vt.hyperlink_at(col, row);
             match (run.take(), uri) {
                 (None, Some(u)) => run = Some((col, u)),
@@ -928,6 +931,9 @@ impl Pane {
         }
         if let Some((s, ru)) = run {
             out.push(kumo_protocol::LinkRange { start: s, end: cols, url: ru });
+        }
+        if !scan_text_urls {
+            return out;
         }
         // Plain-text URLs on the row, unless an OSC 8 run already covers them.
         let line = self.vt.row_text(row);
@@ -2443,6 +2449,26 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         // The URI resolves at pane-relative viewport coordinates (OSC 8).
         assert_eq!(p.link_at(0, 0).as_deref(), Some("https://example.com"));
         assert_eq!(p.link_at(5, 0), None);
+    }
+
+    #[test]
+    fn shipped_rows_carry_osc8_and_plain_text_links_only_where_present() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07\r\n");
+        p.feed(b"see http://localhost:3000 now\r\n");
+        p.feed(b"no links: a:b / c\r\n");
+        p.render_dirty(area, true, &mut buf);
+
+        let palette = [ColorRgb::new(0, 0, 0); 16];
+        let frame = crate::daemon::frames::pane_frame(1, &buf, None, None, &palette, Some(&p), None);
+        let links = |row: u16| frame.rows_dirty.iter().find(|r| r.row == row).unwrap().links.clone();
+        let link = |start, end, url: &str| kumo_protocol::LinkRange { start, end, url: url.into() };
+        assert_eq!(links(0), vec![link(0, 4, "https://example.com")]);
+        assert_eq!(links(1), vec![link(4, 25, "http://localhost:3000")]);
+        assert!(links(2).is_empty());
+        assert!(links(3).is_empty());
     }
 
     #[test]
