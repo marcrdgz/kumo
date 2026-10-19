@@ -1667,6 +1667,32 @@ mod tests {
     }
 
     #[test]
+    fn branch_bookkeeping_forgets_workspaces_without_a_session() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("branch-prune-cfg");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let mut app = App::new(Launch::New(None)).unwrap();
+        // A closed session's workspace whose `git` lookup never returned.
+        let gone = PathBuf::from("/nonexistent/closed-session");
+        let now = Instant::now();
+        app.pending_branch_lookups.insert(gone.clone(), now);
+        app.branch_cache.insert(gone.clone(), (None, now));
+
+        app.refresh_branches();
+
+        assert!(!app.pending_branch_lookups.contains_key(&gone), "stale lookup must be forgotten");
+        assert!(!app.branch_cache.contains_key(&gone));
+        let live = app.sessions[0].workspace.clone();
+        assert!(app.pending_branch_lookups.contains_key(&live), "live workspace lookup is queued");
+        drop(app);
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    #[test]
     fn reload_config_refreshes_shell_and_ai() {
         let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
         let cfg = scratch("reload-cfg");
