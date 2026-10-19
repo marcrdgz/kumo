@@ -684,7 +684,13 @@ impl Pane {
             if yy >= area_y + area.height {
                 continue;
             }
-            let row_bg = codex_row_bg.get(&y).copied().unwrap_or(bg);
+            // `codex_row_bg` is collected for every pane; only a Codex
+            // composer may spread a blank cell's background across its row.
+            let row_bg = if codex_composer {
+                codex_row_bg.get(&y).copied().unwrap_or(bg)
+            } else {
+                bg
+            };
             for x in area_x..(area_x + area.width) {
                 if let Some(c) = cache.cell_mut((x, yy)) {
                     c.set_char(' ').set_fg(fg).set_bg(row_bg);
@@ -1581,6 +1587,23 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
                     "Codex composer cell ({x}, {y}) must use terminal background"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn blank_cell_background_does_not_fill_row_outside_codex() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // Claude highlights spans with an explicit background on blank
+        // cells; the rest of the row must keep the terminal background.
+        p.feed(b"\x1b[5;1Hhello \x1b[48;2;40;48;80m  \x1b[mworld");
+        p.render_dirty(area, true, &mut buf);
+
+        let default_bg = rgb(test_theme().term_bg);
+        assert_eq!(buf.cell((6, 4)).unwrap().bg, RColor::Rgb(40, 48, 80));
+        for x in [0, 8, 60, 119] {
+            assert_eq!(buf.cell((x, 4)).unwrap().bg, default_bg, "cell ({x}, 4)");
         }
     }
 
