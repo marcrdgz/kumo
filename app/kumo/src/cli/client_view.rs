@@ -96,15 +96,27 @@ fn lighten(c: RColor, amt: u8) -> RColor {
 /// Foreground with readable contrast against a theme's input surface. Built-in
 /// themes use a light neutral surface; custom themes may choose a dark one.
 fn input_fg(theme: &OwnedTheme) -> RColor {
-    let rgb = match theme.input_bg {
+    contrast_fg(theme, theme.input_bg)
+}
+
+/// Text color for chrome drawn on a filled theme color (selected rows, badges,
+/// focused fields). Dark text is kept while it meets WCAG AA (4.5:1), which
+/// holds for every built-in accent; dark custom fills get light text.
+fn contrast_fg(theme: &OwnedTheme, bg: RColor) -> RColor {
+    let rgb = match bg {
         RColor::Rgb(r, g, b) => Some((r, g, b)),
         RColor::Indexed(i) => theme.palette.get(i as usize).map(|c| (c.r, c.g, c.b)),
         RColor::Black | RColor::DarkGray | RColor::Red | RColor::Blue | RColor::Magenta => return RColor::White,
         _ => return RColor::Black,
     };
     let Some((r, g, b)) = rgb else { return RColor::Black };
-    let luminance = 299 * r as u32 + 587 * g as u32 + 114 * b as u32;
-    if luminance >= 140_000 { RColor::Black } else { RColor::White }
+    let linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    // Black reaches 4.5:1 at (L + 0.05) / 0.05 >= 4.5, i.e. L >= 0.175.
+    if luminance >= 0.175 { RColor::Black } else { RColor::White }
 }
 
 fn input_style(theme: &OwnedTheme) -> Style {
@@ -4367,6 +4379,23 @@ mod tests {
         let mut dark_input_theme = view.current_theme();
         dark_input_theme.input_bg = RColor::Rgb(0x20, 0x22, 0x28);
         assert_eq!(input_fg(&dark_input_theme), RColor::White, "dark custom inputs need light text");
+    }
+
+    /// Chrome drawn on theme fills must stay readable on custom (e.g. light)
+    /// themes whose accents are dark, without changing the built-in look.
+    #[test]
+    fn filled_chrome_text_contrasts_with_its_fill() {
+        for theme in theme::all_themes(None) {
+            for fill in [theme.accent, theme.secondary, theme.green] {
+                assert_eq!(contrast_fg(&theme, fill), RColor::Black, "{}: built-in fills keep dark text", theme.name);
+            }
+        }
+        let mut light = OwnedTheme::from(THEMES[0]);
+        light.accent = RColor::Rgb(0x1f, 0x3a, 0x93);
+        assert_eq!(contrast_fg(&light, light.accent), RColor::White, "dark accents need light text");
+        light.accent = RColor::Indexed(4);
+        light.palette[4] = kumo_core::color::ColorRgb::new(0x10, 0x10, 0x40);
+        assert_eq!(contrast_fg(&light, light.accent), RColor::White, "indexed fills resolve through the palette");
     }
 
     #[test]

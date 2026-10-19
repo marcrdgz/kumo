@@ -193,25 +193,25 @@ impl View {
             let hint_w = hint.chars().count() as u16;
             let w = hint_w.min(area.width);
             let x = area.width.saturating_sub(w);
-            let hint_style = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+            let hint_style = Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD);
             f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(hint.chars().take(w as usize).collect::<String>(), hint_style)])), Rect::new(x, area.y, w, 1));
         } else if let Some((msg, t)) = &self.status_msg {
             if t.elapsed() < TOAST_TIMEOUT {
                 let msg_w = msg.chars().count() as u16;
                 let w = msg_w.min(area.width);
                 let x = area.width.saturating_sub(w);
-                let msg_style = Style::default().fg(RColor::White).bg(theme.accent).add_modifier(Modifier::BOLD);
+                let msg_style = Style::default().fg(contrast_fg(&theme, theme.accent)).bg(theme.accent).add_modifier(Modifier::BOLD);
                 f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(msg.chars().take(w as usize).collect::<String>(), msg_style)])), Rect::new(x, area.y, w, 1));
             } else if let Some(h) = &copy_hint {
                 let w = (h.chars().count() as u16).min(area.width);
                 let x = area.width.saturating_sub(w);
-                let s = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                let s = Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD);
                 f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(h.chars().take(w as usize).collect::<String>(), s)])), Rect::new(x, area.y, w, 1));
             }
         } else if let Some(h) = &copy_hint {
             let w = (h.chars().count() as u16).min(area.width);
             let x = area.width.saturating_sub(w);
-            let s = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+            let s = Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD);
             f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![ratatui::text::Span::styled(h.chars().take(w as usize).collect::<String>(), s)])), Rect::new(x, area.y, w, 1));
         }
     }

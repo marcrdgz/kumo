@@ -76,7 +76,7 @@ impl View {
             };
             let hovered = self.popup.hover == Some(btn);
             let st = if hovered {
-                Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD)
+                Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
             };
@@ -282,7 +282,7 @@ impl View {
         for (is_yes, label) in [(true, " Remove (y) "), (false, " Cancel (n) ")] {
             if let Some(rect) = self.session_close_confirm_button_rect(is_yes) {
                 let st = if is_yes {
-                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                    Style::default().fg(contrast_fg(&theme, theme.green)).bg(theme.green).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
                 };
@@ -332,9 +332,9 @@ impl View {
             let sel = i == self.finder.selected;
             let bg = if sel { theme.accent } else { theme.panel_sep };
             for cx in (dd.x + 1)..(dd.x + 1 + inner_w + 2) { put(f, cx, y, " ", Style::default().bg(bg)); }
-            let fg = if sel { RColor::Black } else { theme.fg };
+            let fg = if sel { contrast_fg(&theme, bg) } else { theme.fg };
             let marker = if sel { "▸" } else { " " };
-            put(f, dd.x + 2, y, marker, Style::default().fg(if sel { RColor::Black } else { theme.accent }).bg(bg));
+            put(f, dd.x + 2, y, marker, Style::default().fg(if sel { fg } else { theme.accent }).bg(bg));
             let label = match item {
                 FinderItem::Session { name, .. } => name.clone(),
                 FinderItem::Tab { session_name, tab_name, .. } => format!("{session_name} / {tab_name}"),

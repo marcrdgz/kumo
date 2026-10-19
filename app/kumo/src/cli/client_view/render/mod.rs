@@ -192,7 +192,7 @@ impl View {
                 let badge_w = ZOOM_BADGE.chars().count() as u16;
                 if rect.width >= title.chars().count() as u16 + badge_w + 2 {
                     let bx = rect.right() - badge_w;
-                    let bstyle = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                    let bstyle = Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD);
                     for (i, ch) in ZOOM_BADGE.chars().enumerate() {
                         put(f, bx + i as u16, rect.y, &ch.to_string(), bstyle);
                     }
@@ -235,7 +235,7 @@ impl View {
             let badge_w = ZOOM_BADGE.chars().count() as u16;
             if rect.width >= title.chars().count() as u16 + badge_w + 2 {
                 let bx = x1 + 1 - badge_w;
-                let bstyle = Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD);
+                let bstyle = Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD);
                 for (i, ch) in ZOOM_BADGE.chars().enumerate() {
                     put(f, bx + i as u16, y0, &ch.to_string(), bstyle);
                 }
@@ -252,7 +252,7 @@ impl View {
         if self.rects.len() < 2 {
             return;
         }
-        let style = Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD);
+        let style = Style::default().fg(contrast_fg(&theme, theme.accent)).bg(theme.accent).add_modifier(Modifier::BOLD);
         for (i, (_, rect)) in self.rects.iter().enumerate() {
             let Some(digit) = char::from_digit((i + 1) as u32, 10) else { continue };
             put(f, rect.x + rect.width / 2, rect.y + rect.height / 2, &digit.to_string(), style);
@@ -456,8 +456,8 @@ fn render_item_row(f: &mut Frame, x0: u16, y: u16, width: u16, item: &str, sel: 
     let (marker, marker_style, label_style) = if sel {
         (
             "▸",
-            Style::default().fg(RColor::Black).bg(bg).add_modifier(Modifier::BOLD),
-            Style::default().fg(RColor::Black).bg(bg).add_modifier(Modifier::BOLD),
+            Style::default().fg(contrast_fg(theme, bg)).bg(bg).add_modifier(Modifier::BOLD),
+            Style::default().fg(contrast_fg(theme, bg)).bg(bg).add_modifier(Modifier::BOLD),
         )
     } else {
         (
@@ -598,7 +598,7 @@ mod tests {
         // Tab bar at top — active tab uses the primary accent, followed by one
         // spacer cell and the persistent close action.
         assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
-        assert_eq!(buf.cell((26, 0)).unwrap().fg, RColor::Rgb(0x0a, 0x0a, 0x0a));
+        assert_eq!(buf.cell((26, 0)).unwrap().fg, contrast_fg(&view.current_theme(), view.current_theme().accent));
         assert_eq!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
         assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
         assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "x");

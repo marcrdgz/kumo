@@ -50,9 +50,9 @@ impl View {
                     }
                 }
                 SidebarRow::Divider => {
-                    // Plain grey divider. Only the legacy divided layout makes
+                    // Plain muted divider. Only the legacy divided layout makes
                     // it draggable; the project inbox divider stays fixed.
-                    let style = Style::default().fg(RColor::Gray);
+                    let style = Style::default().fg(theme.panel_muted);
                     let line: String = "─".repeat(w.saturating_sub(1).max(1) as usize);
                     if w > 1 {
                         text(f, x, y, &line, style, w.saturating_sub(1));

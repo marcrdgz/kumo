@@ -19,7 +19,7 @@ impl View {
             for cx in tabs.x..(tabs.x + tabs.width) {
                 put(f, cx, y, " ", Style::default().bg(bg));
             }
-            let row_fg = if sel { RColor::Black } else { theme.fg };
+            let row_fg = if sel { contrast_fg(&theme, bg) } else { theme.fg };
             put(f, tabs.x, y, "▸", Style::default().fg(row_fg).bg(bg).add_modifier(Modifier::BOLD));
             text(f, tabs.x + 2, y, tab.label(), Style::default().fg(row_fg).bg(bg), tabs.width.saturating_sub(2));
         }
@@ -64,7 +64,7 @@ impl View {
             for cx in content.x..(content.x + content.width) {
                 put(f, cx, y, " ", Style::default().bg(bg));
             }
-            let row_fg = if sel { RColor::Black } else { theme.fg };
+            let row_fg = if sel { contrast_fg(&theme, bg) } else { theme.fg };
             let marker = if active { "●" } else { "○" };
             let marker_style = if active && !sel {
                 Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD)
@@ -123,11 +123,11 @@ impl View {
                     AgentSkillAction::Update => "updating…",
                     AgentSkillAction::Uninstall => "uninstalling…",
                 };
-                ("◌", status, RColor::Yellow)
+                ("◌", status, theme.orange)
             } else {
                 match target.status() {
-                    AgentSkillStatus::Current => ("●", "installed", RColor::Green),
-                    AgentSkillStatus::Outdated => ("●", "update available", RColor::Yellow),
+                    AgentSkillStatus::Current => ("●", "installed", theme.green),
+                    AgentSkillStatus::Outdated => ("●", "update available", theme.orange),
                     AgentSkillStatus::Missing => ("○", "not installed", theme.panel_muted),
                 }
             };
@@ -171,7 +171,7 @@ impl View {
                     y,
                     message,
                     Style::default()
-                        .fg(if *success { RColor::Green } else { RColor::Red })
+                        .fg(if *success { theme.green } else { theme.red })
                         .bg(theme.panel_sep),
                     content.width,
                 );

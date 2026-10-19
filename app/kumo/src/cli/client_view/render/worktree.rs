@@ -42,8 +42,8 @@ impl View {
             for cx in (dd.x + 1)..(dd.x + 1 + inner_w) {
                 put(f, cx, y, " ", Style::default().bg(bg));
             }
-            let fg = if sel { RColor::Black } else { theme.fg };
-            put(f, dd.x + 1, y, if sel { "▸" } else { " " }, Style::default().fg(if sel { RColor::Black } else { theme.accent }).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }));
+            let fg = if sel { contrast_fg(&theme, bg) } else { theme.fg };
+            put(f, dd.x + 1, y, if sel { "▸" } else { " " }, Style::default().fg(if sel { fg } else { theme.accent }).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }));
             if row.open {
                 put(f, dd.x + 2, y, "●", Style::default().fg(if sel { fg } else { theme.green }).bg(bg));
             }
@@ -118,7 +118,7 @@ impl View {
             let label = tab.label();
             let w = (label.chars().count() as u16) + 2;
             let style = if is_sel {
-                Style::default().fg(RColor::Black).bg(theme.accent).add_modifier(Modifier::BOLD)
+                Style::default().fg(contrast_fg(&theme, theme.accent)).bg(theme.accent).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg).bg(theme.panel_sep)
             };
@@ -136,7 +136,7 @@ impl View {
         text(f, dd.x + 2, dd.y + 3, "Create from", input_label_style, inner_w);
         let input_rect = Rect::new(dd.x + 2, dd.y + 4, inner_w, 1);
         let input_bg = if is_create_focused { theme.accent } else { theme.input_bg };
-        let field_fg = if is_create_focused { RColor::Black } else { input_fg(&theme) };
+        let field_fg = contrast_fg(&theme, input_bg);
         fill(f, input_rect, input_bg);
         // Placeholder / content
         let cf = &self.worktree_create.create_from;
@@ -178,7 +178,7 @@ impl View {
         let adv_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         let adv_label = if self.worktree_create.advanced { "▼ Advanced" } else { "▶ Advanced (branch, note, agent)" };
         let adv_focused = false; // not focusable via Tab, but clickable
-        let adv_text_style = if adv_focused { Style::default().fg(RColor::Black).bg(theme.accent) } else { adv_style };
+        let adv_text_style = if adv_focused { Style::default().fg(contrast_fg(&theme, theme.accent)).bg(theme.accent) } else { adv_style };
         text(f, dd.x + 2, adv_y, adv_label, adv_text_style, inner_w);
         let hint = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         text(f, dd.x + 2 + adv_label.chars().count() as u16 + 2, adv_y, "· ctrl+a", hint, inner_w);
@@ -188,7 +188,7 @@ impl View {
             text(f, dd.x + 2, dd.y + 7, "Branch name override", input_label_style, inner_w);
             let br_rect = Rect::new(dd.x + 2, dd.y + 8, inner_w, 1);
             let bg = if branch_focused { theme.accent } else { theme.input_bg };
-            let fg = if branch_focused { RColor::Black } else { input_fg(&theme) };
+            let fg = contrast_fg(&theme, bg);
             fill(f, br_rect, bg);
             let b = &self.worktree_create.branch_override;
             let bc = self.worktree_create.branch_cursor;
@@ -214,7 +214,7 @@ impl View {
             text(f, dd.x + 2, dd.y + 9, "Note", input_label_style, inner_w);
             let note_rect = Rect::new(dd.x + 2, dd.y + 10, inner_w, 1);
             let nbg = if note_focused { theme.accent } else { theme.input_bg };
-            let nfg = if note_focused { RColor::Black } else { input_fg(&theme) };
+            let nfg = contrast_fg(&theme, nbg);
             fill(f, note_rect, nbg);
             let n = &self.worktree_create.note;
             let nc = self.worktree_create.note_cursor;
@@ -240,7 +240,7 @@ impl View {
             text(f, dd.x + 2, dd.y + 11, "Agent", input_label_style, inner_w);
             let ag_rect = Rect::new(dd.x + 2, dd.y + 12, inner_w, 1);
             let abg = if agent_focused { theme.accent } else { theme.input_bg };
-            let afg = if agent_focused { RColor::Black } else { input_fg(&theme) };
+            let afg = contrast_fg(&theme, abg);
             fill(f, ag_rect, abg);
             let ag = &self.worktree_create.agent;
             let agc = self.worktree_create.agent_cursor;
@@ -279,9 +279,9 @@ impl View {
             if let Some(rect) = self.worktree_create_button_rect(is_create) {
                 let is_hover = false;
                 let st = if is_create {
-                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                    Style::default().fg(contrast_fg(&theme, theme.green)).bg(theme.green).add_modifier(Modifier::BOLD)
                 } else if is_hover {
-                    Style::default().fg(RColor::Black).bg(theme.secondary)
+                    Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary)
                 } else {
                     Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
                 };
