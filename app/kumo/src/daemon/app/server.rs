@@ -104,10 +104,15 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         // via `kumo kill` (Command::KillServer), but the OS will send SIGTERM
         // on shutdown/logout/kill and the user may hit Ctrl-C when running
         // `kumo daemon` in the foreground.
+        //
+        // SIGHUP is ignored: a daemon started from a terminal that later
+        // closes must keep serving its sessions. Pane children are unaffected
+        // because portable-pty resets SIGHUP to SIG_DFL before exec.
         TERM_FLAG.store(false, Ordering::Relaxed);
         unsafe {
             libc::signal(libc::SIGTERM, handle_term as *const () as usize);
             libc::signal(libc::SIGINT, handle_term as *const () as usize);
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
         }
     }
 
@@ -217,20 +222,23 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     // `kumo update` swapped the binary on disk: restart this
                     // process so the new version serves the sessions, inheriting
                     // the live PTY masters so panes and agents survive.
-                    match restart_daemon(&app) {
+                    let resume = kumo_core::config::resume_file();
+                    match restart_daemon(&app, &resume) {
                         Ok(_inheritance) => {
                             for client in clients.values_mut() {
                                 let _ = client.tx.try_send(DaemonEvent::Restarting);
                             }
                             std::thread::sleep(Duration::from_millis(100));
-                            let resume = kumo_core::config::resume_file();
                             if let Err(e) = exec_new_binary(&resume) {
                                 log::warn!("daemon: restart exec failed: {e:#}");
-                                let _ = std::fs::remove_file(&resume);
                             }
                         }
                         Err(e) => log::warn!("daemon: restart prep failed: {e:#}"),
                     }
+                    // Still running: no new daemon will consume the resume
+                    // file, and it holds pane snapshots plus fd numbers that
+                    // are only meaningful to this process.
+                    let _ = std::fs::remove_file(&resume);
                 }
                 Command::SubscribeLayout => {
                     if let Some(c) = clients.get_mut(&id) {
@@ -869,12 +877,11 @@ impl Drop for InheritedDescriptors {
     }
 }
 
-fn restart_daemon(app: &App) -> Result<InheritedDescriptors> {
+fn restart_daemon(app: &App, resume: &Path) -> Result<InheritedDescriptors> {
     let Some(state) = app.to_resume_state() else {
         anyhow::bail!("nothing to resume (no live sessions)");
     };
-    let path = kumo_core::config::resume_file();
-    crate::daemon::state::save(&path, &state)?;
+    crate::daemon::state::save(resume, &state)?;
     let mut inheritance = InheritedDescriptors(Vec::new());
     for pane in app.panes.values() {
         if let Some(fd) = pane.pty.raw_fd() {

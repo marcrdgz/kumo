@@ -166,6 +166,20 @@ fn real_exec_restart_reaps_exited_shell() {
 }
 
 #[test]
+fn daemon_survives_sighup_with_panes_intact() {
+    let mut daemon = Daemon::start();
+    let mut stream = daemon.connect();
+    let pid = daemon.pane(&mut stream);
+    unsafe { libc::kill(daemon.child.id() as i32, libc::SIGHUP) };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(daemon.child.try_wait().unwrap().is_none(), "SIGHUP must not stop the daemon");
+    send(&mut stream, Command::SubscribePane { pane_id: pid });
+    await_frame(&mut stream, true, "");
+    send(&mut stream, Command::PaneWrite { pane_id: pid, bytes: b"printf 'SIGHUP_OK\\n'\n".to_vec() });
+    await_frame(&mut stream, false, "SIGHUP_OK");
+}
+
+#[test]
 fn config_file_changes_reload_the_running_daemon() {
     let mut daemon = Daemon::start();
     let mut stream = daemon.connect();
