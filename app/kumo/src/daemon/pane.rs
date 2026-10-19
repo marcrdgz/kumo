@@ -832,7 +832,8 @@ impl Pane {
             }
         }
 
-        let dirty_vec: Vec<usize> = dirty.iter().copied().collect();
+        let mut dirty_vec: Vec<usize> = dirty.into_iter().collect();
+        dirty_vec.sort_unstable();
         self.vt.clear_dirty(&dirty_vec);
         self.dirty = false;
     }
@@ -1789,6 +1790,21 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
             "daemon render benchmark 120x40 ({label}): total={elapsed:?} per_render={:?}",
             elapsed / 500
         );
+    }
+
+    #[test]
+    fn render_clears_every_redrawn_row() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"hello");
+        p.render_dirty(area, false, &mut buf);
+
+        // After a full frame only the row that changes since must be dirty;
+        // stale dirty flags would make every later frame redraw them.
+        p.feed(b"!");
+        p.vt.refresh();
+        assert_eq!(p.vt.dirty_rows(), vec![0]);
     }
 
     #[test]

@@ -1980,8 +1980,9 @@ impl Terminal {
     /// Reset the per-row dirty flags and the global dirty state to clean, so
     /// the next `refresh` only reports changes since this point.
     /// If `rows` is empty, uses `ghostty_render_state_clean()` for efficiency.
-    /// Otherwise, only clears the specified rows.
+    /// Otherwise, only clears the specified rows, which must be ascending.
     pub fn clear_dirty(&mut self, rows: &[usize]) {
+        debug_assert!(rows.is_sorted(), "clear_dirty rows must be ascending");
         if rows.is_empty() {
             unsafe {
                 ghostty_render_state_clean(self.render);
