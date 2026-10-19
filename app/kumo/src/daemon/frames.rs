@@ -67,6 +67,15 @@ pub(crate) fn row_cells(buf: &Buffer, row: u16, cols: u16, palette: &[ColorRgb; 
     out
 }
 
+/// Whether `row` contains a `://` scheme separator, the anchor of every
+/// plain-text URL; rows without one skip the (costly) row-text URL scan.
+fn row_has_url_scheme(buf: &Buffer, row: u16, cols: u16) -> bool {
+    let s = row as usize * cols as usize;
+    buf.content[s..s + cols as usize]
+        .windows(3)
+        .any(|w| w[0].symbol() == ":" && w[1].symbol() == "/" && w[2].symbol() == "/")
+}
+
 /// Whether any cell in `row` differs between the two buffers.
 fn row_changed(buf: &Buffer, last: &Buffer, row: u16, cols: u16) -> bool {
     let s = row as usize * cols as usize;
@@ -127,7 +136,10 @@ pub(crate) fn pane_frame(
 ) -> PaneFrame {
     let cols = buf.area.width;
     let rows = buf.area.height;
-    let links = |row: u16| pane.map(|p| p.link_ranges(row)).unwrap_or_default();
+    let links = |row: u16| {
+        pane.map(|p| p.link_ranges(row, row_has_url_scheme(buf, row, cols)))
+            .unwrap_or_default()
+    };
     let full = last.map(|l| l.area != buf.area).unwrap_or(true);
     let rows_dirty: Vec<RowPatch> = if full {
         (0..rows)
