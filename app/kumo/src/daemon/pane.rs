@@ -579,14 +579,9 @@ impl Pane {
 
     /// Re-render only the rows that changed since the last frame into `cache`
     /// (the pane's retained viewport buffer), skipping clean rows via the
-    /// render-state dirty patch. Maintains `screen_rows` for agent-state
-    /// detection. Returns the agent status when this is an AI CLI pane.
-    pub fn render_dirty(
-        &mut self,
-        area: Rect,
-        focused: bool,
-        cache: &mut Buffer,
-    ) -> Option<AgentStatus> {
+    /// render-state dirty patch. Agent status is not derived here: the
+    /// daemon samples it at its own cadence via [`Pane::agent_status`].
+    pub fn render_dirty(&mut self, area: Rect, focused: bool, cache: &mut Buffer) {
         let area_x = area.x;
         let area_y = area.y;
         let aw = area.width as i32;
@@ -840,12 +835,6 @@ impl Pane {
         let dirty_vec: Vec<usize> = dirty.iter().copied().collect();
         self.vt.clear_dirty(&dirty_vec);
         self.dirty = false;
-
-        if self.is_ai_cli() {
-            Some(self.compute_agent_status())
-        } else {
-            None
-        }
     }
 
     /// Raw agent lifecycle state, derived from a snapshot of the terminal
@@ -854,10 +843,6 @@ impl Pane {
     /// `Unknown` is the fallback when classification fails. The daemon turns
     /// Idle into `Done` (finished-but-unseen) around focus.
     pub fn agent_status(&self) -> AgentStatus {
-        self.compute_agent_status()
-    }
-
-    fn compute_agent_status(&self) -> AgentStatus {
         if self.dead {
             return AgentStatus::Idle;
         }
@@ -1290,8 +1275,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Feed already happened; render the pane once so `screen_rows` (the
-    /// agent-status source) reflects the fed output.
+    /// Feed already happened; render the pane once, as the daemon tick does
+    /// before its periodic agent-status sample.
     fn render_pane(p: &mut Pane) {
         let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
@@ -1338,6 +1323,17 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         p.last_output = Instant::now() - Duration::from_secs(10);
         render_pane(&mut p);
         assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn agent_status_does_not_depend_on_render() {
+        // Rendering no longer samples agent status, so the periodic refresh
+        // must see output that arrived after the last rendered frame.
+        let mut p = test_pane(true);
+        render_pane(&mut p);
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed(b"working on it - esc interrupt");
+        assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
@@ -1761,9 +1757,25 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     #[test]
     #[ignore = "local render benchmark; run with --ignored --nocapture"]
     fn benchmark_partial_render_120x40() {
+        bench_partial_render("shell", false);
+    }
+
+    #[test]
+    #[ignore = "local render benchmark; run with --ignored --nocapture"]
+    fn benchmark_partial_render_ai_120x40() {
+        bench_partial_render("ai", true);
+    }
+
+    /// One echoed key per frame into a full 120x40 viewport.
+    fn bench_partial_render(label: &str, is_ai: bool) {
         let area = Rect::new(0, 0, 120, 40);
-        let mut pane = test_pane(false);
+        let mut pane = test_pane(is_ai);
         let mut buffer = Buffer::empty(area);
+        let mut screen = String::new();
+        for i in 0..39 {
+            screen.push_str(&format!("output line {i} with some text to scan\r\n"));
+        }
+        pane.feed(screen.as_bytes());
         pane.feed(b"prompt> ");
         pane.render_dirty(area, true, &mut buffer);
 
@@ -1774,7 +1786,7 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         }
         let elapsed = start.elapsed();
         eprintln!(
-            "daemon render benchmark 120x40: total={elapsed:?} per_render={:?}",
+            "daemon render benchmark 120x40 ({label}): total={elapsed:?} per_render={:?}",
             elapsed / 500
         );
     }

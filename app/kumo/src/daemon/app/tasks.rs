@@ -221,10 +221,10 @@ impl App {
     }
 
     /// Recomputed agent status from the terminal buffer at most every
-    /// `STATUS_REFRESH`, independent of pane dirty state. `render_dirty` only
-    /// refreshes the status when the pane produces output or scrolls, so a
-    /// quiet agent that just finished would otherwise stay stuck on the last
-    /// Working status forever.
+    /// `STATUS_REFRESH`, independent of pane dirty state, so a quiet agent
+    /// that just finished does not stay stuck on the last Working status.
+    /// This is the only place the status is sampled; rendering never pays
+    /// for agent detection.
     ///
     /// Also raises an alert on the transitions the user cares about (Working
     /// -> Blocked, Working -> Done) — the audible chime and, when enabled,

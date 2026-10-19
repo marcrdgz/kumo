@@ -44,7 +44,7 @@ impl App {
             if let Some(cached) = self.pane_cache.get_mut(&pid) {
                 // `focused = false`: the cursor is streamed via `PaneFrame` and
                 // drawn by the client, so it is never baked into the grid.
-                let _ = pane.render_dirty(rect, false, cached);
+                pane.render_dirty(rect, false, cached);
                 changed.push(pid);
             }
         }
