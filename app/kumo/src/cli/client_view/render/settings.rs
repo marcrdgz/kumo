@@ -204,3 +204,39 @@ impl View {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::client_view::tests::*;
+
+    #[test]
+    fn settings_agent_skill_tab_renders_targets_and_installing_state() {
+        let mut view = test_view();
+        view.settings.open = true;
+        view.settings.tab = SETTINGS_TABS
+            .iter()
+            .position(|tab| *tab == SettingsTab::Agents)
+            .unwrap();
+        view.settings.skill_installing = Some((
+            AgentSkillTarget::Codex,
+            AgentSkillAction::Install,
+            Instant::now(),
+        ));
+        let content = view.settings_content_rect().unwrap();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| view.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = |y| {
+            (content.x..content.right())
+                .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(line(content.y + 3).contains("Codex"));
+        assert!(line(content.y + 3).contains("installing"));
+        assert!(line(content.y + 5).contains("Claude Code"));
+        assert!(line(content.y + 7).contains("Gemini CLI"));
+        assert!(line(content.y + 9).contains("OpenCode"));
+    }
+}

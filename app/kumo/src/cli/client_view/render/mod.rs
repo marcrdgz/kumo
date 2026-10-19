@@ -145,7 +145,7 @@ impl View {
         base
     }
 
-    pub(super) fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, title: &str) {
+    fn render_pane_frame(&self, f: &mut Frame, rect: Rect, focused: bool, title: &str) {
         if rect.width < 3 || rect.height < 3 {
             return;
         }
@@ -487,5 +487,304 @@ fn draw_scrollbar(f: &mut Frame, x: u16, y_top: u16, region_h: u16, offset: usiz
         } else {
             cell.set_symbol("░").set_fg(theme.panel_sep);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::client_view::tests::*;
+
+    #[test]
+    #[ignore = "local rendering benchmark; run with --ignored --nocapture"]
+    fn benchmark_echo_render_cost() {
+        fn run_case(cols: u16, rows: u16, pane_count: usize) -> (u128, u128, u128) {
+            let pane_ids: Vec<u64> = (1..=pane_count as u64).collect();
+            let mut view = test_view();
+            view.cols = cols;
+            view.rows = rows;
+            view.sidebar_open = false;
+            view.status_bar.enabled = false;
+            view.layout = Some(render_bench_layout(&pane_ids));
+            view.recompute_geometry();
+
+            // Populate every visible pane with a full frame first. Subsequent
+            // partial frames model the daemon's row patch after one echoed key.
+            let dimensions: Vec<(u64, u16, u16)> = view
+                .rects
+                .iter()
+                .map(|&(pid, rect)| {
+                    let inner = PaneGeom { pane_id: pid, rect }.inner();
+                    (pid, inner.width.max(1), inner.height.max(1))
+                })
+                .collect();
+            let backend = ratatui::backend::TestBackend::new(cols, rows);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            for &(pid, pane_cols, pane_rows) in &dimensions {
+                view.on_pane_frame(render_bench_frame(pid, pane_cols, pane_rows, true, 0, pid as u8));
+            }
+            terminal.draw(|frame| view.draw(frame)).unwrap();
+
+            let mut samples = Vec::with_capacity(200);
+            for i in 0..200u8 {
+                let (pid, pane_cols, pane_rows) = dimensions[(i as usize) % dimensions.len()];
+                view.on_pane_frame(render_bench_frame(
+                    pid,
+                    pane_cols,
+                    pane_rows,
+                    false,
+                    i as u16 % pane_rows.max(1),
+                    i,
+                ));
+                let started = Instant::now();
+                terminal.draw(|frame| view.draw(frame)).unwrap();
+                samples.push(started.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            let mean = samples.iter().sum::<u128>() / samples.len() as u128;
+            let p50 = samples[samples.len() / 2];
+            let p95 = samples[samples.len() * 95 / 100];
+            (mean, p50, p95)
+        }
+
+        let typical = run_case(120, 40, 1);
+        let large = run_case(240, 80, 4);
+        eprintln!(
+            "echo render benchmark (microseconds/frame): 120x40/1-pane mean={} p50={} p95={}; 240x80/4-pane mean={} p50={} p95={}",
+            typical.0, typical.1, typical.2, large.0, large.1, large.2,
+        );
+        std::hint::black_box((typical, large));
+    }
+
+    #[test]
+    fn render_draws_pane_borders_and_status() {
+        // One session with a single focused pane, plus a matching grid.
+        let layout = Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
+                is_linked_worktree: false,
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        };
+        let mut g = grid();
+        g.cells = vec![vec![cell("hi", 1), cell(" ", 1)], vec![cell("yo", 1), cell(" ", 1)]];
+        let mut view = test_view();
+        view.layout = Some(layout);
+        view.grids.insert(1, g);
+        view.recompute_geometry();
+        // 80x24 with sidebar+tab bar: the pane area starts at col 26, row 1 (tab bar at row 0).
+        assert_eq!(view.rects, vec![(1, Rect::new(26, 1, 54, 22))]);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        // Tab bar at top — active tab uses the primary accent, followed by one
+        // spacer cell and the persistent close action.
+        assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
+        assert_eq!(buf.cell((26, 0)).unwrap().fg, RColor::Rgb(0x0a, 0x0a, 0x0a));
+        assert_eq!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
+        assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "x");
+        // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
+        assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
+        // The title chip carries the pane label (pane frame at y=1).
+        assert_eq!(buf.cell((27, 1)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((28, 1)).unwrap().symbol(), "s", "plain shell pane should expose its title");
+        let title_cell = buf.cell((28, 1)).unwrap();
+        assert_eq!(title_cell.fg, view.current_theme().accent);
+        assert_eq!(title_cell.bg, RColor::Reset, "focused pane title must not add a competing accent fill");
+        // The status bar shows NORMAL + the session name.
+        let status_line: String = (0..40).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
+        assert!(status_line.contains("NORMAL"), "status chip missing: {status_line:?}");
+        assert!(status_line.contains("sess"), "session name missing: {status_line:?}");
+    }
+
+    #[test]
+    fn pane_titles_preserve_ai_prefix_but_plain_titles_stand_alone() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        assert_eq!(view.pane_label(1), " AI · agent1 ");
+
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.title = "custom title".into();
+            pane.agent.as_mut().unwrap().name = "   ".into();
+        }
+        assert_eq!(view.pane_label(1), " AI · custom title ");
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.agent = None;
+            pane.is_ai = false;
+        }
+        assert_eq!(view.pane_label(1), " custom title ");
+        if let Some(LayoutNode::Pane(pane)) = view
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.sessions.first_mut())
+            .and_then(|session| session.tabs.first_mut())
+            .and_then(|tab| tab.root.as_deref_mut())
+        {
+            pane.title = "   ".into();
+        }
+        assert_eq!(view.pane_label(1), " ");
+    }
+
+    #[test]
+    fn pane_borders_prioritize_blocked_then_done_attention() {
+        let rect = Rect::new(2, 2, 12, 5);
+        for (status, expected) in [
+            (AgentStatus::Blocked, test_view().current_theme().orange),
+            (AgentStatus::Done, test_view().current_theme().green),
+        ] {
+            let mut view = test_view();
+            view.layout = Some(panes_layout(&[(1, status)]));
+            view.rects = vec![(1, rect)];
+            let backend = ratatui::backend::TestBackend::new(20, 10);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.render_pane_frame(frame, rect, true, " title ")).unwrap();
+            let buffer = term.backend().buffer();
+            assert_eq!(buffer.cell((rect.x, rect.y)).unwrap().fg, expected, "attention state owns the focused pane border");
+            let title_cell = buffer.cell((rect.x + 1, rect.y)).unwrap();
+            assert_eq!(title_cell.fg, view.current_theme().accent, "focused title keeps the focus accent");
+            assert!(title_cell.modifier.contains(Modifier::BOLD), "focused title remains bold alongside attention state");
+        }
+    }
+
+    /// Rendering must never panic at any (tiny → large) terminal size, with
+    /// every overlay open — the classic TUI's full frame was drawn every
+    /// cycle, so the client's draw path has to be total over all geometry.
+    #[test]
+    fn render_is_total_across_sizes_and_overlays() {
+        let layout = Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
+                is_linked_worktree: false,
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: Some(WireBranch { name: "main".into(), ahead: 1, behind: 0 }),
+                root: Some(Box::new(LayoutNode::Split {
+                    id: 1,
+                    dir: SplitDir::Vertical,
+                    ratio: 0.5,
+                    a: Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                        id: 1,
+                        title: " shell 1 ".into(),
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        is_ai: false,
+                        agent: None,
+                        mouse_reporting: false,
+                        alt_screen: false,
+                    })),
+                    b: Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                        id: 2,
+                        title: " AI CLI ".into(),
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        is_ai: true,
+                        agent: Some(kumo_protocol::AgentInfo {
+                            name: "opencode".into(),
+                            status: AgentStatus::Blocked,
+                            cpu: 0.0,
+                            mem_kb: 0,
+                            pane_id: 2,
+                            pane_index: 2,
+                            tab_index: 1,
+                        }),
+                        mouse_reporting: true,
+                        alt_screen: false,
+                    })),
+                })),
+            }],
+        };
+        let mut g = grid();
+        g.cells = vec![vec![cell("hi", 1), cell(" ", 1), cell("x", 1), cell("y", 1)]];
+        for (w, h) in [(2u16, 2u16), (5, 4), (20, 8), (40, 12), (80, 24), (120, 40)] {
+            let mut view = test_view();
+            view.cols = w;
+            view.rows = h;
+            view.layout = Some(layout.clone());
+            view.grids.insert(1, g.clone());
+            view.recompute_geometry();
+            // Open every overlay: it must still render without panicking.
+            view.menu.open = true;
+            view.ctx_menu.open = true;
+            view.popup.open = true;
+            view.popup.name = "worktree/name".into();
+            view.keybind_overlay.open = true;
+            view.settings.open = true;
+            view.worktree_picker.open = true;
+            view.worktree_picker.items = vec![
+                WireWorktree { path: std::path::PathBuf::from("/tmp"), branch: Some("main".into()), is_main: true, open: false, comment: None, status: None, is_ephemeral: false },
+            ];
+            view.pane_numbers = Some(Instant::now());
+            view.update_notice = Some(("key".into(), "nightly".into()));
+            view.agent_toasts = vec![
+                AgentToast { pane_id: 2, kind: ToastKind::Blocked, title: "opencode is blocked".into(), body: "/tmp".into(), born: Instant::now() },
+                AgentToast { pane_id: 1, kind: ToastKind::Finished, title: "claude finished".into(), body: String::new(), born: Instant::now() },
+            ];
+            view.sel = Some(Sel { pane_id: 1, start: (0, 0), end: (1, 0) });
+            view.link_mods = true;
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| view.draw(f)).unwrap();
+        }
+    }
+
+    /// The status-bar dropdown opens flush above the bar; its drop shadow must
+    /// stop at the chrome floor instead of repainting the status row (which
+    /// used to wipe out the MENU button).
+    #[test]
+    fn menu_shadow_never_paints_over_status_bar() {
+        let mut view = test_view();
+        view.menu.open = true;
+        let theme = view.current_theme();
+        let shadow_bg = dim_toward(theme.panel_sep, ColorRgb::new(0, 0, 0), &theme.palette, 2, 5);
+        let dd = view.menu_dropdown_rect().expect("dropdown fits at 80x24");
+        assert_eq!(dd.bottom(), 23, "dropdown sits flush above the status row");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        // The MENU button on the status row is intact under the dropdown
+        // (button starts after the mode chip + " · " separator).
+        let btn: String = (11..17).map(|x| buf.cell((x, 23)).unwrap().symbol().to_string()).collect();
+        assert_eq!(btn, " MENU ", "shadow must not repaint the status row");
+
+        // Vertical strip hugs the modal side but stops above the floor.
+        assert_eq!(buf.cell((dd.right(), dd.bottom() - 1)).unwrap().bg, shadow_bg, "shadow beside the modal");
+        assert_ne!(buf.cell((dd.right(), dd.bottom())).unwrap().bg, shadow_bg, "no shadow on the status row");
     }
 }

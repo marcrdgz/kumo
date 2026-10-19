@@ -307,3 +307,106 @@ impl View {
         x == r.x + 2 && y == r.y + 1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::client_view::tests::*;
+
+    /// Toasts stack downward from the tab bar in the default top-right anchor
+    /// (newest at the top) and the stack caps at `MAX_AGENT_TOASTS`, dropping
+    /// the oldest.
+    #[test]
+    fn agent_toasts_stack_downward_and_cap() {
+        let mut view = test_view();
+        for i in 0..(MAX_AGENT_TOASTS + 2) {
+            view.on_event(DaemonEvent::Toast {
+                pane_id: i as u64,
+                kind: ToastKind::Finished,
+                title: format!("agent {i}"),
+                body: String::new(),
+            });
+        }
+        assert_eq!(view.agent_toasts.len(), MAX_AGENT_TOASTS, "oldest toasts dropped");
+        assert_eq!(view.agent_toasts[0].pane_id, 2, "the two oldest were dropped");
+        let rects = view.agent_toast_rects();
+        assert_eq!(rects.len(), MAX_AGENT_TOASTS);
+        // Each rect pair carries its toast index; the newest hugs the anchor
+        // edge, the older ones sit below it.
+        let expected: Vec<String> = view.agent_toasts.iter().map(|t| format!("agent {}", t.pane_id)).collect();
+        for (i, _) in &rects {
+            assert_eq!(&view.agent_toasts[*i].title, &expected[*i], "rect aligns with its toast");
+        }
+        let right_x = view.cols - AGENT_TOAST_W - 1;
+        for pair in rects.windows(2) {
+            assert!(pair[1].1.y + AGENT_TOAST_H <= pair[0].1.y, "newer toast sits above the older one");
+            assert_eq!(pair[0].1.x, right_x, "toasts stay right-aligned");
+            assert_eq!(pair[1].1.x, right_x, "toasts stay right-aligned");
+        }
+        // The newest top row sits directly below the tab bar.
+        let last = rects.last().unwrap();
+        assert_eq!(last.1.y, TAB_H + 1);
+        // The whole stack stays clear of the status bar.
+        for (_, r) in &rects {
+            assert!(r.y + r.height < view.shadow_floor(), "toasts must not cover the status bar");
+        }
+    }
+
+    /// The `[notifications] position` setting moves the stack: corners mirror,
+    /// `center` floats mid-screen, and `off` drops events before they queue.
+    #[test]
+    fn agent_toast_positions_follow_config() {
+        let push = |view: &mut View, pane_id: u64| {
+            view.on_event(DaemonEvent::Toast {
+                pane_id,
+                kind: ToastKind::Finished,
+                title: format!("agent {pane_id}"),
+                body: String::new(),
+            });
+        };
+        // Bottom-left mirrors the default: left-aligned, newest just above
+        // the status bar.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::BottomLeft;
+        push(&mut view, 0);
+        push(&mut view, 1);
+        let rects = view.agent_toast_rects();
+        assert_eq!(rects.len(), 2);
+        for (_, r) in &rects {
+            assert_eq!(r.x, 1, "bottom-left toasts are left-aligned");
+        }
+        assert!(rects[0].1.y + AGENT_TOAST_H <= rects[1].1.y, "older toast stacks above the newer one");
+        let last = rects.last().unwrap();
+        assert_eq!(last.1.y + AGENT_TOAST_H, view.shadow_floor() - 1);
+
+        // Top-left anchors below the tab bar like the default corner.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::TopLeft;
+        push(&mut view, 3);
+        let rect = view.agent_toast_rects()[0].1;
+        assert_eq!(rect.x, 1);
+        assert_eq!(rect.y, TAB_H + 1);
+
+        // Center floats the stack mid-screen.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::Center;
+        push(&mut view, 4);
+        push(&mut view, 5);
+        let rects = view.agent_toast_rects();
+        assert_eq!(rects.len(), 2);
+        let total_h = 2 * AGENT_TOAST_H + 1;
+        let band = view.shadow_floor() - 1 - (TAB_H + 1) + 1;
+        let y0 = TAB_H + 1 + (band - total_h) / 2;
+        assert_eq!(rects[0].1.y, y0, "the stack is vertically centered");
+        assert_eq!(rects[1].1.y, y0 + AGENT_TOAST_H + 1);
+        assert_eq!(rects[0].1.x, (view.cols - AGENT_TOAST_W) / 2, "the stack is horizontally centered");
+
+        // `off` never queues a toast event.
+        let mut view = test_view();
+        view.toast_pos = ToastPosition::Off;
+        push(&mut view, 9);
+        assert!(view.agent_toasts.is_empty(), "position off must drop toast events");
+        assert!(view.agent_toast_rects().is_empty());
+        assert!(!view.has_transient());
+    }
+}

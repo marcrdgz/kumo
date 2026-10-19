@@ -971,3 +971,891 @@ impl View {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::client_view::tests::*;
+
+    #[test]
+    fn agents_panel_groups_by_state_in_order() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Working),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Idle),
+            (4, AgentStatus::Done),
+        ]));
+        let rows = view.agents_panel_items();
+        let heads: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::GroupHeader(st, n) => Some((*st, *n)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            vec![
+                (AgentStatus::Blocked, 1),
+                (AgentStatus::Done, 1),
+                (AgentStatus::Working, 1),
+                (AgentStatus::Idle, 1),
+            ]
+        );
+        let entries: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::AgentName(_, pid, _, _) => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entries, vec![2, 4, 1, 3], "entries follow group order");
+        assert!(
+            rows.iter().all(|r| !matches!(r, SidebarRow::AgentDir(..))),
+            "grouped panel has no workspace-dir rows"
+        );
+    }
+
+    #[test]
+    fn agents_panel_placeholder_when_no_agents() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[]));
+        assert_eq!(view.agents_panel_items(), vec![SidebarRow::Dim("no agents".to_string())]);
+    }
+
+    #[test]
+    fn project_sidebar_anchors_compact_agent_inbox_below_new_session() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Idle),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Working),
+            (4, AgentStatus::Done),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.divider_y && matches!(row, SidebarRow::Divider)));
+        assert!(rows.iter().any(|(y, row)| {
+            *y == geometry.agents_header_y
+                && matches!(row, SidebarRow::AgentInboxHeader { blocked: 1, done: 1, working: 1 })
+        }));
+        let compact: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, row)| match row {
+                SidebarRow::CompactAgent(_, pid, _, status) => Some((*pid, *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            compact,
+            vec![
+                (2, AgentStatus::Blocked),
+                (4, AgentStatus::Done),
+                (3, AgentStatus::Working),
+            ]
+        );
+        assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
+
+        view.sidebar_scroll.0 = u16::MAX;
+        let scrolled = view.sidebar_rows();
+        assert!(scrolled.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(scrolled.iter().any(|(y, row)| *y == geometry.agents_header_y && matches!(row, SidebarRow::AgentInboxHeader { .. })));
+    }
+
+    #[test]
+    fn project_sidebar_renders_contextual_shortcuts_without_covering_counters() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Working),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.sidebar_width = 28;
+        view.recompute_geometry();
+
+        let geometry = view.project_sidebar_geometry();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            view.render_sidebar(f, area);
+        }).unwrap();
+        let buffer = term.backend().buffer();
+        let hint_x = view.effective_sidebar_width() - 2;
+        assert_eq!(buffer.cell((hint_x, geometry.new_session_y)).unwrap().symbol(), "c");
+        assert_eq!(buffer.cell((hint_x, geometry.agents_header_y)).unwrap().symbol(), "i");
+        let header: String = (0..hint_x).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(header.contains("!1"), "blocked counter missing: {header:?}");
+        assert!(header.contains("✓1"), "done counter missing: {header:?}");
+        assert!(view.sidebar_hit(hint_x, geometry.new_session_y));
+        assert!(view.popup.open, "clicking the contextual new-session hint keeps the row target");
+        view.popup.open = false;
+        assert!(view.sidebar_hit(hint_x, geometry.agents_header_y));
+        assert_eq!(view.mode, Mode::Inbox, "clicking the contextual inbox hint keeps the row target");
+    }
+
+    #[test]
+    fn project_sidebar_hides_inbox_shortcut_when_width_is_tight() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Done),
+            (3, AgentStatus::Working),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 21;
+        view.sidebar_width = 21;
+        view.recompute_geometry();
+
+        let geometry = view.project_sidebar_geometry();
+        let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            view.render_sidebar(f, area);
+        }).unwrap();
+        let buffer = term.backend().buffer();
+        let hint_x = view.effective_sidebar_width() - 2;
+        assert_eq!(buffer.cell((hint_x, geometry.new_session_y)).unwrap().symbol(), "c");
+        assert_ne!(buffer.cell((hint_x, geometry.agents_header_y)).unwrap().symbol(), "i");
+        let header: String = (0..hint_x).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(header.contains("!1"), "blocked counter remains visible at narrow width: {header:?}");
+        assert!(header.contains("✓1"), "done counter remains visible at narrow width: {header:?}");
+    }
+
+    #[test]
+    fn short_project_sidebar_reduces_agent_inbox_to_header() {
+        let mut view = test_view();
+        view.rows = 12;
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Done)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        assert_eq!(view.project_sidebar_geometry().agent_rows, 0);
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::AgentInboxHeader { .. })));
+        assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::CompactAgent(..))));
+    }
+
+    #[test]
+    fn project_sidebar_empty_state_keeps_new_session_fixed_below_two_lines() {
+        let mut view = test_view();
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert!(geometry.spaces_h >= 2);
+
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "No sessions yet")));
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "press c to create one")));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line = |y| (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, y)).unwrap().symbol().to_string()).collect::<String>();
+        assert!(line(3).contains("No sessions yet"));
+        assert!(line(4).contains("press c to create one"));
+    }
+
+    #[test]
+    fn project_sidebar_empty_state_falls_back_to_one_line_at_low_height() {
+        let mut view = test_view();
+        view.rows = 8;
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(geometry.spaces_h, 1);
+
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(_, row)| matches!(row, SidebarRow::Dim(label) if label == "No sessions · press c")));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.new_session_y && matches!(row, SidebarRow::NewSession)));
+        assert!(rows.iter().any(|(y, row)| *y == geometry.agents_header_y && matches!(row, SidebarRow::AgentInboxHeader { .. })));
+    }
+
+    #[test]
+    fn compact_agent_header_shows_all_clear_for_idle_only_agents() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Idle), (2, AgentStatus::Unknown)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(view.compact_agent_summary(), "all clear");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line: String = (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(line.contains("AGENTS"));
+        assert!(line.contains("all clear"));
+        assert!(!line.contains("no agents"));
+    }
+
+    #[test]
+    fn compact_agent_header_keeps_attention_counters() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Done), (3, AgentStatus::Working)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(view.compact_agent_summary(), "!1 ✓1 ⠋1");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let line: String = (0..view.effective_sidebar_width()).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert!(line.contains("!1 ✓1 ⠋1"));
+    }
+
+    #[test]
+    fn compact_agent_header_stays_separate_from_title_at_narrow_width() {
+        let mut view = test_view();
+        view.sidebar_width = MIN_SIDEBAR_WIDTH;
+        view.layout = Some(Layout { active: None, sessions: Vec::new() });
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buffer = term.backend().buffer();
+        let title: String = (2..8).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        let summary: String = (10..19).map(|x| buffer.cell((x, geometry.agents_header_y)).unwrap().symbol().to_string()).collect();
+        assert_eq!(title, "AGENTS");
+        assert_eq!(summary, "no agents");
+    }
+
+    #[test]
+    fn compact_agent_inbox_caps_rows_and_has_a_fixed_divider() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[
+            (1, AgentStatus::Blocked),
+            (2, AgentStatus::Blocked),
+            (3, AgentStatus::Done),
+            (4, AgentStatus::Done),
+        ]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let geometry = view.project_sidebar_geometry();
+        assert_eq!(geometry.agent_rows, 3);
+        assert_eq!(
+            view.sidebar_rows().iter().filter(|(_, row)| matches!(row, SidebarRow::CompactAgent(..))).count(),
+            3
+        );
+        assert!(view.sidebar_hit(0, geometry.divider_y));
+        assert!(view.sidebar_drag.is_none(), "project inbox divider is not draggable");
+    }
+
+    #[test]
+    fn working_agents_fill_available_compact_inbox_rows() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let compact: Vec<_> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(_, row)| match row {
+                SidebarRow::CompactAgent(_, pid, _, status) => Some((pid, status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compact, vec![(1, AgentStatus::Working)]);
+    }
+
+    #[test]
+    fn clicking_compact_agent_header_opens_full_inbox() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working)]));
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        let y = view.project_sidebar_geometry().agents_header_y;
+        assert!(view.sidebar_hit(2, y));
+        assert_eq!(view.mode, Mode::Inbox);
+        assert!(view.agent_inbox_rect().is_some());
+    }
+
+    #[test]
+    fn tiny_project_sidebar_rows_never_overlap() {
+        for height in 2..7 {
+            let mut view = test_view();
+            view.rows = height;
+            view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+            view.sidebar_layout_override = Some(SidebarLayout::Project);
+            let rows = view.sidebar_rows();
+            let mut ys: Vec<_> = rows.iter().map(|(y, _)| *y).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            assert_eq!(ys.len(), rows.len(), "duplicate sidebar rows at height {height}");
+        }
+    }
+
+    #[test]
+    fn one_row_spaces_view_keeps_worktree_visible_as_compact_fallback() {
+        let mut view = test_view();
+        view.rows = 8;
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].branch = Some(WireBranch { name: "main".into(), ahead: 0, behind: 0 });
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        assert_eq!(view.project_sidebar_geometry().spaces_h, 1);
+        view.sidebar_scroll.0 = 1;
+        assert!(view.sidebar_rows().iter().any(|(_, row)| matches!(row, SidebarRow::Worktree(0))));
+    }
+
+    #[test]
+    fn divided_sidebar_stacks_panels() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        let rows = view.sidebar_rows();
+        let labels: Vec<_> = rows
+            .iter()
+            .filter_map(|(y, r)| match r {
+                SidebarRow::PanelLabel(t, right) => Some((*y, t.clone(), right.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels.len(), 2, "both panels labeled");
+        assert_eq!(labels[0], (2, "spaces".to_string(), None));
+        // Content area is 20 rows: default divider sits at the exact middle
+        // (spaces 9 rows), so it lands at 12 and the agents label at 13.
+        assert_eq!(labels[1], (13, "agents".to_string(), Some("grouped".to_string())));
+        assert!(
+            rows.iter().any(|(y, r)| *y == 3 && matches!(r, SidebarRow::Session(0))),
+            "spaces content first"
+        );
+        assert!(rows.iter().any(|(_, r)| matches!(r, SidebarRow::NewSession)));
+        assert!(
+            rows.iter().any(|(y, r)| *y == 12 && matches!(r, SidebarRow::Divider)),
+            "divider between the panels"
+        );
+        assert!(
+            rows.iter().any(|(y, r)| *y == 14 && matches!(r, SidebarRow::GroupHeader(AgentStatus::Blocked, 1))),
+            "group header under the agents label"
+        );
+        assert!(
+            rows.iter().any(|(y, r)| *y == 15 && matches!(r, SidebarRow::AgentName(0, 1, _, AgentStatus::Blocked))),
+            "entry follows its group header"
+        );
+    }
+
+    #[test]
+    fn divided_divider_drag_resizes_panels() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        let down = |x, y| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = |x, y| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let up = |x, y| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        // The default split is the exact middle: 9 spaces rows, divider at 12.
+        let rows = view.sidebar_rows();
+        assert!(rows.iter().any(|(y, r)| *y == 12 && matches!(r, SidebarRow::Divider)));
+        // Press on the divider (y=12), drag down 3 rows, release.
+        view.on_mouse(down(10, 12)).unwrap();
+        assert!(view.sidebar_drag.is_some(), "press on the divider starts a drag");
+        view.on_mouse(drag(10, 15)).unwrap();
+        view.on_mouse(up(10, 15)).unwrap();
+        assert!(view.sidebar_drag.is_none());
+        assert_eq!(view.sidebar_split, Some(12), "spaces grew by the drag delta");
+        let rows = view.sidebar_rows();
+        assert!(
+            rows.iter().any(|(y, r)| *y == 15 && matches!(r, SidebarRow::Divider)),
+            "divider moves with the drag"
+        );
+        assert!(
+            rows.iter().any(|(y, r)| *y == 18 && matches!(r, SidebarRow::AgentName(0, 1, _, _))),
+            "agent entries follow the moved label"
+        );
+    }
+
+    #[test]
+    fn divided_sidebar_render_places_panel_rows() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        // Short kind so the full `kind · space · pane` entry row fits the
+        // sidebar budget.
+        if let Some(LayoutNode::Pane(p)) = view
+            .layout
+            .as_mut()
+            .and_then(|l| l.sessions.first_mut())
+            .and_then(|s| s.tabs.first_mut())
+            .and_then(|t| t.root.as_deref_mut())
+        {
+            p.agent.as_mut().unwrap().name = "ai".into();
+        }
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..24)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(row_text(2), "spaces", "spaces label at the old tabs row");
+        assert!(row_text(3).contains("sess"), "session row under spaces");
+        let divider = row_text(12);
+        assert!(!divider.is_empty() && divider.chars().all(|c| c == '─'), "divider between the panels: {divider:?}");
+        let dstyle = buf.cell((5, 12)).unwrap().style();
+        assert_eq!(dstyle.fg, Some(RColor::Gray), "divider is grey");
+        let agents_label = row_text(13);
+        assert!(
+            agents_label.starts_with("agents") && agents_label.contains("grouped"),
+            "agents label after the divider: {agents_label:?}"
+        );
+        assert_eq!(row_text(14), "blocked (1)", "group header under the agents label");
+        assert_eq!(
+            row_text(15),
+            "◉ ai · sess · 1",
+            "grouped entry carries kind · space (session) · pane: {}",
+            row_text(15)
+        );
+        // Panel labels render in the primary color, bold, with no filled chip.
+        for y in [2u16, 13u16] {
+            let st = buf.cell((2, y)).unwrap().style();
+            assert!(
+                st.bg.is_none() || st.bg == Some(RColor::Reset),
+                "panel labels carry no filled bg at y={y}"
+            );
+            assert_ne!(st.fg, Some(RColor::Black), "panel labels are not LEADER-chipped at y={y}");
+            assert!(st.add_modifier.contains(Modifier::BOLD), "panel labels are bold at y={y}");
+        }
+    }
+
+    #[test]
+    fn agent_entry_label_fits_the_budget() {
+        // Full triple when it fits.
+        assert_eq!(agent_entry_label("opencode", "kumo", "1", 19), "opencode · kumo · 1");
+        // Pane drops first when the triple overflows.
+        assert_eq!(agent_entry_label("opencode", "dev/kumo", "1", 19), "opencode · dev/kumo");
+        // Then the space.
+        assert_eq!(agent_entry_label("opencode", "dev/kumo", "1", 10), "opencode");
+        // The kind is truncated as the last resort, never beyond `avail`.
+        assert_eq!(agent_entry_label("opencode", "dev/kumo", "1", 5), "open…");
+    }
+
+    #[test]
+    fn agents_panel_order_toggles_on_label_click() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked)]));
+        assert_eq!(view.agents_panel_order, AgentPanelOrder::Grouped);
+        assert!(view.agents_panel_items().iter().any(|r| matches!(r, SidebarRow::GroupHeader(..))));
+        // Click the sort descriptor on the agents label row (y=13).
+        view.on_mouse(mouse_click(20, 13)).unwrap();
+        assert_eq!(view.agents_panel_order, AgentPanelOrder::Ranked);
+        let rows = view.agents_panel_items();
+        assert!(
+            rows.iter().all(|r| !matches!(r, SidebarRow::GroupHeader(..))),
+            "ranked ordering shows no state headers"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(r, SidebarRow::AgentDir(..))),
+            "ranked ordering keeps workspace-dir rows"
+        );
+        // Ranked name rows carry the same space · pane inline label.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        // Ranked rows: the workspace row leads with `space · pane` (y=14),
+        // the name row below stays plain (y=15).
+        let dir_row: String = (0..24).map(|x| buf.cell((x, 14)).unwrap().symbol().to_string()).collect();
+        assert_eq!(dir_row.trim(), "sess · 1", "ranked workspace row: {dir_row:?}");
+        let name_row: String = (0..24).map(|x| buf.cell((x, 15)).unwrap().symbol().to_string()).collect();
+        assert!(
+            name_row.trim().starts_with("◉ agent1"),
+            "ranked name row: {name_row:?}"
+        );
+        // Click again to return to grouped.
+        view.on_mouse(mouse_click(20, 13)).unwrap();
+        assert_eq!(view.agents_panel_order, AgentPanelOrder::Grouped);
+    }
+
+    #[test]
+    fn tabs_layout_rows_keep_legacy_structure() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Tabs);
+        view.sidebar_tab = SidebarTab::Agents;
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Blocked), (2, AgentStatus::Working)]));
+        let rows = view.sidebar_rows();
+        assert!(
+            rows.iter().all(|(_, r)| !matches!(r, SidebarRow::PanelLabel(..))),
+            "tabs layout renders no panel labels"
+        );
+        let entries: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, r)| match r {
+                SidebarRow::AgentName(_, pid, _, _) => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entries, vec![1, 2], "rank order (blocked first)");
+        assert_eq!(
+            rows.iter().filter(|(_, r)| matches!(r, SidebarRow::AgentDir(..))).count(),
+            2,
+            "workspace-dir rows kept"
+        );
+    }
+
+    #[test]
+    fn project_sidebar_groups_linked_worktrees_under_main_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "main".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/kumo");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/kumo"));
+        layout.sessions[0].branch = Some(WireBranch { name: "main".into(), ahead: 2, behind: 1 });
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "sidebar-uiux".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/kumo-sidebar-uiux");
+        linked.branch = Some(WireBranch { name: "sidebar-uiux".into(), ahead: 1, behind: 0 });
+        layout.sessions.push(linked);
+        view.layout = Some(layout);
+        let rows = view.project_content();
+        let headers: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::ProjectHeader { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["kumo"]);
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Branch(_, _))).count(), 2);
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 2);
+        let worktrees: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Worktree(i) => Some(view.session_name(*i)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(worktrees, vec!["main", "sidebar-uiux"]);
+    }
+
+    #[test]
+    fn project_sidebar_renders_distinct_hierarchy_levels() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "workspace".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/kumo-workspace");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/kumo"));
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/ui".into(), ahead: 0, behind: 0 });
+        layout.active = Some("workspace".into());
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.recompute_geometry();
+
+        let rows = view.sidebar_rows();
+        let workspace_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::Worktree(0)).then_some(*y)).unwrap();
+        let branch_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::Branch(0, _)).then_some(*y)).unwrap();
+        let project_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::ProjectHeader { .. }).then_some(*y)).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        assert_eq!(buf.cell((3, project_y)).unwrap().symbol(), "▰");
+        assert_eq!(buf.cell((2, workspace_y)).unwrap().symbol(), "└");
+        assert_eq!(buf.cell((2, workspace_y)).unwrap().fg, view.current_theme().panel_muted);
+        assert_eq!(buf.cell((4, workspace_y)).unwrap().symbol(), "◆");
+        assert_eq!(buf.cell((view.effective_sidebar_width() - 2, workspace_y)).unwrap().symbol(), "●");
+        assert_eq!(buf.cell((1, workspace_y)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((5, branch_y)).unwrap().symbol(), "⎇");
+        assert!(rows.iter().all(|(_, row)| !matches!(row, SidebarRow::InlineAgent(..))));
+        assert_eq!(buf.cell((0, workspace_y)).unwrap().symbol(), "┃");
+        assert_eq!(buf.cell((0, branch_y)).unwrap().symbol(), "┃");
+    }
+
+    #[test]
+    fn project_sidebar_highlights_only_the_active_workspace_path() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.active = Some("active".into());
+        layout.sessions[0].name = "active".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-active");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project-active"));
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/active".into(), ahead: 0, behind: 0 });
+
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "linked".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/project-active-linked");
+        linked.branch = Some(WireBranch { name: "feature/linked".into(), ahead: 0, behind: 0 });
+
+        let mut other = layout.sessions[0].clone();
+        other.name = "other".into();
+        other.workspace = std::path::PathBuf::from("/tmp/project-other");
+        other.project_root = Some(std::path::PathBuf::from("/tmp/project-other"));
+        other.branch = Some(WireBranch { name: "main".into(), ahead: 0, behind: 0 });
+
+        let active_project = session_project_key(&layout.sessions[0]);
+        let other_project = session_project_key(&other);
+        layout.sessions.extend([linked, other]);
+        view.project_order = vec![active_project.clone(), other_project.clone()];
+        view.layout = Some(layout);
+        view.sidebar_layout_override = Some(SidebarLayout::Project);
+        view.cols = 120;
+        view.recompute_geometry();
+
+        let rows = view.sidebar_rows();
+        let row_y = |predicate: &dyn Fn(&SidebarRow) -> bool| {
+            rows.iter().find_map(|(y, row)| predicate(row).then_some(*y)).unwrap()
+        };
+        let active_project_y = row_y(&|row| matches!(row, SidebarRow::ProjectHeader { key, .. } if key == &active_project));
+        let active_worktree_y = row_y(&|row| matches!(row, SidebarRow::Worktree(0)));
+        let active_branch_y = row_y(&|row| matches!(row, SidebarRow::Branch(0, _)));
+        let other_project_y = row_y(&|row| matches!(row, SidebarRow::ProjectHeader { key, .. } if key == &other_project));
+        let other_worktree_y = row_y(&|row| matches!(row, SidebarRow::Worktree(2)));
+        let other_branch_y = row_y(&|row| matches!(row, SidebarRow::Branch(2, _)));
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let active_bg = sidebar_active_bg(&view.current_theme());
+
+        for y in [active_project_y, active_worktree_y, active_branch_y] {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, active_bg, "active path background at y={y}");
+            assert_eq!(buf.cell((0, y)).unwrap().symbol(), "┃", "active path marker at y={y}");
+        }
+        assert!(buf.cell((5, active_project_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(buf.cell((6, active_worktree_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(buf.cell((7, active_branch_y)).unwrap().modifier.contains(Modifier::BOLD));
+
+        for y in [other_project_y, other_worktree_y, other_branch_y] {
+            assert_eq!(buf.cell((0, y)).unwrap().bg, RColor::Reset, "inactive path background at y={y}");
+            assert_ne!(buf.cell((0, y)).unwrap().symbol(), "┃", "inactive path marker at y={y}");
+        }
+        assert!(!buf.cell((6, other_worktree_y)).unwrap().modifier.contains(Modifier::BOLD));
+        assert!(!buf.cell((7, other_branch_y)).unwrap().modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn project_sidebar_collapse_hides_only_that_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "main".into();
+        let mut linked = layout.sessions[0].clone();
+        linked.name = "other".into();
+        linked.workspace = std::path::PathBuf::from("/tmp/other");
+        layout.sessions.push(linked);
+        view.layout = Some(layout);
+        let project = kumo_core::ui_state::canonical_project_key(&view.layout.as_ref().unwrap().sessions[0].workspace);
+        view.collapsed_projects.insert(project);
+        let rows = view.project_content();
+        assert_eq!(rows.iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 1);
+        assert!(rows.iter().any(|r| matches!(r, SidebarRow::ProjectHeader { .. })));
+    }
+
+    #[test]
+    fn project_sidebar_orders_blocked_worktree_first() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "idle".into();
+        let mut blocked = panes_layout(&[(9, AgentStatus::Blocked)]).sessions.remove(0);
+        blocked.name = "blocked".into();
+        blocked.workspace = layout.sessions[0].workspace.clone();
+        layout.sessions.push(blocked);
+        view.layout = Some(layout);
+        let rows = view.project_content();
+        let first = rows.iter().find_map(|r| match r { SidebarRow::Worktree(i) => Some(view.session_name(*i)), _ => None });
+        assert_eq!(first.as_deref(), Some("blocked"));
+    }
+
+    #[test]
+    fn project_sidebar_manual_worktree_order_overrides_attention() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "idle".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-idle");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project"));
+        let mut blocked = panes_layout(&[(9, AgentStatus::Blocked)]).sessions.remove(0);
+        blocked.name = "blocked".into();
+        blocked.workspace = std::path::PathBuf::from("/tmp/project-blocked");
+        blocked.project_root = Some(std::path::PathBuf::from("/tmp/project"));
+        let project = session_project_key(&layout.sessions[0]);
+        view.worktree_order.insert(
+            project,
+            vec![session_worktree_key(&layout.sessions[0]), session_worktree_key(&blocked)],
+        );
+        layout.sessions.push(blocked);
+        view.layout = Some(layout);
+
+        let first = view.project_content().into_iter().find_map(|row| match row {
+            SidebarRow::Worktree(i) => Some(view.session_name(i)),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn project_sidebar_manual_project_order_overrides_attention() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "first".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/first");
+        let mut urgent = panes_layout(&[(9, AgentStatus::Blocked)]).sessions.remove(0);
+        urgent.name = "urgent".into();
+        urgent.workspace = std::path::PathBuf::from("/tmp/urgent");
+        view.project_order = vec![session_project_key(&layout.sessions[0]), session_project_key(&urgent)];
+        layout.sessions.push(urgent);
+        view.layout = Some(layout);
+
+        let first = view.project_content().into_iter().find_map(|row| match row {
+            SidebarRow::ProjectHeader { key, .. } => Some(key),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("/tmp/first"));
+    }
+
+    #[test]
+    fn sidebar_reorder_moves_before_and_after_target() {
+        let mut order = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        assert!(move_sidebar_item(&mut order, "one", "three", true));
+        assert_eq!(order, ["two", "three", "one"]);
+        assert!(move_sidebar_item(&mut order, "one", "two", false));
+        assert_eq!(order, ["one", "two", "three"]);
+        assert!(!move_sidebar_item(&mut order, "one", "one", false));
+        assert!(!move_sidebar_item(&mut order, "one", "two", false));
+    }
+
+    #[test]
+    fn sidebar_reorder_rejects_worktree_drop_in_another_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/one");
+        let mut other = panes_layout(&[(2, AgentStatus::Idle)]).sessions.remove(0);
+        other.name = "other".into();
+        other.workspace = std::path::PathBuf::from("/tmp/two");
+        layout.sessions.push(other);
+        view.layout = Some(layout);
+        let worktree_rows: Vec<u16> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(y, row)| matches!(row, SidebarRow::Worktree(_)).then_some(y))
+            .collect();
+
+        assert!(view.begin_sidebar_reorder(worktree_rows[0]));
+        assert!(view.update_sidebar_reorder(worktree_rows[1]));
+        let drag = view.sidebar_reorder_drag.as_ref().unwrap();
+        let SidebarReorderTarget::Worktree { project, .. } = &drag.target else { panic!("worktree target") };
+        assert_eq!(project, "/tmp/one");
+    }
+
+    #[test]
+    fn sidebar_reorder_bar_uses_worktree_boundaries() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].name = "one".into();
+        layout.sessions[0].workspace = std::path::PathBuf::from("/tmp/project-one");
+        layout.sessions[0].project_root = Some(std::path::PathBuf::from("/tmp/project"));
+        let mut two = layout.sessions[0].clone();
+        two.name = "two".into();
+        two.workspace = std::path::PathBuf::from("/tmp/project-two");
+        layout.sessions.push(two);
+        view.layout = Some(layout);
+        let project = session_project_key(&view.layout.as_ref().unwrap().sessions[0]);
+        let first_key = session_worktree_key(&view.layout.as_ref().unwrap().sessions[0]);
+        let second_key = session_worktree_key(&view.layout.as_ref().unwrap().sessions[1]);
+        let worktree_rows: Vec<u16> = view
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|(y, row)| matches!(row, SidebarRow::Worktree(_)).then_some(y))
+            .collect();
+        let drag = SidebarReorderDrag {
+            source: SidebarReorderItem::Worktree {
+                project: project.clone(),
+                worktree: session_worktree_key(&view.layout.as_ref().unwrap().sessions[1]),
+                session_idx: 1,
+            },
+            source_y: worktree_rows[1],
+            target: SidebarReorderTarget::Worktree { project: project.clone(), worktree: first_key.clone() },
+            after: true,
+            moved: true,
+        };
+
+        let base_rows = view.sidebar_rows_base();
+        assert_eq!(view.sidebar_reorder_insertion_y(&drag, &base_rows), Some(worktree_rows[1]));
+        view.sidebar_reorder_drag = Some(drag);
+        let visual_rows = view.sidebar_rows();
+        assert!(visual_rows.iter().any(|(y, row)| *y == worktree_rows[1] && matches!(row, SidebarRow::DropIndicator)));
+        assert!(visual_rows.iter().any(|(y, row)| *y == worktree_rows[1] + 1 && matches!(row, SidebarRow::Worktree(1))));
+
+        let after_last = SidebarReorderDrag {
+            source: SidebarReorderItem::Worktree { project: project.clone(), worktree: first_key, session_idx: 0 },
+            source_y: worktree_rows[0],
+            target: SidebarReorderTarget::Worktree { project, worktree: second_key },
+            after: true,
+            moved: true,
+        };
+        let insertion = view.sidebar_reorder_insertion_y(&after_last, &view.sidebar_rows_base()).unwrap();
+        assert!(insertion < view.project_sidebar_geometry().new_session_y);
+        view.sidebar_reorder_drag = Some(after_last);
+        let rows = view.sidebar_rows();
+        let new_session_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::NewSession).then_some(*y)).unwrap();
+        let drop_y = rows.iter().find_map(|(y, row)| matches!(row, SidebarRow::DropIndicator).then_some(*y)).unwrap();
+        assert_ne!(drop_y, new_session_y, "drop indicator must not cover the fixed action");
+    }
+
+    #[test]
+    fn project_sidebar_filter_matches_branch_and_shows_empty_state() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/search".into(), ahead: 0, behind: 0 });
+        view.layout = Some(layout);
+        view.sidebar_filter = "search".into();
+        assert_eq!(view.project_content().iter().filter(|r| matches!(r, SidebarRow::Worktree(_))).count(), 1);
+        view.sidebar_filter = "does-not-exist".into();
+        assert!(view.project_content().iter().any(|r| matches!(r, SidebarRow::Dim(s) if s.contains("no matches"))));
+    }
+
+    #[test]
+    fn project_sidebar_filter_reveals_matches_in_collapsed_project() {
+        let mut view = test_view();
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        layout.sessions[0].branch = Some(WireBranch { name: "feature/search".into(), ahead: 0, behind: 0 });
+        let project = session_project_key(&layout.sessions[0]);
+        view.layout = Some(layout);
+        view.collapsed_projects.insert(project);
+
+        assert!(!view.project_content().iter().any(|row| matches!(row, SidebarRow::Worktree(_))));
+        view.sidebar_filter = "search".into();
+        let filtered = view.project_content();
+        assert!(filtered.iter().any(|row| matches!(row, SidebarRow::Worktree(_))));
+        assert!(!filtered.iter().any(|row| matches!(row, SidebarRow::Dim(s) if s.contains("no matches"))));
+    }
+
+    #[test]
+    fn project_sidebar_filter_backspace_and_escape_are_local() {
+        let mut view = test_view();
+        view.sidebar_filter = "abc".into();
+        view.sidebar_filter_active = true;
+        view.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).unwrap();
+        assert_eq!(view.sidebar_filter, "ab");
+        view.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+        assert!(!view.sidebar_filter_active);
+        assert!(view.sidebar_filter.is_empty());
+    }
+}

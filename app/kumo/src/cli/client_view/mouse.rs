@@ -691,3 +691,198 @@ impl View {
         lines.join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::client_view::tests::*;
+
+    #[test]
+    fn selection_text_joins_rows_and_skips_continuation() {
+        let mut g = grid();
+        g.cells = vec![
+            vec![cell("a", 1), cell("b", 1), cell("c", 1), cell("d", 1)],
+            vec![cell("\u{1f600}", 2), cell(" ", 0), cell("x", 1), cell("y", 1)],
+            vec![cell("1", 1), cell("2", 1), cell("3", 1), cell("4", 1)],
+        ];
+        let mut view = test_view();
+        view.grids.insert(1, g);
+        let sel = Sel { pane_id: 1, start: (1, 0), end: (1, 1) };
+        let text = view.selection_text(&sel);
+        assert_eq!(text, "bcd\n\u{1f600}", "wide char is kept, continuation cell skipped: {text:?}");
+    }
+
+    /// The highlight rectangle must cover exactly the cells `selection_text`
+    /// copies — a horizontal drag over a table like `top` must not light up a
+    /// vertical band (the classic transposed-corner bug).
+    #[test]
+    fn selection_highlight_matches_copied_text() {
+        let mut g = grid();
+        g.cells = vec![
+            vec![cell("a", 1), cell("b", 1), cell("c", 1), cell("d", 1), cell("e", 1)],
+            vec![cell("f", 1), cell("g", 1), cell("h", 1), cell("i", 1), cell("j", 1)],
+            vec![cell("k", 1), cell("l", 1), cell("m", 1), cell("n", 1), cell("o", 1)],
+        ];
+        let layout = Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
+                is_linked_worktree: false,
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        };
+        let mut view = test_view();
+        view.layout = Some(layout);
+        view.grids.insert(1, g);
+        view.recompute_geometry();
+        // Horizontal drag across row 1, cols 1..=3.
+        view.sel = Some(Sel { pane_id: 1, start: (1, 1), end: (3, 1) });
+        assert_eq!(view.selection_text(&view.sel.unwrap()), "ghi", "copy of a row drag");
+
+        // Render and check exactly cols 1..=3 of row 1 are reversed.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        let rev = |c: u16, r: u16| {
+            buf.cell((inner.x + c, inner.y + r)).unwrap().modifier.contains(Modifier::REVERSED)
+        };
+        assert!(!rev(0, 1) && rev(1, 1) && rev(2, 1) && rev(3, 1) && !rev(4, 1),
+            "row 1 highlights only cols 1..=3");
+        assert!(!rev(1, 0) && !rev(1, 2), "adjacent rows stay clear");
+    }
+
+    /// A drag drawn up-left (end before start) still highlights the same cells
+    /// the copy extracts.
+    #[test]
+    fn selection_reversed_drag_normalizes_corners() {
+        let sel = Sel { pane_id: 1, start: (3, 1), end: (1, 1) };
+        let ((tr, tc), (br, bc)) = sel_corners(&sel);
+        assert_eq!(((tr, tc), (br, bc)), ((1, 1), (1, 3)));
+    }
+
+    /// Hovering the MENU dropdown or the context menu must move the selection
+    /// AND mark the view dirty, so the primary-accent highlight repaints live.
+    #[test]
+    fn hovering_menu_repaints_selection() {
+        let mut view = test_view();
+        view.menu.open = true;
+        view.menu.selected = 0;
+        // The dropdown sits above the MENU button; item i lives at row 17+i
+        // (cols 80, rows 24, mode NORMAL -> dropdown anchored at x 5).
+        view.on_mouse(mouse_moved(8, 18)).unwrap();
+        assert_eq!(view.menu.selected, 1, "hover item 2 selects it");
+        assert!(view.dirty(), "hover must trigger a repaint");
+        view.dirty = false;
+        // Hovering the same item again is a no-op (no repaint churn).
+        view.on_mouse(mouse_moved(8, 18)).unwrap();
+        assert!(!view.dirty(), "unchanged hover must not repaint");
+        // Hovering item 4 updates selection + repaints.
+        view.on_mouse(mouse_moved(8, 20)).unwrap();
+        assert_eq!(view.menu.selected, 3);
+        assert!(view.dirty());
+    }
+
+    #[test]
+    fn hovering_ctx_menu_repaints_selection() {
+        let mut view = test_view();
+        view.ctx_menu.open = true;
+        view.ctx_menu.x = 30;
+        view.ctx_menu.y = 5;
+        view.ctx_menu.target = CtxTarget::Pane(1);
+        view.ctx_menu.selected = 0;
+        // The context menu opens down-right of (30,5): box at (31,6,18,7),
+        // item i at row 7+i. Hover item 2.
+        view.on_mouse(mouse_moved(32, 8)).unwrap();
+        assert_eq!(view.ctx_menu.selected, 1);
+        assert!(view.dirty(), "ctx-menu hover must repaint");
+    }
+
+    /// A mouse selection stamps REVERSED onto pane cells; popups painted over
+    /// that region must come out clean (panel bg, no stale modifiers) instead
+    /// of inheriting the highlighted colors underneath.
+    #[test]
+    fn ctx_menu_clears_selection_highlight_underneath() {
+        let mut g = grid();
+        g.cols = 30;
+        g.rows = 10;
+        g.cells = (0..10).map(|_| (0..30).map(|_| cell("a", 1)).collect()).collect();
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        view.grids.insert(1, g);
+        view.recompute_geometry();
+        // Select a band inside the pane that crosses where the ctx menu opens.
+        view.sel = Some(Sel { pane_id: 1, start: (5, 5), end: (25, 6) });
+        view.ctx_menu = CtxMenu { open: true, x: 30, y: 5, selected: 1, target: CtxTarget::Pane(1) };
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        // Control: the selection does render outside the menu.
+        assert!(buf.cell((inner.x + 25, inner.y + 5)).unwrap().modifier.contains(Modifier::REVERSED));
+
+        let dd = view.ctx_menu_rect().unwrap();
+        for y in dd.y..dd.bottom() {
+            for x in dd.x..dd.right() {
+                let c = buf.cell((x, y)).unwrap();
+                assert!(!c.modifier.contains(Modifier::REVERSED), "stale REVERSED inside menu at {x},{y}");
+            }
+        }
+        // Unselected item rows carry the panel surface, not the selection bg.
+        let theme = view.current_theme();
+        assert_eq!(buf.cell((dd.x + 3, dd.y + 3)).unwrap().bg, theme.panel_sep);
+    }
+
+    /// Clicking a corner toast dismisses it and focuses the agent's pane;
+    /// clicks elsewhere leave it alone.
+    #[test]
+    fn agent_toast_click_focuses_and_dismisses() {
+        let mut view = test_view();
+        view.sidebar_layout_override = Some(SidebarLayout::Divided);
+        view.layout = Some(one_pane_layout());
+        view.on_event(DaemonEvent::Toast {
+            pane_id: 1,
+            kind: ToastKind::Blocked,
+            title: "claude is blocked".into(),
+            body: "~/dev/kumo".into(),
+        });
+        let rect = view.agent_toast_rects()[0].1;
+        // Click outside: no effect.
+        view.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(view.agent_toasts.len(), 1, "a click off the toast leaves it up");
+        // Click inside: dismiss + focus the pane.
+        view.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: rect.x + 3,
+            row: rect.y + 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert!(view.agent_toasts.is_empty(), "clicking a toast dismisses it");
+    }
+}
