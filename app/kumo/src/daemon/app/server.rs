@@ -126,12 +126,19 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     prepare_socket(&path)?;
     let listener = UnixListener::bind(&path)?;
     set_socket_perms(&path)?;
-    listener.set_nonblocking(true)?;
 
     let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Command)>(256);
-    // Reader threads wake this loop after queueing commands. The timeout below
-    // remains as a safety poll for signals, config changes, and listener work.
+    // Reader and accept threads wake this loop after queueing work. The
+    // timeout below remains as a safety poll for signals, child exits, and
+    // config changes.
     let daemon_thread = std::thread::current();
+    let (conn_tx, conn_rx) = mpsc::channel::<UnixStream>();
+    {
+        let wake = daemon_thread.clone();
+        std::thread::Builder::new()
+            .name("kumo-accept".into())
+            .spawn(move || client_accept_loop(listener, conn_tx, wake))?;
+    }
     let mut clients: HashMap<usize, Client> = HashMap::new();
     let mut next_id = 0usize;
     let mut last_layout: Option<Arc<Layout>> = None;
@@ -150,7 +157,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             kill = true;
         }
         // Accept new clients (each gets a reader thread + a writer thread).
-        while let Ok((stream, _)) = listener.accept() {
+        while let Ok(stream) = conn_rx.try_recv() {
             if clients.len() >= 32 {
                 log::warn!("daemon: rejecting client, too many clients ({} open)", clients.len());
                 continue;
@@ -159,9 +166,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 log::warn!("daemon: rejecting connection from a different user");
                 continue;
             }
-            // A socket accepted from a nonblocking listener can inherit
-            // O_NONBLOCK on some platforms; force blocking mode so the reader
-            // thread actually blocks (not spin on EAGAIN).
+            // Force blocking mode so the reader thread actually blocks (not
+            // spin on EAGAIN), whatever flags the accepted socket inherited.
             let _ = stream.set_nonblocking(false);
             let Ok(read_half) = stream.try_clone() else { continue };
             let (writer_tx, writer_rx) = mpsc::sync_channel::<Arc<DaemonEvent>>(8);
@@ -638,15 +644,19 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             }
         }
 
-        // Config files are tiny and edits are rare, so a content poll keeps
-        // hot reload portable without another watcher thread or platform-
-        // specific dependency. Debouncing at 250 ms also avoids reloading an
-        // editor's temporary rename/write sequence more than once.
+        // Config files are tiny and edits are rare, so a poll keeps hot reload
+        // portable without another watcher thread or platform-specific
+        // dependency; `refresh` only stats files whose size and mtime are
+        // unchanged. Debouncing at 250 ms also avoids reloading an editor's
+        // temporary rename/write sequence more than once.
         if last_config_check.elapsed() >= Duration::from_millis(250) {
             last_config_check = Instant::now();
-            let current = kumo_core::config::config_fingerprint();
-            if current != config_fingerprint {
-                config_fingerprint = current;
+            let current = config_fingerprint.refresh();
+            let changed = current != config_fingerprint;
+            // Keep the fresh stamps even when the contents match (e.g. a
+            // `touch`), so the next poll can skip re-reading the file.
+            config_fingerprint = current;
+            if changed {
                 reload_config(&mut app, &mut clients, None);
                 log::info!("daemon: configuration reloaded after file change");
             }
@@ -820,7 +830,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             }
         }
         pane_cursors.extend(next_cursors);
-        let idle = changed.is_empty() && !layout_changed && dead.is_empty() && waits.is_empty();
+        // A lagging client's retry is pending work too: keep polling briskly.
+        let retrying = clients.values().any(|c| c.pending_layout || !c.pane_needs_full.is_empty());
+        let idle = changed.is_empty() && !layout_changed && dead.is_empty() && waits.is_empty() && !retrying;
         for id in dead {
             waits.cancel_client(id);
             clients.remove(&id);
@@ -836,9 +848,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         }
 
         // Park between iterations instead of sleeping unconditionally. Client
-        // and PTY reader threads unpark us after queueing work, while these
-        // bounded timeouts preserve periodic polling when no producer wakes us.
-        std::thread::park_timeout(Duration::from_millis(if idle { 10 } else { 2 }));
+        // reader, accept and PTY reader threads unpark us after queueing work,
+        // so the idle timeout only bounds the purely polled work (signals,
+        // child exits, config reload) and can stay long.
+        std::thread::park_timeout(Duration::from_millis(if idle { 50 } else { 2 }));
     }
 
     // Start every cleanup together, then wait while all children are reaped.
@@ -846,8 +859,33 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     for worker in cleanup {
         let _ = worker.join();
     }
+    // Wake the accept thread so it sees the closed queue and releases the
+    // listener (matters for in-process test daemons).
+    drop(conn_rx);
+    let _ = UnixStream::connect(&path);
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+/// Accept loop: hands each new connection to the daemon loop and wakes it, so
+/// connecting never waits for the loop's idle poll.
+fn client_accept_loop(
+    listener: UnixListener,
+    tx: mpsc::Sender<UnixStream>,
+    daemon_thread: std::thread::Thread,
+) {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if tx.send(stream).is_err() {
+                    break;
+                }
+                daemon_thread.unpark();
+            }
+            // Transient failures (EMFILE, ECONNABORTED): back off, don't spin.
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 /// Apply the same live reload path for an explicit CLI request and the file

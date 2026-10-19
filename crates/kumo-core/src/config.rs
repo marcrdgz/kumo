@@ -1246,12 +1246,50 @@ fn current_config_paths() -> Vec<PathBuf> {
 /// The daemon compares this value periodically to implement dependency-free
 /// config hot reload. Besides the legacy and canonical config files, it tracks
 /// every user agent-detection manifest so creating, editing, renaming, or
-/// removing an override takes effect without a manual `kumo reload`.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ConfigFingerprint(Vec<(PathBuf, Option<u64>)>);
+/// removing an override takes effect without a manual `kumo reload`. Two
+/// snapshots are equal when every tracked file has the same contents.
+#[derive(Clone, Debug)]
+pub struct ConfigFingerprint(Vec<(PathBuf, Option<FileStamp>)>);
+
+/// A tracked file's metadata plus the hash of its contents.
+#[derive(Clone, Debug)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+    hash: u64,
+}
+
+/// Files modified this recently are re-read even when their size and mtime
+/// look unchanged: a filesystem with a coarse mtime resolution can stamp a
+/// same-length rewrite with the previous write's time.
+const RACY_MTIME_WINDOW: Duration = Duration::from_secs(3);
+
+impl PartialEq for ConfigFingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(&other.0).all(|((pa, a), (pb, b))| {
+                pa == pb && a.as_ref().map(|s| s.hash) == b.as_ref().map(|s| s.hash)
+            })
+    }
+}
+
+impl Eq for ConfigFingerprint {}
+
+impl ConfigFingerprint {
+    /// Re-capture the fingerprint, reusing this snapshot's content hash for
+    /// every file whose size and mtime are unchanged (and not recent enough
+    /// to be ambiguous), so an idle poll only stats the files.
+    pub fn refresh(&self) -> ConfigFingerprint {
+        capture_fingerprint(Some(self))
+    }
+}
 
 /// Capture the current live-config fingerprint.
 pub fn config_fingerprint() -> ConfigFingerprint {
+    capture_fingerprint(None)
+}
+
+fn capture_fingerprint(previous: Option<&ConfigFingerprint>) -> ConfigFingerprint {
     let mut paths = current_config_paths();
     let rules_dir = config_dir().join("agent-detection");
     if let Ok(entries) = std::fs::read_dir(&rules_dir) {
@@ -1264,15 +1302,30 @@ pub fn config_fingerprint() -> ConfigFingerprint {
     }
     paths.sort();
     paths.dedup();
+    let reusable = |path: &Path, modified: Option<SystemTime>, len: u64| {
+        let settled = modified
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age >= RACY_MTIME_WINDOW);
+        let previous = previous?.0.iter().find(|(p, _)| p == path)?.1.as_ref()?;
+        (settled && previous.modified == modified && previous.len == len).then_some(previous.hash)
+    };
     ConfigFingerprint(
         paths
             .into_iter()
             .map(|path| {
-                let stamp = std::fs::read(&path).ok().map(|contents| {
-                    use std::hash::{DefaultHasher, Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    contents.hash(&mut hasher);
-                    hasher.finish()
+                let stamp = std::fs::metadata(&path).ok().and_then(|meta| {
+                    let (modified, len) = (meta.modified().ok(), meta.len());
+                    let hash = match reusable(&path, modified, len) {
+                        Some(hash) => hash,
+                        None => {
+                            use std::hash::{DefaultHasher, Hash, Hasher};
+                            let contents = std::fs::read(&path).ok()?;
+                            let mut hasher = DefaultHasher::new();
+                            contents.hash(&mut hasher);
+                            hasher.finish()
+                        }
+                    };
+                    Some(FileStamp { modified, len, hash })
                 });
                 (path, stamp)
             })
@@ -1861,22 +1914,63 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
 
+        // Chained `refresh` calls, as the daemon polls.
         let empty = config_fingerprint();
         write(&cfg_dir.join("config.toml"), "theme = 'a'\n");
-        let first = config_fingerprint();
+        let first = empty.refresh();
         assert_ne!(empty, first);
 
         // Same-length rewrites must still trigger even on filesystems with a
         // coarse modification-time resolution.
         write(&cfg_dir.join("config.toml"), "theme = 'b'\n");
-        let second = config_fingerprint();
+        let second = first.refresh();
         assert_ne!(first, second);
 
         write(
             &cfg_dir.join("agent-detection/gemini.toml"),
             "[agent]\nid = 'gemini'\n",
         );
-        assert_ne!(second, config_fingerprint());
+        let third = second.refresh();
+        assert_ne!(second, third);
+
+        std::fs::remove_file(cfg_dir.join("agent-detection/gemini.toml")).unwrap();
+        assert_ne!(third, third.refresh());
+    }
+
+    #[test]
+    fn config_fingerprint_refresh_reuses_settled_stamps_until_a_file_changes() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("fingerprint-settled");
+        let home = scratch_dir("fingerprint-settled-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        let config = cfg_dir.join("config.toml");
+        let settle = |contents: &str| {
+            write(&config, contents);
+            std::fs::File::open(&config)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+                )
+                .unwrap();
+        };
+
+        settle("theme = 'a'\n");
+        let first = config_fingerprint();
+        assert_eq!(first, first.refresh());
+
+        // A settled file whose size and mtime are unchanged is not re-read:
+        // the stale hash is reused (the price of the stat-only poll).
+        settle("theme = 'b'\n");
+        assert_eq!(first, first.refresh());
+
+        // Any real edit moves the mtime, so it is picked up.
+        write(&config, "theme = 'c'\n");
+        assert_ne!(first, first.refresh());
+        assert_eq!(first.refresh(), config_fingerprint());
     }
 
     #[test]
