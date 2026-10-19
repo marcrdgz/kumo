@@ -35,11 +35,22 @@ what goes on the right-hand side.
 | <kbd>n</kbd> / <kbd>p</kbd> | `next-session` / `prev-session` | Cycle sessions |
 | <kbd>1</kbd>–<kbd>9</kbd> | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position |
 | <kbd>b</kbd> | `toggle-sidebar` | Toggle the sidebar |
-| <kbd>f</kbd> | `workspace-finder` | Open workspace finder (project layout — search sessions/tabs) |
 | <kbd>i</kbd> | `agent-inbox` | Focus the agent inbox (blocked · done · running) |
 | <kbd>d</kbd> | `detach` | Detach (daemon keeps running) |
 | <kbd>?</kbd> | `show-keybinds` | Keybind showcase — every leader binding at a glance |
 | <kbd>Esc</kbd> | — | Exit leader mode |
+
+## Palette-only actions
+
+These have no stock key: run them from the <kbd>leader+?</kbd> command palette,
+or bind them in `[keymap.bindings]`.
+
+| Action id | Action |
+| --- | --- |
+| `workspace-finder` | Open workspace finder (project layout — search sessions/tabs) |
+| `settings` | Open settings (theme, agent skills) |
+| `rename-session` | Rename the active session |
+| `close-session` | Close the active session |
 
 ## Remapping
 

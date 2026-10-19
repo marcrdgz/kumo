@@ -227,9 +227,8 @@ impl View {
         if matches.is_empty() {
             text(f, dd.x + 2, body_top, "no matching commands", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
         }
-        for (row, keymap_idx) in matches.iter().copied().skip(self.keybind_overlay.scroll).enumerate() {
+        for (row, entry) in matches.iter().skip(self.keybind_overlay.scroll).enumerate() {
             let i = self.keybind_overlay.scroll + row;
-            let b = &self.keymap[keymap_idx];
             let y = body_top + row as u16;
             if y >= body_bottom {
                 break;
@@ -242,9 +241,8 @@ impl View {
             }
             let keys = Style::default().fg(if selected { theme.secondary } else { theme.accent }).bg(bg).add_modifier(Modifier::BOLD);
             let desc = Style::default().fg(if selected { theme.fg } else { theme.panel_muted }).bg(bg);
-            let chord = bindings::chord_display(b.key);
-            text(f, dd.x + 2, y, &chord, keys, max_keys);
-            text(f, dd.x + 2 + max_keys + 2, y, palette_action_desc(b.action), desc, inner_w.saturating_sub(max_keys + 2));
+            text(f, dd.x + 2, y, &entry.chord_label(), keys, max_keys);
+            text(f, dd.x + 2 + max_keys + 2, y, palette_action_desc(entry.action), desc, inner_w.saturating_sub(max_keys + 2));
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         text(f, dd.x + 2, dd.bottom() - 2, "↑/↓ select · enter run · esc close", footer, inner_w);

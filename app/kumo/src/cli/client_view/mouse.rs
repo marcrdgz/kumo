@@ -76,8 +76,7 @@ impl View {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(item) = self.command_palette_item_at(x, y) {
                         let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
-                        if let Some(keymap_idx) = matches.get(item).copied() {
-                            let action = self.keymap[keymap_idx].action;
+                        if let Some(action) = matches.get(item).map(|entry| entry.action) {
                             self.keybind_overlay.open = false;
                             self.run_action(action)?;
                         }

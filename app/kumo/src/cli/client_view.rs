@@ -2008,6 +2008,15 @@ impl View {
             Action::OpenSidebarFilter => unreachable!("sidebar filter handled before session lookup"),
             Action::AgentInbox => self.open_inbox(),
             Action::WorkspaceFinder => self.open_finder(),
+            Action::OpenSettings => self.open_settings(),
+            Action::RenameSession => {
+                if let Some(idx) = self.session_index(&session) {
+                    self.open_rename_session_popup(idx);
+                }
+            }
+            Action::CloseSession => {
+                let _ = self.send(&Command::SessionKill { name: session });
+            }
         }
         self.mark_dirty();
         Ok(())
@@ -2334,6 +2343,14 @@ impl View {
         self.popup.target = Some(PopupTarget::RenamePane(pid));
         self.popup.open = true;
         self.ctx_menu.open = false;
+        self.mark_dirty();
+    }
+
+    fn open_settings(&mut self) {
+        self.settings.open = true;
+        self.settings.tab = 0;
+        self.settings.selected = self.theme_idx;
+        self.settings.skill_feedback = None;
         self.mark_dirty();
     }
 
@@ -3064,12 +3081,7 @@ impl View {
                 let _ = self.send(&Command::ReloadConfig);
             }
             "keybinds" => self.open_keybind_overlay(),
-            "settings" => {
-                self.settings.open = true;
-                self.settings.tab = 0;
-                self.settings.selected = self.theme_idx;
-                self.settings.skill_feedback = None;
-            }
+            "settings" => self.open_settings(),
             "detach" => {
                 let _ = self.send(&Command::Detach);
                 self.detach_requested = true;
@@ -3283,8 +3295,7 @@ impl View {
             }
             KeyCode::Enter => {
                 let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
-                if let Some(index) = matches.get(self.keybind_overlay.selected).copied() {
-                    let action = self.keymap[index].action;
+                if let Some(action) = matches.get(self.keybind_overlay.selected).map(|entry| entry.action) {
                     self.keybind_overlay.open = false;
                     self.run_action(action)?;
                     return Ok(());
@@ -3347,7 +3358,11 @@ impl View {
     fn keybind_overlay_rect(&self) -> Option<Rect> {
         let (w, h) = (self.cols, self.rows);
         let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let max_desc = self.keymap.iter().map(|b| palette_action_desc(b.action).chars().count()).max().unwrap_or(10) as u16;
+        let max_desc = bindings::palette_entries(&self.keymap)
+            .iter()
+            .map(|entry| palette_action_desc(entry.action).chars().count())
+            .max()
+            .unwrap_or(10) as u16;
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
         let lines = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
@@ -3720,22 +3735,21 @@ fn palette_action_desc(action: Action) -> &'static str {
     }
 }
 
-fn command_palette_matches(keymap: &[Binding], query: &str) -> Vec<usize> {
+fn command_palette_matches<'a>(keymap: &'a [Binding], query: &str) -> Vec<bindings::PaletteEntry<'a>> {
     let needles: Vec<String> = query.split_whitespace().map(str::to_ascii_lowercase).collect();
-    keymap
-        .iter()
-        .enumerate()
-        .filter_map(|(index, binding)| {
+    bindings::palette_entries(keymap)
+        .into_iter()
+        .filter(|entry| {
             let haystack = format!(
                 "{} {} {} {} {}",
-                bindings::action_id(binding.action),
-                palette_action_desc(binding.action),
-                binding.group.label(),
-                bindings::chord_display(binding.key),
-                binding.keys
+                bindings::action_id(entry.action),
+                palette_action_desc(entry.action),
+                entry.group().label(),
+                entry.chord_label(),
+                entry.binding.map(|b| b.keys.as_str()).unwrap_or_default()
             )
             .to_ascii_lowercase();
-            needles.iter().all(|needle| haystack.contains(needle)).then_some(index)
+            needles.iter().all(|needle| haystack.contains(needle))
         })
         .collect()
 }
@@ -4335,7 +4349,7 @@ mod tests {
         view.layout = Some(one_pane_layout());
         let matches = command_palette_matches(&view.keymap, "focus right");
         assert_eq!(matches.len(), 1);
-        assert_eq!(view.keymap[matches[0]].action, Action::Focus(Dir::Right));
+        assert_eq!(matches[0].action, Action::Focus(Dir::Right));
 
         let sidebar_was_open = view.sidebar_open;
         view.open_keybind_overlay();
@@ -4347,6 +4361,30 @@ mod tests {
 
         assert!(!view.keybind_overlay.open);
         assert_eq!(view.sidebar_open, !sidebar_was_open);
+    }
+
+    /// Settings and session rename have no stock chord; the palette is how
+    /// users discover them.
+    #[test]
+    fn command_palette_runs_unbound_session_and_settings_actions() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        let run = |view: &mut View, query: &str| {
+            view.open_keybind_overlay();
+            for ch in query.chars() {
+                view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+            }
+            assert_eq!(command_palette_matches(&view.keymap, &view.keybind_overlay.input).len(), 1, "{query}");
+            view.on_overlay_key(key(KeyCode::Enter)).unwrap();
+        };
+
+        run(&mut view, "open settings");
+        assert!(view.settings.open);
+        view.settings.open = false;
+
+        run(&mut view, "rename the active session");
+        assert!(view.popup.open);
+        assert!(matches!(view.popup.target, Some(PopupTarget::RenameSession(0))));
     }
 
     #[test]
