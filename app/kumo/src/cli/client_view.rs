@@ -3591,7 +3591,7 @@ mod tests {
 
     pub(super) fn cell(text: &str, width: u16) -> WireCell {
         WireCell {
-            text: text.to_string(),
+            text: text.into(),
             fg: None,
             bg: None,
             bold: false,

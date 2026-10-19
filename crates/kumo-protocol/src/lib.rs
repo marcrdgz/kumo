@@ -35,6 +35,11 @@ use std::io::{self, Read};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Inline small-string type of [`WireCell::text`]: it serializes exactly like
+/// `String` (wire-identical), but keeps short graphemes off the heap, so a
+/// full frame does not allocate once per cell on either side of the socket.
+pub use compact_str::CompactString;
+
 #[cfg(feature = "crossterm")]
 mod crossterm;
 
@@ -241,7 +246,7 @@ pub struct WireMouseEvent {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct WireCell {
     /// Grapheme to draw; empty for cells with no content.
-    pub text: String,
+    pub text: CompactString,
     /// Packed 0xRRGGBB foreground; `None` = default.
     pub fg: Option<u32>,
     /// Packed 0xRRGGBB background; `None` = default.
@@ -1409,6 +1414,54 @@ mod tests {
         let mut expected = (payload.len() as u32).to_le_bytes().to_vec();
         expected.extend_from_slice(&payload);
         assert_eq!(encode(&msg).unwrap(), expected);
+    }
+
+    #[test]
+    fn wire_cell_text_keeps_the_string_wire_format() {
+        // The pre-`CompactString` shape of `WireCell`: older peers still
+        // encode and decode this, so the bytes must not change.
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct StringCell {
+            text: String,
+            fg: Option<u32>,
+            bg: Option<u32>,
+            bold: bool,
+            italic: bool,
+            underline: bool,
+            inverse: bool,
+            faint: bool,
+            cell_width: u16,
+        }
+        let config = bincode::config::standard();
+        // Inline (short) and heap (> 24 bytes) graphemes.
+        for text in ["", "a", "👩‍👩‍👧‍👦", "a-grapheme-longer-than-the-inline-limit"] {
+            let cell = WireCell {
+                text: text.into(),
+                fg: Some(0x123456),
+                bg: None,
+                bold: true,
+                italic: false,
+                underline: true,
+                inverse: false,
+                faint: false,
+                cell_width: 1,
+            };
+            let legacy = StringCell {
+                text: text.to_string(),
+                fg: Some(0x123456),
+                bg: None,
+                bold: true,
+                italic: false,
+                underline: true,
+                inverse: false,
+                faint: false,
+                cell_width: 1,
+            };
+            let bytes = bincode::serde::encode_to_vec(&cell, config).unwrap();
+            assert_eq!(bytes, bincode::serde::encode_to_vec(&legacy, config).unwrap());
+            let (decoded, _): (WireCell, _) = bincode::serde::decode_from_slice(&bytes, config).unwrap();
+            assert_eq!(decoded, cell);
+        }
     }
 
     #[test]
