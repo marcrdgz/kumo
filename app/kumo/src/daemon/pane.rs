@@ -60,6 +60,11 @@ pub struct Pane {
     /// Viewport position where the terminal cursor was last drawn, so the
     /// previous cursor cell can be cleared on a row-level render.
     last_cursor: Option<(u16, u16)>,
+    /// Viewport row of the visible Codex composer placeholder as of the last
+    /// render. While set, the pane is treated as a Codex composer and the
+    /// whole viewport is scanned for composer backgrounds; otherwise only
+    /// redrawn rows are, since a newly drawn placeholder lands on one.
+    codex_placeholder_row: Option<usize>,
     /// Answers terminal capability probes as a plain xterm (no mouse caps).
     xtgettcap: XtgettcapTracker,
     /// Whether a link modifier (Cmd/Ctrl/Option) is currently held. Links are
@@ -390,6 +395,7 @@ impl Pane {
             dirty: true,
             full_redraw: true,
             last_cursor: None,
+            codex_placeholder_row: None,
             xtgettcap: XtgettcapTracker::new(),
             link_mods: false,
         };
@@ -579,14 +585,9 @@ impl Pane {
 
     /// Re-render only the rows that changed since the last frame into `cache`
     /// (the pane's retained viewport buffer), skipping clean rows via the
-    /// render-state dirty patch. Maintains `screen_rows` for agent-state
-    /// detection. Returns the agent status when this is an AI CLI pane.
-    pub fn render_dirty(
-        &mut self,
-        area: Rect,
-        focused: bool,
-        cache: &mut Buffer,
-    ) -> Option<AgentStatus> {
+    /// render-state dirty patch. Agent status is not derived here: the
+    /// daemon samples it at its own cadence via [`Pane::agent_status`].
+    pub fn render_dirty(&mut self, area: Rect, focused: bool, cache: &mut Buffer) {
         let area_x = area.x;
         let area_y = area.y;
         let aw = area.width as i32;
@@ -635,30 +636,23 @@ impl Pane {
         // asynchronous, so also recognize the visible placeholder here; this
         // prevents the first frame from showing only the prompt text while
         // the three-line background arrives on a later refresh.
-        let mut codex_row_bg: HashMap<usize, RColor> = HashMap::new();
-        let mut composer_text: HashMap<usize, String> = HashMap::new();
-        let mut composer_bg: HashMap<usize, RColor> = HashMap::new();
-        // Collect all composer metadata in one viewport pass. The blank-cell
-        // backgrounds are harmless to retain for non-Codex panes and avoid a
-        // second full scan once the visible placeholder has classified the
-        // pane as a Codex composer.
-        self.vt.for_each_cell(|row, _col, rc, _selected, _row_dirty| {
-            if row >= ah as usize {
-                return;
-            }
-            let line = composer_text.entry(row).or_default();
-            line.push_str(rc.text);
-            let blank = rc.text.trim().is_empty();
-            if !blank && rc.has_bg {
-                composer_bg.entry(row).or_insert_with(|| rgb(rc.bg));
-            }
-            if blank && rc.has_bg {
-                codex_row_bg.entry(row).or_insert_with(|| rgb(rc.bg));
-            }
+        //
+        // Only a Codex composer needs the whole viewport scanned. Other panes
+        // scan just the rows about to be redrawn, which is where a newly drawn
+        // placeholder would appear; finding one upgrades the frame to a full
+        // scan so the composer is complete on that same frame.
+        let scan_all = full
+            || self.agent_rule_id() == Some("codex")
+            || self.codex_placeholder_row.is_some();
+        let mut scan = ComposerScan::collect(&mut self.vt, ah as usize, |row, row_dirty| {
+            scan_all || row_dirty || dirty.contains(&row)
         });
-        let placeholder_row = composer_text
-            .iter()
-            .find_map(|(&row, text)| text.contains("Ask Codex to do anything").then_some(row));
+        if !scan_all && scan.placeholder_row().is_some() {
+            scan = ComposerScan::collect(&mut self.vt, ah as usize, |_, _| true);
+        }
+        let placeholder_row = scan.placeholder_row();
+        self.codex_placeholder_row = placeholder_row;
+        let ComposerScan { text_bg: composer_bg, blank_bg: mut codex_row_bg, .. } = scan;
         let codex_composer = self.agent_rule_id() == Some("codex") || placeholder_row.is_some();
         if codex_composer {
             // The initial placeholder is often the only non-empty cell in
@@ -684,7 +678,7 @@ impl Pane {
             if yy >= area_y + area.height {
                 continue;
             }
-            // `codex_row_bg` is collected for every pane; only a Codex
+            // `codex_row_bg` is collected for every scanned row; only a Codex
             // composer may spread a blank cell's background across its row.
             let row_bg = if codex_composer {
                 codex_row_bg.get(&y).copied().unwrap_or(bg)
@@ -837,15 +831,10 @@ impl Pane {
             }
         }
 
-        let dirty_vec: Vec<usize> = dirty.iter().copied().collect();
+        let mut dirty_vec: Vec<usize> = dirty.into_iter().collect();
+        dirty_vec.sort_unstable();
         self.vt.clear_dirty(&dirty_vec);
         self.dirty = false;
-
-        if self.is_ai_cli() {
-            Some(self.compute_agent_status())
-        } else {
-            None
-        }
     }
 
     /// Raw agent lifecycle state, derived from a snapshot of the terminal
@@ -854,10 +843,6 @@ impl Pane {
     /// `Unknown` is the fallback when classification fails. The daemon turns
     /// Idle into `Done` (finished-but-unseen) around focus.
     pub fn agent_status(&self) -> AgentStatus {
-        self.compute_agent_status()
-    }
-
-    fn compute_agent_status(&self) -> AgentStatus {
         if self.dead {
             return AgentStatus::Idle;
         }
@@ -966,6 +951,44 @@ pub(crate) fn normalize_agent_kind(command: &str) -> String {
     let file = command.rsplit('/').next().unwrap_or(command);
     let name = file.split_whitespace().next().unwrap_or(file);
     name.strip_suffix(".exe").unwrap_or(name).to_string()
+}
+
+/// Per-row composer metadata gathered from the cells of the scanned rows.
+#[derive(Default)]
+struct ComposerScan {
+    /// Row text, for spotting the Codex placeholder.
+    text: HashMap<usize, String>,
+    /// First explicit background of a non-blank cell on each row.
+    text_bg: HashMap<usize, RColor>,
+    /// First explicit background of a blank cell on each row.
+    blank_bg: HashMap<usize, RColor>,
+}
+
+impl ComposerScan {
+    fn collect(
+        vt: &mut vt::Terminal,
+        rows: usize,
+        should_visit: impl FnMut(usize, bool) -> bool,
+    ) -> Self {
+        let mut scan = Self::default();
+        vt.for_each_cell_filtered(should_visit, |row, _col, rc, _selected, _row_dirty| {
+            if row >= rows {
+                return;
+            }
+            scan.text.entry(row).or_default().push_str(rc.text);
+            if rc.has_bg {
+                let bgs = if rc.text.trim().is_empty() { &mut scan.blank_bg } else { &mut scan.text_bg };
+                bgs.entry(row).or_insert_with(|| rgb(rc.bg));
+            }
+        });
+        scan
+    }
+
+    fn placeholder_row(&self) -> Option<usize> {
+        self.text
+            .iter()
+            .find_map(|(&row, text)| text.contains("Ask Codex to do anything").then_some(row))
+    }
 }
 
 fn rgb(c: ColorRgb) -> RColor {
@@ -1290,8 +1313,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Feed already happened; render the pane once so `screen_rows` (the
-    /// agent-status source) reflects the fed output.
+    /// Feed already happened; render the pane once, as the daemon tick does
+    /// before its periodic agent-status sample.
     fn render_pane(p: &mut Pane) {
         let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
@@ -1338,6 +1361,17 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         p.last_output = Instant::now() - Duration::from_secs(10);
         render_pane(&mut p);
         assert_eq!(p.agent_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn agent_status_does_not_depend_on_render() {
+        // Rendering no longer samples agent status, so the periodic refresh
+        // must see output that arrived after the last rendered frame.
+        let mut p = test_pane(true);
+        render_pane(&mut p);
+        p.feed(b"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        p.feed(b"working on it - esc interrupt");
+        assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
@@ -1644,6 +1678,56 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     }
 
     #[test]
+    fn codex_placeholder_on_partial_frame_fills_clean_composer_rows() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        // The composer background is drawn first, before the placeholder
+        // classifies the pane as Codex: a plain pane must not spread it. The
+        // cursor is parked away from the composer: the row it leaves is
+        // always redrawn, which would hide a missed composer row.
+        p.feed(b"\x1b[48;2;18;28;38m\x1b[9;1H \x1b[10;1H \x1b[11;1H  \x1b[20;1H");
+        p.render_dirty(area, false, &mut buf);
+        let default_bg = rgb(test_theme().term_bg);
+        assert_eq!(buf.cell((60, 10)).unwrap().bg, default_bg);
+
+        // Only the placeholder row changes on this partial frame. The
+        // composer row two lines below it is clean, yet must still be filled.
+        p.feed(b"\x1b[9;1H\x1b[2m\xe2\x80\xba Ask Codex to do anything\x1b[m");
+        p.render_dirty(area, false, &mut buf);
+        let composer_bg = RColor::Rgb(18, 28, 38);
+        for y in 8..11 {
+            assert_eq!(buf.cell((60, y)).unwrap().bg, composer_bg, "row {y}");
+        }
+    }
+
+    #[test]
+    fn codex_placeholder_is_remembered_until_it_disappears() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"\x1b[48;2;18;28;38m\x1b[9;1H \x1b[10;1H \x1b[11;1H  ");
+        p.feed(b"\x1b[9;1H\x1b[2m\xe2\x80\xba Ask Codex to do anything\x1b[m\x1b[20;1H");
+        p.render_dirty(area, false, &mut buf);
+
+        // Redraw the row below the placeholder without any background. The
+        // placeholder row itself is clean now, but the pane is still a Codex
+        // composer, so the row keeps the placeholder's background.
+        p.feed(b"\x1b[10;1Hx");
+        p.render_dirty(area, false, &mut buf);
+        let composer_bg = RColor::Rgb(18, 28, 38);
+        assert_eq!(buf.cell((60, 9)).unwrap().bg, composer_bg);
+
+        // Once the placeholder is gone the pane is a plain pane again: a
+        // blank cell's background stays on that cell.
+        p.feed(b"\x1b[2J\x1b[5;1Hhello \x1b[48;2;40;48;80m  \x1b[mworld");
+        p.render_dirty(area, false, &mut buf);
+        let default_bg = rgb(test_theme().term_bg);
+        assert_eq!(buf.cell((6, 4)).unwrap().bg, RColor::Rgb(40, 48, 80));
+        assert_eq!(buf.cell((60, 4)).unwrap().bg, default_bg);
+    }
+
+    #[test]
     fn opencode_raw_output_renders_without_losing_rows() {
         let mut p = test_pane(false);
         let area = Rect::new(0, 0, 120, 40);
@@ -1761,9 +1845,25 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
     #[test]
     #[ignore = "local render benchmark; run with --ignored --nocapture"]
     fn benchmark_partial_render_120x40() {
+        bench_partial_render("shell", false);
+    }
+
+    #[test]
+    #[ignore = "local render benchmark; run with --ignored --nocapture"]
+    fn benchmark_partial_render_ai_120x40() {
+        bench_partial_render("ai", true);
+    }
+
+    /// One echoed key per frame into a full 120x40 viewport.
+    fn bench_partial_render(label: &str, is_ai: bool) {
         let area = Rect::new(0, 0, 120, 40);
-        let mut pane = test_pane(false);
+        let mut pane = test_pane(is_ai);
         let mut buffer = Buffer::empty(area);
+        let mut screen = String::new();
+        for i in 0..39 {
+            screen.push_str(&format!("output line {i} with some text to scan\r\n"));
+        }
+        pane.feed(screen.as_bytes());
         pane.feed(b"prompt> ");
         pane.render_dirty(area, true, &mut buffer);
 
@@ -1774,9 +1874,24 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         }
         let elapsed = start.elapsed();
         eprintln!(
-            "daemon render benchmark 120x40: total={elapsed:?} per_render={:?}",
+            "daemon render benchmark 120x40 ({label}): total={elapsed:?} per_render={:?}",
             elapsed / 500
         );
+    }
+
+    #[test]
+    fn render_clears_every_redrawn_row() {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        p.feed(b"hello");
+        p.render_dirty(area, false, &mut buf);
+
+        // After a full frame only the row that changes since must be dirty;
+        // stale dirty flags would make every later frame redraw them.
+        p.feed(b"!");
+        p.vt.refresh();
+        assert_eq!(p.vt.dirty_rows(), vec![0]);
     }
 
     #[test]
