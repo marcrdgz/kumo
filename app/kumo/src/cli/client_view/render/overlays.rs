@@ -76,7 +76,7 @@ impl View {
             };
             let hovered = self.popup.hover == Some(btn);
             let st = if hovered {
-                Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD)
+                Style::default().fg(contrast_fg(&theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
             };
@@ -227,9 +227,8 @@ impl View {
         if matches.is_empty() {
             text(f, dd.x + 2, body_top, "no matching commands", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
         }
-        for (row, keymap_idx) in matches.iter().copied().skip(self.keybind_overlay.scroll).enumerate() {
+        for (row, entry) in matches.iter().skip(self.keybind_overlay.scroll).enumerate() {
             let i = self.keybind_overlay.scroll + row;
-            let b = &self.keymap[keymap_idx];
             let y = body_top + row as u16;
             if y >= body_bottom {
                 break;
@@ -242,9 +241,8 @@ impl View {
             }
             let keys = Style::default().fg(if selected { theme.secondary } else { theme.accent }).bg(bg).add_modifier(Modifier::BOLD);
             let desc = Style::default().fg(if selected { theme.fg } else { theme.panel_muted }).bg(bg);
-            let chord = bindings::chord_display(b.key);
-            text(f, dd.x + 2, y, &chord, keys, max_keys);
-            text(f, dd.x + 2 + max_keys + 2, y, palette_action_desc(b.action), desc, inner_w.saturating_sub(max_keys + 2));
+            text(f, dd.x + 2, y, &entry.chord_label(), keys, max_keys);
+            text(f, dd.x + 2 + max_keys + 2, y, palette_action_desc(entry.action), desc, inner_w.saturating_sub(max_keys + 2));
         }
         let footer = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
         text(f, dd.x + 2, dd.bottom() - 2, "↑/↓ select · enter run · esc close", footer, inner_w);
@@ -282,7 +280,7 @@ impl View {
         for (is_yes, label) in [(true, " Remove (y) "), (false, " Cancel (n) ")] {
             if let Some(rect) = self.session_close_confirm_button_rect(is_yes) {
                 let st = if is_yes {
-                    Style::default().fg(RColor::Black).bg(theme.green).add_modifier(Modifier::BOLD)
+                    Style::default().fg(contrast_fg(&theme, theme.green)).bg(theme.green).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD)
                 };
@@ -332,9 +330,9 @@ impl View {
             let sel = i == self.finder.selected;
             let bg = if sel { theme.accent } else { theme.panel_sep };
             for cx in (dd.x + 1)..(dd.x + 1 + inner_w + 2) { put(f, cx, y, " ", Style::default().bg(bg)); }
-            let fg = if sel { RColor::Black } else { theme.fg };
+            let fg = if sel { contrast_fg(&theme, bg) } else { theme.fg };
             let marker = if sel { "▸" } else { " " };
-            put(f, dd.x + 2, y, marker, Style::default().fg(if sel { RColor::Black } else { theme.accent }).bg(bg));
+            put(f, dd.x + 2, y, marker, Style::default().fg(if sel { fg } else { theme.accent }).bg(bg));
             let label = match item {
                 FinderItem::Session { name, .. } => name.clone(),
                 FinderItem::Tab { session_name, tab_name, .. } => format!("{session_name} / {tab_name}"),

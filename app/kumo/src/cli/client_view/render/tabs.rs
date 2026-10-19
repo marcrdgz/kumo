@@ -21,7 +21,7 @@ impl View {
             let active = sess.active_tab == *idx;
             let is_hover = self.tab_hover == Some(*idx);
             let pill_bg = if active { theme.accent } else { lighten(bar_bg, 14) };
-            let fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.fg };
+            let fg = if active { contrast_fg(&theme, pill_bg) } else { theme.fg };
             fill(f, *pill, pill_bg);
             let base_style = if active {
                 Style::default().fg(fg).bg(pill_bg).add_modifier(Modifier::BOLD)
@@ -51,7 +51,7 @@ impl View {
                 );
             }
             if is_hover {
-                let x_fg = if active { RColor::Rgb(0x0a, 0x0a, 0x0a) } else { theme.red };
+                let x_fg = if active { fg } else { theme.red };
                 put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
             } else {
                 // Persistent ghost close hint: always visible (clickable without

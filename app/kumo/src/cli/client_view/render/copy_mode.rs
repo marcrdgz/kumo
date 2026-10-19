@@ -24,12 +24,12 @@ impl View {
                         if is_active {
                             cell.set_style(cell.style().add_modifier(Modifier::REVERSED).add_modifier(Modifier::BOLD));
                             cell.set_bg(theme.accent);
-                            cell.set_fg(RColor::Black);
+                            cell.set_fg(contrast_fg(&theme, theme.accent));
                         } else {
                             cell.set_style(cell.style().add_modifier(Modifier::UNDERLINED));
                             // tint background slightly
                             cell.set_bg(theme.secondary);
-                            cell.set_fg(RColor::Black);
+                            cell.set_fg(contrast_fg(&theme, theme.secondary));
                         }
                     }
                 }
@@ -117,12 +117,11 @@ impl View {
             // Hint moved to status bar right side (like "copied" toast) — nothing to draw here.
             return;
         }
-        // Active search — rectangle popup (black bg, red border) like rename, below tabs with gap
+        // Active search — rectangle popup (panel bg, red border) like rename, below tabs with gap
         let theme = self.current_theme();
         if let Some(dd) = self.copy_search_rect() {
-            // black bg, red border
-            let border = Style::default().fg(theme.red).bg(RColor::Black);
-            fill(f, dd, RColor::Black);
+            let border = Style::default().fg(theme.red).bg(theme.panel_sep);
+            fill(f, dd, theme.panel_sep);
             let (bx0, by0, bx1, by1) = (dd.x, dd.y, dd.right() - 1, dd.bottom() - 1);
             put(f, bx0, by0, "┌", border);
             put(f, bx1, by0, "┐", border);
@@ -138,7 +137,7 @@ impl View {
             }
             let inner_w = dd.width.saturating_sub(4);
             // title
-            let title = Style::default().fg(RColor::White).bg(RColor::Black).add_modifier(Modifier::BOLD);
+            let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
             let title_text = if cs.search_forward { "search /" } else { "search ?" };
             text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
             let field = input_style(&theme);
@@ -164,9 +163,8 @@ impl View {
             if cursor == input.chars().count() && col < dd.x + 2 + field_w {
                 put(f, col, dd.y + 2, " ", field.add_modifier(Modifier::REVERSED));
             }
-            // footer hint (white on black, like context menu)
             let hint = "enter: search  esc: cancel  n/N: next";
-            let hint_style = Style::default().fg(RColor::White).bg(RColor::Black);
+            let hint_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
             text(f, dd.x + 2, dd.y + 3, hint, hint_style, inner_w);
             return;
         }

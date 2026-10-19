@@ -1417,7 +1417,7 @@ mod tests {
         let divider = row_text(12);
         assert!(!divider.is_empty() && divider.chars().all(|c| c == '─'), "divider between the panels: {divider:?}");
         let dstyle = buf.cell((5, 12)).unwrap().style();
-        assert_eq!(dstyle.fg, Some(RColor::Gray), "divider is grey");
+        assert_eq!(dstyle.fg, Some(view.current_theme().panel_muted), "divider is muted");
         let agents_label = row_text(13);
         assert!(
             agents_label.starts_with("agents") && agents_label.contains("grouped"),

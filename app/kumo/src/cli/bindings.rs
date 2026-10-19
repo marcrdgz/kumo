@@ -92,6 +92,9 @@ pub(crate) enum Action {
     OpenSidebarFilter,
     AgentInbox,
     WorkspaceFinder,
+    OpenSettings,
+    RenameSession,
+    CloseSession,
 }
 
 /// Logical group a binding belongs to, used to organize the showcase.
@@ -229,6 +232,40 @@ const BINDING_SPECS: &[BindingSpec] = &[
     BindingSpec { key: chord(KeyCode::Char('i')), keys: "i", desc: "open the agent inbox", group: Group::General, action: Action::AgentInbox },
     BindingSpec { key: chord(KeyCode::Char('?')), keys: "?", desc: "open the searchable command palette", group: Group::General, action: Action::ShowKeybinds },
 ];
+
+/// Actions with no stock chord that the command palette still lists, so they
+/// stay discoverable. Users can bind any of them in `[keymap.bindings]`.
+const PALETTE_ONLY_ACTIONS: &[Action] =
+    &[Action::WorkspaceFinder, Action::OpenSettings, Action::RenameSession, Action::CloseSession];
+
+/// One command-palette row: a keymap binding, or a palette-only action the
+/// keymap does not bind.
+pub(crate) struct PaletteEntry<'a> {
+    pub(crate) binding: Option<&'a Binding>,
+    pub(crate) action: Action,
+}
+
+impl PaletteEntry<'_> {
+    /// Chord shown in the palette's key column (empty when unbound).
+    pub(crate) fn chord_label(&self) -> String {
+        self.binding.map(|b| chord_display(b.key)).unwrap_or_default()
+    }
+
+    pub(crate) fn group(&self) -> Group {
+        self.binding.map(|b| b.group).unwrap_or_else(|| action_group(self.action))
+    }
+}
+
+/// The command palette's rows: every keymap binding in showcase order, then
+/// the palette-only actions the user has not bound themselves.
+pub(crate) fn palette_entries(keymap: &[Binding]) -> Vec<PaletteEntry<'_>> {
+    let bound = keymap.iter().map(|b| PaletteEntry { binding: Some(b), action: b.action });
+    let unbound = PALETTE_ONLY_ACTIONS
+        .iter()
+        .filter(|action| !keymap.iter().any(|b| b.action == **action))
+        .map(|&action| PaletteEntry { binding: None, action });
+    bound.chain(unbound).collect()
+}
 
 /// The stock bindings as a runtime table.
 fn stock_bindings() -> Vec<Binding> {
@@ -373,6 +410,9 @@ pub(crate) fn action_id(action: Action) -> &'static str {
         Action::EnterCopyModeSearch => "copy-mode-search",
         Action::OpenSidebarFilter => "sidebar-filter",
         Action::AgentInbox => "agent-inbox",
+        Action::OpenSettings => "settings",
+        Action::RenameSession => "rename-session",
+        Action::CloseSession => "close-session",
     }
 }
 
@@ -431,6 +471,9 @@ pub(crate) fn action_from_id(id: &str) -> Option<Action> {
         "copy-mode-search" | "copy-search" => Action::EnterCopyModeSearch,
         "sidebar-filter" | "filter-sidebar" => Action::OpenSidebarFilter,
         "agent-inbox" | "focus-agent-inbox" => Action::AgentInbox,
+        "settings" | "open-settings" => Action::OpenSettings,
+        "rename-session" => Action::RenameSession,
+        "close-session" | "kill-session" => Action::CloseSession,
         _ => return None,
     })
 }
@@ -466,6 +509,9 @@ pub(crate) fn action_desc(action: Action) -> &'static str {
         Action::EnterCopyModeSearch => "search forward (enter copy-mode)",
         Action::OpenSidebarFilter => "filter worktrees in the project sidebar",
         Action::AgentInbox => "open the agent inbox",
+        Action::OpenSettings => "open settings (theme, agent skills)",
+        Action::RenameSession => "rename the active session",
+        Action::CloseSession => "close the active session",
     }
 }
 
@@ -481,9 +527,10 @@ pub(crate) fn action_group(action: Action) -> Group {
         | Action::RotateLayout | Action::ShowPaneNumbers | Action::EnterCopyMode | Action::EnterCopyModeSearch => Group::Panes,
         Action::NewTab | Action::CloseTab | Action::RenameTab | Action::NextTab | Action::PrevTab | Action::JumpTab(_) => Group::Tabs,
         Action::NewSession | Action::NewWorktree | Action::NextSession | Action::PrevSession
-        | Action::JumpSession(_) => Group::Sessions,
+        | Action::JumpSession(_) | Action::RenameSession | Action::CloseSession => Group::Sessions,
         Action::ToggleSidebar | Action::OpenSidebarFilter => Group::Chrome,
-        Action::Detach | Action::ShowKeybinds | Action::AgentInbox | Action::WorkspaceFinder => Group::General,
+        Action::Detach | Action::ShowKeybinds | Action::AgentInbox | Action::WorkspaceFinder
+        | Action::OpenSettings => Group::General,
     }
 }
 
@@ -679,6 +726,24 @@ mod tests {
         let added = keymap.iter().find(|b| b.key.code == KeyCode::Char('s')).unwrap();
         assert_eq!(added.keys, "s");
         assert_eq!(added.desc, action_desc(Action::SplitVertical));
+    }
+
+    #[test]
+    fn palette_lists_unbound_actions_once() {
+        let stock = stock_bindings();
+        let entries = palette_entries(&stock);
+        assert_eq!(entries.len(), stock.len() + PALETTE_ONLY_ACTIONS.len());
+        for action in PALETTE_ONLY_ACTIONS {
+            let entry = entries.iter().find(|e| e.action == *action).expect("palette-only action listed");
+            assert!(entry.binding.is_none() && entry.chord_label().is_empty());
+            assert_eq!(action_from_id(action_id(*action)), Some(*action), "palette-only actions are bindable");
+        }
+
+        // Binding one in the config shows its chord instead of a duplicate row.
+        let keymap = build_keymap(&HashMap::from([("ctrl+s".to_string(), "settings".to_string())]));
+        let settings: Vec<_> = palette_entries(&keymap).into_iter().filter(|e| e.action == Action::OpenSettings).collect();
+        assert_eq!(settings.len(), 1);
+        assert_eq!(settings[0].chord_label(), "ctrl+s");
     }
 
     #[test]

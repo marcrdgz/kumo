@@ -92,6 +92,8 @@ const ACTION_GROUPS: { label: string; actions: string[] }[] = [
       'jump-session-7',
       'jump-session-8',
       'jump-session-9',
+      'rename-session',
+      'close-session',
     ],
   },
   { label: 'chrome', actions: ['toggle-sidebar'] },
@@ -104,6 +106,7 @@ const ACTION_GROUPS: { label: string; actions: string[] }[] = [
       'copy-mode-search',
       'agent-inbox',
       'workspace-finder',
+      'settings',
     ],
   },
 ];

@@ -31,6 +31,7 @@ use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
 use crate::cli::status_bar::{self, SlotContext};
+use crate::cli::text_input::{TextEdit, TextInput};
 use kumo_core::config::{SidebarLayout, StatusBarConfig, StatusWidget, ToastPosition};
 
 mod copy_mode;
@@ -96,15 +97,27 @@ fn lighten(c: RColor, amt: u8) -> RColor {
 /// Foreground with readable contrast against a theme's input surface. Built-in
 /// themes use a light neutral surface; custom themes may choose a dark one.
 fn input_fg(theme: &OwnedTheme) -> RColor {
-    let rgb = match theme.input_bg {
+    contrast_fg(theme, theme.input_bg)
+}
+
+/// Text color for chrome drawn on a filled theme color (selected rows, badges,
+/// focused fields). Dark text is kept while it meets WCAG AA (4.5:1), which
+/// holds for every built-in accent; dark custom fills get light text.
+fn contrast_fg(theme: &OwnedTheme, bg: RColor) -> RColor {
+    let rgb = match bg {
         RColor::Rgb(r, g, b) => Some((r, g, b)),
         RColor::Indexed(i) => theme.palette.get(i as usize).map(|c| (c.r, c.g, c.b)),
         RColor::Black | RColor::DarkGray | RColor::Red | RColor::Blue | RColor::Magenta => return RColor::White,
         _ => return RColor::Black,
     };
     let Some((r, g, b)) = rgb else { return RColor::Black };
-    let luminance = 299 * r as u32 + 587 * g as u32 + 114 * b as u32;
-    if luminance >= 140_000 { RColor::Black } else { RColor::White }
+    let linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    // Black reaches 4.5:1 at (L + 0.05) / 0.05 >= 4.5, i.e. L >= 0.175.
+    if luminance >= 0.175 { RColor::Black } else { RColor::White }
 }
 
 fn input_style(theme: &OwnedTheme) -> Style {
@@ -722,6 +735,10 @@ pub struct View {
     sidebar_filter_active: bool,
     dirty: bool,
     detach_requested: bool,
+    /// A write to the daemon socket failed. Most call sites ignore `send`'s
+    /// result, so the render loop polls this to reconnect instead of the
+    /// client silently running against a dead connection.
+    connection_lost: bool,
     status_bar: StatusBarConfig,
     hostname: String,
     clock_str: String,
@@ -856,6 +873,7 @@ impl View {
             plus_rect: None,
             dirty: true,
             detach_requested: false,
+            connection_lost: false,
             status_bar,
             hostname,
             clock_str,
@@ -1024,8 +1042,25 @@ impl View {
         self.detach_requested
     }
 
+    pub fn connection_lost(&self) -> bool {
+        self.connection_lost
+    }
+
+    /// Show a transient notice line (e.g. after the client reconnected).
+    pub fn show_notice(&mut self, message: impl Into<String>) {
+        self.notice = Some((message.into(), Instant::now()));
+        self.mark_dirty();
+    }
+
     fn send(&mut self, cmd: &Command) -> Result<()> {
-        kumo_core::protocol::write_framed(&mut self.out, cmd)?;
+        use std::io::Write;
+        let frame = kumo_core::protocol::encode(cmd)?;
+        // Only a socket write failure means the daemon is gone; an encode
+        // error is a local bug and must not trigger a reconnect.
+        if let Err(e) = self.out.write_all(&frame).and_then(|()| self.out.flush()) {
+            self.connection_lost = true;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -1974,6 +2009,15 @@ impl View {
             Action::OpenSidebarFilter => unreachable!("sidebar filter handled before session lookup"),
             Action::AgentInbox => self.open_inbox(),
             Action::WorkspaceFinder => self.open_finder(),
+            Action::OpenSettings => self.open_settings(),
+            Action::RenameSession => {
+                if let Some(idx) = self.session_index(&session) {
+                    self.open_rename_session_popup(idx);
+                }
+            }
+            Action::CloseSession => {
+                let _ = self.send(&Command::SessionKill { name: session });
+            }
         }
         self.mark_dirty();
         Ok(())
@@ -2192,29 +2236,14 @@ impl View {
             KeyCode::Down | KeyCode::Char('j') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.finder.selected + 1 < self.finder.filtered.len() { self.finder.selected += 1; let max_vis = 8usize; if self.finder.selected >= self.finder.scroll + max_vis { self.finder.scroll += 1; } self.mark_dirty(); }
             }
-            KeyCode::Backspace => {
-                if self.finder.cursor > 0 && !self.finder.input.is_empty() {
-                    let mut chars: Vec<char> = self.finder.input.chars().collect();
-                    if self.finder.cursor <= chars.len() { chars.remove(self.finder.cursor -1); self.finder.input = chars.into_iter().collect(); self.finder.cursor -=1; self.finder_rebuild(); self.mark_dirty(); }
+            _ => match TextInput::new(&mut self.finder.input, &mut self.finder.cursor).handle_key(key) {
+                TextEdit::Changed => {
+                    self.finder_rebuild();
+                    self.mark_dirty();
                 }
-            }
-            KeyCode::Delete => {
-                let mut chars: Vec<char> = self.finder.input.chars().collect();
-                if self.finder.cursor < chars.len() { chars.remove(self.finder.cursor); self.finder.input = chars.into_iter().collect(); self.finder_rebuild(); self.mark_dirty(); }
-            }
-            KeyCode::Left => { if self.finder.cursor>0 { self.finder.cursor-=1; self.mark_dirty(); } }
-            KeyCode::Right => { if self.finder.cursor < self.finder.input.chars().count() { self.finder.cursor+=1; self.mark_dirty(); } }
-            KeyCode::Home => { self.finder.cursor = 0; self.mark_dirty(); }
-            KeyCode::End => { self.finder.cursor = self.finder.input.chars().count(); self.mark_dirty(); }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                let mut chars: Vec<char> = self.finder.input.chars().collect();
-                chars.insert(self.finder.cursor, c);
-                self.finder.input = chars.into_iter().collect();
-                self.finder.cursor += 1;
-                self.finder_rebuild();
-                self.mark_dirty();
-            }
-            _ => {}
+                TextEdit::Moved => self.mark_dirty(),
+                TextEdit::Ignored => {}
+            },
         }
     }
 
@@ -2300,6 +2329,14 @@ impl View {
         self.popup.target = Some(PopupTarget::RenamePane(pid));
         self.popup.open = true;
         self.ctx_menu.open = false;
+        self.mark_dirty();
+    }
+
+    fn open_settings(&mut self) {
+        self.settings.open = true;
+        self.settings.tab = 0;
+        self.settings.selected = self.theme_idx;
+        self.settings.skill_feedback = None;
         self.mark_dirty();
     }
 
@@ -2623,72 +2660,12 @@ impl View {
             self.mark_dirty();
             return;
         }
-        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Enter => self.commit_name(),
-            KeyCode::Backspace if key.modifiers.intersects(word_back) => self.popup_delete_word_backward(),
-            KeyCode::Backspace => self.popup_backspace(),
-            KeyCode::Char('h') if ctrl => self.popup_backspace(),
-            KeyCode::Char('w') if ctrl => self.popup_delete_word_backward(),
-            KeyCode::Char('u') if ctrl => self.popup_delete_to_start(),
-            KeyCode::Delete if key.modifiers.intersects(word_back) => self.popup_delete_word_forward(),
-            KeyCode::Delete => self.popup_delete_forward(),
-            KeyCode::Left => self.popup.cursor = self.popup.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                let len = self.popup.name.chars().count();
-                self.popup.cursor = self.popup.cursor.min(len).saturating_add(1).min(len);
-            }
-            KeyCode::Home => self.popup.cursor = 0,
-            KeyCode::End => self.popup.cursor = self.popup.name.chars().count(),
-            KeyCode::Char(c) if !ctrl => self.popup_insert(c),
-            _ => {}
+        if key.code == KeyCode::Enter {
+            self.commit_name();
+        } else {
+            TextInput::new(&mut self.popup.name, &mut self.popup.cursor).handle_key(key);
         }
         self.mark_dirty();
-    }
-
-    fn popup_insert(&mut self, ch: char) {
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        self.popup.name.insert(b, ch);
-        self.popup.cursor += 1;
-    }
-
-    fn popup_backspace(&mut self) {
-        if self.popup.cursor == 0 {
-            return;
-        }
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        let prev_len = self.popup.name[..b].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0);
-        let start = b - prev_len;
-        self.popup.name.replace_range(start..b, "");
-        self.popup.cursor -= 1;
-    }
-
-    fn popup_delete_word_backward(&mut self) {
-        let (name, cursor) = delete_word_backward(&self.popup.name, self.popup.cursor);
-        self.popup.name = name;
-        self.popup.cursor = cursor;
-    }
-
-    fn popup_delete_word_forward(&mut self) {
-        let name = delete_word_forward(&self.popup.name, self.popup.cursor);
-        self.popup.name = name;
-    }
-
-    fn popup_delete_forward(&mut self) {
-        let len = self.popup.name.chars().count();
-        if self.popup.cursor >= len {
-            return;
-        }
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        let next_len = self.popup.name[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-        self.popup.name.replace_range(b..b + next_len, "");
-    }
-
-    fn popup_delete_to_start(&mut self) {
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        self.popup.name.replace_range(..b, "");
-        self.popup.cursor = 0;
     }
 
     fn on_worktree_create_key(&mut self, key: KeyEvent) {
@@ -2697,7 +2674,6 @@ impl View {
             self.mark_dirty();
             return;
         }
-        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Enter => self.commit_worktree_create(),
@@ -2719,29 +2695,10 @@ impl View {
                 }
                 self.mark_dirty();
             }
-            KeyCode::Char(c) if c.is_ascii_digit() && !ctrl && self.worktree_create.focus == WorktreeCreateFocus::CreateFrom => {
-                // Number keys 1-5 select tab when focus is CreateFrom and input empty or with modifier? Use with no extra logic:
-                // Only treat as tab switch if the input field is empty and digit 1-5 pressed alone – otherwise insert digit.
-                // To avoid conflict with typing numbers (e.g. #123), only switch when digit pressed with no other char pending?
-                // Instead use Ctrl+digit for tab switch.
-                self.worktree_create_insert(c);
+            _ => {
+                let (text, cursor) = self.worktree_create_focused_mut();
+                TextInput::new(text, cursor).handle_key(key);
             }
-            KeyCode::Backspace if key.modifiers.intersects(word_back) => self.worktree_create_delete_word_backward(),
-            KeyCode::Backspace => self.worktree_create_backspace(),
-            KeyCode::Char('h') if ctrl => self.worktree_create_backspace(),
-            KeyCode::Char('w') if ctrl => self.worktree_create_delete_word_backward(),
-            KeyCode::Char('u') if ctrl => self.worktree_create_delete_to_start(),
-            KeyCode::Delete if key.modifiers.intersects(word_back) => self.worktree_create_delete_word_forward(),
-            KeyCode::Delete => self.worktree_create_delete_forward(),
-            KeyCode::Left => self.worktree_create_move_cursor(-1),
-            KeyCode::Right => self.worktree_create_move_cursor(1),
-            KeyCode::Home => self.worktree_create_set_cursor(0),
-            KeyCode::End => {
-                let len = self.worktree_create_focused_len();
-                self.worktree_create_set_cursor(len);
-            }
-            KeyCode::Char(c) if !ctrl => self.worktree_create_insert(c),
-            _ => {}
         }
         self.mark_dirty();
     }
@@ -2755,98 +2712,11 @@ impl View {
         }
     }
 
-    fn worktree_create_focused_len(&self) -> usize {
-        match self.worktree_create.focus {
-            WorktreeCreateFocus::CreateFrom => self.worktree_create.create_from.chars().count(),
-            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_override.chars().count(),
-            WorktreeCreateFocus::Note => self.worktree_create.note.chars().count(),
-            WorktreeCreateFocus::Agent => self.worktree_create.agent.chars().count(),
-        }
-    }
-
-    fn worktree_create_set_cursor(&mut self, pos: usize) {
-        let len = self.worktree_create_focused_len();
-        let clamped = pos.min(len);
-        match self.worktree_create.focus {
-            WorktreeCreateFocus::CreateFrom => self.worktree_create.cursor = clamped,
-            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor = clamped,
-            WorktreeCreateFocus::Note => self.worktree_create.note_cursor = clamped,
-            WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor = clamped,
-        }
-    }
-
-    fn worktree_create_move_cursor(&mut self, delta: isize) {
-        let len = self.worktree_create_focused_len();
-        let cur = match self.worktree_create.focus {
-            WorktreeCreateFocus::CreateFrom => self.worktree_create.cursor,
-            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor,
-            WorktreeCreateFocus::Note => self.worktree_create.note_cursor,
-            WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor,
-        } as isize;
-        let next = (cur + delta).clamp(0, len as isize) as usize;
-        self.worktree_create_set_cursor(next);
-    }
-
-    fn worktree_create_insert(&mut self, ch: char) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let b = char_idx_to_byte(s, *cursor);
-        s.insert(b, ch);
-        *cursor += 1;
-    }
-
-    fn worktree_create_backspace(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        if *cursor == 0 {
-            return;
-        }
-        let b = char_idx_to_byte(s, *cursor);
-        let prev_len = s[..b].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0);
-        let start = b - prev_len;
-        s.replace_range(start..b, "");
-        *cursor -= 1;
-    }
-
-    fn worktree_create_delete_word_backward(&mut self) {
-        let focus = self.worktree_create.focus;
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let (new_s, new_c) = delete_word_backward(s, *cursor);
-        *s = new_s;
-        *cursor = new_c;
-        // Keep focus sync (delete_word handles)
-        let _ = focus;
-    }
-
-    fn worktree_create_delete_word_forward(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let new_s = delete_word_forward(s, *cursor);
-        *s = new_s;
-    }
-
-    fn worktree_create_delete_forward(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let len = s.chars().count();
-        if *cursor >= len {
-            return;
-        }
-        let b = char_idx_to_byte(s, *cursor);
-        let next_len = s[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-        s.replace_range(b..b + next_len, "");
-    }
-
-    fn worktree_create_delete_to_start(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let b = char_idx_to_byte(s, *cursor);
-        s.replace_range(..b, "");
-        *cursor = 0;
-    }
-
     fn worktree_create_paste(&mut self, text: &str) {
         // Paste sanitizes newlines to spaces for these fields
         let clean = text.replace(['\n', '\r'], " ");
         let (s, cursor) = self.worktree_create_focused_mut();
-        let b = char_idx_to_byte(s, *cursor);
-        s.insert_str(b, &clean);
-        *cursor += clean.chars().count();
+        TextInput::new(s, cursor).insert_str(&clean);
         self.mark_dirty();
     }
 
@@ -3030,12 +2900,7 @@ impl View {
                 let _ = self.send(&Command::ReloadConfig);
             }
             "keybinds" => self.open_keybind_overlay(),
-            "settings" => {
-                self.settings.open = true;
-                self.settings.tab = 0;
-                self.settings.selected = self.theme_idx;
-                self.settings.skill_feedback = None;
-            }
+            "settings" => self.open_settings(),
             "detach" => {
                 let _ = self.send(&Command::Detach);
                 self.detach_requested = true;
@@ -3249,49 +3114,19 @@ impl View {
             }
             KeyCode::Enter => {
                 let matches = command_palette_matches(&self.keymap, &self.keybind_overlay.input);
-                if let Some(index) = matches.get(self.keybind_overlay.selected).copied() {
-                    let action = self.keymap[index].action;
+                if let Some(action) = matches.get(self.keybind_overlay.selected).map(|entry| entry.action) {
                     self.keybind_overlay.open = false;
                     self.run_action(action)?;
                     return Ok(());
                 }
             }
-            KeyCode::Backspace => {
-                if self.keybind_overlay.cursor > 0 {
-                    let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
-                    chars.remove(self.keybind_overlay.cursor - 1);
-                    self.keybind_overlay.input = chars.into_iter().collect();
-                    self.keybind_overlay.cursor -= 1;
-                    self.keybind_overlay.selected = 0;
-                    self.keybind_overlay.scroll = 0;
+            _ => {
+                let overlay = &mut self.keybind_overlay;
+                if TextInput::new(&mut overlay.input, &mut overlay.cursor).handle_key(key) == TextEdit::Changed {
+                    overlay.selected = 0;
+                    overlay.scroll = 0;
                 }
             }
-            KeyCode::Delete => {
-                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
-                if self.keybind_overlay.cursor < chars.len() {
-                    chars.remove(self.keybind_overlay.cursor);
-                    self.keybind_overlay.input = chars.into_iter().collect();
-                    self.keybind_overlay.selected = 0;
-                    self.keybind_overlay.scroll = 0;
-                }
-            }
-            KeyCode::Left => self.keybind_overlay.cursor = self.keybind_overlay.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                self.keybind_overlay.cursor = (self.keybind_overlay.cursor + 1).min(self.keybind_overlay.input.chars().count());
-            }
-            KeyCode::Home => self.keybind_overlay.cursor = 0,
-            KeyCode::End => self.keybind_overlay.cursor = self.keybind_overlay.input.chars().count(),
-            KeyCode::Char(c)
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
-            {
-                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
-                chars.insert(self.keybind_overlay.cursor, c);
-                self.keybind_overlay.input = chars.into_iter().collect();
-                self.keybind_overlay.cursor += 1;
-                self.keybind_overlay.selected = 0;
-                self.keybind_overlay.scroll = 0;
-            }
-            _ => {}
         }
         self.normalize_command_palette_scroll();
         self.mark_dirty();
@@ -3313,7 +3148,11 @@ impl View {
     fn keybind_overlay_rect(&self) -> Option<Rect> {
         let (w, h) = (self.cols, self.rows);
         let max_keys = self.keymap.iter().map(|b| b.keys.chars().count()).max().unwrap_or(4) as u16;
-        let max_desc = self.keymap.iter().map(|b| palette_action_desc(b.action).chars().count()).max().unwrap_or(10) as u16;
+        let max_desc = bindings::palette_entries(&self.keymap)
+            .iter()
+            .map(|entry| palette_action_desc(entry.action).chars().count())
+            .max()
+            .unwrap_or(10) as u16;
         let inner = (max_keys + 2 + max_desc).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
         let lines = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
@@ -3686,73 +3525,23 @@ fn palette_action_desc(action: Action) -> &'static str {
     }
 }
 
-fn command_palette_matches(keymap: &[Binding], query: &str) -> Vec<usize> {
+fn command_palette_matches<'a>(keymap: &'a [Binding], query: &str) -> Vec<bindings::PaletteEntry<'a>> {
     let needles: Vec<String> = query.split_whitespace().map(str::to_ascii_lowercase).collect();
-    keymap
-        .iter()
-        .enumerate()
-        .filter_map(|(index, binding)| {
+    bindings::palette_entries(keymap)
+        .into_iter()
+        .filter(|entry| {
             let haystack = format!(
                 "{} {} {} {} {}",
-                bindings::action_id(binding.action),
-                palette_action_desc(binding.action),
-                binding.group.label(),
-                bindings::chord_display(binding.key),
-                binding.keys
+                bindings::action_id(entry.action),
+                palette_action_desc(entry.action),
+                entry.group().label(),
+                entry.chord_label(),
+                entry.binding.map(|b| b.keys.as_str()).unwrap_or_default()
             )
             .to_ascii_lowercase();
-            needles.iter().all(|needle| haystack.contains(needle)).then_some(index)
+            needles.iter().all(|needle| haystack.contains(needle))
         })
         .collect()
-}
-
-/// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).
-fn char_idx_to_byte(s: &str, ci: usize) -> usize {
-    s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
-}
-
-/// Delete the word before `cursor` in `s`; returns the new string and cursor.
-fn delete_word_backward(s: &str, cursor: usize) -> (String, usize) {
-    let chars: Vec<char> = s.chars().collect();
-    let mut pos = cursor.min(chars.len());
-    while pos > 0 && chars[pos - 1].is_whitespace() {
-        pos -= 1;
-    }
-    while pos > 0 && !chars[pos - 1].is_whitespace() {
-        pos -= 1;
-    }
-    let start = pos;
-    let end = cursor.min(chars.len());
-    if start == end {
-        return (s.to_string(), cursor);
-    }
-    let sb = char_idx_to_byte(s, start);
-    let eb = char_idx_to_byte(s, end);
-    let mut out = s.to_string();
-    out.replace_range(sb..eb, "");
-    (out, start)
-}
-
-/// Delete the word after `cursor` in `s`; returns the new string.
-fn delete_word_forward(s: &str, cursor: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    let mut pos = cursor.min(len);
-    while pos < len && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    while pos < len && !chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    let start = cursor.min(len);
-    if pos == start {
-        return s.to_string();
-    }
-    let sb = char_idx_to_byte(s, start);
-    let eb = char_idx_to_byte(s, pos);
-    let mut out = s.to_string();
-    out.replace_range(sb..eb, "");
-    out
 }
 
 /// Compose a grouped agent entry label `kind · space · pane` within `avail`
@@ -3888,6 +3677,7 @@ mod tests {
             plus_rect: None,
             dirty: false,
             detach_requested: false,
+            connection_lost: false,
             status_bar: StatusBarConfig::default(),
             hostname: "testhost".to_string(),
             clock_str: "12:00".to_string(),
@@ -4300,7 +4090,7 @@ mod tests {
         view.layout = Some(one_pane_layout());
         let matches = command_palette_matches(&view.keymap, "focus right");
         assert_eq!(matches.len(), 1);
-        assert_eq!(view.keymap[matches[0]].action, Action::Focus(Dir::Right));
+        assert_eq!(matches[0].action, Action::Focus(Dir::Right));
 
         let sidebar_was_open = view.sidebar_open;
         view.open_keybind_overlay();
@@ -4312,6 +4102,46 @@ mod tests {
 
         assert!(!view.keybind_overlay.open);
         assert_eq!(view.sidebar_open, !sidebar_was_open);
+    }
+
+    /// Settings and session rename have no stock chord; the palette is how
+    /// users discover them.
+    #[test]
+    fn command_palette_runs_unbound_session_and_settings_actions() {
+        let mut view = test_view();
+        view.layout = Some(one_pane_layout());
+        let run = |view: &mut View, query: &str| {
+            view.open_keybind_overlay();
+            for ch in query.chars() {
+                view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+            }
+            assert_eq!(command_palette_matches(&view.keymap, &view.keybind_overlay.input).len(), 1, "{query}");
+            view.on_overlay_key(key(KeyCode::Enter)).unwrap();
+        };
+
+        run(&mut view, "open settings");
+        assert!(view.settings.open);
+        view.settings.open = false;
+
+        run(&mut view, "rename the active session");
+        assert!(view.popup.open);
+        assert!(matches!(view.popup.target, Some(PopupTarget::RenameSession(0))));
+    }
+
+    /// Popup fields share one editor, so readline keys work in the palette
+    /// query too and editing it resets the selection.
+    #[test]
+    fn command_palette_query_uses_shared_text_editing() {
+        let mut view = test_view();
+        view.open_keybind_overlay();
+        for ch in "focus right".chars() {
+            view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+        }
+        view.keybind_overlay.selected = 1;
+        view.on_overlay_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).unwrap();
+        assert_eq!(view.keybind_overlay.input, "focus ");
+        assert_eq!(view.keybind_overlay.cursor, 6);
+        assert_eq!(view.keybind_overlay.selected, 0);
     }
 
     #[test]
@@ -4346,6 +4176,23 @@ mod tests {
         assert_eq!(input_fg(&dark_input_theme), RColor::White, "dark custom inputs need light text");
     }
 
+    /// Chrome drawn on theme fills must stay readable on custom (e.g. light)
+    /// themes whose accents are dark, without changing the built-in look.
+    #[test]
+    fn filled_chrome_text_contrasts_with_its_fill() {
+        for theme in theme::all_themes(None) {
+            for fill in [theme.accent, theme.secondary, theme.green] {
+                assert_eq!(contrast_fg(&theme, fill), RColor::Black, "{}: built-in fills keep dark text", theme.name);
+            }
+        }
+        let mut light = OwnedTheme::from(THEMES[0]);
+        light.accent = RColor::Rgb(0x1f, 0x3a, 0x93);
+        assert_eq!(contrast_fg(&light, light.accent), RColor::White, "dark accents need light text");
+        light.accent = RColor::Indexed(4);
+        light.palette[4] = kumo_core::color::ColorRgb::new(0x10, 0x10, 0x40);
+        assert_eq!(contrast_fg(&light, light.accent), RColor::White, "indexed fills resolve through the palette");
+    }
+
     #[test]
     fn recompute_geometry_requests_pane_sizes() {
         let layout = Layout {
@@ -4378,6 +4225,46 @@ mod tests {
         assert!(view.subscribed.contains(&1));
         let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
         assert_eq!(view.sent_sizes.get(&1), Some(&(inner.width, inner.height)));
+    }
+
+    /// Fire-and-forget sends (`let _ = self.send(..)`) must not hide a dead
+    /// daemon socket: the render loop polls `connection_lost` to reconnect.
+    #[test]
+    fn failed_fire_and_forget_send_marks_connection_lost() {
+        let (out, peer) = UnixStream::pair().unwrap();
+        let mut view = test_view();
+        view.out = out;
+        view.layout = Some(Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
+                is_linked_worktree: false,
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        });
+        view.recompute_geometry();
+        assert!(!view.connection_lost(), "a live socket must not be reported as lost");
+
+        drop(peer);
+        view.subscribed.clear();
+        view.sent_sizes.clear();
+        view.recompute_geometry();
+        assert!(view.connection_lost(), "a failed write must be surfaced");
     }
 
     /// A toast event lands in the toast stack, keeps the loop repainting via
@@ -4424,16 +4311,6 @@ mod tests {
         assert!(view.poll_github(Instant::now()));
         assert_eq!(view.github_status, Some(expected));
         assert!(view.github_query.is_none());
-    }
-
-    #[test]
-    fn delete_word_backward_plain() {
-        assert_eq!(delete_word_backward("foo bar", 7), ("foo ".to_string(), 4));
-    }
-
-    #[test]
-    fn delete_word_forward_plain() {
-        assert_eq!(delete_word_forward("foo bar", 4), "foo ".to_string());
     }
 
     #[test]

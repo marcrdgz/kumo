@@ -8,6 +8,8 @@ pub mod client;
 pub mod client_view;
 #[cfg(unix)]
 pub mod status_bar;
+#[cfg(unix)]
+pub mod text_input;
 // The control CLI lives in `cli/cli.rs` (the `cli` folder hosts the whole
 // client); the name collision is intentional.
 #[cfg(unix)]

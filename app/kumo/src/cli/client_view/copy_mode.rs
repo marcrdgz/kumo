@@ -296,37 +296,9 @@ impl View {
                 KeyCode::Enter => {
                     commit = Some(cs.search_input.clone());
                 }
-                KeyCode::Backspace => {
-                    if cs.search_cursor > 0 && !cs.search_input.is_empty() {
-                        let mut chars: Vec<char> = cs.search_input.chars().collect();
-                        let idx = cs.search_cursor.min(chars.len()).saturating_sub(1);
-                        chars.remove(idx);
-                        cs.search_input = chars.into_iter().collect();
-                        cs.search_cursor = cs.search_cursor.saturating_sub(1);
-                    }
+                _ => {
+                    TextInput::new(&mut cs.search_input, &mut cs.search_cursor).handle_key(key);
                 }
-                KeyCode::Delete => {
-                    let mut chars: Vec<char> = cs.search_input.chars().collect();
-                    if cs.search_cursor < chars.len() {
-                        chars.remove(cs.search_cursor);
-                        cs.search_input = chars.into_iter().collect();
-                    }
-                }
-                KeyCode::Left => { cs.search_cursor = cs.search_cursor.saturating_sub(1); }
-                KeyCode::Right => {
-                    let len = cs.search_input.chars().count();
-                    if cs.search_cursor < len { cs.search_cursor += 1; }
-                }
-                KeyCode::Home => { cs.search_cursor = 0; }
-                KeyCode::End => { cs.search_cursor = cs.search_input.chars().count(); }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                    let mut chars: Vec<char> = cs.search_input.chars().collect();
-                    let idx = cs.search_cursor.min(chars.len());
-                    chars.insert(idx, c);
-                    cs.search_input = chars.into_iter().collect();
-                    cs.search_cursor += 1;
-                }
-                _ => {}
             }
         }
         if cancel {
