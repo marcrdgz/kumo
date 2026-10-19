@@ -579,8 +579,11 @@ impl View {
                     return Ok(());
                 }
                 if let Some((pid, rect)) = self.pane_at(x, y) {
+                    // Wheel ticks arrive in bursts; only a focus change is
+                    // worth a round trip.
+                    let focused = self.active_tab().is_some_and(|t| t.focus == pid);
                     let session = self.active_session().map(|s| s.name.clone());
-                    if let Some(session) = session {
+                    if let Some(session) = session.filter(|_| !focused) {
                         let _ = self.send(&Command::PaneFocus { session, pane_id: pid });
                     }
                     let inner = PaneGeom { pane_id: pid, rect }.inner();

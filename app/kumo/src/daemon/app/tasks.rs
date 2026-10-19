@@ -24,24 +24,24 @@ const ALERT_COOLDOWN: Duration = Duration::from_secs(3);
 const UPDATE_REFRESH: Duration = Duration::from_secs(6 * 3600);
 
 impl App {
-    /// Refresh cached git branches for all session workspaces (every
-    /// `BRANCH_REFRESH`). Spawns background threads for git lookups to avoid
-    /// blocking the main loop.
-    pub(super) fn refresh_branches(&mut self) {
+    /// Refresh cached git facts (branch, worktree classification) for all
+    /// session workspaces (every `BRANCH_REFRESH`). Spawns background threads
+    /// for git lookups to avoid blocking the main loop: the layout is rebuilt
+    /// on every focus/status change and must never wait on a `git` process.
+    pub(super) fn refresh_workspace_git(&mut self) {
         let now = Instant::now();
         let live: Vec<PathBuf> = self.sessions.iter().map(|s| s.workspace.clone()).collect();
 
         // Drain completed background git lookups
-        let mut branch_changed = false;
-        while let Ok((ws, branch)) = self.branch_rx.try_recv() {
-            self.pending_branch_lookups.remove(&ws);
-            let prev = self.branch_cache.get(&ws).and_then(|(b, _)| b.clone());
-            if prev != branch {
-                branch_changed = true;
+        let mut git_changed = false;
+        while let Ok((ws, git)) = self.git_rx.try_recv() {
+            self.pending_git_lookups.remove(&ws);
+            if self.git_cache.get(&ws).map(|(prev, _)| prev) != Some(&git) {
+                git_changed = true;
             }
-            self.branch_cache.insert(ws, (branch, now));
+            self.git_cache.insert(ws, (git, now));
         }
-        if branch_changed {
+        if git_changed {
             self.bump_layout_version();
         }
 
@@ -51,43 +51,51 @@ impl App {
         let stale: Vec<PathBuf> = live
             .iter()
             .filter(|ws| {
-                let is_stale = match self.branch_cache.get(*ws) {
+                let is_stale = match self.git_cache.get(*ws) {
                     Some((_, t)) => now.duration_since(*t) >= BRANCH_REFRESH,
                     None => true,
                 };
-                is_stale && !self.pending_branch_lookups.contains_key(*ws)
+                is_stale && !self.pending_git_lookups.contains_key(*ws)
             })
             .cloned()
             .collect();
         if !stale.is_empty() {
-            let tx = self.branch_tx.clone();
+            let tx = self.git_tx.clone();
             let lookups = stale.clone();
             let spawned = std::thread::Builder::new()
                 .name("kumo-git-branch".into())
                 .spawn(move || {
                     for ws in lookups {
-                        let branch = git_branch(&ws);
-                        let _ = tx.send((ws, branch));
+                        let git = WorkspaceGit::lookup(&ws);
+                        let _ = tx.send((ws, git));
                     }
                 });
             // Mark pending only once a worker owns the lookups: a failed spawn
             // never reports back, so the workspaces would stay pending forever.
             if spawned.is_ok() {
                 for ws in stale {
-                    self.pending_branch_lookups.insert(ws, now);
+                    self.pending_git_lookups.insert(ws, now);
                 }
             }
         }
         // Forget workspaces no session uses any more, including lookups still
         // in flight (e.g. a hung `git`); a late result is pruned on arrival.
-        self.branch_cache.retain(|ws, _| live.contains(ws));
-        self.pending_branch_lookups.retain(|ws, _| live.contains(ws));
+        self.git_cache.retain(|ws, _| live.contains(ws));
+        self.pending_git_lookups.retain(|ws, _| live.contains(ws));
     }
 
     /// Cached git branch for a session's workspace.
     pub(super) fn session_branch(&self, idx: usize) -> Option<BranchInfo> {
         let ws = &self.sessions[idx].workspace;
-        self.branch_cache.get(ws).and_then(|(b, _)| b.clone())
+        self.git_cache.get(ws).and_then(|(git, _)| git.branch.clone())
+    }
+
+    /// Cached worktree classification for a session's workspace: the main
+    /// worktree path and whether the workspace is a linked worktree. `None`
+    /// outside a repository or until the first background lookup lands.
+    pub(super) fn session_worktree(&self, idx: usize) -> Option<(PathBuf, bool)> {
+        let ws = &self.sessions[idx].workspace;
+        self.git_cache.get(ws).and_then(|(git, _)| git.worktree.clone())
     }
 
     /// Follow the workspace to the first pane in the first tab (`[terminal]
@@ -362,6 +370,25 @@ impl App {
                     tail,
                 );
             }
+        }
+    }
+}
+
+/// Git facts about a session workspace, gathered off the daemon thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct WorkspaceGit {
+    pub(super) branch: Option<BranchInfo>,
+    /// Main worktree path and whether the workspace is a linked worktree.
+    pub(super) worktree: Option<(PathBuf, bool)>,
+}
+
+impl WorkspaceGit {
+    /// Run the git lookups for `ws`. Spawns `git` processes, so it must only
+    /// run on a background worker.
+    fn lookup(ws: &std::path::Path) -> WorkspaceGit {
+        WorkspaceGit {
+            branch: git_branch(ws),
+            worktree: kumo_core::worktrees::classify_worktree(ws).ok(),
         }
     }
 }
