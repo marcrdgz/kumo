@@ -31,6 +31,7 @@ use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
 use crate::cli::status_bar::{self, SlotContext};
+use crate::cli::text_input::{TextEdit, TextInput};
 use kumo_core::config::{SidebarLayout, StatusBarConfig, StatusWidget, ToastPosition};
 
 mod copy_mode;
@@ -2235,29 +2236,14 @@ impl View {
             KeyCode::Down | KeyCode::Char('j') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.finder.selected + 1 < self.finder.filtered.len() { self.finder.selected += 1; let max_vis = 8usize; if self.finder.selected >= self.finder.scroll + max_vis { self.finder.scroll += 1; } self.mark_dirty(); }
             }
-            KeyCode::Backspace => {
-                if self.finder.cursor > 0 && !self.finder.input.is_empty() {
-                    let mut chars: Vec<char> = self.finder.input.chars().collect();
-                    if self.finder.cursor <= chars.len() { chars.remove(self.finder.cursor -1); self.finder.input = chars.into_iter().collect(); self.finder.cursor -=1; self.finder_rebuild(); self.mark_dirty(); }
+            _ => match TextInput::new(&mut self.finder.input, &mut self.finder.cursor).handle_key(key) {
+                TextEdit::Changed => {
+                    self.finder_rebuild();
+                    self.mark_dirty();
                 }
-            }
-            KeyCode::Delete => {
-                let mut chars: Vec<char> = self.finder.input.chars().collect();
-                if self.finder.cursor < chars.len() { chars.remove(self.finder.cursor); self.finder.input = chars.into_iter().collect(); self.finder_rebuild(); self.mark_dirty(); }
-            }
-            KeyCode::Left => { if self.finder.cursor>0 { self.finder.cursor-=1; self.mark_dirty(); } }
-            KeyCode::Right => { if self.finder.cursor < self.finder.input.chars().count() { self.finder.cursor+=1; self.mark_dirty(); } }
-            KeyCode::Home => { self.finder.cursor = 0; self.mark_dirty(); }
-            KeyCode::End => { self.finder.cursor = self.finder.input.chars().count(); self.mark_dirty(); }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                let mut chars: Vec<char> = self.finder.input.chars().collect();
-                chars.insert(self.finder.cursor, c);
-                self.finder.input = chars.into_iter().collect();
-                self.finder.cursor += 1;
-                self.finder_rebuild();
-                self.mark_dirty();
-            }
-            _ => {}
+                TextEdit::Moved => self.mark_dirty(),
+                TextEdit::Ignored => {}
+            },
         }
     }
 
@@ -2674,72 +2660,12 @@ impl View {
             self.mark_dirty();
             return;
         }
-        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Enter => self.commit_name(),
-            KeyCode::Backspace if key.modifiers.intersects(word_back) => self.popup_delete_word_backward(),
-            KeyCode::Backspace => self.popup_backspace(),
-            KeyCode::Char('h') if ctrl => self.popup_backspace(),
-            KeyCode::Char('w') if ctrl => self.popup_delete_word_backward(),
-            KeyCode::Char('u') if ctrl => self.popup_delete_to_start(),
-            KeyCode::Delete if key.modifiers.intersects(word_back) => self.popup_delete_word_forward(),
-            KeyCode::Delete => self.popup_delete_forward(),
-            KeyCode::Left => self.popup.cursor = self.popup.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                let len = self.popup.name.chars().count();
-                self.popup.cursor = self.popup.cursor.min(len).saturating_add(1).min(len);
-            }
-            KeyCode::Home => self.popup.cursor = 0,
-            KeyCode::End => self.popup.cursor = self.popup.name.chars().count(),
-            KeyCode::Char(c) if !ctrl => self.popup_insert(c),
-            _ => {}
+        if key.code == KeyCode::Enter {
+            self.commit_name();
+        } else {
+            TextInput::new(&mut self.popup.name, &mut self.popup.cursor).handle_key(key);
         }
         self.mark_dirty();
-    }
-
-    fn popup_insert(&mut self, ch: char) {
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        self.popup.name.insert(b, ch);
-        self.popup.cursor += 1;
-    }
-
-    fn popup_backspace(&mut self) {
-        if self.popup.cursor == 0 {
-            return;
-        }
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        let prev_len = self.popup.name[..b].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0);
-        let start = b - prev_len;
-        self.popup.name.replace_range(start..b, "");
-        self.popup.cursor -= 1;
-    }
-
-    fn popup_delete_word_backward(&mut self) {
-        let (name, cursor) = delete_word_backward(&self.popup.name, self.popup.cursor);
-        self.popup.name = name;
-        self.popup.cursor = cursor;
-    }
-
-    fn popup_delete_word_forward(&mut self) {
-        let name = delete_word_forward(&self.popup.name, self.popup.cursor);
-        self.popup.name = name;
-    }
-
-    fn popup_delete_forward(&mut self) {
-        let len = self.popup.name.chars().count();
-        if self.popup.cursor >= len {
-            return;
-        }
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        let next_len = self.popup.name[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-        self.popup.name.replace_range(b..b + next_len, "");
-    }
-
-    fn popup_delete_to_start(&mut self) {
-        let b = char_idx_to_byte(&self.popup.name, self.popup.cursor);
-        self.popup.name.replace_range(..b, "");
-        self.popup.cursor = 0;
     }
 
     fn on_worktree_create_key(&mut self, key: KeyEvent) {
@@ -2748,7 +2674,6 @@ impl View {
             self.mark_dirty();
             return;
         }
-        let word_back = KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Enter => self.commit_worktree_create(),
@@ -2770,29 +2695,10 @@ impl View {
                 }
                 self.mark_dirty();
             }
-            KeyCode::Char(c) if c.is_ascii_digit() && !ctrl && self.worktree_create.focus == WorktreeCreateFocus::CreateFrom => {
-                // Number keys 1-5 select tab when focus is CreateFrom and input empty or with modifier? Use with no extra logic:
-                // Only treat as tab switch if the input field is empty and digit 1-5 pressed alone – otherwise insert digit.
-                // To avoid conflict with typing numbers (e.g. #123), only switch when digit pressed with no other char pending?
-                // Instead use Ctrl+digit for tab switch.
-                self.worktree_create_insert(c);
+            _ => {
+                let (text, cursor) = self.worktree_create_focused_mut();
+                TextInput::new(text, cursor).handle_key(key);
             }
-            KeyCode::Backspace if key.modifiers.intersects(word_back) => self.worktree_create_delete_word_backward(),
-            KeyCode::Backspace => self.worktree_create_backspace(),
-            KeyCode::Char('h') if ctrl => self.worktree_create_backspace(),
-            KeyCode::Char('w') if ctrl => self.worktree_create_delete_word_backward(),
-            KeyCode::Char('u') if ctrl => self.worktree_create_delete_to_start(),
-            KeyCode::Delete if key.modifiers.intersects(word_back) => self.worktree_create_delete_word_forward(),
-            KeyCode::Delete => self.worktree_create_delete_forward(),
-            KeyCode::Left => self.worktree_create_move_cursor(-1),
-            KeyCode::Right => self.worktree_create_move_cursor(1),
-            KeyCode::Home => self.worktree_create_set_cursor(0),
-            KeyCode::End => {
-                let len = self.worktree_create_focused_len();
-                self.worktree_create_set_cursor(len);
-            }
-            KeyCode::Char(c) if !ctrl => self.worktree_create_insert(c),
-            _ => {}
         }
         self.mark_dirty();
     }
@@ -2806,98 +2712,11 @@ impl View {
         }
     }
 
-    fn worktree_create_focused_len(&self) -> usize {
-        match self.worktree_create.focus {
-            WorktreeCreateFocus::CreateFrom => self.worktree_create.create_from.chars().count(),
-            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_override.chars().count(),
-            WorktreeCreateFocus::Note => self.worktree_create.note.chars().count(),
-            WorktreeCreateFocus::Agent => self.worktree_create.agent.chars().count(),
-        }
-    }
-
-    fn worktree_create_set_cursor(&mut self, pos: usize) {
-        let len = self.worktree_create_focused_len();
-        let clamped = pos.min(len);
-        match self.worktree_create.focus {
-            WorktreeCreateFocus::CreateFrom => self.worktree_create.cursor = clamped,
-            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor = clamped,
-            WorktreeCreateFocus::Note => self.worktree_create.note_cursor = clamped,
-            WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor = clamped,
-        }
-    }
-
-    fn worktree_create_move_cursor(&mut self, delta: isize) {
-        let len = self.worktree_create_focused_len();
-        let cur = match self.worktree_create.focus {
-            WorktreeCreateFocus::CreateFrom => self.worktree_create.cursor,
-            WorktreeCreateFocus::BranchOverride => self.worktree_create.branch_cursor,
-            WorktreeCreateFocus::Note => self.worktree_create.note_cursor,
-            WorktreeCreateFocus::Agent => self.worktree_create.agent_cursor,
-        } as isize;
-        let next = (cur + delta).clamp(0, len as isize) as usize;
-        self.worktree_create_set_cursor(next);
-    }
-
-    fn worktree_create_insert(&mut self, ch: char) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let b = char_idx_to_byte(s, *cursor);
-        s.insert(b, ch);
-        *cursor += 1;
-    }
-
-    fn worktree_create_backspace(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        if *cursor == 0 {
-            return;
-        }
-        let b = char_idx_to_byte(s, *cursor);
-        let prev_len = s[..b].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0);
-        let start = b - prev_len;
-        s.replace_range(start..b, "");
-        *cursor -= 1;
-    }
-
-    fn worktree_create_delete_word_backward(&mut self) {
-        let focus = self.worktree_create.focus;
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let (new_s, new_c) = delete_word_backward(s, *cursor);
-        *s = new_s;
-        *cursor = new_c;
-        // Keep focus sync (delete_word handles)
-        let _ = focus;
-    }
-
-    fn worktree_create_delete_word_forward(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let new_s = delete_word_forward(s, *cursor);
-        *s = new_s;
-    }
-
-    fn worktree_create_delete_forward(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let len = s.chars().count();
-        if *cursor >= len {
-            return;
-        }
-        let b = char_idx_to_byte(s, *cursor);
-        let next_len = s[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-        s.replace_range(b..b + next_len, "");
-    }
-
-    fn worktree_create_delete_to_start(&mut self) {
-        let (s, cursor) = self.worktree_create_focused_mut();
-        let b = char_idx_to_byte(s, *cursor);
-        s.replace_range(..b, "");
-        *cursor = 0;
-    }
-
     fn worktree_create_paste(&mut self, text: &str) {
         // Paste sanitizes newlines to spaces for these fields
         let clean = text.replace(['\n', '\r'], " ");
         let (s, cursor) = self.worktree_create_focused_mut();
-        let b = char_idx_to_byte(s, *cursor);
-        s.insert_str(b, &clean);
-        *cursor += clean.chars().count();
+        TextInput::new(s, cursor).insert_str(&clean);
         self.mark_dirty();
     }
 
@@ -3301,42 +3120,13 @@ impl View {
                     return Ok(());
                 }
             }
-            KeyCode::Backspace => {
-                if self.keybind_overlay.cursor > 0 {
-                    let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
-                    chars.remove(self.keybind_overlay.cursor - 1);
-                    self.keybind_overlay.input = chars.into_iter().collect();
-                    self.keybind_overlay.cursor -= 1;
-                    self.keybind_overlay.selected = 0;
-                    self.keybind_overlay.scroll = 0;
+            _ => {
+                let overlay = &mut self.keybind_overlay;
+                if TextInput::new(&mut overlay.input, &mut overlay.cursor).handle_key(key) == TextEdit::Changed {
+                    overlay.selected = 0;
+                    overlay.scroll = 0;
                 }
             }
-            KeyCode::Delete => {
-                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
-                if self.keybind_overlay.cursor < chars.len() {
-                    chars.remove(self.keybind_overlay.cursor);
-                    self.keybind_overlay.input = chars.into_iter().collect();
-                    self.keybind_overlay.selected = 0;
-                    self.keybind_overlay.scroll = 0;
-                }
-            }
-            KeyCode::Left => self.keybind_overlay.cursor = self.keybind_overlay.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                self.keybind_overlay.cursor = (self.keybind_overlay.cursor + 1).min(self.keybind_overlay.input.chars().count());
-            }
-            KeyCode::Home => self.keybind_overlay.cursor = 0,
-            KeyCode::End => self.keybind_overlay.cursor = self.keybind_overlay.input.chars().count(),
-            KeyCode::Char(c)
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
-            {
-                let mut chars: Vec<char> = self.keybind_overlay.input.chars().collect();
-                chars.insert(self.keybind_overlay.cursor, c);
-                self.keybind_overlay.input = chars.into_iter().collect();
-                self.keybind_overlay.cursor += 1;
-                self.keybind_overlay.selected = 0;
-                self.keybind_overlay.scroll = 0;
-            }
-            _ => {}
         }
         self.normalize_command_palette_scroll();
         self.mark_dirty();
@@ -3752,55 +3542,6 @@ fn command_palette_matches<'a>(keymap: &'a [Binding], query: &str) -> Vec<bindin
             needles.iter().all(|needle| haystack.contains(needle))
         })
         .collect()
-}
-
-/// Byte offset of the `ci`-th char in `s` (or `s.len()` past the end).
-fn char_idx_to_byte(s: &str, ci: usize) -> usize {
-    s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
-}
-
-/// Delete the word before `cursor` in `s`; returns the new string and cursor.
-fn delete_word_backward(s: &str, cursor: usize) -> (String, usize) {
-    let chars: Vec<char> = s.chars().collect();
-    let mut pos = cursor.min(chars.len());
-    while pos > 0 && chars[pos - 1].is_whitespace() {
-        pos -= 1;
-    }
-    while pos > 0 && !chars[pos - 1].is_whitespace() {
-        pos -= 1;
-    }
-    let start = pos;
-    let end = cursor.min(chars.len());
-    if start == end {
-        return (s.to_string(), cursor);
-    }
-    let sb = char_idx_to_byte(s, start);
-    let eb = char_idx_to_byte(s, end);
-    let mut out = s.to_string();
-    out.replace_range(sb..eb, "");
-    (out, start)
-}
-
-/// Delete the word after `cursor` in `s`; returns the new string.
-fn delete_word_forward(s: &str, cursor: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    let mut pos = cursor.min(len);
-    while pos < len && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    while pos < len && !chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    let start = cursor.min(len);
-    if pos == start {
-        return s.to_string();
-    }
-    let sb = char_idx_to_byte(s, start);
-    let eb = char_idx_to_byte(s, pos);
-    let mut out = s.to_string();
-    out.replace_range(sb..eb, "");
-    out
 }
 
 /// Compose a grouped agent entry label `kind · space · pane` within `avail`
@@ -4387,6 +4128,22 @@ mod tests {
         assert!(matches!(view.popup.target, Some(PopupTarget::RenameSession(0))));
     }
 
+    /// Popup fields share one editor, so readline keys work in the palette
+    /// query too and editing it resets the selection.
+    #[test]
+    fn command_palette_query_uses_shared_text_editing() {
+        let mut view = test_view();
+        view.open_keybind_overlay();
+        for ch in "focus right".chars() {
+            view.on_overlay_key(key(KeyCode::Char(ch))).unwrap();
+        }
+        view.keybind_overlay.selected = 1;
+        view.on_overlay_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).unwrap();
+        assert_eq!(view.keybind_overlay.input, "focus ");
+        assert_eq!(view.keybind_overlay.cursor, 6);
+        assert_eq!(view.keybind_overlay.selected, 0);
+    }
+
     #[test]
     fn command_palette_question_mark_is_searchable_input() {
         let mut view = test_view();
@@ -4554,16 +4311,6 @@ mod tests {
         assert!(view.poll_github(Instant::now()));
         assert_eq!(view.github_status, Some(expected));
         assert!(view.github_query.is_none());
-    }
-
-    #[test]
-    fn delete_word_backward_plain() {
-        assert_eq!(delete_word_backward("foo bar", 7), ("foo ".to_string(), 4));
-    }
-
-    #[test]
-    fn delete_word_forward_plain() {
-        assert_eq!(delete_word_forward("foo bar", 4), "foo ".to_string());
     }
 
     #[test]
