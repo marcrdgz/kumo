@@ -722,6 +722,10 @@ pub struct View {
     sidebar_filter_active: bool,
     dirty: bool,
     detach_requested: bool,
+    /// A write to the daemon socket failed. Most call sites ignore `send`'s
+    /// result, so the render loop polls this to reconnect instead of the
+    /// client silently running against a dead connection.
+    connection_lost: bool,
     status_bar: StatusBarConfig,
     hostname: String,
     clock_str: String,
@@ -856,6 +860,7 @@ impl View {
             plus_rect: None,
             dirty: true,
             detach_requested: false,
+            connection_lost: false,
             status_bar,
             hostname,
             clock_str,
@@ -1024,8 +1029,25 @@ impl View {
         self.detach_requested
     }
 
+    pub fn connection_lost(&self) -> bool {
+        self.connection_lost
+    }
+
+    /// Show a transient notice line (e.g. after the client reconnected).
+    pub fn show_notice(&mut self, message: impl Into<String>) {
+        self.notice = Some((message.into(), Instant::now()));
+        self.mark_dirty();
+    }
+
     fn send(&mut self, cmd: &Command) -> Result<()> {
-        kumo_core::protocol::write_framed(&mut self.out, cmd)?;
+        use std::io::Write;
+        let frame = kumo_core::protocol::encode(cmd)?;
+        // Only a socket write failure means the daemon is gone; an encode
+        // error is a local bug and must not trigger a reconnect.
+        if let Err(e) = self.out.write_all(&frame).and_then(|()| self.out.flush()) {
+            self.connection_lost = true;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -3888,6 +3910,7 @@ mod tests {
             plus_rect: None,
             dirty: false,
             detach_requested: false,
+            connection_lost: false,
             status_bar: StatusBarConfig::default(),
             hostname: "testhost".to_string(),
             clock_str: "12:00".to_string(),
@@ -4378,6 +4401,46 @@ mod tests {
         assert!(view.subscribed.contains(&1));
         let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
         assert_eq!(view.sent_sizes.get(&1), Some(&(inner.width, inner.height)));
+    }
+
+    /// Fire-and-forget sends (`let _ = self.send(..)`) must not hide a dead
+    /// daemon socket: the render loop polls `connection_lost` to reconnect.
+    #[test]
+    fn failed_fire_and_forget_send_marks_connection_lost() {
+        let (out, peer) = UnixStream::pair().unwrap();
+        let mut view = test_view();
+        view.out = out;
+        view.layout = Some(Layout {
+            active: Some("sess".into()),
+            sessions: vec![SessionLayout {
+                name: "sess".into(),
+                workspace: std::path::PathBuf::from("/tmp"),
+                project_root: None,
+                is_linked_worktree: false,
+                active_tab: 0,
+                tabs: vec![kumo_protocol::TabLayout { id: 1, name: "1".into(), focus: 1, zoom: false, root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane { id: 1, title: " shell ".into(), cwd: std::path::PathBuf::from("/tmp"), is_ai: false, agent: None, mouse_reporting: false, alt_screen: false }))) }],
+                focus: 1,
+                zoom: false,
+                branch: None,
+                root: Some(Box::new(LayoutNode::Pane(kumo_protocol::LayoutPane {
+                    id: 1,
+                    title: " shell ".into(),
+                    cwd: std::path::PathBuf::from("/tmp"),
+                    is_ai: false,
+                    agent: None,
+                    mouse_reporting: false,
+                    alt_screen: false,
+                }))),
+            }],
+        });
+        view.recompute_geometry();
+        assert!(!view.connection_lost(), "a live socket must not be reported as lost");
+
+        drop(peer);
+        view.subscribed.clear();
+        view.sent_sizes.clear();
+        view.recompute_geometry();
+        assert!(view.connection_lost(), "a failed write must be surfaced");
     }
 
     /// A toast event lands in the toast stack, keeps the loop repainting via

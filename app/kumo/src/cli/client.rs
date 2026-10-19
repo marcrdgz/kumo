@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -54,6 +54,14 @@ const INPUT_BATCH_BUDGET: Duration = Duration::from_millis(4);
 const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(10);
 /// Keep client-local timers (clock, spinner and expiring overlays) moving.
 const RENDER_WAKE: Duration = Duration::from_millis(8);
+/// How long to wait for the daemon to rebind its socket after `kumo update`.
+const RESTART_RECONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long to retry after a failed write; a crashed daemon never comes back,
+/// so give up quickly and report it.
+const LOST_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a failed write waits for the reader to deliver a final
+/// `Shutdown`/`Detach` frame that may already be in flight.
+const LOST_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 enum InputMessage {
@@ -98,14 +106,29 @@ fn workspace_for(launch: &Launch) -> Option<PathBuf> {
 
 fn client_loop(mut stream: UnixStream, pre: &[Command]) -> Result<()> {
     let mut pre = pre.to_vec();
+    let mut notice = None;
     loop {
-        match client_once(&mut stream, &pre) {
+        match client_once(&mut stream, &pre, notice.take()) {
             Ok(Exit::Clean) => return Ok(()),
             Ok(Exit::Restarting) => {
                 // The daemon exec'd a new binary for `kumo update`; reconnect
                 // (with retries) and re-handshake, keeping the TUI intact.
-                stream = reconnect()?;
+                stream = reconnect(RESTART_RECONNECT_TIMEOUT)
+                    .map_err(|_| anyhow::anyhow!("kumo daemon did not come back after the update restart"))?;
                 pre.clear();
+            }
+            Ok(Exit::Lost) => {
+                // A write to the daemon failed. A live daemon that dropped this
+                // connection accepts a fresh attach; a dead one fails fast.
+                match reconnect(LOST_RECONNECT_TIMEOUT) {
+                    Ok(s) => stream = s,
+                    Err(_) => {
+                        restore_terminal();
+                        anyhow::bail!("lost connection to the kumo daemon");
+                    }
+                }
+                pre.clear();
+                notice = Some("connection to the kumo daemon was lost; reconnected");
             }
             Err(e) => return Err(e),
         }
@@ -119,11 +142,14 @@ enum Exit {
     /// The daemon is restarting itself (`kumo update`); drop the socket and
     /// reconnect.
     Restarting,
+    /// A write to the daemon socket failed without a final protocol frame;
+    /// try to reconnect, else report the lost connection.
+    Lost,
 }
 
 /// One attach session: handshake, render loop, teardown. On `Restarting` the
 /// terminal is left in raw mode so the reconnect is seamless (no flicker).
-fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
+fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -> Result<Exit> {
     let (cols, rows) = crossterm::terminal::size()?;
     protocol::write_framed(
         stream,
@@ -153,6 +179,9 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     let mut view = View::new(stream.try_clone()?, cols, rows);
+    if let Some(notice) = notice {
+        view.show_notice(notice);
+    }
     view.render_now(&mut terminal)?;
 
     // Daemon-event reader thread: forwards every frame the daemon pushes. It
@@ -235,6 +264,9 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
             if view.detach_requested() {
                 return Ok(Exit::Clean);
             }
+            if view.connection_lost() {
+                return Ok(Exit::Lost);
+            }
 
             // A producer may have filled a batch while we were rendering. Do
             // not park in that case; the next bounded batch gives the other
@@ -249,6 +281,18 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
             std::thread::park_timeout(RENDER_WAKE);
         }
     })();
+    // Most input handlers propagate a failed send with `?`; route those to the
+    // reconnect path too instead of tearing the client down with an I/O error.
+    let result = match result {
+        Err(_) if view.connection_lost() && !view.detach_requested() => Ok(Exit::Lost),
+        other => other,
+    };
+    // A failed write can race a graceful stop/detach/restart whose final frame
+    // is still queued; honour that frame instead of reconnecting.
+    let result = match result {
+        Ok(Exit::Lost) => Ok(final_exit_after_lost_write(&ev_rx)),
+        other => other,
+    };
 
     // Close all client socket clones before joining the reader. The bounded
     // producer checks `stop` between retries, while shutdown also wakes any
@@ -261,23 +305,46 @@ fn client_once(stream: &mut UnixStream, pre: &[Command]) -> Result<Exit> {
     let _ = input_reader.join();
 
     match result {
-        Ok(Exit::Restarting) => {
+        Ok(exit @ (Exit::Restarting | Exit::Lost)) => {
             let _ = execute!(stdout, PopKeyboardEnhancementFlags);
             let _ = stdout.flush();
-            Ok(Exit::Restarting)
+            Ok(exit)
         }
         other => {
-            let _ = execute!(
-                stdout,
-                crossterm::cursor::Show,
-                crossterm::event::DisableMouseCapture,
-                DisableBracketedPaste,
-                PopKeyboardEnhancementFlags,
-                LeaveAlternateScreen
-            );
-            let _ = disable_raw_mode();
-            let _ = stdout.flush();
+            restore_terminal();
             other
+        }
+    }
+}
+
+/// Leave raw mode and the alternate screen. Idempotent, so the reconnect
+/// path can call it when it gives up after `client_once` kept them active.
+fn restore_terminal() {
+    let mut stdout = io::stdout();
+    let _ = execute!(
+        stdout,
+        crossterm::cursor::Show,
+        crossterm::event::DisableMouseCapture,
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
+    let _ = stdout.flush();
+}
+
+/// After a failed write, wait briefly for the reader to drain what the daemon
+/// sent before closing: a queued `Shutdown`/`Detach`/`Restarting` decides the
+/// exit; otherwise the connection was genuinely lost.
+fn final_exit_after_lost_write(ev_rx: &Receiver<DaemonEvent>) -> Exit {
+    let deadline = Instant::now() + LOST_DRAIN_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match ev_rx.recv_timeout(left) {
+            Ok(DaemonEvent::Detach | DaemonEvent::Shutdown) => return Exit::Clean,
+            Ok(DaemonEvent::Restarting) => return Exit::Restarting,
+            Ok(_) => {}
+            Err(_) => return Exit::Lost,
         }
     }
 }
@@ -442,17 +509,16 @@ fn send_event_and_wake(
     true
 }
 
-/// Reconnect to the daemon socket, retrying while the restarted daemon comes
+/// Reconnect to the daemon socket, retrying while a restarted daemon comes
 /// back up (it rebinds the socket shortly after the `kumo update` exec).
-fn reconnect() -> Result<UnixStream> {
+fn reconnect(timeout: Duration) -> Result<UnixStream> {
     let path = kumo_core::config::ipc_socket_path();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(s) = UnixStream::connect(&path) {
-            return Ok(s);
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("kumo daemon did not come back after the update restart");
+        match UnixStream::connect(&path) {
+            Ok(s) => return Ok(s),
+            Err(e) if Instant::now() >= deadline => return Err(e.into()),
+            Err(_) => {}
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -547,6 +613,22 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         assert!(!producer.join().unwrap(), "full input queue must exit on shutdown");
         assert!(matches!(rx.try_recv(), Ok(InputMessage::Event(crossterm::event::Event::FocusGained))));
+    }
+
+    #[test]
+    fn lost_write_honours_a_queued_shutdown_frame() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        tx.send(reply(0)).unwrap();
+        tx.send(DaemonEvent::Shutdown).unwrap();
+        assert!(matches!(final_exit_after_lost_write(&rx), Exit::Clean));
+    }
+
+    #[test]
+    fn lost_write_without_final_frame_reports_lost() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        tx.send(reply(0)).unwrap();
+        drop(tx);
+        assert!(matches!(final_exit_after_lost_write(&rx), Exit::Lost));
     }
 
     #[test]
