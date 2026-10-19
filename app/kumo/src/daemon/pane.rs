@@ -2299,8 +2299,10 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         // emulator.
         use std::time::{Duration, Instant};
 
+        // bash, not `/bin/sh`: readline redraws its prompt on SIGWINCH, while
+        // dash (`/bin/sh` on Debian/Ubuntu) has no line editor to repaint.
         let spec = PtySpec {
-            shell: "/bin/sh".into(),
+            shell: "/bin/bash".into(),
             program: None,
             cwd: Some(std::env::temp_dir()),
             cols: 80,
