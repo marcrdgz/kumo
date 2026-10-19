@@ -412,21 +412,21 @@ struct WorktreePicker {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WorktreeCreateTab {
-    Inteligente,
+    Smart,
     Github,
     Jira,
-    Rama,
-    Nombre,
+    Branch,
+    Name,
 }
 
 impl WorktreeCreateTab {
     fn label(self) -> &'static str {
         match self {
-            WorktreeCreateTab::Inteligente => "Smart",
+            WorktreeCreateTab::Smart => "Smart",
             WorktreeCreateTab::Github => "GitHub",
             WorktreeCreateTab::Jira => "Jira",
-            WorktreeCreateTab::Rama => "Branch",
-            WorktreeCreateTab::Nombre => "Name",
+            WorktreeCreateTab::Branch => "Branch",
+            WorktreeCreateTab::Name => "Name",
         }
     }
     #[allow(dead_code)]
@@ -434,19 +434,19 @@ impl WorktreeCreateTab {
         match idx {
             1 => Self::Github,
             2 => Self::Jira,
-            3 => Self::Rama,
-            4 => Self::Nombre,
-            _ => Self::Inteligente,
+            3 => Self::Branch,
+            4 => Self::Name,
+            _ => Self::Smart,
         }
     }
     #[allow(dead_code)]
     fn idx(self) -> usize {
         match self {
-            WorktreeCreateTab::Inteligente => 0,
+            WorktreeCreateTab::Smart => 0,
             WorktreeCreateTab::Github => 1,
             WorktreeCreateTab::Jira => 2,
-            WorktreeCreateTab::Rama => 3,
-            WorktreeCreateTab::Nombre => 4,
+            WorktreeCreateTab::Branch => 3,
+            WorktreeCreateTab::Name => 4,
         }
     }
 }
@@ -820,7 +820,7 @@ impl View {
                 skill_feedback: None,
             },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
-            worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Smart, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
             pane_numbers: None,
             status_msg: None,
@@ -2356,7 +2356,7 @@ impl View {
         }
         self.worktree_create.open = true;
         self.worktree_create.session = idx;
-        self.worktree_create.tab = WorktreeCreateTab::Inteligente;
+        self.worktree_create.tab = WorktreeCreateTab::Smart;
         self.worktree_create.create_from = String::new();
         self.worktree_create.cursor = 0;
         self.worktree_create.branch_override = String::new();
@@ -2477,10 +2477,10 @@ impl View {
         // Tabs row from x+2, each tab approx label len + 2
         let mut cur = dd.x + 2;
         for tab in [
-            WorktreeCreateTab::Inteligente,
+            WorktreeCreateTab::Smart,
             WorktreeCreateTab::Github,
-            WorktreeCreateTab::Rama,
-            WorktreeCreateTab::Nombre,
+            WorktreeCreateTab::Branch,
+            WorktreeCreateTab::Name,
         ] {
             let label = tab.label();
             let w = (label.chars().count() as u16) + 2; // padded
@@ -2881,7 +2881,7 @@ impl View {
         let agent_opt = if agent.is_empty() { None } else { Some(agent) };
         // Determine name/from based on tab and content
         let (name_opt, from_opt) = match self.worktree_create.tab {
-            WorktreeCreateTab::Inteligente => {
+            WorktreeCreateTab::Smart => {
                 if kumo_core::worktrees::parse_pr_number(&cf).is_some() || cf.contains("://") {
                     (None, Some(cf.clone()))
                 } else {
@@ -2890,8 +2890,8 @@ impl View {
             }
             WorktreeCreateTab::Github => (None, Some(cf.clone())),
             WorktreeCreateTab::Jira => (None, Some(cf.clone())),
-            WorktreeCreateTab::Rama => (None, Some(cf.clone())),
-            WorktreeCreateTab::Nombre => (Some(cf.clone()), None),
+            WorktreeCreateTab::Branch => (None, Some(cf.clone())),
+            WorktreeCreateTab::Name => (Some(cf.clone()), None),
         };
         // Validate branch override early (daemon will also validate)
         if !branch.is_empty() {
@@ -3852,7 +3852,7 @@ mod tests {
                 skill_feedback: None,
             },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
-            worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Inteligente, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
+            worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Smart, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
             pane_numbers: None,
             status_msg: None,

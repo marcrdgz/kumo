@@ -998,7 +998,7 @@ pub enum Command {
         /// Ephemeral isolated worktree (`--ai`).
         #[serde(default)]
         is_ai: bool,
-        /// Workspace/task name (Nombre tab) used when `branch` override is empty — slugified to branch.
+        /// Workspace/task name (Name tab) used when `branch` override is empty — slugified to branch.
         #[serde(default)]
         name: Option<String>,
     },

@@ -109,10 +109,10 @@ impl View {
         let tabs_y = dd.y + 2;
         let mut cur_x = dd.x + 2;
         for tab in [
-            WorktreeCreateTab::Inteligente,
+            WorktreeCreateTab::Smart,
             WorktreeCreateTab::Github,
-            WorktreeCreateTab::Rama,
-            WorktreeCreateTab::Nombre,
+            WorktreeCreateTab::Branch,
+            WorktreeCreateTab::Name,
         ] {
             let is_sel = tab == self.worktree_create.tab;
             let label = tab.label();
@@ -142,11 +142,11 @@ impl View {
         let cf = &self.worktree_create.create_from;
         let cursor = self.worktree_create.cursor;
         let placeholder = match self.worktree_create.tab {
-            WorktreeCreateTab::Inteligente => "name, #1234, branch, or https://github.com/.../pull/123",
+            WorktreeCreateTab::Smart => "name, #1234, branch, or https://github.com/.../pull/123",
             WorktreeCreateTab::Github => "#1234 or GitHub URL",
             WorktreeCreateTab::Jira => "Jira issue",
-            WorktreeCreateTab::Rama => "branch name (e.g. feat/login)",
-            WorktreeCreateTab::Nombre => "task name (e.g. fix login)",
+            WorktreeCreateTab::Branch => "branch name (e.g. feat/login)",
+            WorktreeCreateTab::Name => "task name (e.g. fix login)",
         };
         let display = if cf.is_empty() && !is_create_focused { placeholder } else { cf.as_str() };
         let text_style = if cf.is_empty() && !is_create_focused {

@@ -678,7 +678,7 @@ impl App {
     }
 
     /// Extended creator for isolated `--ai` worktrees (Orca-aligned naming, no `kumo/` prefix).
-    /// `branch_override` is `--branch`, `name_hint` is the Nombre task name, `from` is `--from`,
+    /// `branch_override` is `--branch`, `name_hint` is the Name task name, `from` is `--from`,
     /// `note` is `--note`, `agent` is `--agent`, `is_ai` marks ephemeral checkout.
     #[allow(clippy::too_many_arguments)]
     fn new_worktree_session_ext(

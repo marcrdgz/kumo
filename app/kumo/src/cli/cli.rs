@@ -1149,7 +1149,7 @@ fn parse_worktree(args: &[String]) -> Result<CliCmd> {
                     _ => { anyhow::bail!("unknown worktree create flag {:?}", rest[j]); }
                 }
             }
-            // Positional handling: for --ai, first positional is task name (Nombre); for generic, it's branch
+            // Positional handling: for --ai, first positional is task name (Name); for generic, it's branch
             if is_ai {
                 if !positional.is_empty() { name = Some(positional[0].clone()); }
                 // Also support `kumo worktree create --ai <branch>` generic fallback when no --branch but want branch directly?
