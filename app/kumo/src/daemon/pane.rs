@@ -1222,6 +1222,17 @@ mod tests {
     use ratatui::layout::Rect;
     use std::sync::mpsc;
 
+    // Raw PTY output of real agent CLIs at 120x40 (see tests/fixtures/README.md).
+    const CLAUDE_FIXTURE: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude.raw"));
+    // Synthetic: Claude's Edit diff highlights spans that include blank cells.
+    const CLAUDE_EDIT_DIFF_FIXTURE: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude-edit-diff.raw"));
+    const CODEX_FIXTURE: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex.raw"));
+    const OPENCODE_FIXTURE: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/opencode.raw"));
+
     #[test]
     fn grapheme_width_matches_terminal_layout_rules() {
         // Wide via East Asian Width.
@@ -1628,21 +1639,98 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
 
     #[test]
     fn opencode_raw_output_renders_without_losing_rows() {
-        let raw = match std::fs::read("/tmp/oc_msg.raw") {
-            Ok(d) => d,
-            Err(_) => return, // captured fixture not present
-        };
         let mut p = test_pane(false);
         let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
         // Feed like a pty: many small chunks, one render after each burst.
-        for chunk in raw.chunks(256) {
+        for chunk in OPENCODE_FIXTURE.chunks(256) {
             p.feed(chunk);
             p.render_dirty(area, true, &mut buf);
         }
         let text = pane_text(&buf);
         // opencode's composer + footer should be visible after a full session.
         assert!(text.contains("say hello"), "opencode message lost: {text:?}");
+    }
+
+    /// Feed `raw` in `chunk`-byte pieces, rendering incrementally after each
+    /// one, then compare the retained buffer with a full redraw of the final
+    /// emulator state into a fresh buffer. `agent` stands in for the process
+    /// scan that names the CLI running in a live pane.
+    fn assert_incremental_matches_full_redraw(name: &str, raw: &[u8], agent: Option<&str>, chunk: usize) {
+        let mut p = test_pane(false);
+        p.detected_ai_name = agent.map(str::to_string);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut incremental = Buffer::empty(area);
+        for piece in raw.chunks(chunk) {
+            p.feed(piece);
+            p.render_dirty(area, true, &mut incremental);
+        }
+        p.full_redraw = true;
+        let mut full = Buffer::empty(area);
+        p.render_dirty(area, true, &mut full);
+
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let (inc, ful) = (&incremental[(x, y)], &full[(x, y)]);
+                assert_eq!(
+                    inc, ful,
+                    "{name} (chunk {chunk}): cell ({x}, {y}) differs from a full redraw\n\
+                     incremental:\n{}\nfull:\n{}",
+                    pane_text(&incremental),
+                    pane_text(&full),
+                );
+            }
+        }
+    }
+
+    /// Every rendered cell's background must be the emulator's: its explicit
+    /// background, or the terminal default. Only a Codex composer may spread
+    /// a background across a row, so this holds for any other pane.
+    fn assert_backgrounds_match_emulator(name: &str, raw: &[u8]) {
+        let mut p = test_pane(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        for piece in raw.chunks(256) {
+            p.feed(piece);
+            p.render_dirty(area, false, &mut buf);
+        }
+        let (w, h) = (area.width as usize, area.height as usize);
+        let mut expected = vec![rgb(p.vt.default_bg()); w * h];
+        p.vt.for_each_cell(|row, col, rc, _selected, _row_dirty| {
+            if rc.has_bg && row < h && col < w {
+                expected[row * w + col] = rgb(rc.bg);
+            }
+        });
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(
+                    buf[(x as u16, y as u16)].bg,
+                    expected[y * w + x],
+                    "{name}: cell ({x}, {y}) background differs from the emulator"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_render_matches_full_redraw() {
+        for (name, raw) in [
+            ("claude", CLAUDE_FIXTURE),
+            ("claude", CLAUDE_EDIT_DIFF_FIXTURE),
+            ("codex", CODEX_FIXTURE),
+            ("opencode", OPENCODE_FIXTURE),
+        ] {
+            for chunk in [61, 256, 4096] {
+                assert_incremental_matches_full_redraw(name, raw, Some(name), chunk);
+            }
+        }
+    }
+
+    #[test]
+    fn non_codex_render_keeps_emulator_backgrounds() {
+        assert_backgrounds_match_emulator("claude", CLAUDE_FIXTURE);
+        assert_backgrounds_match_emulator("claude edit diff", CLAUDE_EDIT_DIFF_FIXTURE);
+        assert_backgrounds_match_emulator("opencode", OPENCODE_FIXTURE);
     }
 
     #[test]
@@ -1936,14 +2024,10 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
 
     #[test]
     fn select_text_in_opencode() {
-        let raw = match std::fs::read("/tmp/oc_msg.raw") {
-            Ok(d) => d,
-            Err(_) => return, // captured fixture not present
-        };
         let mut p = test_pane(false);
         let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
-        for chunk in raw.chunks(256) {
+        for chunk in OPENCODE_FIXTURE.chunks(256) {
             p.feed(chunk);
             p.render_dirty(area, true, &mut buf);
         }
@@ -1969,9 +2053,10 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         let text = p.selection_text((sx, sy), (ex, ey)).unwrap_or_default();
         assert!(text.contains("say hello"), "selection wrong: {text:?}");
 
-        // Highlight must cover exactly the selected text cells (plus the
-        // terminal cursor, which is also reversed).
-        p.render_dirty(area, true, &mut buf);
+        // Highlight must cover exactly the selected text cells. Render
+        // unfocused: the fixture's cursor sits right after the typed text and
+        // is drawn reversed too.
+        p.render_dirty(area, false, &mut buf);
         let hl = |x: u16, y: u16| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED);
         for dx in 0.."say hello".len() as u16 {
             assert!(hl(sx + dx, sy), "selected cell not highlighted ({},{})", sx + dx, sy);
@@ -1981,9 +2066,9 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
 
         // Multi-row selection returns both lines joined.
         p.clear_selection();
-        let (sx2, sy2) = (0u16, 0u16);
-        assert!(p.set_selection((sx2, sy2), (20, 3)), "multi set_selection failed");
-        let mtext = p.selection_text((sx2, sy2), (20, 3)).unwrap_or_default();
+        let (sx2, sy2) = (0u16, sy - 1);
+        assert!(p.set_selection((sx2, sy2), (ex, ey)), "multi set_selection failed");
+        let mtext = p.selection_text((sx2, sy2), (ex, ey)).unwrap_or_default();
         assert!(mtext.contains("say hello"), "multi-row selection lost text: {mtext:?}");
     }
 
@@ -2099,14 +2184,10 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
 
     #[test]
     fn opencode_pane_reports_mouse_tracking() {
-        let raw = match std::fs::read("/tmp/oc_msg.raw") {
-            Ok(d) => d,
-            Err(_) => return, // captured fixture not present
-        };
         let mut p = test_pane(false);
         let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
-        for chunk in raw.chunks(256) {
+        for chunk in OPENCODE_FIXTURE.chunks(256) {
             p.feed(chunk);
             p.render_dirty(area, true, &mut buf);
         }

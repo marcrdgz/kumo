@@ -1,0 +1,7 @@
+[2J[H[38;2;255;255;255m⏺[m [1mUpdate[m(hello.txt)
+  ⎿  Updated [1mhello.txt[m with [1m1[m addition and [1m1[m removal
+      [48;2;92;28;36m1 -[m[48;2;92;28;36m hello [48;2;160;48;60mworld[m
+      [48;2;28;72;40m1 +[m[48;2;28;72;40m hello [48;2;48;140;72mthere[m
+      2   second line
+
+[38;2;153;153;153m❯ [m
