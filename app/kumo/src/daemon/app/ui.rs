@@ -20,7 +20,7 @@ impl App {
     /// panes whose content changed (candidates for a `PaneFrame`).
     pub(super) fn tick(&mut self) -> Vec<u64> {
         self.poll_exits();
-        self.refresh_branches();
+        self.refresh_workspace_git();
         self.refresh_workspace_follow();
         self.refresh_ai_cli();
         self.refresh_agent_statuses();
@@ -109,7 +109,8 @@ impl App {
                     root: t.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
                 }).collect();
                 let active = tabs.get(s.active_tab).cloned();
-                let (project_root, is_linked_worktree) = kumo_core::worktrees::classify_worktree(&s.workspace)
+                let (project_root, is_linked_worktree) = self
+                    .session_worktree(i)
                     .map(|(main, linked)| (Some(main), linked))
                     .unwrap_or((None, false));
                 kumo_protocol::SessionLayout {

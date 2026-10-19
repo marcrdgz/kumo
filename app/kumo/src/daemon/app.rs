@@ -15,7 +15,7 @@ use crate::daemon::pane::{Pane, PtyEvent};
 use crate::daemon::pty::Pty;
 use crate::daemon::state::{self, SavedState};
 
-use self::tasks::BranchInfo;
+use self::tasks::WorkspaceGit;
 
 mod commands;
 #[cfg(unix)]
@@ -109,8 +109,9 @@ pub struct App {
     shell: String,
     ai: (String, Vec<String>),
     workspace: PathBuf,
-    /// Cached git branch (name + ahead/behind) per workspace, refreshed periodically.
-    branch_cache: HashMap<PathBuf, (Option<BranchInfo>, Instant)>,
+    /// Cached git facts (branch, worktree classification) per workspace,
+    /// refreshed periodically off the daemon thread.
+    git_cache: HashMap<PathBuf, (WorkspaceGit, Instant)>,
     /// When the pane process tree was last scanned for an AI CLI.
     last_ai_scan: Instant,
     /// When the follow-workspace scan last ran (only meaningful in Follow mode).
@@ -154,10 +155,10 @@ pub struct App {
     last_update_check: Instant,
     /// Whether a background update check is currently in flight.
     update_check_pending: bool,
-    /// Receives background git branch results (workspace -> branch info).
-    branch_rx: mpsc::Receiver<(PathBuf, Option<BranchInfo>)>,
-    /// Sender for background git branch jobs.
-    branch_tx: mpsc::Sender<(PathBuf, Option<BranchInfo>)>,
+    /// Receives background workspace git lookups.
+    git_rx: mpsc::Receiver<(PathBuf, WorkspaceGit)>,
+    /// Sender for background workspace git lookups.
+    git_tx: mpsc::Sender<(PathBuf, WorkspaceGit)>,
     /// Receives background AI CLI scan results (snapshot + pane IDs with their process IDs).
     ai_rx: mpsc::Receiver<AiScanResult>,
     /// Sender for background AI CLI scan jobs.
@@ -173,8 +174,8 @@ pub struct App {
     toast_rx: mpsc::Receiver<AgentToast>,
     /// Sender for agent lifecycle toasts.
     toast_tx: mpsc::Sender<AgentToast>,
-    /// Workspaces with pending git branch lookups.
-    pending_branch_lookups: HashMap<PathBuf, Instant>,
+    /// Workspaces with pending git lookups.
+    pending_git_lookups: HashMap<PathBuf, Instant>,
     /// Whether an AI CLI scan is currently in progress.
     ai_scan_in_progress: bool,
     /// Monotonic version bumped on every layout change (sessions, tree, focus,
@@ -215,7 +216,7 @@ impl App {
 
         let (events_tx, events_rx) = mpsc::sync_channel(256);
         let (update_tx, update_rx) = mpsc::channel();
-        let (branch_tx, branch_rx) = mpsc::channel::<(PathBuf, Option<BranchInfo>)>();
+        let (git_tx, git_rx) = mpsc::channel::<(PathBuf, WorkspaceGit)>();
         let (ai_tx, ai_rx) = mpsc::channel::<AiScanResult>();
         let (toast_tx, toast_rx) = mpsc::channel::<AgentToast>();
         let startup_update_tx = update_tx.clone();
@@ -234,7 +235,7 @@ impl App {
             shell,
             ai: (ai_prog, ai_args),
             workspace,
-            branch_cache: HashMap::new(),
+            git_cache: HashMap::new(),
             last_ai_scan: Instant::now(),
             last_follow_scan: Instant::now(),
             last_agent_debug: Instant::now(),
@@ -254,9 +255,9 @@ impl App {
             update_tx,
             last_update_check: Instant::now(),
             update_check_pending: false,
-            branch_rx,
-            branch_tx,
-            pending_branch_lookups: HashMap::new(),
+            git_rx,
+            git_tx,
+            pending_git_lookups: HashMap::new(),
             ai_rx,
             ai_tx,
             agent_process_snapshot: None,
@@ -1436,6 +1437,14 @@ impl App {
         let Some(t_idx) = self.sessions[i].find_tab_containing(pane_id) else {
             return false;
         };
+        // Clients re-send the current focus on every wheel tick; an unchanged
+        // focus must not trigger a layout rebuild and broadcast.
+        if self.active == i
+            && self.sessions[i].active_tab == t_idx
+            && self.sessions[i].tabs[t_idx].tree.focus == pane_id
+        {
+            return true;
+        }
         self.active = i;
         self.sessions[i].active_tab = t_idx;
         self.sessions[i].tabs[t_idx].tree.focus = pane_id;
@@ -1679,15 +1688,62 @@ mod tests {
         // A closed session's workspace whose `git` lookup never returned.
         let gone = PathBuf::from("/nonexistent/closed-session");
         let now = Instant::now();
-        app.pending_branch_lookups.insert(gone.clone(), now);
-        app.branch_cache.insert(gone.clone(), (None, now));
+        app.pending_git_lookups.insert(gone.clone(), now);
+        app.git_cache.insert(gone.clone(), (WorkspaceGit::default(), now));
 
-        app.refresh_branches();
+        app.refresh_workspace_git();
 
-        assert!(!app.pending_branch_lookups.contains_key(&gone), "stale lookup must be forgotten");
-        assert!(!app.branch_cache.contains_key(&gone));
+        assert!(!app.pending_git_lookups.contains_key(&gone), "stale lookup must be forgotten");
+        assert!(!app.git_cache.contains_key(&gone));
         let live = app.sessions[0].workspace.clone();
-        assert!(app.pending_branch_lookups.contains_key(&live), "live workspace lookup is queued");
+        assert!(app.pending_git_lookups.contains_key(&live), "live workspace lookup is queued");
+        drop(app);
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    #[test]
+    fn layout_reads_worktree_classification_from_cache() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("layout-git-cfg");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let mut app = App::new(Launch::New(None)).unwrap();
+        let ws = app.sessions[0].workspace.clone();
+
+        // Before the background lookup lands the layout must not classify the
+        // workspace itself (that would spawn `git` on the daemon thread).
+        assert_eq!(app.layout().sessions[0].project_root, None);
+
+        let main = PathBuf::from("/repo/main");
+        let git = WorkspaceGit { branch: None, worktree: Some((main.clone(), true)) };
+        app.git_tx.send((ws, git)).unwrap();
+        app.refresh_workspace_git();
+        let layout = app.layout();
+        assert_eq!(layout.sessions[0].project_root, Some(main));
+        assert!(layout.sessions[0].is_linked_worktree);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    #[test]
+    fn refocusing_the_focused_pane_keeps_the_layout_version() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("refocus-cfg");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let mut app = App::new(Launch::New(None)).unwrap();
+        let name = app.sessions[0].name.clone();
+        let focus = app.sessions[0].active_tab().tree.focus;
+        let version = app.layout_version;
+
+        assert!(app.focus_pane_in_session(&name, focus));
+        assert_eq!(app.layout_version, version, "unchanged focus must not rebuild the layout");
         drop(app);
         let _ = std::fs::remove_dir_all(&cfg);
     }
