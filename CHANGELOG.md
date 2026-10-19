@@ -1,10 +1,19 @@
 # Changelog
 
+## v0.7.5
+
+### 🐛 Bug Fixes
+
+- *(render)* Skip unchanged rows to reduce typing latency
 ## v0.7.4
 
 ### 🐛 Bug Fixes
 
 - *(input)* Wake client and daemon to reduce typing latency
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.7.4
 ## v0.7.3
 
 ### 🚜 Refactor
