@@ -1,0 +1,2 @@
+# Raw PTY captures; keep the bytes exactly as recorded.
+*.raw binary

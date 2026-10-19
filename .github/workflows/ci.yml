@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      # Xcode 26.5+ SDKs dropped the arm64-macos slice from libSystem.tbd, so
+      # zig resolves no symbols from it; link against the CommandLineTools
+      # SDK instead, as the Makefile does.
+      - name: Use CommandLineTools SDK
+        if: runner.os == 'macOS'
+        run: |
+          if [ -d /Library/Developer/CommandLineTools ]; then
+            echo "DEVELOPER_DIR=/Library/Developer/CommandLineTools" >> "$GITHUB_ENV"
+          fi
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: vendor/libghostty-vt/.zig-cache
+          key: zig-${{ runner.os }}-ci-${{ hashFiles('vendor/libghostty-vt/build.zig.zon', 'vendor/libghostty-vt/VERSION') }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --locked -- -D warnings
