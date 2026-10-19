@@ -8,25 +8,25 @@ management, featuring Claude AI integration and TMUX-style session/pane
 management.
 
 ### Architecture
-The daemon and the clients are **one binary plus a desktop app** in one cargo
-workspace:
+The daemon and the TUI client are **one binary** in one cargo workspace:
 
 - **`app/kumo`** (`kumo`): the single binary — the headless **daemon** and the
   **TUI/control CLI** together. `kumo daemon` runs the headless server, `kumo`
   launches the TUI, `kumo session|pane|agent` drives it, `kumo update`
   self-updates. Sources are split into `src/daemon/` (PTYs, ghostty emulators,
   layout tree, agents) and `src/cli/` (chrome, input, mouse, control CLI).
-- **`app/desktop`** (`kumo-desktop`): a native GPUI desktop client that draws
-  its own chrome. Distributed separately (as a `Kumo-<arch>.dmg` on macOS);
-  it is the "smart" update interface — on launch it checks the `kumo` CLI and
-  the app itself against the latest release and can update both in-app.
 - **`crates/kumo-core`**: shared logic — config, layout tree, themes, update
   check, the desktop updater (`updater.rs`), worktrees.
 - **`crates/kumo-protocol`**: the pure wire protocol (`Command`/`DaemonEvent`).
 
-The client and desktop launch the daemon via `kumo daemon` (sibling binary or
-`PATH`); the daemon restarts itself in place for `kumo update`
+The client launches the daemon via `kumo daemon` (sibling binary or `PATH`);
+the daemon restarts itself in place for `kumo update`
 (`kumo daemon --resume <file>`).
+
+The native GPUI desktop client (`kumo-desktop`, distributed as a
+`Kumo-<arch>.dmg` on macOS) is a **separate project outside this workspace**.
+It depends only on `kumo-protocol` (pinned by git rev), so wire-protocol
+changes must stay compatible with it or bump `PROTOCOL_VERSION`.
 
 ### Technology Stack
 - **Frontend**: Rust TUI (ratatui + crossterm) in `app/kumo/src/cli`.
@@ -94,7 +94,9 @@ The client and desktop launch the daemon via `kumo daemon` (sibling binary or
   dispatched by `app/kumo/src/daemon/agents/mod.rs` from a `Snapshot` of the terminal buffer.
 - **`app/kumo/src/daemon/vt.rs`**: Hand-written FFI bindings to the `libghostty-vt` C API
   plus the safe `Terminal` wrapper.
-- **`app/kumo/src/cli/client_view.rs`**: client-side view — geometry, input, mouse, and all chrome rendering.
+- **`app/kumo/src/cli/client_view.rs`**: client-side view — state, geometry, daemon events, keys and overlays;
+  its submodules in `cli/client_view/` hold `render/` (all chrome rendering), `mouse.rs`, `copy_mode.rs`,
+  `sidebar.rs` (sidebar model + hit-testing) and `hit_test.rs` (overlay geometry).
 - **`app/kumo/build.rs`**: Compiles the vendored Zig library at build time.
 - **`crates/kumo-core/src/updater.rs`**: the desktop app's update manager (CLI bootstrap + `.dmg` self-update).
 - **`crates/kumo-core/src/daemon.rs`**: locating/spawning the `kumo` daemon binary (`kumo daemon`).
