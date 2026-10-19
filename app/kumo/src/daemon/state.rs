@@ -134,15 +134,30 @@ pub struct SavedPane {
 }
 
 /// Write `state` to `path` atomically (temp file + rename) so a crash mid-write
-/// never leaves a truncated `state.json`.
+/// never leaves a truncated `state.json`. The temp file is fsynced before the
+/// rename and the directory after it: without both, a power loss can persist
+/// the rename but not the data, leaving an empty file in place of the state.
+/// The file is owner-only because pane snapshots carry terminal contents.
 pub fn save(path: &Path, state: &SavedState) -> Result<()> {
+    use std::io::Write;
+
     let json = serde_json::to_string_pretty(state)?;
-    if let Some(parent) = path.parent() {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(parent) = parent {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&tmp)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
     Ok(())
 }
 
@@ -344,6 +359,23 @@ mod tests {
         assert_eq!(s.panes.len(), 2);
         assert_eq!(s.panes[1].program, Some(("opencode".into(), Vec::new())));
         assert_eq!(s.panes[1].agent_alias.as_deref(), Some("worker"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_existing_state_owner_only_without_temp_leftover() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kumo-state-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, "stale").unwrap();
+        save(&path, &sample_state()).unwrap();
+        assert!(load(&path).unwrap().is_some(), "the old file must be replaced");
+        assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "pane snapshots must not be world-readable");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

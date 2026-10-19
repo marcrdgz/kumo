@@ -60,20 +60,28 @@ impl App {
             .cloned()
             .collect();
         if !stale.is_empty() {
-            for ws in &stale {
-                self.pending_branch_lookups.insert(ws.clone(), now);
-            }
             let tx = self.branch_tx.clone();
-            let _ = std::thread::Builder::new()
+            let lookups = stale.clone();
+            let spawned = std::thread::Builder::new()
                 .name("kumo-git-branch".into())
                 .spawn(move || {
-                    for ws in stale {
+                    for ws in lookups {
                         let branch = git_branch(&ws);
                         let _ = tx.send((ws, branch));
                     }
                 });
+            // Mark pending only once a worker owns the lookups: a failed spawn
+            // never reports back, so the workspaces would stay pending forever.
+            if spawned.is_ok() {
+                for ws in stale {
+                    self.pending_branch_lookups.insert(ws, now);
+                }
+            }
         }
+        // Forget workspaces no session uses any more, including lookups still
+        // in flight (e.g. a hung `git`); a late result is pruned on arrival.
         self.branch_cache.retain(|ws, _| live.contains(ws));
+        self.pending_branch_lookups.retain(|ws, _| live.contains(ws));
     }
 
     /// Cached git branch for a session's workspace.
