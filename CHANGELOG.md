@@ -1,10 +1,35 @@
 # Changelog
 
+## v0.7.6
+
+### 🐛 Bug Fixes
+
+- *(render)* Limit codex row background to codex panes
+- *(daemon)* Harden daemon robustness (#19)
+- *(ux)* Surface lost connections, theme-derived colors, palette actions (#22)
+- *(daemon)* Keep git lookups off the layout rebuild path (#24)
+
+### 🚜 Refactor
+
+- *(cli)* Split client_view into modules (#20)
+
+### ⚡ Performance
+
+- Cut per-frame copies and idle polling in the frame pipeline (#23)
+- *(render)* Skip unchanged rows in the daemon render hot path (#25)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Gate on build, test and clippy; versioned render fixtures (#21)
 ## v0.7.5
 
 ### 🐛 Bug Fixes
 
 - *(render)* Skip unchanged rows to reduce typing latency
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.7.5
 ## v0.7.4
 
 ### 🐛 Bug Fixes

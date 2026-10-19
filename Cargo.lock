@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "kumo"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-core"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "anyhow",
  "kumo-protocol",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-protocol"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "anyhow",
  "bincode",
