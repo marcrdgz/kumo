@@ -17,6 +17,7 @@ use kumo_protocol::{
 };
 
 use super::App;
+use super::worktree_removal::WorktreeRemoval;
 use kumo_core::layout;
 use crate::daemon::agents::{self, AgentStatus, Snapshot};
 use crate::daemon::pane::Pane;
@@ -824,17 +825,21 @@ impl App {
         })
     }
 
-    /// Remove a worktree directory and optionally its branch (ephemeral preview when `!force`).
-    pub(crate) fn worktree_remove(&mut self, session: &str, path: &std::path::Path, force: bool) -> Result<String> {
+    /// Start removing a worktree directory and optionally its branch
+    /// (ephemeral preview when `!force`). The returned job does the slow
+    /// deletion; `Err` carries the immediate reply.
+    pub(crate) fn worktree_remove(
+        &mut self,
+        session: &str,
+        path: &std::path::Path,
+        force: bool,
+    ) -> std::result::Result<WorktreeRemoval, String> {
         if !self.sessions.iter().any(|s| s.name == session) {
-            return Ok(format!("no session {session:?}"));
+            return Err(format!("no session {session:?}"));
         }
-        let target = self.resolve_worktree_path(session, path)?;
+        let target = self.resolve_worktree_path(session, path).map_err(|e| format!("error: {e:#}"))?;
         let ws = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone());
-        match self.remove_worktree_at(&target, force, ws.as_deref()) {
-            Ok(msg) => Ok(msg),
-            Err(e) => Ok(format!("error: {e}")),
-        }
+        self.begin_worktree_removal(&target, force, ws.as_deref()).map_err(|e| format!("error: {e}"))
     }
 
     /// Set checkpoint comment/status for a worktree.

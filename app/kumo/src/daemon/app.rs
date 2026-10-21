@@ -16,11 +16,13 @@ use crate::daemon::pty::Pty;
 use crate::daemon::state::{self, SavedState};
 
 use self::tasks::WorkspaceGit;
+use self::worktree_removal::WorktreeRemovalOutcome;
 
 mod commands;
 #[cfg(unix)]
 pub(super) mod server;
 mod tasks;
+mod worktree_removal;
 pub(crate) mod ui;
 pub(crate) mod proc;
 pub(crate) mod waits;
@@ -174,6 +176,13 @@ pub struct App {
     toast_rx: mpsc::Receiver<AgentToast>,
     /// Sender for agent lifecycle toasts.
     toast_tx: mpsc::Sender<AgentToast>,
+    /// Worktree removals running off the daemon loop, keyed by canonical
+    /// path; joined before the daemon stops or re-executes.
+    worktree_removals: HashMap<PathBuf, std::thread::JoinHandle<()>>,
+    /// Receives finished worktree removals with the requesting client id.
+    worktree_removal_rx: mpsc::Receiver<(usize, WorktreeRemovalOutcome)>,
+    /// Sender for worktree removal workers.
+    worktree_removal_tx: mpsc::Sender<(usize, WorktreeRemovalOutcome)>,
     /// Workspaces with pending git lookups.
     pending_git_lookups: HashMap<PathBuf, Instant>,
     /// Whether an AI CLI scan is currently in progress.
@@ -219,6 +228,7 @@ impl App {
         let (git_tx, git_rx) = mpsc::channel::<(PathBuf, WorkspaceGit)>();
         let (ai_tx, ai_rx) = mpsc::channel::<AiScanResult>();
         let (toast_tx, toast_rx) = mpsc::channel::<AgentToast>();
+        let (worktree_removal_tx, worktree_removal_rx) = mpsc::channel();
         let startup_update_tx = update_tx.clone();
         let _ = std::thread::Builder::new()
             .name("kumo-update-check".into())
@@ -263,6 +273,9 @@ impl App {
             agent_process_snapshot: None,
             toast_rx,
             toast_tx,
+            worktree_removals: HashMap::new(),
+            worktree_removal_rx,
+            worktree_removal_tx,
             ai_scan_in_progress: false,
             layout_version: 0,
             cached_layout: None,
@@ -812,130 +825,6 @@ impl App {
         })
     }
 
-    /// Remove a worktree at `path` (and optionally its branch). Finds the repo
-    /// root from `path` or the given `repo_hint`, performs a clean-tree
-    /// preflight, stops the owning session, and only then removes the checkout.
-    pub(super) fn remove_worktree_at(
-        &mut self,
-        path: &std::path::Path,
-        force: bool,
-        repo_hint: Option<&std::path::Path>,
-    ) -> Result<String, String> {
-        // Determine branch for this worktree (for delete / preview)
-        let branch = kumo_core::worktrees::list_worktrees(path)
-            .ok()
-            .and_then(|list| list.into_iter().find(|w| {
-                let canon = std::fs::canonicalize(&w.path).ok();
-                let target = std::fs::canonicalize(path).ok().unwrap_or_else(|| path.to_path_buf());
-                canon.as_ref().map(|c| c == &target).unwrap_or(w.path == path)
-            }).and_then(|w| w.branch))
-            .or_else(|| kumo_core::worktree_meta::get(path).and_then(|m| m.branch))
-            .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()));
-        // Find the main worktree's path (common repo root) — `repo_root` on a linked worktree returns its own top, not main
-        let repo_root = repo_hint.and_then(kumo_core::worktrees::main_worktree_path)
-            .or_else(|| kumo_core::worktrees::main_worktree_path(path))
-            .or_else(|| self.sessions.iter().find_map(|s| kumo_core::worktrees::main_worktree_path(&s.workspace)))
-            .or_else(|| repo_hint.and_then(kumo_core::worktrees::repo_root))
-            .or_else(|| kumo_core::worktrees::repo_root(path));
-        let Some(root) = repo_root else { return Err("not a git repository".to_string()); };
-        if kumo_core::worktrees::is_main_worktree(&root, path)? {
-            return Err(format!("refusing to remove the main worktree {}", path.display()));
-        }
-
-        // The safe action must be non-destructive: reject dirty or untracked
-        // work before touching the session or any PTY process.
-        if !force {
-            let dirty = kumo_core::worktrees::dirty_worktree_entries(path)?;
-            if !dirty.is_empty() {
-                return Err(format!(
-                    "worktree has local changes; refusing removal ({}): {}",
-                    dirty.len(),
-                    dirty.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
-                ));
-            }
-        }
-
-        // Keep the session identity because canonicalization stops working
-        // once Git removes the directory. A post-teardown failure may recover
-        // the session below.
-        let session_idx = self.session_for_workspace(path);
-        let recovery = session_idx
-            .and_then(|idx| self.sessions.get(idx))
-            .map(|session| (session.name.clone(), session.workspace.clone()));
-        if let Some(idx) = session_idx {
-            // Wait for the PTY cleanup workers before allowing Git to remove
-            // the directory. This avoids leaving children with a deleted cwd.
-            self.close_session_wait(idx);
-        }
-        if !force {
-            match kumo_core::worktrees::dirty_worktree_entries(path) {
-                Ok(dirty) if !dirty.is_empty() => {
-                    let error = format!(
-                        "worktree changed while closing; refusing removal ({}): {}",
-                        dirty.len(),
-                        dirty.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
-                    );
-                    return Err(self.recover_after_teardown(recovery, error));
-                }
-                Ok(_) => {}
-                Err(error) => return Err(self.recover_after_teardown(recovery, error)),
-            }
-        }
-        if let Err(error) = kumo_core::worktrees::remove_worktree(&root, path, force) {
-            return Err(self.recover_after_teardown(recovery, error));
-        }
-
-        // The checkout is gone at this point, so metadata can safely be
-        // removed even when branch cleanup below needs to report an error.
-        let mut warnings = Vec::new();
-        if let Err(error) = kumo_core::worktree_meta::remove(path) {
-            warnings.push(format!("metadata cleanup failed: {error}"));
-        }
-
-        if let Some(br) = branch {
-            match kumo_core::worktrees::list_worktrees(&root) {
-                Ok(worktrees) => {
-                    let still_used = worktrees.iter().any(|w| w.branch.as_deref() == Some(&br));
-                    if !still_used {
-                        let preserve = if !force {
-                            match kumo_core::worktrees::branch_unmerged_count(&root, &br) {
-                                Ok(cnt) if cnt > 0 => match kumo_core::worktrees::branch_head(&root, &br) {
-                                    Ok(head) => {
-                                        warnings.push(format!("branch {br:?} preserved: {cnt} unmerged commits, head {head}"));
-                                        true
-                                    }
-                                    Err(error) => {
-                                        warnings.push(format!("could not resolve preserved branch {br:?}: {error}"));
-                                        false
-                                    }
-                                },
-                                Ok(_) => false,
-                                Err(error) => {
-                                    warnings.push(format!("could not inspect branch {br:?}: {error}"));
-                                    false
-                                }
-                            }
-                        } else {
-                            false
-                        };
-                        if !preserve {
-                            if let Err(error) = kumo_core::worktrees::delete_branch(&root, &br, force) {
-                                warnings.push(format!("branch cleanup failed for {br:?}: {error}"));
-                            }
-                        }
-                    }
-                }
-                Err(error) => warnings.push(format!("could not inspect remaining worktrees for branch cleanup: {error}")),
-            }
-        }
-        let mut message = format!("removed worktree {}", path.display());
-        for warning in warnings {
-            message.push_str("; warning: ");
-            message.push_str(&warning);
-        }
-        Ok(message)
-    }
-
     fn recover_after_teardown(&mut self, recovery: Option<(String, PathBuf)>, error: String) -> String {
         let Some((name, workspace)) = recovery else { return error };
         match self.new_session_in_workspace(name, workspace) {
@@ -1244,31 +1133,22 @@ impl App {
 
     /// Close the session at `idx` and all of its panes.
     fn close_session(&mut self, idx: usize) {
-        self.close_session_inner(idx, false);
+        // Dropping the handles lets the PTY cleanup workers finish detached.
+        let _ = self.close_session_with_workers(idx);
     }
 
-    /// Close a session and wait for every PTY cleanup worker to finish. This
-    /// is required before deleting a worktree directory.
-    fn close_session_wait(&mut self, idx: usize) {
-        self.close_session_inner(idx, true);
-    }
-
-    fn close_session_inner(&mut self, idx: usize, wait_for_children: bool) {
+    /// Close a session and return its PTY cleanup workers. Joining them is
+    /// required before deleting a worktree directory.
+    fn close_session_with_workers(&mut self, idx: usize) -> Vec<std::thread::JoinHandle<()>> {
         if self.sessions.get(idx).is_none() {
-            return;
+            return Vec::new();
         }
         let mut cleanup_workers = Vec::new();
         for tab in &self.sessions[idx].tabs {
             for pid in tab.tree.pane_ids() {
                 let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
                 if let Some(mut pane) = self.panes.remove(&pid) {
-                    if wait_for_children {
-                        if let Some(worker) = pane.pty.kill_worker() {
-                            cleanup_workers.push(worker);
-                        }
-                    } else {
-                        pane.pty.kill();
-                    }
+                    cleanup_workers.extend(pane.pty.kill_worker());
                 }
                 self.pane_cache.remove(&pid);
                 self.pane_sizes.remove(&pid);
@@ -1282,22 +1162,18 @@ impl App {
                 }
             }
         }
-        if wait_for_children {
-            for worker in cleanup_workers {
-                let _ = worker.join();
-            }
-        }
         self.sessions.remove(idx);
         if self.sessions.is_empty() {
             self.quit = true;
             self.bump_layout_version();
-            return;
+            return cleanup_workers;
         }
         if idx <= self.active {
             self.active = self.active.saturating_sub(1);
         }
         self.active = self.active.min(self.sessions.len() - 1);
         self.bump_layout_version();
+        cleanup_workers
     }
 
     /// Remove panes whose child process has exited, collapsing the layout.
@@ -1799,6 +1675,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// Remove a worktree inline, as the daemon loop and its worker would.
+    fn remove_worktree(
+        app: &mut App,
+        path: &std::path::Path,
+        force: bool,
+        repo_hint: Option<&std::path::Path>,
+    ) -> Result<String, String> {
+        let removal = app.begin_worktree_removal(path, force, repo_hint)?;
+        app.finish_worktree_removal(removal.run())
+    }
+
     /// Make a temp git repo on branch `main`. Returns the working tree path.
     fn temp_git_repo() -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1834,7 +1721,7 @@ mod tests {
 
         // The daemon must protect the primary checkout explicitly, even when
         // a caller targets it through the worktree removal API.
-        assert!(app.remove_worktree_at(&repo, false, Some(&repo)).is_err());
+        assert!(remove_worktree(&mut app, &repo, false, Some(&repo)).is_err());
         assert_eq!(app.sessions.len(), 1, "main-worktree rejection keeps session alive");
 
         // Protocol callers may provide a relative path; the daemon resolves
@@ -1862,7 +1749,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(lock_status.success());
-        let removal = app.remove_worktree_at(&wt_path, false, Some(&repo));
+        let removal = remove_worktree(&mut app, &wt_path, false, Some(&repo));
         assert!(removal.is_err());
         assert!(!app.quit, "recovered active session keeps daemon alive");
         assert_eq!(app.sessions.len(), 2);
@@ -1883,11 +1770,11 @@ mod tests {
         // A rejected removal must preserve the live workspace and its panes.
         std::fs::write(wt_path.join("untracked.txt"), "unfinished work").unwrap();
         let pane_id = app.sessions[1].active_tab().tree.focus;
-        assert!(app.remove_worktree_at(&wt_path, false, Some(&repo)).is_err());
+        assert!(remove_worktree(&mut app, &wt_path, false, Some(&repo)).is_err());
         assert_eq!(app.sessions.len(), 2);
         assert!(app.panes.contains_key(&pane_id));
         assert!(wt_path.join("untracked.txt").exists());
-        app.remove_worktree_at(&wt_path, true, Some(&repo)).unwrap();
+        remove_worktree(&mut app, &wt_path, true, Some(&repo)).unwrap();
         assert_eq!(app.sessions.len(), 1);
 
         let _ = std::fs::remove_dir_all(&repo);
@@ -1923,7 +1810,7 @@ mod tests {
         assert!(status.success());
         let head = kumo_core::worktrees::branch_head(&repo, "feat/preserve").unwrap();
 
-        let msg = app.remove_worktree_at(&wt_path, false, Some(&repo)).unwrap();
+        let msg = remove_worktree(&mut app, &wt_path, false, Some(&repo)).unwrap();
         assert!(msg.contains("branch \"feat/preserve\" preserved"));
         assert!(msg.contains(&head));
         assert!(!wt_path.exists());
@@ -1971,7 +1858,41 @@ mod tests {
         );
 
         let wt_path = app.sessions[1].workspace.clone();
-        app.remove_worktree_at(&wt_path, true, Some(&repo)).unwrap();
+        remove_worktree(&mut app, &wt_path, true, Some(&repo)).unwrap();
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&cfg);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn background_worktree_removal_rejects_duplicates_until_finished() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("wt-bg-cfg");
+        let home = scratch("wt-bg-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let repo = temp_git_repo();
+        let mut app = App::new(Launch::New(Some(repo.clone()))).unwrap();
+        app.new_worktree_session(0, "feat/bg").unwrap();
+        let wt_path = app.sessions[1].workspace.clone();
+
+        let removal = app.begin_worktree_removal(&wt_path, false, Some(&repo)).unwrap();
+        assert_eq!(app.sessions.len(), 1, "the session closes before the checkout is deleted");
+        app.spawn_worktree_removal(7, removal);
+        let duplicate = app.begin_worktree_removal(&wt_path, false, Some(&repo));
+        assert!(duplicate.err().is_some_and(|e| e.contains("already being removed")));
+
+        let (client_id, outcome) = app.worktree_removal_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!(client_id, 7);
+        let message = app.finish_worktree_removal(outcome).unwrap();
+        assert!(message.starts_with("removed worktree"), "{message}");
+        assert!(!wt_path.exists());
+        assert!(app.worktree_removals.is_empty());
+
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&home);

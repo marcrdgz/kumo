@@ -230,6 +230,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     // `kumo update` swapped the binary on disk: restart this
                     // process so the new version serves the sessions, inheriting
                     // the live PTY masters so panes and agents survive.
+                    // A removal may recover a session, which must be part of
+                    // the resume state.
+                    app.join_worktree_removals();
+                    finish_worktree_removals(&mut app, &mut clients);
                     let resume = kumo_core::config::resume_file();
                     match restart_daemon(&app, &resume) {
                         Ok(_inheritance) => {
@@ -329,10 +333,20 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let reply = app.worktree_open(&session, &path).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
                 }
-                Command::WorktreeRemove { session, path, force } => {
-                    let reply = app.worktree_remove(&session, &path, force).unwrap_or_else(|e| format!("error: {e:#}"));
-                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
-                }
+                Command::WorktreeRemove { session, path, force } => match app.worktree_remove(&session, &path, force) {
+                    // Closing the last session stops the daemon at the end of
+                    // this iteration, so finish inline and reply first.
+                    Ok(removal) if app.quit => {
+                        let message = app.finish_worktree_removal(removal.run()).unwrap_or_else(|e| format!("error: {e}"));
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message });
+                    }
+                    // Deleting a checkout can take a minute; the reply follows
+                    // from `finish_worktree_removals` once the worker is done.
+                    Ok(removal) => app.spawn_worktree_removal(id, removal),
+                    Err(message) => {
+                        let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message });
+                    }
+                },
                 Command::WorktreeSet { session, path, comment, status } => {
                     let reply = app.worktree_set(&session, &path, comment.as_deref(), status.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
@@ -635,6 +649,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             let Ok(ev) = app.events_rx.try_recv() else { break };
             app.on_pty_event(ev);
         }
+        finish_worktree_removals(&mut app, &mut clients);
         while let Ok(notice) = app.update_rx.try_recv() {
             app.update_check_pending = false;
             app.update_notice = notice;
@@ -854,6 +869,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         std::thread::park_timeout(Duration::from_millis(if idle { 50 } else { 2 }));
     }
 
+    // Never cut a checkout deletion short; nobody is left to reply to.
+    app.join_worktree_removals();
     // Start every cleanup together, then wait while all children are reaped.
     let cleanup: Vec<_> = app.panes.values_mut().filter_map(|p| p.pty.kill_worker()).collect();
     for worker in cleanup {
@@ -969,6 +986,14 @@ fn exec_new_binary(resume: &std::path::Path) -> Result<()> {
         .arg(resume)
         .exec();
     Err(err.into())
+}
+
+/// Apply finished worktree removals and answer the clients that asked.
+fn finish_worktree_removals(app: &mut App, clients: &mut HashMap<usize, Client>) {
+    while let Ok((id, outcome)) = app.worktree_removal_rx.try_recv() {
+        let message = app.finish_worktree_removal(outcome).unwrap_or_else(|e| format!("error: {e}"));
+        let _ = send_to(clients, id, &DaemonEvent::Reply { message });
+    }
 }
 
 /// Queue a message to one client (non-blocking).
@@ -1321,6 +1346,101 @@ mod tests {
         // Don't let the daemon linger (it otherwise lives until the last
         // session closes, keeping its socket for the next test run).
         protocol::write_framed(&mut stream, &Command::KillServer).unwrap();
+    }
+
+    /// Deleting a checkout runs off the daemon loop: a command sent right
+    /// after `WorktreeRemove` is answered before the removal finishes.
+    #[test]
+    fn worktree_removal_does_not_block_the_daemon_loop() {
+        let cfg = scratch("wt-rm-cfg");
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\nupdate-check = false\n").unwrap();
+        let repo = scratch("wt-rm-repo").join("repo");
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main", repo.to_str().unwrap()]);
+        git(&["-C", repo.to_str().unwrap(), "config", "user.email", "t@t"]);
+        git(&["-C", repo.to_str().unwrap(), "config", "user.name", "t"]);
+        git(&["-C", repo.to_str().unwrap(), "commit", "-q", "--allow-empty", "-m", "x"]);
+
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let prev_cfg = std::env::var("KUMO_CONFIG_DIR").ok();
+        let prev_update = std::env::var("KUMO_NO_UPDATE").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        std::env::set_var("KUMO_NO_UPDATE", "1");
+        let rt = scratch("wt-rm-rt");
+        let sock = rt.join("kumo").join("kumo.sock");
+        let s = sock.clone();
+        let launch_dir = repo.clone();
+        std::thread::spawn(move || {
+            let _ = run_daemon_at(s, Launch::New(Some(launch_dir)));
+        });
+        let mut stream = wait_for_socket(&sock, Duration::from_secs(10));
+        match prev_cfg {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        match prev_update {
+            Some(v) => std::env::set_var("KUMO_NO_UPDATE", v),
+            None => std::env::remove_var("KUMO_NO_UPDATE"),
+        }
+        drop(_lock);
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+
+        protocol::write_framed(&mut stream, &Command::SessionList).unwrap();
+        let session = loop {
+            if let DaemonEvent::SessionList { sessions } = next_event(&mut stream, Duration::from_secs(10), "SessionList") {
+                break sessions.into_iter().find(|s| s.active).unwrap().name;
+            }
+        };
+        protocol::write_framed(&mut stream, &Command::WorktreeCreate {
+            session: session.clone(),
+            branch: "feat/slow-rm".into(),
+            from: None,
+            note: None,
+            agent: None,
+            is_ai: false,
+            name: None,
+        })
+        .unwrap();
+        loop {
+            if let DaemonEvent::Reply { message } = next_event(&mut stream, Duration::from_secs(10), "WorktreeCreate") {
+                assert!(message.contains("feat/slow-rm"), "create failed: {message}");
+                break;
+            }
+        }
+        // Enough untracked files that deleting the checkout clearly outlasts
+        // one loop iteration.
+        let wt = kumo_core::worktrees::worktree_path(&repo, "feat/slow-rm");
+        let bulk = wt.join("target");
+        std::fs::create_dir_all(&bulk).unwrap();
+        for i in 0..2000 {
+            std::fs::write(bulk.join(format!("{i}.o")), "x").unwrap();
+        }
+
+        protocol::write_framed(&mut stream, &Command::WorktreeRemove { session: session.clone(), path: wt.clone(), force: true }).unwrap();
+        protocol::write_framed(&mut stream, &Command::SessionList).unwrap();
+        let mut listed_first = None;
+        let removal = loop {
+            match next_event(&mut stream, Duration::from_secs(30), "WorktreeRemove") {
+                DaemonEvent::SessionList { sessions } => {
+                    listed_first.get_or_insert(true);
+                    assert!(sessions.iter().all(|s| s.name != "feat/slow-rm"), "the session closes immediately");
+                }
+                DaemonEvent::Reply { message } => {
+                    listed_first.get_or_insert(false);
+                    break message;
+                }
+                _ => continue,
+            }
+        };
+        assert_eq!(listed_first, Some(true), "SessionList must not wait for the removal");
+        assert!(removal.starts_with("removed worktree"), "removal failed: {removal}");
+        assert!(!wt.exists());
+
+        protocol::write_framed(&mut stream, &Command::KillServer).unwrap();
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&cfg);
     }
 
     /// All pane nodes of a layout tree (leaf panes only).
