@@ -64,7 +64,10 @@ s = "split-vertical"   # now leader+s splits vertically
 x = "close-pane"
 ```
 
-Invalid chords/actions are ignored with a warning. The dispatch table feeds
+Invalid chords/actions are ignored, and the TUI shows a warning notice at
+startup and on reload. `H` and `shift+h` spell the same chord: when two
+entries resolve to one chord with different actions, the entry whose key sorts
+last wins, and kumo warns about the one it shadows. The dispatch table feeds
 the leader-mode status-bar hint and the <kbd>leader+?</kbd> showcase from the
 same source, so they never drift.
 

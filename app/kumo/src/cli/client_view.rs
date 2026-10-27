@@ -778,16 +778,19 @@ fn node_has_working(node: Option<&LayoutNode>) -> bool {
 
 impl View {
     pub fn new(out: UnixStream, cols: u16, rows: u16) -> Self {
-        let leader = match kumo_core::config::leader() {            Some(raw) => match bindings::parse_chord(&raw) {
+        let mut config_warnings = Vec::new();
+        let leader = match kumo_core::config::leader() {
+            Some(raw) => match bindings::parse_chord(&raw) {
                 Some(chord) => chord,
                 None => {
-                    log::warn!("kumo: invalid leader key {:?}; falling back to ctrl+b", raw);
+                    config_warnings.push(format!("keymap: invalid leader key {raw:?}; using ctrl+b"));
                     bindings::LEADER
                 }
             },
             None => bindings::LEADER,
         };
-        let keymap = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+        let (keymap, keymap_warnings) = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+        config_warnings.extend(keymap_warnings);
         let status_bar = kumo_core::config::status_bar();
         let toast_pos = kumo_core::config::toast_position();
         let hostname = status_bar::cached_hostname();
@@ -839,7 +842,7 @@ impl View {
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
             pane_numbers: None,
             status_msg: None,
-            notice: None,
+            notice: config_notice(&config_warnings).map(|n| (n, Instant::now())),
             agent_toasts: Vec::new(),
             toast_pos,
             update_notice: None,
@@ -1156,10 +1159,13 @@ impl View {
                 self.mark_dirty();
             }
             DaemonEvent::ConfigReloaded { notice } => {
-                self.notice = Some((notice, Instant::now()));
                 self.ensure_sidebar_tab_visible();
-                // Status bar is client-local but reloaded from the same config.
+                // Status bar and keymap are client-local but reloaded from
+                // the same config.
                 kumo_core::config::invalidate_cache();
+                let (keymap, warnings) = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+                self.keymap = keymap;
+                self.notice = Some((config_notice(&warnings).unwrap_or(notice), Instant::now()));
                 let new_bar = kumo_core::config::status_bar();
                 let enabled_changed = new_bar.enabled != self.status_bar.enabled;
                 self.status_bar = new_bar;
@@ -3522,6 +3528,16 @@ fn palette_action_desc(action: Action) -> &'static str {
     }
 }
 
+/// One notice line for the config problems found while building the
+/// keymap: the first problem, plus a count of the rest.
+fn config_notice(warnings: &[String]) -> Option<String> {
+    let first = warnings.first()?;
+    Some(match warnings.len() {
+        1 => first.clone(),
+        n => format!("{first} (+{} more)", n - 1),
+    })
+}
+
 fn command_palette_matches<'a>(keymap: &'a [Binding], query: &str) -> Vec<bindings::PaletteEntry<'a>> {
     let needles: Vec<String> = query.split_whitespace().map(str::to_ascii_lowercase).collect();
     bindings::palette_entries(keymap)
@@ -3613,7 +3629,7 @@ mod tests {
             rows: 24,
             mode: Mode::Normal,
             leader: bindings::LEADER,
-            keymap: bindings::build_keymap(&Default::default()),
+            keymap: bindings::build_keymap(&Default::default()).0,
             layout: None,
             grids: HashMap::new(),
             rects: Vec::new(),
