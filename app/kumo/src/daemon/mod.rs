@@ -32,6 +32,9 @@ pub fn run(args: &[String]) -> Result<()> {
         install_panic_hook(kumo_core::config::state_dir().join("daemon.log"));
         let launch = match resume {
             Some(path) => Launch::Resume(path),
+            None if kumo_core::config::persistence().restore => {
+                Launch::Restore(kumo_core::config::state_file(), workspace)
+            }
             None => Launch::New(workspace),
         };
         app::server::run_daemon(launch)

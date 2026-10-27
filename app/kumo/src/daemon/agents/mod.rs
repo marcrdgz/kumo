@@ -276,6 +276,12 @@ pub(crate) fn is_known_agent_kind(id: &str) -> bool {
     rules::with_rules(|r| r.agents.iter().any(|agent| agent.id == id))
 }
 
+/// The loaded manifest's `resume` command for agent `id`: what reopens its
+/// last conversation when a pane is restored after a reboot.
+pub(crate) fn resume_command(id: &str) -> Option<Vec<String>> {
+    rules::with_rules(|r| r.agents.iter().find(|agent| agent.id == id)?.resume.clone())
+}
+
 /// Text of `screen` below its last horizontal rule (a run of box-drawing
 /// dashes), where Claude Code renders the live prompt and approval forms.
 fn after_last_rule(screen: &str) -> String {    let mut start = 0usize;

@@ -35,6 +35,11 @@ sound = true            # audible chime on blocked/finished transitions
 [worktree]
 shared-dirs = ["node_modules", ".cache"] # gitignored dirs shared by worktrees
 expose-socket = true    # pass KUMO_SOCKET_PATH and KUMO_BIN_PATH to panes
+
+[persistence]
+restore = true          # bring sessions back after a reboot, logout or crash
+autosave-interval = 120 # max age (seconds) of saved screen contents; 0 = on shutdown only
+resume-agents = true    # relaunch agents with their resume command (claude --continue, …)
 ```
 
 ## Config builder
@@ -133,6 +138,21 @@ with `kumo agent prompt`; automatic task submission is planned for 0.7.1.
         'Relative, gitignored directories to share with new isolated worktrees (for example `node_modules` or `.cache`).',
       default: 'empty',
     },
+    'persistence.restore': {
+      description:
+        'Save sessions to `state.json` and restore them when the daemon starts cold (after a reboot, logout or crash). `kumo kill` and closing the last session clear the saved state.',
+      default: '`true`',
+    },
+    'persistence.autosave-interval': {
+      description:
+        'Maximum age in seconds of the saved screen contents. Layout changes are saved within seconds and a final save runs on shutdown; `0` saves contents only on shutdown.',
+      default: '`120`',
+    },
+    'persistence.resume-agents': {
+      description:
+        "Relaunch restored agent panes with their manifest's `resume` command (`claude --continue`, `codex resume --last`, `opencode --continue`, `aider --restore-chat-history`) instead of leaving a plain shell.",
+      default: '`true`',
+    },
     'worktree.expose-socket': {
       description:
         'Pass `KUMO_SOCKET_PATH` and `KUMO_BIN_PATH` to processes spawned in panes.',
@@ -177,7 +197,7 @@ Overrides follow the usual conventions:
 | Location | Path / override |
 | --- | --- |
 | Config | `~/.config/kumo/config.toml` — override with `KUMO_CONFIG_DIR` or `XDG_CONFIG_HOME` |
-| Runtime state | `~/.local/state/kumo/` — override with `KUMO_STATE_DIR` or `XDG_STATE_HOME` |
+| Runtime state | `~/.local/state/kumo/` (including the saved sessions, `state.json`) — override with `KUMO_STATE_DIR` or `XDG_STATE_HOME` |
 | IPC socket | `$XDG_RUNTIME_DIR/kumo` |
 
 ## Live reload

@@ -7,6 +7,8 @@
 
 [agent]
 id = "opencode"
+# Reopens the last conversation when kumo restores the pane after a reboot.
+resume = ["opencode", "--continue"]
 
 # Question dialog (QuestionPrompt): "esc dismiss" must be paired with an
 # enter action AND a navigation hint — otherwise it is the idle prompt.

@@ -42,6 +42,9 @@ pub struct Pane {
     pub dead: bool,
     /// When the pane last produced output. Drives the agent status heuristic.
     last_output: Instant,
+    /// Bumped on every output chunk, so autosave re-encodes only the panes
+    /// whose terminal changed since the last save.
+    output_seq: u64,
     /// Rolling tail of recent output with ANSI escapes stripped, scanned for
     /// blocked (approval) markers.
     recent_text: Vec<u8>,
@@ -184,6 +187,14 @@ impl TextStripper {
         }
     }
 }
+
+/// Fed to a restored pane's emulator before the new shell's first output:
+/// leave the alternate screen (`?1047l`: unlike `?1049l` it does not restore
+/// a saved cursor, which would draw over the saved output), turn off mouse
+/// reporting, focus events,
+/// bracketed paste and application cursor keys (the new shell re-enables
+/// what it uses), reset attributes, and print a dim marker line.
+const RESTORED_PREAMBLE: &[u8] = b"\x1b[?1047l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b[?25h\x1b[0m\r\n\x1b[2m-- restored by kumo --\x1b[0m\r\n";
 
 impl Pane {
     // Spawn/resume/finish take every `Pane` init parameter as a flat argument
@@ -338,29 +349,38 @@ impl Pane {
         Self::build_pane(id, session_id, is_ai, program, cwd, pty, vt, events_tx)
     }
 
-    #[allow(dead_code)]
+    /// Respawn a pane saved before the daemon stopped (reboot, logout,
+    /// crash): a fresh shell in `cwd` whose emulator is seeded with the saved
+    /// screen and scrollback, so the pane reads as it did before. The program
+    /// that drew that screen is gone, so the emulator leaves any alternate
+    /// screen and input modes it had set, and a dim line marks where the new
+    /// shell starts. An undecodable snapshot falls back to a blank emulator.
     #[allow(clippy::too_many_arguments)]
-    fn finish_from_snapshot(
-        id: u64,
+    pub fn restore(
         session_id: u64,
-        is_ai: bool,
-        program: Option<(String, Vec<String>)>,
+        id: u64,
+        shell: String,
         cwd: PathBuf,
-        pty: Pty,
-        snapshot: Vec<u8>,
+        cols: u16,
+        rows: u16,
+        snapshot: Option<&[u8]>,
         events_tx: Sender<PtyEvent>,
         theme: &OwnedTheme,
     ) -> Result<Pane> {
-        let vt = vt::Terminal::from_snapshot(
-            &snapshot,
-            10_000,
-            &theme.palette,
-            theme.term_fg,
-            theme.term_bg,
-            theme.term_cursor,
-        )
-        .map_err(|e| anyhow::anyhow!("snapshot decode failed: {e:#}"))?;
-        Self::build_pane(id, session_id, is_ai, program, cwd, pty, vt, events_tx)
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let pty = Pty::spawn(&PtySpec { shell, program: None, cwd: Some(cwd.clone()), cols, rows })?;
+        let restored = snapshot.and_then(|bytes| {
+            vt::Terminal::from_snapshot(bytes, 10_000, &theme.palette, theme.term_fg, theme.term_bg, theme.term_cursor)
+                .inspect_err(|e| log::warn!("kumo: snapshot decode failed for restored pane {id}: {e:#}"))
+                .ok()
+        });
+        let Some(mut vt) = restored else {
+            return Self::finish(id, session_id, false, None, cwd, cols, rows, pty, events_tx, theme);
+        };
+        vt.write(RESTORED_PREAMBLE);
+        let mut pane = Self::build_pane(id, session_id, false, None, cwd, pty, vt, events_tx)?;
+        pane.resize(cols, rows);
+        Ok(pane)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -388,6 +408,7 @@ impl Pane {
             vt,
             dead: false,
             last_output: Instant::now(),
+            output_seq: 0,
             recent_text: Vec::with_capacity(RECENT_TEXT_BYTES),
             recent_text_start: 0,
             recent_text_len: 0,
@@ -437,6 +458,7 @@ impl Pane {
     pub fn feed(&mut self, data: &[u8]) {
         if !data.is_empty() {
             self.last_output = Instant::now();
+            self.output_seq = self.output_seq.wrapping_add(1);
             self.dirty = true;
             self.stripper.feed(data, &mut self.recent_text);
             self.recent_text_len = self.recent_text.len() - self.recent_text_start;
@@ -482,6 +504,11 @@ impl Pane {
     /// override installed by `agent start`.
     pub fn detected_agent_rule_id(&self) -> Option<String> {
         self.detected_ai_name.as_deref().map(normalize_agent_kind)
+    }
+
+    /// Changes whenever the pane receives output (see `output_seq`).
+    pub fn output_seq(&self) -> u64 {
+        self.output_seq
     }
 
     /// Remember a CLI selected by `kumo agent start` so its state rules apply
@@ -2259,6 +2286,22 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         assert_eq!(cwd, std::env::current_dir().unwrap(), "process_cwd(self) must match current_dir");
     }
 
+    /// Poll `detected_cwd` until it reports `want` (shells under parallel
+    /// test load can take well over a fixed sleep to run the `cd`).
+    fn wait_for_cwd(pane: &Pane, want: &std::path::Path) -> Option<PathBuf> {
+        // macOS /var and /tmp resolve to /private; compare canonical paths.
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let want = canon(want);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let cwd = pane.detected_cwd().map(|p| canon(&p));
+            if cwd.as_deref() == Some(want.as_path()) || Instant::now() >= deadline {
+                return cwd;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     #[test]
     fn detected_cwd_follows_shell_cd() {
         let dir = std::env::temp_dir().join(format!("kumo-pane-cwd-{}", std::process::id()));
@@ -2267,11 +2310,8 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         let (tx, _rx) = mpsc::sync_channel(256);
         let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, &test_theme()).unwrap();
         pane.write(format!("cd {}\n", dir.display()).as_bytes());
-        std::thread::sleep(Duration::from_millis(600));
-        // macOS /var and /tmp resolve to /private; compare canonical paths.
-        let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-        let cwd = pane.detected_cwd().map(|p| canon(&p));
-        assert_eq!(cwd, Some(canon(&dir)), "detected_cwd must follow a shell cd");
+        let cwd = wait_for_cwd(&pane, &dir);
+        assert_eq!(cwd, Some(std::fs::canonicalize(&dir).unwrap()), "detected_cwd must follow a shell cd");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2290,12 +2330,10 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         let (tx, _rx) = mpsc::sync_channel(256);
         let mut pane = Pane::spawn(1, 1, "/bin/sh".into(), None, None, 80, 24, false, tx, &test_theme()).unwrap();
         pane.write(format!("cd {}\nsleep 3 &\ncd {}\n", bg.display(), cwd_dir.display()).as_bytes());
-        std::thread::sleep(Duration::from_millis(900));
-        let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-        let cwd = pane.detected_cwd().map(|p| canon(&p));
+        let cwd = wait_for_cwd(&pane, &cwd_dir);
         assert_eq!(
             cwd,
-            Some(canon(&cwd_dir)),
+            Some(std::fs::canonicalize(&cwd_dir).unwrap()),
             "follow must report the shell's cwd, not the background job's"
         );
         for d in [&bg, &cwd_dir] {

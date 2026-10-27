@@ -17,6 +17,7 @@ and everything is exactly where you left it.
   several terminals can watch the same session at once.
 - The daemon **auto-stops** when the last session closes — no lingering
   background process.
+- Sessions **survive a reboot** (see below).
 - `kumo new` always starts a fresh session; it never attaches to an existing
   one.
 
@@ -33,3 +34,29 @@ user's client is rejected, fail closed.
 (`daemon --resume`), inheriting the live terminals from a transient resume
 file — running agents survive the update, attached terminals auto-reconnect
 over the fresh socket, and each pane restores its screen and scrollback.
+
+## Surviving a reboot
+
+The daemon keeps `~/.local/state/kumo/state.json` current: layout changes are
+saved within seconds, screen contents at most every
+`[persistence] autosave-interval` (2 minutes by default), and a final save
+runs when the OS stops the daemon at shutdown or logout. Only panes with new
+output are re-encoded, and the write happens off the daemon's render loop.
+
+After a reboot (or a crash), the first `kumo` starts the daemon cold and it
+restores every session, tab and split:
+
+- each shell reopens in the directory it was in, showing its saved screen and
+  scrollback above a dim `-- restored by kumo --` line;
+- agent panes relaunch their last conversation (`claude --continue`,
+  `codex resume --last`, `opencode --continue`,
+  `aider --restore-chat-history`), typed into the restored shell so a failed
+  resume leaves you at a prompt. Disable with `resume-agents = false`;
+  add or change an agent's command with `resume = [...]` in its
+  [detection manifest](/docs/guides/agents);
+- names and agent aliases come back, so scripts keep working.
+
+Running processes other than agents (servers, editors, builds) are not
+relaunched. `kumo kill` and closing the last session end the sessions for
+good: nothing is restored afterwards. Turn the whole feature off with
+`[persistence] restore = false`.

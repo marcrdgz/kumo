@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use kumo_core::layout::{LayoutTree, SplitDir};
 use kumo_core::theme::OwnedTheme;
 use kumo_core::Launch;
-use crate::daemon::agents::AgentStatus;
+use crate::daemon::agents::{self, AgentStatus};
 use crate::daemon::alert::AgentToast;
 use crate::daemon::pane::{Pane, PtyEvent};
 use crate::daemon::pty::Pty;
@@ -18,6 +18,8 @@ use crate::daemon::state::{self, SavedState};
 use self::tasks::WorkspaceGit;
 use self::worktree_removal::WorktreeRemovalOutcome;
 
+#[cfg(unix)]
+mod autosave;
 mod commands;
 #[cfg(unix)]
 pub(super) mod server;
@@ -41,6 +43,10 @@ pub(crate) struct CreatedWorktree {
     pub(crate) branch: String,
     pub(crate) agent_pane: Option<u64>,
 }
+
+/// Per-pane snapshot bytes from the last `state.json` save, keyed by pane id
+/// with the pane's `output_seq` at encode time.
+pub(crate) type SnapshotCache = HashMap<u64, (u64, Vec<u8>)>;
 
 struct Tab {
     id: u64,
@@ -227,7 +233,7 @@ impl App {
         // Workspace for a fresh session: the explicit `kumo new [dir]` arg, else
         // the directory kumo was launched from, else $HOME.
         let workspace = match &launch {
-            Launch::New(Some(p)) if p.is_dir() => p.clone(),
+            Launch::New(Some(p)) | Launch::Restore(_, Some(p)) if p.is_dir() => p.clone(),
             _ => cwd.clone().unwrap_or_else(|| home.clone()),
         };
 
@@ -293,12 +299,30 @@ impl App {
 
         match launch {
             Launch::Auto | Launch::Attach => {
-                if let Some(state) = state::load(&kumo_core::config::state_file())? {
-                    app.restore(state)?;
-                } else if matches!(launch, Launch::Attach) {
-                    anyhow::bail!("no saved state to attach to (start with `kumo` or `kumo new`)");
-                } else {
+                let state = state::load(&kumo_core::config::state_file())?;
+                let restored = state.is_some_and(|state| app.restore(state, kumo_core::config::persistence().resume_agents));
+                if !restored {
+                    if matches!(launch, Launch::Attach) {
+                        anyhow::bail!("no saved state to attach to (start with `kumo` or `kumo new`)");
+                    }
                     app.new_session()?;
+                }
+            }
+            Launch::Restore(saved, explicit) => {
+                let restored = match state::load(&saved) {
+                    Ok(Some(state)) => app.restore(state, kumo_core::config::persistence().resume_agents),
+                    Ok(None) => false,
+                    Err(e) => {
+                        log::warn!("kumo: could not read {}: {e:#}", saved.display());
+                        false
+                    }
+                };
+                // `kumo new DIR` started this daemon: the new session joins
+                // the restored ones and takes focus.
+                match explicit {
+                    Some(dir) if dir.is_dir() => app.new_session_in(dir)?,
+                    _ if !restored => app.new_session()?,
+                    _ => {}
                 }
             }
             Launch::New(Some(p)) if p.is_dir() => app.new_session_in(p)?,
@@ -336,11 +360,15 @@ impl App {
         Ok(app)
     }
 
-    /// Rebuild sessions and panes from a saved state. Saved pane ids are
-    /// remapped to fresh process-local ids; every pane is respawned via the
-    /// same `Pane::spawn` path a fresh session uses (and that 0.4.0's daemon
-    /// will own).
-    fn restore(&mut self, mut state: SavedState) -> Result<()> {
+    /// Rebuild sessions and panes from a saved `state.json` (a cold daemon
+    /// start after a reboot, logout or crash). Saved pane ids are remapped
+    /// to fresh process-local ids. Every pane comes back as a new shell in
+    /// its last working directory showing its saved screen; an agent pane
+    /// also relaunches its agent with the manifest's `resume` command when
+    /// `resume_agents` is set. Restoring is best effort: a pane that cannot
+    /// be respawned is dropped from its tab instead of failing the daemon.
+    /// Returns whether any session came back.
+    fn restore(&mut self, mut state: SavedState, resume_agents: bool) -> bool {
         // Assign a fresh pane id per saved id, consistently across sessions.
         let mut map = std::collections::HashMap::new();
         for session in &state.sessions {
@@ -354,37 +382,57 @@ impl App {
         }
         state::remap_pane_ids(&mut state, &map);
 
-        self.panes.clear();
-        self.sessions.clear();
-        self.agent_aliases.clear();
-        let (cols, rows) = DEFAULT_PANE_DIMS;
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+        let (default_cols, default_rows) = DEFAULT_PANE_DIMS;
         let saved_active = state.active;
+        let mut active = None;
         for (i, saved) in state.sessions.into_iter().enumerate() {
             let sid = self.next_session_id();
+            let mut missing = Vec::new();
             for sp in saved.panes {
-                let saved_id = sp.id;
-                let agent_alias = sp.agent_alias.clone();
-                let mut pane = Pane::spawn(
-                    sid,
-                    saved_id,
-                    sp.shell,
-                    sp.program,
-                    Some(sp.cwd.clone()),
-                    cols,
-                    rows,
-                    sp.is_ai,
-                    self.events_tx.clone(),
-                    &self.theme,
-                )?;
+                // A deleted directory (a removed worktree, a cleaned temp
+                // dir) must not cost the pane: fall back to the workspace.
+                let cwd = [&sp.cwd, &saved.workspace, &home]
+                    .into_iter()
+                    .find(|dir| dir.is_dir())
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                let (cols, rows) = if sp.cols > 0 && sp.rows > 0 { (sp.cols, sp.rows) } else { (default_cols, default_rows) };
+                let pane = Pane::restore(sid, sp.id, self.shell.clone(), cwd, cols, rows, sp.snapshot.as_deref(), self.events_tx.clone(), &self.theme);
+                let mut pane = match pane {
+                    Ok(pane) => pane,
+                    Err(e) => {
+                        log::warn!("kumo: could not restore pane {}: {e:#}", sp.id);
+                        missing.push(sp.id);
+                        continue;
+                    }
+                };
                 pane.custom_name = sp.custom_name;
-                self.panes.insert(saved_id, pane);
-                if let Some(alias) = agent_alias {
-                    self.agent_aliases.insert(saved_id, alias);
+                if let Some(kind) = sp.agent_kind.filter(|_| resume_agents) {
+                    if let Some(cmd) = agents::resume_command(&kind) {
+                        // Typed into the restored shell, like `agent start`:
+                        // if the agent fails to resume, the shell remains.
+                        let mut line = cmd.iter().map(|arg| commands::shell_quote_posix(arg)).collect::<Vec<_>>().join(" ");
+                        line.push('\r');
+                        pane.set_agent_kind(&kind);
+                        pane.write(line.as_bytes());
+                    }
                 }
+                if let Some(alias) = sp.agent_alias {
+                    self.agent_aliases.insert(sp.id, alias);
+                }
+                self.pane_sizes.insert(sp.id, (cols, rows));
+                self.panes.insert(sp.id, pane);
             }
             let mut tabs = Vec::new();
             for saved_tab in saved.tabs {
                 let mut tree = LayoutTree::from_node(state::to_layout_node(&saved_tab.tree), saved_tab.focus);
+                for pid in &missing {
+                    tree.remove_pane(*pid);
+                }
+                if tree.pane_count() == 0 {
+                    continue;
+                }
                 if !tree.contains(tree.focus) {
                     if let Some(&first) = tree.pane_ids().first() {
                         tree.focus = first;
@@ -392,25 +440,22 @@ impl App {
                 }
                 tabs.push(Tab { id: saved_tab.id, name: saved_tab.name, tree, zoom: saved_tab.zoom });
             }
-            // If the state had no tabs (should not happen after v2), create a default.
             if tabs.is_empty() {
-                if let Some(pid) = self.panes.keys().next().copied() {
-                    tabs.push(Tab { id: 1, name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false });
-                }
+                continue;
             }
-            let active_tab = saved.active_tab.min(tabs.len().saturating_sub(1));
+            if i == saved_active {
+                active = Some(self.sessions.len());
+            }
+            let active_tab = saved.active_tab.min(tabs.len() - 1);
             self.sessions.push(Session { id: sid, name: saved.name, tabs, active_tab, workspace: saved.workspace });
-            self.active = i;
         }
         if self.sessions.is_empty() {
-            // Saved state without any surviving pane (or empty): fall back to a
-            // fresh session rather than rendering a broken tree.
-            self.new_session()?;
-        } else {
-            self.active = saved_active.min(self.sessions.len() - 1);
+            return false;
         }
+        self.active = active.unwrap_or(0);
+        self.workspace = self.sessions[self.active].workspace.clone();
         self.bump_layout_version();
-        Ok(())
+        true
     }
 
     /// Rebuild sessions/panes from a resume file (daemon restart for `kumo
@@ -507,41 +552,79 @@ impl App {
     /// adopt the live terminals (`kumo update`).
     #[cfg(unix)]
     fn to_resume_state(&self) -> Option<SavedState> {
-        if self.sessions.is_empty() {
-            return None;
+        self.saved_state(|pid, pane| {
+            let snapshot = pane.vt.snapshot_encode();
+            if snapshot.is_none() {
+                log::warn!("kumo: snapshot encode failed for pane {pid}");
+            }
+            state::SavedPane {
+                master_fd: pane.pty.raw_fd().map(|fd| fd as i64),
+                child_pid: pane.pty.process_id().map(|p| p as i64),
+                mouse_tracking: pane.has_mouse_reporting(),
+                snapshot,
+                ..self.saved_pane(pid, pane)
+            }
+        })
+    }
+
+    /// Serialize the sessions for `state.json`, the reboot-recovery file:
+    /// no live descriptors, each pane's current working directory, and the
+    /// running agent so a cold restore can relaunch it. Snapshots come from
+    /// `snapshots`, re-encoded only for panes with output since they were
+    /// cached; entries for closed panes are dropped.
+    pub(crate) fn to_saved_state(&self, snapshots: &mut SnapshotCache) -> Option<SavedState> {
+        snapshots.retain(|pid, _| self.panes.contains_key(pid));
+        self.saved_state(|pid, pane| {
+            let seq = pane.output_seq();
+            let snapshot = match snapshots.get(&pid) {
+                Some((cached, bytes)) if *cached == seq => Some(bytes.clone()),
+                _ => pane.vt.snapshot_encode().inspect(|bytes| {
+                    snapshots.insert(pid, (seq, bytes.clone()));
+                }),
+            };
+            state::SavedPane {
+                cwd: pane.detected_cwd().unwrap_or_else(|| pane.cwd.clone()),
+                snapshot,
+                agent_kind: pane.is_ai_cli().then(|| pane.agent_rule_id().map(crate::daemon::pane::normalize_agent_kind)).flatten(),
+                ..self.saved_pane(pid, pane)
+            }
+        })
+    }
+
+    /// The fields of a `SavedPane` both state files share.
+    fn saved_pane(&self, pid: u64, pane: &Pane) -> state::SavedPane {
+        state::SavedPane {
+            id: pid,
+            is_ai: pane.is_ai,
+            shell: pane.pty.shell.clone(),
+            program: pane.program.clone(),
+            cwd: pane.cwd.clone(),
+            custom_name: pane.custom_name.clone(),
+            agent_alias: self.agent_aliases.get(&pid).cloned(),
+            master_fd: None,
+            child_pid: None,
+            cols: pane.pty.cols,
+            rows: pane.pty.rows,
+            mouse_tracking: false,
+            snapshot: None,
+            agent_kind: None,
         }
+    }
+
+    /// Every session with its tabs and panes, each pane serialized by
+    /// `save_pane`. `None` when there is nothing to save.
+    fn saved_state(&self, mut save_pane: impl FnMut(u64, &Pane) -> state::SavedPane) -> Option<SavedState> {
         let mut sessions = Vec::new();
         for session in &self.sessions {
             let mut panes = Vec::new();
-            let mut pane_ids = Vec::new();
-            for tab in &session.tabs {
-                pane_ids.extend(tab.tree.pane_ids());
-            }
-            for pid in pane_ids {
-                let Some(pane) = self.panes.get(&pid) else { continue };
-                let snapshot = pane.vt.snapshot_encode();
-                if snapshot.is_none() {
-                    log::warn!("kumo: snapshot encode failed for pane {pid}");
-                }
-                // dedup if a pane id somehow appears in multiple tabs (should not happen)
+            for pid in session.tabs.iter().flat_map(|tab| tab.tree.pane_ids()) {
+                // A pane id appears in exactly one tab; skip duplicates anyway.
                 if panes.iter().any(|p: &state::SavedPane| p.id == pid) {
                     continue;
                 }
-                panes.push(state::SavedPane {
-                    id: pid,
-                    is_ai: pane.is_ai,
-                    shell: pane.pty.shell.clone(),
-                    program: pane.program.clone(),
-                    cwd: pane.cwd.clone(),
-                    custom_name: pane.custom_name.clone(),
-                    agent_alias: self.agent_aliases.get(&pid).cloned(),
-                    master_fd: pane.pty.raw_fd().map(|fd| fd as i64),
-                    child_pid: pane.pty.process_id().map(|p| p as i64),
-                    cols: pane.pty.cols,
-                    rows: pane.pty.rows,
-                    mouse_tracking: pane.has_mouse_reporting(),
-                    snapshot,
-                });
+                if let Some(pane) = self.panes.get(&pid) {
+                    panes.push(save_pane(pid, pane));
+                }
             }
             let tabs = session.tabs.iter().filter_map(|tab| {
                 let root = tab.tree.root.as_ref()?;
@@ -567,7 +650,7 @@ impl App {
         if sessions.is_empty() {
             return None;
         }
-        Some(state::SavedState { version: state::STATE_VERSION, active: self.active, sessions })
+        Some(SavedState { version: state::STATE_VERSION, active: self.active, sessions })
     }
 
     // ----- lifecycle -----
@@ -1682,6 +1765,171 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Apply queued PTY output until `pane`'s screen contains `needle`.
+    fn wait_for_screen(app: &mut App, pane: u64, needle: &str) -> String {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            while let Ok(ev) = app.events_rx.try_recv() {
+                app.on_pty_event(ev);
+            }
+            let screen = app.panes.get_mut(&pane).map(|p| p.vt.screen_text()).unwrap_or_default();
+            if screen.contains(needle) {
+                return screen;
+            }
+            assert!(Instant::now() < deadline, "pane {pane} never showed {needle:?}:\n{screen}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn canonical(path: &std::path::Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn reboot_restore_brings_back_layout_cwd_and_screen() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("reboot-cfg");
+        let home = scratch("reboot-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let work = scratch("reboot-work");
+        let sub = work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let mut app = App::new(Launch::New(Some(work.clone()))).unwrap();
+        let session = app.sessions[0].name.clone();
+        let first = app.sessions[0].active_tab().tree.focus;
+        app.split_in_session(&session, kumo_protocol::SplitDir::Vertical, false).unwrap();
+        app.rename_pane_in_session(&session, first, "editor").unwrap();
+        app.agent_aliases.insert(first, "keeper".into());
+        // `$((1+1))` keeps the typed command line from matching the output.
+        let command = format!("cd {} && echo BEFORE_$((1+1))\n", sub.display());
+        app.panes.get_mut(&first).unwrap().write(command.as_bytes());
+        wait_for_screen(&mut app, first, "BEFORE_2");
+
+        let saved = app.to_saved_state(&mut SnapshotCache::new()).unwrap();
+        let file = cfg.join("state.json");
+        state::save(&file, &saved).unwrap();
+        drop(app);
+
+        let mut restored = App::new(Launch::Restore(file, None)).unwrap();
+        assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].name, session);
+        let panes = restored.sessions[0].active_tab().tree.pane_ids();
+        assert_eq!(panes.len(), 2, "the split comes back");
+        let editor = *panes.iter().find(|id| restored.panes[id].custom_name.as_deref() == Some("editor")).unwrap();
+        assert_eq!(canonical(&restored.panes[&editor].cwd), canonical(&sub), "the shell reopens where it was");
+        assert_eq!(restored.agent_aliases.get(&editor).map(String::as_str), Some("keeper"));
+        let screen = wait_for_screen(&mut restored, editor, "restored by kumo");
+        assert!(screen.contains("BEFORE_2"), "the saved screen is shown above the new shell:\n{screen}");
+        drop(restored);
+        for dir in [cfg, home, work] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn reboot_restore_is_best_effort_and_resumes_agents() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("reboot-agent-cfg");
+        let home = scratch("reboot-agent-home");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        // A stand-in agent, so the test never launches a real one.
+        std::fs::create_dir_all(cfg.join("agent-detection")).unwrap();
+        std::fs::write(
+            cfg.join("agent-detection/fake-agent.toml"),
+            "[agent]\nid = \"fake-agent\"\nresume = [\"printf\", \"RESUMED_%s\", \"ok\"]\n",
+        )
+        .unwrap();
+        crate::daemon::agents::reload_agent_rules();
+        let work = scratch("reboot-agent-work");
+        let pane = |id: u64, cwd: PathBuf, agent_kind: Option<&str>| state::SavedPane {
+            id,
+            is_ai: false,
+            shell: "/bin/sh".into(),
+            program: None,
+            cwd,
+            custom_name: None,
+            agent_alias: None,
+            master_fd: None,
+            child_pid: None,
+            cols: 100,
+            rows: 30,
+            mouse_tracking: false,
+            snapshot: Some(b"not a ghostty snapshot".to_vec()),
+            agent_kind: agent_kind.map(str::to_string),
+        };
+        let saved = SavedState {
+            version: state::STATE_VERSION,
+            active: 0,
+            sessions: vec![state::SavedSession {
+                name: "agents".into(),
+                workspace: work.clone(),
+                active_tab: 0,
+                tabs: vec![state::SavedTab {
+                    id: 1,
+                    name: "1".into(),
+                    zoom: false,
+                    focus: 2,
+                    tree: state::SavedNode::Split {
+                        id: 9,
+                        dir: SplitDir::V,
+                        ratio: 0.5,
+                        a: Box::new(state::SavedNode::Pane { id: 1 }),
+                        b: Box::new(state::SavedNode::Pane { id: 2 }),
+                    },
+                }],
+                panes: vec![pane(1, work.join("deleted-worktree"), None), pane(2, work.clone(), Some("fake-agent"))],
+            }],
+        };
+        let file = cfg.join("state.json");
+        state::save(&file, &saved).unwrap();
+
+        // `kumo new DIR` started the daemon: restored sessions plus a new one.
+        let fresh = scratch("reboot-agent-fresh");
+        let mut app = App::new(Launch::Restore(file.clone(), Some(fresh.clone()))).unwrap();
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.active, 1, "the requested session takes focus");
+        assert_eq!(canonical(&app.sessions[1].workspace), canonical(&fresh));
+        let restored = app.sessions[0].active_tab().tree.pane_ids();
+        assert_eq!(restored.len(), 2);
+        let (shell, agent) = (restored[0], restored[1]);
+        assert_eq!(canonical(&app.panes[&shell].cwd), canonical(&work), "a missing cwd falls back to the workspace");
+        assert_eq!((app.panes[&shell].pty.cols, app.panes[&shell].pty.rows), (100, 30));
+        wait_for_screen(&mut app, agent, "RESUMED_ok");
+        drop(app);
+
+        // Without `resume-agents`, the agent pane is a plain shell.
+        let mut app = App::new(Launch::New(Some(work.clone()))).unwrap();
+        app.sessions.clear();
+        app.panes.clear();
+        assert!(app.restore(state::load(&file).unwrap().unwrap(), false));
+        let agent = app.sessions[0].active_tab().tree.pane_ids()[1];
+        // Anything typed at restore is echoed before this later marker.
+        app.panes.get_mut(&agent).unwrap().write(b"echo MARK_$((1))\n");
+        let screen = wait_for_screen(&mut app, agent, "MARK_1");
+        assert!(!screen.contains("RESUMED"), "{screen}");
+        drop(app);
+
+        // Nothing saved: a cold start opens a fresh session.
+        let app = App::new(Launch::Restore(cfg.join("missing.json"), None)).unwrap();
+        assert_eq!(app.sessions.len(), 1);
+        drop(app);
+        for dir in [cfg, home, work, fresh] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        crate::daemon::agents::reload_agent_rules();
     }
 
     /// Remove a worktree inline, as the daemon loop and its worker would.

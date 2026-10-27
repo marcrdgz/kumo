@@ -2,6 +2,8 @@
 # commands or questions retained in its transcript do not become stale state.
 [agent]
 id = "aider"
+# Reopens the last conversation when kumo restores the pane after a reboot.
+resume = ["aider", "--restore-chat-history"]
 
 [[blocked]]
 tests = [{ region = "footer", contains-any = [

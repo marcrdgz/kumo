@@ -7,6 +7,8 @@
 
 [agent]
 id = "codex"
+# Reopens the last conversation when kumo restores the pane after a reboot.
+resume = ["codex", "resume", "--last"]
 
 # Initial trust prompt. Both phrases are required: output which merely quotes
 # either one must not make the pane look blocked. The complete prompt fits in
