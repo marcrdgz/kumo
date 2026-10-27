@@ -20,3 +20,21 @@ python3 capture.py opencode.raw /tmp/kumo-fixture "w10;tsay hello;w2" -- opencod
 
 Before committing a new capture, check it for user names, e-mail addresses
 and home paths.
+
+# Upgrade fixtures
+
+`state/resume-<version>.json` is the resume file a released daemon wrote for
+`kumo update`: the sessions, tabs, layout, agent aliases and ghostty snapshots
+the next release must adopt. The tests in `src/daemon/state.rs` load every
+fixture and decode its snapshots, so a schema or snapshot-format change that
+would lose sessions on upgrade fails CI.
+
+Capture one per release with the released binary (only the last 0.x release
+needs to be kept once 1.0 ships):
+
+```sh
+sh state/capture.sh "$(command -v kumo)" state/resume-0.7.6.json
+```
+
+The 0.7.6 fixture was captured from the 0.7.6 release (its `echo` marker reads
+`FIXTURE_SCROLLBACK_0_7_6`); paths are throwaway `mktemp` directories.

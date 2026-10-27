@@ -478,6 +478,68 @@ mod tests {
         assert_eq!(state.sessions[0].panes[0].id, 100);
     }
 
+    /// Resume files written by released daemons (`tests/fixtures/state`).
+    /// `kumo update` from that release execs this binary on them, so every
+    /// one must still load with its layout, aliases and terminal snapshots.
+    fn released_resume_fixtures() -> Vec<(String, SavedState)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/state");
+        let mut fixtures: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        fixtures.sort();
+        assert!(!fixtures.is_empty(), "no upgrade fixtures in {}", dir.display());
+        fixtures
+            .into_iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let state = load(&path).unwrap().unwrap_or_else(|| panic!("{name} no longer loads"));
+                (name, state)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn released_resume_files_keep_layout_and_aliases() {
+        for (name, state) in released_resume_fixtures() {
+            assert_eq!(state.version, STATE_VERSION, "{name}");
+            assert!(!state.sessions.is_empty(), "{name}");
+            for session in &state.sessions {
+                for tab in &session.tabs {
+                    let mut ids = Vec::new();
+                    tree_pane_ids(&tab.tree, &mut ids);
+                    for id in ids {
+                        let pane = session.panes.iter().find(|p| p.id == id);
+                        let pane = pane.unwrap_or_else(|| panic!("{name}: tab {} shows unknown pane {id}", tab.name));
+                        assert!(pane.master_fd.is_some(), "{name}: pane {id} lost its PTY descriptor");
+                        assert!(pane.cols > 0 && pane.rows > 0, "{name}: pane {id} lost its size");
+                    }
+                }
+            }
+        }
+        let (_, v076) = released_resume_fixtures().into_iter().find(|(name, _)| name == "resume-0.7.6.json").unwrap();
+        let tabs: Vec<_> = v076.sessions.iter().map(|s| (s.name.as_str(), s.tabs.len())).collect();
+        assert_eq!(tabs, [("session-1", 2), ("other", 1)]);
+        let aliases: Vec<_> = v076.sessions.iter().flat_map(|s| &s.panes).filter_map(|p| p.agent_alias.as_deref()).collect();
+        assert_eq!(aliases, ["worker"]);
+    }
+
+    #[test]
+    fn released_resume_snapshots_decode() {
+        let theme = kumo_core::theme::OwnedTheme::from(kumo_core::theme::THEMES[kumo_core::theme::DEFAULT_THEME_IDX]);
+        for (name, state) in released_resume_fixtures() {
+            let mut text = String::new();
+            for pane in state.sessions.iter().flat_map(|s| &s.panes) {
+                let snapshot = pane.snapshot.as_deref().unwrap_or_else(|| panic!("{name}: pane {} has no snapshot", pane.id));
+                let mut vt = crate::daemon::vt::Terminal::from_snapshot(snapshot, 10_000, &theme.palette, theme.term_fg, theme.term_bg, theme.term_cursor)
+                    .unwrap_or_else(|e| panic!("{name}: pane {} snapshot no longer decodes: {e:#}", pane.id));
+                text.push_str(&vt.screen_text());
+            }
+            assert!(text.contains("FIXTURE_SCROLLBACK"), "{name}: the restored screens lost their content");
+        }
+    }
+
     #[test]
     fn v1_migrates_to_single_tab() {
         let json_v1 = r#"{"version":1,"active":0,"sessions":[{"name":"s1","workspace":"/tmp","zoom":true,"focus":42,"tree":{"Pane":{"id":42}},"panes":[{"id":42,"is_ai":false,"shell":"/bin/sh","program":null,"cwd":"/tmp","custom_name":null}]}]}"#;
