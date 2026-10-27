@@ -428,11 +428,8 @@ fn reader_loop(
                     return;
                 }
                 for f in frames {
-                    let Ok((msg, _)) =
-                        bincode::serde::decode_from_slice::<DaemonEvent, _>(&f, bincode::config::standard())
-                    else {
-                        return;
-                    };
+                    // Skip events appended by a newer daemon of the same major.
+                    let Ok(msg) = protocol::decode::<DaemonEvent>(&f) else { continue };
                     if !send_event_and_wake(&tx, msg, &stop, &wake) {
                         return;
                     }

@@ -23,7 +23,7 @@ use ratatui::buffer::Buffer;
 
 use super::{App, Launch};
 use crate::daemon::frames;
-use kumo_core::protocol::{AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_VERSION};
+use kumo_core::protocol::{AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_MINOR, PROTOCOL_VERSION};
 
 /// Maximum time the daemon waits for process discovery plus a lifecycle marker
 /// after `agent start` injects a command into an existing shell pane.
@@ -127,7 +127,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let listener = UnixListener::bind(&path)?;
     set_socket_perms(&path)?;
 
-    let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Command)>(256);
+    // `None` is a frame that didn't decode as a `Command`: a newer client of
+    // the same major sent a command this daemon doesn't know.
+    let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Option<Command>)>(256);
     // Reader and accept threads wake this loop after queueing work. The
     // timeout below remains as a safety poll for signals, child exits, and
     // config changes.
@@ -186,6 +188,19 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
 
         // Commands from clients.
         for (id, cmd) in input_rx.try_iter().take(128) {
+            let Some(cmd) = cmd else {
+                let _ = send_to(
+                    &mut clients,
+                    id,
+                    &DaemonEvent::Error {
+                        code: "unsupported".into(),
+                        message: format!(
+                            "the running daemon (protocol {PROTOCOL_VERSION}.{PROTOCOL_MINOR}) does not support this command; restart it with `kumo server restart`"
+                        ),
+                    },
+                );
+                continue;
+            };
             match cmd {
                 Command::Attach { protocol, kind, .. } => {
                     if protocol != PROTOCOL_VERSION {
@@ -196,7 +211,7 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     let _ = send_to(
                         &mut clients,
                         id,
-                        &DaemonEvent::Welcome { protocol: PROTOCOL_VERSION },
+                        &DaemonEvent::Welcome { protocol: PROTOCOL_VERSION, minor: PROTOCOL_MINOR },
                     );
                     if let Some(c) = clients.get_mut(&id) {
                         c.welcomed = true;
@@ -1021,11 +1036,12 @@ fn client_write_loop(stream: UnixStream, rx: mpsc::Receiver<Arc<DaemonEvent>>) {
 }
 
 /// Read loop for one client: decodes frames and forwards them to the daemon's
-/// main loop (tagged with the client id). A closed socket yields a synthetic
-/// `Detach` so the writer is dropped.
+/// main loop (tagged with the client id); a frame that doesn't decode is
+/// forwarded as `None` and answered `unsupported`. A closed socket yields a
+/// synthetic `Detach` so the writer is dropped.
 fn client_read_loop(
     mut stream: UnixStream,
-    tx: mpsc::SyncSender<(usize, Command)>,
+    tx: mpsc::SyncSender<(usize, Option<Command>)>,
     id: usize,
     daemon_thread: std::thread::Thread,
 ) {
@@ -1044,12 +1060,7 @@ fn client_read_loop(
                     break;
                 }
                 for f in frames {
-                    let Ok((msg, _)) = bincode::serde::decode_from_slice::<Command, _>(
-                        &f,
-                        bincode::config::standard(),
-                    ) else {
-                        break 'outer;
-                    };
+                    let msg = kumo_core::protocol::decode::<Command>(&f).ok();
                     if tx.send((id, msg)).is_err() {
                         break 'outer;
                     }
@@ -1058,7 +1069,7 @@ fn client_read_loop(
             }
         }
     }
-    if tx.send((id, Command::Detach)).is_ok() {
+    if tx.send((id, Some(Command::Detach))).is_ok() {
         daemon_thread.unpark();
     }
 }
@@ -1168,7 +1179,7 @@ mod tests {
         let deadline = Instant::now() + deadline;
         loop {
             assert!(Instant::now() < deadline, "no {what} within deadline");
-            match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
+            match kumo_core::protocol::read_event(stream) {
                 Ok(ev) => return ev,
                 Err(e) => {
                     if e.downcast_ref::<std::io::Error>()
@@ -1211,7 +1222,8 @@ mod tests {
             std::thread::park_timeout(Duration::from_secs(5));
             let (id, command) = rx.recv_timeout(Duration::from_millis(500)).unwrap();
             done_tx.send((id, command)).unwrap();
-            detach_tx.send(rx.recv_timeout(Duration::from_millis(500)).unwrap()).unwrap();
+            let unknown = rx.recv_timeout(Duration::from_millis(500)).unwrap();
+            detach_tx.send((unknown, rx.recv_timeout(Duration::from_millis(500)).unwrap())).unwrap();
         });
 
         let server_thread = ready_rx.recv().unwrap();
@@ -1220,12 +1232,16 @@ mod tests {
 
         let (id, command) = done_rx.recv_timeout(Duration::from_millis(500)).unwrap();
         assert_eq!(id, 7);
-        assert!(matches!(command, Command::SessionList));
+        assert!(matches!(command, Some(Command::SessionList)));
 
+        // A command appended by a newer client (unknown variant index) is
+        // forwarded as `None` for an `unsupported` reply; the client stays.
+        client.write_all(&[1, 0, 0, 0, 250]).unwrap();
         drop(client);
-        let (detach_id, detach) = detach_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        let ((unknown_id, unknown), (detach_id, detach)) = detach_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        assert_eq!((unknown_id, unknown), (7, None));
         assert_eq!(detach_id, 7);
-        assert!(matches!(detach, Command::Detach));
+        assert!(matches!(detach, Some(Command::Detach)));
 
         reader.join().unwrap();
         server.join().unwrap();
@@ -1504,8 +1520,8 @@ mod tests {
         protocol::write_framed(&mut stream, &Command::SubscribeLayout).unwrap();
         loop {
             match next_event(&mut stream, Duration::from_secs(10), "Welcome") {
-                DaemonEvent::Welcome { protocol: v } => {
-                    assert_eq!(v, PROTOCOL_VERSION);
+                DaemonEvent::Welcome { protocol: v, minor } => {
+                    assert_eq!((v, minor), (PROTOCOL_VERSION, PROTOCOL_MINOR));
                     break;
                 }
                 _ => continue,

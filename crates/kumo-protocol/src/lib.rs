@@ -58,8 +58,22 @@ mod crossterm;
 /// `WorktreeCreate` with `from`/`note`/`agent`/`is_ai` and adds `WorktreeRemove`,
 /// `WorktreeSet`, `WorktreeCurrent` plus checkpoint fields on `WireWorktree`.
 /// v13 adds the main Git worktree path to `SessionLayout` so clients can group
-/// linked worktrees under one project. v14 adds `TabMove`.
-pub const PROTOCOL_VERSION: u32 = 14;
+/// linked worktrees under one project. v14 adds `TabMove`. v15 makes the
+/// protocol additive-compatible: `Welcome` carries [`PROTOCOL_MINOR`], daemons
+/// answer undecodable commands with `Error { code: "unsupported" }`, and
+/// clients skip undecodable events (see [`read_event`]).
+///
+/// This is the protocol **major**: the daemon rejects clients whose major
+/// differs. Additive changes bump [`PROTOCOL_MINOR`] instead, and must only
+/// **append** a variant to [`Command`] or [`DaemonEvent`]. bincode encodes
+/// enum variants by index and structs positionally, so adding a field,
+/// reordering variants, or adding a variant to a nested enum (e.g.
+/// `AgentStatus`) breaks older peers and needs a major bump.
+pub const PROTOCOL_VERSION: u32 = 15;
+/// Protocol minor: bumped for every additive change (a variant appended to
+/// [`Command`] or [`DaemonEvent`]); reset to 0 on a major bump. Clients read
+/// the daemon's minor from `Welcome` to feature-detect newer commands.
+pub const PROTOCOL_MINOR: u32 = 0;
 /// Upper bound for a single frame payload (a full 80x24 grid fits comfortably).
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
@@ -851,7 +865,10 @@ pub struct AgentExplainReport {
 pub enum Command {
     // -- attach / lifecycle ------------------------------------------------
     /// Attach as an interactive viewer of the given size. The daemon responds
-    /// with `Welcome`, then pushes `Layout` and `PaneFrame` streams.
+    /// with `Welcome`, then pushes `Layout` and `PaneFrame` streams; on a
+    /// major mismatch it sends `Shutdown` instead. `Attach` stays variant 0
+    /// with `protocol` as its first field in every major, so any daemon can
+    /// read the version before rejecting a client.
     Attach {
         protocol: u32,
         kind: ClientKind,
@@ -1211,13 +1228,16 @@ pub enum Command {
 /// Everything the daemon pushes to a client: command replies and streams.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub enum DaemonEvent {
-    /// Reply to `Command::Attach`.
+    /// Reply to `Command::Attach`: the daemon's protocol major and minor.
     Welcome {
         protocol: u32,
+        minor: u32,
     },
     /// `leader+d` / detach: this viewer should disconnect; the daemon lives on.
     Detach,
-    /// The daemon is stopping (last session closed / `kill`).
+    /// The daemon is stopping (last session closed / `kill`), or rejected an
+    /// `Attach` with another protocol major. Stays variant 2 without fields in
+    /// every major, so a rejected client of any version can decode it.
     Shutdown,
     /// The daemon is restarting itself (`kumo update`); reconnect with retries.
     Restarting,
@@ -1383,6 +1403,27 @@ impl FrameReader {
 
 /// Read one message from `reader` using the length-prefixed framing.
 pub fn read_framed<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
+    decode(&read_frame(reader)?)
+}
+
+/// Read the next daemon event, skipping frames this build cannot decode: a
+/// newer daemon of the same major may send events appended after this
+/// build's `DaemonEvent`. Framing errors (I/O, oversized frames) still fail.
+pub fn read_event(reader: &mut impl Read) -> Result<DaemonEvent> {
+    loop {
+        if let Ok(event) = decode(&read_frame(reader)?) {
+            return Ok(event);
+        }
+    }
+}
+
+/// Decode one frame payload (as yielded by [`FrameReader::push`]).
+pub fn decode<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    let (msg, _) = bincode::serde::decode_from_slice(payload, bincode::config::standard())?;
+    Ok(msg)
+}
+
+fn read_frame(reader: &mut impl Read) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
@@ -1391,9 +1432,7 @@ pub fn read_framed<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Re
     }
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload)?;
-    let (msg, _): (T, usize) =
-        bincode::serde::decode_from_slice(&payload, bincode::config::standard())?;
-    Ok(msg)
+    Ok(payload)
 }
 
 pub fn write_framed<T: serde::Serialize>(writer: &mut impl io::Write, msg: &T) -> Result<()> {
@@ -1409,7 +1448,7 @@ mod tests {
 
     #[test]
     fn encode_matches_the_original_length_prefixed_bincode_wire_format() {
-        let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION };
+        let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION, minor: PROTOCOL_MINOR };
         let payload = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let mut expected = (payload.len() as u32).to_le_bytes().to_vec();
         expected.extend_from_slice(&payload);
@@ -1473,7 +1512,7 @@ mod tests {
 
     #[test]
     fn frame_reader_accepts_every_header_and_payload_split() {
-        let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION };
+        let msg = DaemonEvent::Welcome { protocol: PROTOCOL_VERSION, minor: PROTOCOL_MINOR };
         let bytes = encode(&msg).unwrap();
         let payload = bytes[4..].to_vec();
         for split in 0..=bytes.len() {
@@ -1489,7 +1528,7 @@ mod tests {
     #[test]
     fn frame_reader_keeps_partial_tails_and_appends_to_existing_output() {
         let first = encode(&DaemonEvent::Shutdown).unwrap();
-        let second = encode(&DaemonEvent::Welcome { protocol: PROTOCOL_VERSION }).unwrap();
+        let second = encode(&DaemonEvent::Welcome { protocol: PROTOCOL_VERSION, minor: PROTOCOL_MINOR }).unwrap();
         let third = encode(&DaemonEvent::UpdateNotice { notice: None }).unwrap();
         let mut initial = Vec::new();
         initial.extend_from_slice(&first);
@@ -1703,5 +1742,22 @@ mod tests {
             let decoded: DaemonEvent = read_framed(&mut &buf[..]).unwrap();
             assert_eq!(decoded, ev);
         }
+    }
+
+    #[test]
+    fn handshake_layout_is_stable_across_majors() {
+        // A daemon must read any client's major, and any rejected client must
+        // decode `Shutdown`: these encodings may never change.
+        let attach = Command::Attach { protocol: 15, kind: ClientKind::Cli, cols: 1, rows: 1 };
+        assert_eq!(&bincode::serde::encode_to_vec(&attach, bincode::config::standard()).unwrap()[..2], [0, 15]);
+        assert_eq!(bincode::serde::encode_to_vec(&DaemonEvent::Shutdown, bincode::config::standard()).unwrap(), [2]);
+    }
+
+    #[test]
+    fn read_event_skips_events_appended_by_a_newer_daemon() {
+        // Variant index 250 stands in for an event this build doesn't know.
+        let mut buf = vec![1, 0, 0, 0, 250];
+        write_framed(&mut buf, &DaemonEvent::Detach).unwrap();
+        assert_eq!(read_event(&mut &buf[..]).unwrap(), DaemonEvent::Detach);
     }
 }
