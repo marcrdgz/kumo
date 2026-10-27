@@ -6,7 +6,7 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use kumo_protocol::{read_framed, write_framed, ClientKind, Command, DaemonEvent, PROTOCOL_VERSION};
+use kumo_protocol::{read_event, write_framed, ClientKind, Command, DaemonEvent, PROTOCOL_VERSION};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -37,7 +37,7 @@ impl Daemon {
             if let Ok(mut stream) = UnixStream::connect(self.root.join("kumo/kumo.sock")) {
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 send(&mut stream, Command::Attach { protocol: PROTOCOL_VERSION, kind: ClientKind::Terminal, cols: 80, rows: 24 });
-                if matches!(read_framed::<DaemonEvent>(&mut stream), Ok(DaemonEvent::Welcome { .. })) {
+                if matches!(read_event(&mut stream), Ok(DaemonEvent::Welcome { .. })) {
                     return stream;
                 }
             }
@@ -49,7 +49,7 @@ impl Daemon {
     fn pane(&self, stream: &mut UnixStream) -> u64 {
         send(stream, Command::SessionList);
         loop {
-            if let DaemonEvent::SessionList { sessions } = read_framed(stream).unwrap() {
+            if let DaemonEvent::SessionList { sessions } = read_event(stream).unwrap() {
                 return sessions[0].tabs[0].panes[0].id;
             }
         }
@@ -80,7 +80,7 @@ fn await_frame(stream: &mut UnixStream, full: bool, needle: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         assert!(Instant::now() < deadline, "missing frame containing {needle}");
-        if let DaemonEvent::PaneFrame { frame } = read_framed(stream).unwrap() {
+        if let DaemonEvent::PaneFrame { frame } = read_event(stream).unwrap() {
             let text: String = frame.rows_dirty.iter().flat_map(|r| r.cells.iter().map(|c| c.text.as_str())).collect();
             if frame.full == full && text.contains(needle) { return; }
         }
@@ -156,7 +156,7 @@ fn real_exec_restart_reaps_exited_shell() {
     let pid = daemon.pane(&mut stream);
     send(&mut stream, Command::Restart);
     loop {
-        if read_framed::<DaemonEvent>(&mut stream).is_err() { break; }
+        if read_event(&mut stream).is_err() { break; }
     }
     let mut resumed = daemon.connect();
     assert_eq!(daemon.pane(&mut resumed), pid);
@@ -193,7 +193,7 @@ fn config_file_changes_reload_the_running_daemon() {
     let mut reloaded = false;
     let mut theme_after_reload = false;
     while Instant::now() < deadline && !theme_after_reload {
-        match read_framed::<DaemonEvent>(&mut stream).unwrap() {
+        match read_event(&mut stream).unwrap() {
             DaemonEvent::ConfigReloaded { .. } => reloaded = true,
             DaemonEvent::Theme { .. } if reloaded => theme_after_reload = true,
             _ => {}

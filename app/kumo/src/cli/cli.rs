@@ -220,7 +220,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             kumo_core::protocol::write_framed(&mut stream, &Command::SessionList)?;
             stream.set_read_timeout(Some(Duration::from_millis(800)))?;
             loop {
-                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                match kumo_core::protocol::read_event(&mut stream) {
                     Ok(DaemonEvent::SessionList { sessions }) => {
                         if json {
                             let tabs = sessions
@@ -285,7 +285,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeList { session: sess.clone() })?;
             stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
             loop {
-                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                match kumo_core::protocol::read_event(&mut stream) {
                     Ok(DaemonEvent::Worktrees { items }) => {
                         if json {
                             print_json(&serde_json::json!({"worktrees": items}))?;
@@ -312,7 +312,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess.clone(), path: path.clone() })?;
             stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
             loop {
-                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                match kumo_core::protocol::read_event(&mut stream) {
                     Ok(DaemonEvent::WorktreeCurrent { info }) => {
                         if json {
                             print_json(&serde_json::json!({"worktree": info}))?;
@@ -343,7 +343,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             if json {
                 stream.set_read_timeout(Some(Duration::from_millis(5000)))?;
                 loop {
-                    match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    match kumo_core::protocol::read_event(&mut stream) {
                         Ok(DaemonEvent::Reply { message }) => {
                             if message.starts_with("error:") {
                                 anyhow::bail!(message);
@@ -394,7 +394,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 // After set, read Reply then print JSON with resulting checkpoint
                 stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
                 let reply_msg = loop {
-                    match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    match kumo_core::protocol::read_event(&mut stream) {
                         Ok(DaemonEvent::Reply { message }) => break message,
                         Ok(DaemonEvent::Error { code, message }) => {
                             anyhow::bail!("{code}: {message}");
@@ -411,7 +411,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 kumo_core::protocol::write_framed(&mut stream, &Command::WorktreeCurrent { session: sess, path: Some(pbuf.clone()) })?;
                 stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
                 loop {
-                    match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                    match kumo_core::protocol::read_event(&mut stream) {
                         Ok(DaemonEvent::WorktreeCurrent { info }) => {
                             print_json(&serde_json::json!({"ok": true, "message": reply_msg, "worktree": info}))?;
                             return Ok(());
@@ -506,7 +506,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                             kumo_core::protocol::write_framed(&mut stream, &Command::AgentStatus)?;
                             let mut found = None;
                             loop {
-                                match kumo_core::protocol::read_framed::<DaemonEvent>(&mut stream) {
+                                match kumo_core::protocol::read_event(&mut stream) {
                                     Ok(DaemonEvent::AgentStatus { agents }) => {
                                         found = agents
                                             .into_iter()
@@ -1567,7 +1567,7 @@ fn resolve_session(stream: &mut UnixStream, session: Option<String>) -> Result<S
     }
     kumo_core::protocol::write_framed(stream, &Command::SessionList)?;
     loop {
-        match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
+        match kumo_core::protocol::read_event(stream) {
             Ok(DaemonEvent::SessionList { sessions }) => {
                 return Ok(sessions
                     .iter()
@@ -1586,7 +1586,7 @@ fn resolve_session(stream: &mut UnixStream, session: Option<String>) -> Result<S
 fn fetch_session_list(stream: &mut UnixStream) -> Result<Vec<kumo_protocol::SessionInfo>> {
     kumo_core::protocol::write_framed(stream, &Command::SessionList)?;
     loop {
-        match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
+        match kumo_core::protocol::read_event(stream) {
             Ok(DaemonEvent::SessionList { sessions }) => return Ok(sessions),
             Ok(_) => continue,
             Err(e) if is_timeout(&e) => anyhow::bail!("no reply from the daemon"),
@@ -1695,7 +1695,7 @@ fn read_reply(stream: &mut UnixStream, json: bool) -> Result<()> {
 fn read_reply_with_timeout(stream: &mut UnixStream, timeout: Duration, json: bool) -> Result<()> {
     stream.set_read_timeout(Some(timeout))?;
     loop {
-        match kumo_core::protocol::read_framed::<DaemonEvent>(stream) {
+        match kumo_core::protocol::read_event(stream) {
             Ok(DaemonEvent::Reply { message }) => {
                 if message.starts_with("error:") {
                     anyhow::bail!(message);

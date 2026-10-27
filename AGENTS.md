@@ -26,7 +26,9 @@ the daemon restarts itself in place for `kumo update`
 The native GPUI desktop client (`kumo-desktop`, distributed as a
 `Kumo-<arch>.dmg` on macOS) is a **separate project outside this workspace**.
 It depends only on `kumo-protocol` (pinned by git rev), so wire-protocol
-changes must stay compatible with it or bump `PROTOCOL_VERSION`.
+changes must stay compatible with it: an additive change only **appends** a
+variant to `Command`/`DaemonEvent` and bumps `PROTOCOL_MINOR`; anything else
+(new fields, reordering, nested enum variants) bumps `PROTOCOL_VERSION`.
 
 ### Technology Stack
 - **Frontend**: Rust TUI (ratatui + crossterm) in `app/kumo/src/cli`.
