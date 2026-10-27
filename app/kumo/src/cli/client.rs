@@ -66,6 +66,8 @@ const LOST_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const LOST_STREAK_WINDOW: Duration = Duration::from_secs(5);
 /// Give up after this many quick losses in a row instead of looping forever.
 const MAX_LOST_STREAK: u32 = 3;
+/// How long the daemon may take to answer `Attach` before the client gives up.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 enum InputMessage {
@@ -176,10 +178,7 @@ enum Exit {
 /// terminal is left in raw mode so the reconnect is seamless (no flicker).
 fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -> Result<Exit> {
     let (cols, rows) = crossterm::terminal::size()?;
-    protocol::write_framed(
-        stream,
-        &Command::Attach { protocol: protocol::PROTOCOL_VERSION, kind: ClientKind::Terminal, cols, rows },
-    )?;
+    handshake(stream, cols, rows)?;
     // Messages to send right after the handshake (e.g. the `kumo new` session
     // request), before entering the render loop.
     for msg in pre {
@@ -352,6 +351,33 @@ fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -
             other
         }
     }
+}
+
+/// Attach and wait for the daemon's verdict before taking over the terminal,
+/// so a rejected client reports why instead of exiting silently. The daemon
+/// answers `Attach` with `Welcome`, or `Shutdown` on a protocol major mismatch.
+fn handshake(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<()> {
+    protocol::write_framed(
+        stream,
+        &Command::Attach { protocol: protocol::PROTOCOL_VERSION, kind: ClientKind::Terminal, cols, rows },
+    )?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let verdict = loop {
+        match protocol::read_event(stream) {
+            Ok(DaemonEvent::Welcome { .. }) => break Ok(()),
+            Ok(DaemonEvent::Shutdown) => {
+                break Err(anyhow::anyhow!(
+                    "the running kumo daemon speaks a different protocol than this client (v{}); \
+                     restart it with `kumo server restart`",
+                    protocol::PROTOCOL_VERSION
+                ))
+            }
+            Ok(_) => {}
+            Err(e) => break Err(e.context("kumo daemon did not answer the attach handshake")),
+        }
+    };
+    stream.set_read_timeout(None)?;
+    verdict
 }
 
 /// Leave raw mode and the alternate screen. `pop_keyboard_flags` is false
@@ -692,5 +718,28 @@ mod tests {
             .recv_timeout(Duration::from_millis(100))
             .expect("queued daemon event must wake the render thread");
         waiter.join().unwrap();
+    }
+
+    #[test]
+    fn handshake_reports_a_daemon_that_rejects_the_protocol() {
+        let (mut client, mut daemon) = UnixStream::pair().unwrap();
+        protocol::write_framed(&mut daemon, &DaemonEvent::Shutdown).unwrap();
+        let err = handshake(&mut client, 80, 24).unwrap_err();
+        assert!(err.to_string().contains("different protocol"), "{err}");
+        assert!(matches!(
+            protocol::read_framed(&mut daemon).unwrap(),
+            Command::Attach { protocol: protocol::PROTOCOL_VERSION, .. }
+        ));
+    }
+
+    #[test]
+    fn handshake_accepts_welcome() {
+        let (mut client, mut daemon) = UnixStream::pair().unwrap();
+        protocol::write_framed(
+            &mut daemon,
+            &DaemonEvent::Welcome { protocol: protocol::PROTOCOL_VERSION, minor: protocol::PROTOCOL_MINOR },
+        )
+        .unwrap();
+        handshake(&mut client, 80, 24).unwrap();
     }
 }
