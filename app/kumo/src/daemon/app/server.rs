@@ -337,12 +337,26 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
                 Command::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
-                    let reply = if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
-                        app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"))
+                    let (reply, agent_pane) = if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
+                        app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref())
                     } else {
-                        app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"))
+                        (app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}")), None)
                     };
-                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                    match (agent_pane, agent.as_deref()) {
+                        // A chained `--agent` replies through the same
+                        // occupant-pinned readiness wait as `agent start`.
+                        (Some(pane_id), Some(kind)) => {
+                            let pinned = app.pane_os_pid(pane_id);
+                            let expected = crate::daemon::pane::normalize_agent_kind(kind);
+                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned, reply);
+                        }
+                        _ if reply.starts_with("error:") && reply.contains("agent_not_ready") => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "agent_not_ready".into(), message: reply });
+                        }
+                        _ => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                        }
+                    }
                 }
                 Command::WorktreeOpen { session, path } => {
                     let reply = app.worktree_open(&session, &path).unwrap_or_else(|e| format!("error: {e:#}"));
@@ -593,7 +607,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         Ok(msg) if msg.starts_with("started ") => {
                             let pinned = app.pane_os_pid(pane_id);
                             let expected = crate::daemon::pane::normalize_agent_kind(&kind);
-                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned);
+                            let ready = format!("started {expected} in pane {pane_id}");
+                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned, ready);
                         }
                         Ok(msg) => {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Error {

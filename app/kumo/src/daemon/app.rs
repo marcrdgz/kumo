@@ -34,6 +34,14 @@ pub(crate) mod waits;
 /// Default pane size until a client requests a real size via `PaneResize`.
 const DEFAULT_PANE_DIMS: (u16, u16) = (80, 24);
 
+/// A worktree session just created by `new_worktree_session_ext`.
+/// `agent_pane` is the pane an `--agent` was launched into; its readiness is
+/// still pending and owned by the caller.
+pub(crate) struct CreatedWorktree {
+    pub(crate) branch: String,
+    pub(crate) agent_pane: Option<u64>,
+}
+
 struct Tab {
     id: u64,
     name: String,
@@ -704,7 +712,7 @@ impl App {
         agent: Option<&str>,
         is_ai: bool,
         name_hint: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<CreatedWorktree, String> {
         let Some(session) = self.sessions.get(idx) else {
             return Err("no such session".to_string());
         };
@@ -754,6 +762,7 @@ impl App {
         // Chain agent start into the new pane. The worktree/session remain
         // available for inspection if startup fails, but the failure must be
         // visible to the caller rather than silently looking successful.
+        let mut agent_pane = None;
         if let Some(kind) = agent.filter(|s| !s.trim().is_empty()) {
             // New session is the last one after new_session_in_workspace
             let Some(new_sess) = self.sessions.last() else {
@@ -778,7 +787,7 @@ impl App {
                         path.display()
                     ));
                 }
-                Ok(msg) if msg.starts_with("started ") => {}
+                Ok(msg) if msg.starts_with("started ") => agent_pane = Some(pane_id),
                 Ok(msg) => {
                     return Err(format!(
                         "created worktree {branch:?} at {} but agent {kind:?} failed to start: {msg}",
@@ -787,7 +796,7 @@ impl App {
                 }
             }
         }
-        Ok(branch)
+        Ok(CreatedWorktree { branch, agent_pane })
     }
 
     /// Open the session already working in `path` (matching the exact path or
@@ -1849,7 +1858,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(result.unwrap(), "feat/codex");
+        let created = result.unwrap();
+        assert_eq!(created.branch, "feat/codex");
+        let pane = created.agent_pane.expect("the agent was launched into the new session's pane");
+        assert!(app.sessions[1].contains_pane(pane));
         assert_eq!(app.sessions.len(), 2);
         assert_eq!(
             std::fs::canonicalize(&app.sessions[1].workspace).unwrap(),
