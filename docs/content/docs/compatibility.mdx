@@ -1,0 +1,55 @@
+---
+title: Compatibility policy
+description: What kumo's version numbers promise for your config, keybindings, scripts and sessions.
+icon: 🤝
+---
+
+kumo follows [semantic versioning](https://semver.org) from 1.0.0. A **minor**
+release (1.x) only adds; anything that could break a working setup waits for
+the next **major** release (2.0). This page lists what each surface promises.
+
+## Surfaces
+
+| Surface | Minor release (1.x) may | Only a major release may |
+| --- | --- | --- |
+| **Config** (`config.toml`) | add keys and sections; add values to an enum-like key | rename or remove a key, change its meaning or type, change a default in a way that breaks existing setups |
+| **Keymap action ids** (`[keymap.bindings]`) | add actions | rename or remove an action id |
+| **Control CLI** (`kumo session\|pane\|tab\|agent\|worktree …`) | add commands and flags; add fields to `--json` replies; add error codes | rename or remove a command or flag, remove or retype a `--json` field, change an error code or the exit-code meaning |
+| **Wire protocol** (`kumo-protocol`) | append a `Command`/`DaemonEvent` variant (bumps `PROTOCOL_MINOR`) | anything else (bumps `PROTOCOL_VERSION`) |
+| **Agent-detection manifests** (`agent-detection/*.toml`) | add fields, matchers and regions | rename or remove a field, matcher or region |
+| **Saved sessions** (`state.json`, `resume.json`) | change the format, with a migration | drop support for a format written by the previous release |
+
+The `--json` shapes and error codes are pinned by golden tests; see the
+[machine API](/docs/cli) for the contract details.
+
+## Upgrades keep your sessions
+
+`kumo update` restarts the daemon in place, and the new version adopts every
+running pane. Every release is tested against the session files written by
+the release before it (checked-in fixtures, plus a live upgrade test run
+before each release), so an upgrade never loses sessions. Saved sessions
+restored after a reboot follow the same rule. Downgrades are not supported:
+an older daemon starts fresh when it cannot read a newer format.
+
+## Deprecations
+
+A deprecated config key, action id, flag or command keeps working, with a
+warning, for at least one minor release, and is only removed in the next
+major release. Today that covers:
+
+- the legacy `~/.kumo` config and the flat `config` file (use `config.toml`);
+- top-level `shell` and `leader` (use `[terminal] shell` and `[keymap] leader`);
+- `ai_cmd` (use `ai-cmd`).
+
+All of them keep working throughout 1.x.
+
+## Not covered
+
+- Human-readable CLI output (without `--json`): it is for people and may
+  change in any release. Scripts should use `--json`.
+- The TUI's look and layout, default themes, and stock keybindings. Defaults
+  may change in a minor release (called out in the changelog); your
+  `[keymap.bindings]` overrides always win.
+- Agent lifecycle detection results: manifests are tuned as agent CLIs
+  change their UIs, so a pane's detected state can improve in any release.
+- Windows, which stays experimental until it reaches parity.

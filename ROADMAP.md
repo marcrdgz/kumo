@@ -15,9 +15,9 @@ persistent kumo.
 
 1. Config schema **v1 frozen and documented** (with migrations if it changes; every state bump ships a round-trip migration test — see `app/kumo/src/daemon/state.rs: v1→v2`).
 2. Keymap stable — renaming bindings never breaks user configs; duplicate chords are detected and warned instead of silently shadowing.
-3. Persistence and detach **without state loss** (crash-safe: atomic `tmp+rename` writes in `state.rs: save`, tolerant load on corrupt/unknown version, `kill -9` restore verified).
+3. Persistence and detach **without state loss**, including across a reboot (crash-safe: atomic `tmp+rename` writes in `state.rs: save`, tolerant load on corrupt/unknown version, `kill -9` restore verified).
 4. Theme system stable.
-5. Release pipeline proven (stable + nightly), `cargo clippy`/`test` green in CI, with published benchmarks (attach latency, memory/pane, keystroke→render — the `4 ms` daemon / `8 ms` client budget from `v0.5.2`).
+5. Release pipeline proven (stable + nightly), `cargo clippy`/`test` green in CI, with a **measured, documented performance baseline** against the `4 ms` daemon / `8 ms` client budget from `v0.5.2` (CI-tracked benchmarks are 1.x).
 6. Wire protocol **compatible across additive changes**: a major/minor split (or capability negotiation) replaces today's strict `PROTOCOL_VERSION` equality (`crates/kumo-protocol/src/lib.rs`), so a new command or event no longer locks out `kumo-desktop` or future remote clients; only breaking changes bump the major.
 7. Control CLI is a **stable machine API**: `--json` output shapes, error codes, and exit codes are frozen and covered by golden tests — agents already drive kumo through it.
 8. **Upgrade without session loss**: `kumo update` from the last 0.x release resumes running sessions on 1.0 (`resume.json` + `state.json`), verified against fixtures written by the previous release.
@@ -432,72 +432,63 @@ JSON/MCP lands post-1.0), `verify loop leader+r` (→ 1.x; `pane wait-output`
 primitive already ships), `sync-input` stays cut (broadcast supersedes it),
 `pipe-pane` moves to 1.x (Asciinema export).
 
-## 🧊 0.8.0 — Contracts, hardening & freeze (RC)
+## 🧊 0.8.0 — Contracts, persistence & freeze (RC)
 
-The last release before 1.0 and its release candidate. It adds **no new product
-surface**: it fixes what kumo already ships, turns it into stable contracts,
-and proves the 1.0 gates, so 1.0.0 is a version bump on a proven build. Agent
-continuity features (native resume, launch profiles, …) moved to 1.x, and the
-0.7.1 Delegate Task handoff is split: its correctness fix lands here, task
-submission moved to 1.x.
+The last release before 1.0 and its release candidate. It freezes what kumo
+already ships as stable contracts, fixes the bugs that freezing exposed, and
+makes sessions survive a reboot, so 1.0.0 is a version bump on a proven
+build. The test for every item: would skipping it force a major bump or lose
+user state later? Hardening that fails that test ships in 1.x patch and minor
+releases, driven by real reports.
 
-**P0 — correctness & contracts (the 1.0 gates):**
+**P0 — the 1.0 gates:**
 
-- **Readiness-gated chained launch**: route `new_worktree_session_ext`'s
-  optional `--agent` through the server-owned, occupant-pinned readiness wait
-  that standalone `agent start` already uses; return deterministic success,
-  `agent_not_ready`, `agent_replaced`, and timeout results.
-- **Additive-compatible wire protocol**: replace the strict `PROTOCOL_VERSION`
-  equality check with a major/minor version (or capability negotiation).
-  Daemons answer unknown commands with a deterministic `unsupported` error and
-  clients ignore unknown events, so additive changes stop locking out
-  `kumo-desktop`. Keep a machine-scoped session id in mind (remote sessions,
-  1.x) so it never needs a breaking bump.
-- **Frozen control CLI**: golden tests for every `--json` reply shape, error
-  code, and exit code; document them as the machine API agents and scripts
-  rely on.
-- **0.x → 1.0 upgrade path**: `kumo update` restarts the daemon in place
-  (`daemon --resume`) and loads `state.json` written by the previous release;
-  both are tested against checked-in fixtures from the last 0.x release.
-- **Compatibility policy** (`docs`): what semver means per surface — config
-  schema, keymap action names, CLI JSON, wire protocol, `state.json` — and the
-  deprecation window (generalizes the `~/.kumo` "warn for one release" rule).
-- **Config diagnostics**: `kumo config check` (alias `kumo doctor`) validates
-  `config.toml` — TOML syntax, unknown keys, invalid leader/chords, bad
-  `fixed-cwd` — and surfaces the "ignored after
-  warning" cases that are silent today. Includes **keymap conflict
-  detection**: duplicate chords warn and the last-wins rule is documented (the
-  1.0 keymap-stability gate).
-- **State migration tests**: every state-schema bump ships a round-trip save/load test (`app/kumo/src/daemon/state.rs: save_load_roundtrip`, `v1_migrates_to_single_tab`) and the tolerant load still fails closed to a fresh start on unknown/corrupt versions. The resume-identity field above is the first bump to exercise it.
-- **Crash-safety harness**: `kill -9` the daemon mid-write / mid-`state.json` `tmp+rename` and verify exact restore; exercises the atomic write (`state.rs: save`) and the tolerant load path. fsync policy documented.
-- **Published performance benchmark** with concrete targets: attach latency, memory per pane (idle + scrollback), and keystroke→render (the `4 ms` daemon / `8 ms` client budget from `v0.5.2`); tracked in CI so regressions are visible.
+- ✅ **Additive-compatible wire protocol** (#27): a major/minor split
+  (`PROTOCOL_VERSION` / `PROTOCOL_MINOR`); daemons answer unknown commands
+  with `unsupported` and clients ignore unknown events.
+- **Readiness-gated chained launch** (#28): `worktree create --agent` replies
+  through the same server-owned, occupant-pinned wait as `agent start`, with
+  deterministic success, `agent_not_ready`, `agent_replaced` and `timeout`.
+- **Frozen control CLI** (#30): golden tests pin every `--json` reply shape,
+  the error codes and the exit codes (`app/kumo/tests/cli_json.rs`),
+  documented as the machine API. Fixes the success-shaped errors it exposed
+  (`session kill <missing>`, `pane focus <missing>`).
+- **Keymap stability** (#29): conflicting spellings of one chord resolve
+  deterministically and warn; invalid bindings and leader warn in the TUI
+  instead of being dropped silently.
+- **0.x → 1.0 upgrade path** (#31): a genuine 0.7.6 `resume.json` fixture is
+  loaded and its snapshots decoded on every test run, plus an opt-in live
+  upgrade test from a released binary
+  (`KUMO_PREV_BIN=… cargo test -p kumo --test upgrade -- --ignored`), run
+  before each release.
+- **Reboot recovery** (#32): the daemon autosaves `state.json` (layout within
+  seconds, screen contents at most every `[persistence] autosave-interval`,
+  final save on SIGTERM) and a cold start restores sessions, cwd, screens,
+  aliases, and agents via their manifest `resume` command. Covers the
+  `kill -9` restore check of gate 3.
+- **Compatibility policy** (`docs/compatibility`): what semver covers per
+  surface and the deprecation window.
+- **Performance baseline**: pane write → incremental frame on the local
+  socket measures p50 0.61 ms / p95 0.93 ms (release, Apple silicon; the
+  ignored `benchmark_pane_write_to_incremental_frame` in `tests/runtime.rs`).
+  Attach latency and memory per pane still need a measured number before the
+  RC.
 
-**P1 — hardening:**
+**P1 — release:**
 
-- **Signal and config hygiene**: harden `SIGCHLD`/`SIGWINCH` handling, complete
-  the config docs, and warn on legacy `~/.kumo` (the fallback is removed in 1.x).
-- **Fuzzing**: `cargo fuzz` targets for protocol frame decoding
-  (`kumo-protocol`) and the agent-detection screen rules; run them in nightly CI.
-- **Socket trust model**: document and test the control socket's directory and
-  file permissions and what any connected client may do.
-- **Terminal compatibility audit**: run vttest/esctest through kumo and
-  document passthrough of the kitty keyboard protocol, OSC 52 clipboard, OSC 8
-  hyperlinks, and image protocols; fix regressions, list known gaps.
-- **Repeatable soak**: turn the 0.7.0 working-day soak (still open) (parallel agents,
-  blocked/done agents, detach/reattach, worktree cleanup, hot reload, daemon
-  restart) into a scripted scenario run before each release.
+- **Homebrew tap**: prebuilt binaries already ship through the cargo-dist
+  installer, so nobody needs zig to install kumo. A tap adds `brew install`;
+  it needs a `homebrew-tap` repository and a `HOMEBREW_TAP_TOKEN` secret
+  before `installers` can include `"homebrew"`.
+- Run the live upgrade test against the last 0.x release, then publish.
 
-**P2 — release polish:**
-
-- **Shell completions** (bash/zsh/fish) and a **man page**, generated from the
-  CLI definition.
-- **Prebuilt packages as the primary install path**: Homebrew tap plus Linux
-  tarballs/packages, so users never need the pinned zig `0.15.x` toolchain or
-  the macOS SDK workaround to install kumo.
-- **`kumo doctor` covers the runtime**: daemon/client version skew and socket
-  health, in addition to the config checks above.
-- **Extend the command palette / fuzzy switcher** with sessions.
-- **Configurable scrollback limit** (`[terminal] scrollback-limit` / `scrollback-limit-lines`): expose ghostty's cap (`vt.rs: Terminal::new(max_scrollback)`, today hard-coded `10_000` in `app/kumo/src/daemon/pane.rs:323`) as optional `config.toml` keys. QoL only — **not** a 1.0 gate; the default stays `10_000` and the v1 schema can add it compatibly later. See also `vendor/libghostty-vt/src/config/Config.zig: scrollback-limit-bytes`.
+**Moved to 1.x** (no contract depends on them; each ships when a report or a
+measured need asks for it): `kumo config check` / `kumo doctor`, CI-tracked
+benchmarks, `cargo fuzz` targets, the terminal compatibility audit
+(vttest/esctest), the scripted multi-agent soak, socket trust-model tests,
+shell completions and a man page, sessions in the command palette, and the
+configurable scrollback limit (`[terminal] scrollback-limit`, today
+hard-coded `10_000` in `app/kumo/src/daemon/pane.rs`).
 
 ## 🎉 1.0.0
 
