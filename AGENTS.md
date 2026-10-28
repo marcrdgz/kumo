@@ -73,7 +73,8 @@ variant to `Command`/`DaemonEvent` and bumps `PROTOCOL_MINOR`; anything else
 - **Gate**: `cargo build --workspace && cargo test --workspace && cargo clippy --workspace` must all pass
 - **Note**: building `kumo` requires a `zig` toolchain on `PATH` to compile the
   vendored `libghostty-vt` (the `build.rs` lives in `app/kumo`). The vendored
-  build pins zig `0.15.x` (it rejects `0.16+`). On macOS with Xcode ≥ 26.5,
+  build pins zig `0.16.x` (`minimum_zig_version` in
+  `vendor/libghostty-vt/build.zig.zon`; CI installs `0.16.0`). On macOS with Xcode ≥ 26.5,
   also point builds at the CommandLineTools SDK
   (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`; the Makefile exports
   it): the Xcode 26.5 SDK's `libSystem.tbd` no longer lists the `arm64-macos`
