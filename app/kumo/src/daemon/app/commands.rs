@@ -23,6 +23,20 @@ use crate::daemon::agents::{self, AgentStatus, Snapshot};
 use crate::daemon::pane::Pane;
 use crate::daemon::pty::Pty;
 
+/// Error replies are `error: <code>: <detail>`; the CLI maps `<code>` to its
+/// `--json` `error.code`, part of the frozen machine API (docs/cli).
+fn no_session(session: &str) -> String {
+    format!("error: session_not_found: no session {session:?}")
+}
+
+fn no_pane(pane_id: u64, session: &str) -> String {
+    format!("error: pane_not_found: no pane {pane_id} in {session:?}")
+}
+
+fn invalid_argument(detail: &str) -> String {
+    format!("error: invalid_argument: {detail}")
+}
+
 /// Fraction of the split width/height a `leader+H/J/K/L` resize nudges per press.
 const RESIZE_STEP: f32 = 0.05;
 
@@ -136,7 +150,7 @@ impl App {
         is_ai: bool,
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let dir = match dir {
             SplitDir::Vertical => layout::SplitDir::V,
@@ -153,12 +167,12 @@ impl App {
     /// Close a pane in the named session (default: the focused pane of the active tab).
     pub(crate) fn close_pane_in_session(&mut self, session: &str, pane_id: Option<u64>) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let pid = match pane_id {
             Some(pid) => {
                 if !self.sessions[idx].contains_pane(pid) {
-                    return Ok(format!("no pane {pid} in {session:?}"));
+                    return Ok(no_pane(pid, session));
                 }
                 pid
             }
@@ -181,7 +195,7 @@ impl App {
     /// neighbor in `dir` (active tab).
     pub(crate) fn resize_split_in_session(&mut self, session: &str, dir: kumo_protocol::ResizeDir) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let dir = match dir {
             kumo_protocol::ResizeDir::Left => kumo_core::layout::ResizeDir::Left,
@@ -208,7 +222,7 @@ impl App {
         ratio: f32,
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let t = self.sessions[idx].active_tab;
         self.sessions[idx].tabs[t].tree.set_ratio(split_id, ratio);
@@ -219,7 +233,7 @@ impl App {
     /// Swap the focused pane with its sibling in the named session's active tab.
     pub(crate) fn swap_focused(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let focus = self.sessions[idx].active_tab().tree.focus;
         let t = self.sessions[idx].active_tab;
@@ -234,7 +248,7 @@ impl App {
     /// Mirror (rotate) the layout tree of the named session's active tab.
     pub(crate) fn rotate_layout(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let t = self.sessions[idx].active_tab;
         self.sessions[idx].tabs[t].tree.mirror();
@@ -245,7 +259,7 @@ impl App {
     /// Toggle the active tab's zoom in the named session.
     pub(crate) fn zoom_session(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let t = self.sessions[idx].active_tab;
         self.sessions[idx].tabs[t].zoom = !self.sessions[idx].tabs[t].zoom;
@@ -261,7 +275,7 @@ impl App {
         keys: &[WireKeyEvent],
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let prev_active = self.active;
         let s_idx = idx;
@@ -271,7 +285,7 @@ impl App {
         let pid = match pane_id {
             Some(pid) => {
                 if !self.sessions[idx].contains_pane(pid) {
-                    return Ok(format!("no pane {pid} in {session:?}"));
+                    return Ok(no_pane(pid, session));
                 }
                 // focus the tab containing that pane
                 if let Some(t) = self.sessions[idx].find_tab_containing(pid) {
@@ -323,7 +337,7 @@ impl App {
     /// Close a session by name, killing its panes.
     pub(crate) fn kill_session_named(&mut self, name: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == name) else {
-            return Ok(format!("no session {name:?}"));
+            return Ok(no_session(name));
         };
         self.close_session(idx);
         Ok(format!("killed session {name:?}"))
@@ -403,7 +417,7 @@ impl App {
     /// the configured AI command).
     pub(crate) fn agent_spawn(&mut self, session: &str, program: Option<&str>) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let prev = self.active;
         self.active = idx;
@@ -429,18 +443,18 @@ impl App {
         args: &[String],
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         if !self.sessions[idx].contains_pane(pane_id) {
-            return Ok(format!("no pane {pane_id} in {session:?}"));
+            return Ok(no_pane(pane_id, session));
         }
         let kind = kind.trim();
         if kind.is_empty() {
-            return Ok("kind cannot be empty".to_string());
+            return Ok(invalid_argument("kind cannot be empty"));
         }
         let rule_id = crate::daemon::pane::normalize_agent_kind(kind);
         if !crate::daemon::agents::is_known_agent_kind(&rule_id) {
-            return Ok(format!("error: unknown agent kind {rule_id:?} (no agent-detection manifest loaded)"));
+            return Ok(invalid_argument(&format!("unknown agent kind {rule_id:?} (no agent-detection manifest loaded)")));
         }
         // The agent is launched by the existing interactive shell, so quote
         // every token rather than trying to escape only spaces/double quotes.
@@ -458,7 +472,7 @@ impl App {
         if let Some(pane) = self.panes.get(&pane_id) {
             let st = pane.agent_status();
             if st == crate::daemon::agents::AgentStatus::Blocked {
-                return Ok("error: agent_not_ready (pane is blocked immediately after start)".to_string());
+                return Ok("error: agent_not_ready: pane is blocked immediately after start".to_string());
             }
         }
         Ok(format!("started {kind} in pane {pane_id}"))
@@ -468,29 +482,29 @@ impl App {
     /// agents by name instead of pane id.
     pub(crate) fn agent_rename(&mut self, session: &str, pane_id: u64, name: &str) -> Result<String> {
         let Some(s) = self.sessions.iter().find(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         if !s.contains_pane(pane_id) {
-            return Ok(format!("no pane {pane_id} in {session:?}"));
+            return Ok(no_pane(pane_id, session));
         }
         let Some(pane) = self.panes.get(&pane_id) else {
-            return Ok(format!("no pane {pane_id} in {session:?}"));
+            return Ok(no_pane(pane_id, session));
         };
         if !pane.is_ai_cli() {
-            return Ok(format!("pane {pane_id} is not an agent pane"));
+            return Ok(format!("error: not_an_agent: pane {pane_id} is not an agent pane"));
         }
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Ok("name cannot be empty".to_string());
+            return Ok(invalid_argument("name cannot be empty"));
         }
         if name.len() > 64 {
-            return Ok("name too long (max 64)".to_string());
+            return Ok(invalid_argument("name too long (max 64)"));
         }
         if name.contains(':') {
-            return Ok("name cannot contain ':' (reserved for pane positions)".to_string());
+            return Ok(invalid_argument("name cannot contain ':' (reserved for pane positions)"));
         }
         if name.parse::<u64>().is_ok() {
-            return Ok("name cannot be numeric (reserved for pane ids)".to_string());
+            return Ok(invalid_argument("name cannot be numeric (reserved for pane ids)"));
         }
         if self
             .agent_aliases
@@ -513,7 +527,7 @@ impl App {
         filter: Option<kumo_protocol::AgentStatus>,
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let pids: Vec<u64> = self.sessions[idx]
             .tabs
@@ -580,13 +594,13 @@ impl App {
     /// daemon's cached state.
     pub(crate) fn agent_explain(&self, session: &str, pane_id: u64) -> Result<AgentExplainReport> {
         let Some(s) = self.sessions.iter().find(|s| s.name == session) else {
-            anyhow::bail!("no session {session:?}");
+            anyhow::bail!("session_not_found: no session {session:?}");
         };
         if !s.contains_pane(pane_id) {
-            anyhow::bail!("no pane {pane_id} in session {session:?}");
+            anyhow::bail!("pane_not_found: no pane {pane_id} in session {session:?}");
         }
         let Some(pane) = self.panes.get(&pane_id) else {
-            anyhow::bail!("no pane {pane_id}");
+            anyhow::bail!("pane_not_found: no pane {pane_id}");
         };
         let exp = agents::explain_for(&Snapshot::capture(&pane.vt), pane.agent_rule_id());
         // Detection only runs for AI panes; a dead or plain shell pane reads
@@ -686,14 +700,14 @@ impl App {
         name: &str,
     ) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         if !self.sessions[idx].contains_pane(pane_id) {
-            return Ok(format!("no pane {pane_id} in {session:?}"));
+            return Ok(no_pane(pane_id, session));
         }
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Ok("name cannot be empty".to_string());
+            return Ok(invalid_argument("name cannot be empty"));
         }
         let all_ids: Vec<u64> = self.sessions[idx].tabs.iter().flat_map(|t| t.tree.pane_ids()).collect();
         let taken = all_ids.into_iter().filter(|id| *id != pane_id).map(|id| self.pane_label(id)).any(|l| l.trim() == name);
@@ -710,11 +724,11 @@ impl App {
     /// Rename a session.
     pub(crate) fn rename_session(&mut self, session: &str, new_name: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let name = new_name.trim().to_string();
         if name.is_empty() {
-            return Ok("name cannot be empty".to_string());
+            return Ok(invalid_argument("name cannot be empty"));
         }
         let taken = self
             .sessions
@@ -764,11 +778,11 @@ impl App {
     /// session inside it, named after the branch.
     pub(crate) fn worktree_create(&mut self, session: &str, branch: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let branch = branch.trim().to_string();
         if branch.is_empty() {
-            return Ok("branch name cannot be empty".to_string());
+            return Ok(invalid_argument("branch name cannot be empty"));
         }
         match self.new_worktree_session(idx, &branch) {
             Ok(()) => Ok(format!("created worktree {branch:?}")),
@@ -791,7 +805,7 @@ impl App {
         name: Option<&str>,
     ) -> (String, Option<u64>) {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return (format!("no session {session:?}"), None);
+            return (no_session(session), None);
         };
         let branch_override = if branch.trim().is_empty() { None } else { Some(branch.trim()) };
         let from = from.map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -818,7 +832,7 @@ impl App {
     /// clients agree on the same target without a protocol change.
     fn resolve_worktree_path(&self, session: &str, path: &std::path::Path) -> Result<PathBuf> {
         let Some(workspace) = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone()) else {
-            return Err(anyhow!("no session {session:?}"));
+            return Err(anyhow!("session_not_found: no session {session:?}"));
         };
         Ok(if path.is_absolute() {
             path.to_path_buf()
@@ -837,7 +851,7 @@ impl App {
         force: bool,
     ) -> std::result::Result<WorktreeRemoval, String> {
         if !self.sessions.iter().any(|s| s.name == session) {
-            return Err(format!("no session {session:?}"));
+            return Err(no_session(session));
         }
         let target = self.resolve_worktree_path(session, path).map_err(|e| format!("error: {e:#}"))?;
         let ws = self.sessions.iter().find(|s| s.name == session).map(|s| s.workspace.clone());
@@ -853,7 +867,7 @@ impl App {
         status: Option<&str>,
     ) -> Result<String> {
         if !self.sessions.iter().any(|s| s.name == session) {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         }
         let target = self.resolve_worktree_path(session, path)?;
         // Validate status via protocol helper
@@ -933,7 +947,7 @@ impl App {
     /// (the worktree picker's confirm).
     pub(crate) fn worktree_open(&mut self, session: &str, path: &std::path::Path) -> Result<String> {
         if !self.sessions.iter().any(|s| s.name == session) {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         }
         let target = self.resolve_worktree_path(session, path)?;
         self.open_session_in_worktree(&target, None)?;
@@ -946,7 +960,7 @@ impl App {
     pub(crate) fn set_theme(&mut self, idx: usize) -> Result<String> {
         let all = kumo_core::theme::all_themes(kumo_core::config::custom_theme());
         if idx >= all.len() {
-            return Ok(format!("no such theme #{idx}"));
+            return Ok(invalid_argument(&format!("no such theme #{idx}")));
         }
         let theme = all[idx].clone();
         // A custom theme's display name is user-controlled, while its config
@@ -970,7 +984,7 @@ impl App {
     /// session's active tab (vertical split). Uses `$VISUAL`, then `$EDITOR`, then `vi`.
     pub(crate) fn open_config_in_session(&mut self, session: &str) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(no_session(session));
         };
         let (prog, mut args) = config_editor();
         let path = kumo_core::config::config_file_toml();

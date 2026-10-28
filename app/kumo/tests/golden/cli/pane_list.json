@@ -1,0 +1,20 @@
+{
+  "session": "<string>",
+  "tabs": [
+    {
+      "active": "<bool>",
+      "focus": "<number>",
+      "id": "<number>",
+      "name": "<string>",
+      "pane_count": "<number>",
+      "panes": [
+        {
+          "active": "<bool>",
+          "id": "<number>",
+          "label": "<string>"
+        }
+      ],
+      "zoomed": "<bool>"
+    }
+  ]
+}

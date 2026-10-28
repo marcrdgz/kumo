@@ -350,8 +350,9 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                             let expected = crate::daemon::pane::normalize_agent_kind(kind);
                             waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned, reply);
                         }
-                        _ if reply.starts_with("error:") && reply.contains("agent_not_ready") => {
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "agent_not_ready".into(), message: reply });
+                        _ if reply.starts_with("error:") => {
+                            let (code, message) = error_reply_parts(&reply);
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: code.into(), message: message.into() });
                         }
                         _ => {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
@@ -601,8 +602,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                 Command::AgentStart { session, pane_id, kind, args } => {
                     match app.agent_start(&session, pane_id, &kind, &args) {
                         Ok(msg) if msg.starts_with("error:") => {
-                            let code = if msg.contains("agent_not_ready") { "agent_not_ready" } else { "error" };
-                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: code.into(), message: msg });
+                            let (code, message) = error_reply_parts(&msg);
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: code.into(), message: message.into() });
                         }
                         Ok(msg) if msg.starts_with("started ") => {
                             let pinned = app.pane_os_pid(pane_id);
@@ -912,6 +913,16 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
     let _ = UnixStream::connect(&path);
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+/// Split an `error: <code>: <detail>` reply into its code and detail; a reply
+/// without a code reads as the generic `error`.
+fn error_reply_parts(reply: &str) -> (&str, &str) {
+    let rest = reply.strip_prefix("error:").map(str::trim).unwrap_or(reply);
+    match rest.split_once(':') {
+        Some((code, detail)) if !code.is_empty() && !code.contains(char::is_whitespace) => (code, detail.trim()),
+        _ => ("error", rest),
+    }
 }
 
 /// Accept loop: hands each new connection to the daemon loop and wakes it, so

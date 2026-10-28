@@ -1,0 +1,32 @@
+{
+  "sessions": [
+    {
+      "active": "<bool>",
+      "active_tab": "<string>",
+      "agents": [],
+      "focus": "<number>",
+      "name": "<string>",
+      "pane_count": "<number>",
+      "tab_count": "<number>",
+      "tabs": [
+        {
+          "active": "<bool>",
+          "focus": "<number>",
+          "id": "<number>",
+          "name": "<string>",
+          "pane_count": "<number>",
+          "panes": [
+            {
+              "active": "<bool>",
+              "id": "<number>",
+              "label": "<string>"
+            }
+          ],
+          "zoomed": "<bool>"
+        }
+      ],
+      "workspace": "<string>",
+      "zoomed": "<bool>"
+    }
+  ]
+}

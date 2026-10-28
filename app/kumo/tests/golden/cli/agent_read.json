@@ -1,0 +1,6 @@
+{
+  "pane_id": "<number>",
+  "source": "<string>",
+  "text": "<string>",
+  "truncated": "<bool>"
+}

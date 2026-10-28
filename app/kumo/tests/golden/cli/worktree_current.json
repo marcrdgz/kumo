@@ -1,0 +1,11 @@
+{
+  "worktree": {
+    "branch": "<string>",
+    "comment": null,
+    "is_ephemeral": "<bool>",
+    "is_main": "<bool>",
+    "open": "<bool>",
+    "path": "<string>",
+    "status": null
+  }
+}
