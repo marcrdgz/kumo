@@ -1,0 +1,44 @@
+---
+title: Performance
+description: Measured latency and memory of the kumo daemon, and how to reproduce the numbers.
+icon: ⏱️
+---
+
+kumo's budget, set in `v0.5.2`, is **4 ms** of daemon work and **8 ms** of
+client work per frame. The numbers below are the reference baseline for 1.0;
+a later release that moves them noticeably is a regression to explain.
+
+## Baseline
+
+Measured on kumo 0.8.0, release build, Apple silicon (macOS), local Unix
+socket, 80×24 panes, 2026-10-28.
+
+| Measurement | Result |
+| --- | --- |
+| **Typing latency**: pane write → incremental frame received | p50 0.61 ms · p95 0.93 ms |
+| **Attach latency**: fresh connect → first full frame of a pane with full scrollback | p50 0.37 ms · p95 0.43 ms |
+| **Handshake**: fresh connect → `Welcome` | p50 0.07 ms · p95 0.10 ms |
+| **Memory per pane**: daemon RSS, empty pane | ~0.6 MiB |
+| **Memory per pane**: daemon RSS, full 10 000-line scrollback | ~1.4 MiB |
+
+Memory counts the daemon process only (terminal emulator, scrollback and
+buffers), averaged over 16 panes; the shell or agent running in each pane is a
+separate process and is not included.
+
+## Reproducing
+
+The benchmarks are ignored tests in `app/kumo/tests/runtime.rs`. Each starts
+an isolated daemon, so they don't touch your running sessions:
+
+```sh
+cargo test --release -p kumo --test runtime benchmark -- --ignored --nocapture --test-threads=1
+```
+
+| Benchmark | Measures |
+| --- | --- |
+| `benchmark_pane_write_to_incremental_frame` | typing latency |
+| `benchmark_attach_to_first_full_frame` | handshake and attach latency |
+| `benchmark_daemon_memory_per_pane` | memory per pane |
+
+The numbers are re-measured and updated here for each release. Results depend
+on hardware and system load, so compare runs on the same machine.
