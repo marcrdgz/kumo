@@ -89,26 +89,26 @@ impl View {
             self.mark_dirty();
             return Ok(());
         }
-        if self.session_close_confirm.open {
+        if self.confirm.is_some() {
             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                if let Some(rect) = self.session_close_confirm_button_rect(true) {
+                if let Some(rect) = self.confirm_button_rect(true) {
                     if rect.contains(Position::new(x, y)) {
-                        self.submit_worktree_removal();
+                        self.submit_confirm();
                         self.mark_dirty();
                         return Ok(());
                     }
                 }
-                if let Some(rect) = self.session_close_confirm_button_rect(false) {
+                if let Some(rect) = self.confirm_button_rect(false) {
                     if rect.contains(Position::new(x, y)) {
-                        self.session_close_confirm.open = false;
+                        self.confirm = None;
                         self.mark_dirty();
                         return Ok(());
                     }
                 }
-                if self.session_close_confirm_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
+                if self.confirm_rect().map(|r| r.contains(Position::new(x, y))).unwrap_or(false) {
                     return Ok(());
                 }
-                self.session_close_confirm.open = false;
+                self.confirm = None;
                 self.mark_dirty();
             }
             return Ok(());

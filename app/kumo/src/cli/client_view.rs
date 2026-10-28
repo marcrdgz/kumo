@@ -489,12 +489,21 @@ struct WorktreeCreateDialog {
     error: Option<String>,
 }
 
-struct SessionCloseConfirm {
-    open: bool,
-    session_idx: usize,
-    session_name: String,
-    path: PathBuf,
-    mode: WorktreeRemovalMode,
+/// A destructive action held by the yes/no confirm dialog until the user
+/// answers.
+enum ConfirmAction {
+    RemoveWorktree { session: String, path: PathBuf, mode: WorktreeRemovalMode },
+    /// `pane_id: None` closes the session's focused pane, as `leader+x` does.
+    ClosePane { session: String, pane_id: Option<u64>, running: String },
+}
+
+impl ConfirmAction {
+    fn yes_label(&self) -> &'static str {
+        match self {
+            ConfirmAction::RemoveWorktree { .. } => " Remove (y) ",
+            ConfirmAction::ClosePane { .. } => " Close (y) ",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -697,7 +706,7 @@ pub struct View {
     settings: SettingsPanel,
     worktree_picker: WorktreePicker,
     worktree_create: WorktreeCreateDialog,
-    session_close_confirm: SessionCloseConfirm,
+    confirm: Option<ConfirmAction>,
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
@@ -842,7 +851,7 @@ impl View {
             },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Smart, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
-            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
+            confirm: None,
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -1775,8 +1784,8 @@ impl View {
     pub fn on_key(&mut self, key: KeyEvent) -> Result<()> {
         self.flush_wheel()?;
         self.set_link_mods(key.modifiers.intersects(link_modifiers()));
-        if self.session_close_confirm.open {
-            self.on_session_close_confirm_key(key);
+        if self.confirm.is_some() {
+            self.on_confirm_key(key);
             return Ok(());
         }
         if self.worktree_create.open {
@@ -1862,7 +1871,7 @@ impl View {
 
     pub fn on_paste(&mut self, text: &str) {
         let _ = self.flush_wheel();
-        if self.session_close_confirm.open {
+        if self.confirm.is_some() {
             return;
         }
         if self.worktree_create.open {
@@ -1935,9 +1944,7 @@ impl View {
                 let idx = self.session_index(&session).unwrap_or(0);
                 self.open_worktree_popup(idx);
             }
-            Action::ClosePane => {
-                let _ = self.send(&Command::PaneClose { session, pane_id: None });
-            }
+            Action::ClosePane => self.request_pane_close(session, None),
             Action::Zoom => {
                 let _ = self.send(&Command::SessionZoom { session });
             }
@@ -2608,10 +2615,8 @@ impl View {
         }
     }
 
-    fn session_close_confirm_rect(&self) -> Option<Rect> {
-        if !self.session_close_confirm.open {
-            return None;
-        }
+    fn confirm_rect(&self) -> Option<Rect> {
+        self.confirm.as_ref()?;
         let (w, h) = (self.cols, self.rows);
         let width = 60u16.min(w.saturating_sub(4)).max(30);
         let height = 7u16;
@@ -2621,10 +2626,10 @@ impl View {
         Some(Rect::new((w - width) / 2, (h - height) / 2, width, height))
     }
 
-    fn session_close_confirm_button_rect(&self, is_yes: bool) -> Option<Rect> {
-        let dd = self.session_close_confirm_rect()?;
+    fn confirm_button_rect(&self, is_yes: bool) -> Option<Rect> {
+        let dd = self.confirm_rect()?;
         let y = dd.bottom().saturating_sub(2);
-        let yes_label = " Remove (y) ";
+        let yes_label = self.confirm.as_ref()?.yes_label();
         let no_label = " Cancel (n) ";
         let yes_w = yes_label.chars().count() as u16 + 2;
         let no_w = no_label.chars().count() as u16 + 2;
@@ -2809,36 +2814,54 @@ impl View {
         self.mark_dirty();
     }
 
-    fn on_session_close_confirm_key(&mut self, key: KeyEvent) {
+    fn on_confirm_key(&mut self, key: KeyEvent) {
         if self.leader.is_leader(key) || key.code == KeyCode::Esc {
-            // Cancel — don't close session at all
-            self.session_close_confirm.open = false;
+            self.confirm = None;
             self.mark_dirty();
             return;
         }
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.submit_worktree_removal();
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.submit_confirm();
                 self.mark_dirty();
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.session_close_confirm.open = false;
-                self.mark_dirty();
-            }
-            KeyCode::Enter => {
-                self.submit_worktree_removal();
+                self.confirm = None;
                 self.mark_dirty();
             }
             _ => {}
         }
     }
 
-    fn submit_worktree_removal(&mut self) {
-        let path = self.session_close_confirm.path.clone();
-        let session = self.session_close_confirm.session_name.clone();
-        let force = self.session_close_confirm.mode == WorktreeRemovalMode::Force;
-        self.session_close_confirm.open = false;
-        let _ = self.send(&Command::WorktreeRemove { session, path, force });
+    fn submit_confirm(&mut self) {
+        let cmd = match self.confirm.take() {
+            Some(ConfirmAction::RemoveWorktree { session, path, mode }) => {
+                Command::WorktreeRemove { session, path, force: mode == WorktreeRemovalMode::Force }
+            }
+            Some(ConfirmAction::ClosePane { session, pane_id, .. }) => Command::PaneClose { session, pane_id },
+            None => return,
+        };
+        let _ = self.send(&cmd);
+    }
+
+    /// Closes a pane of the active session (`None`: its focused pane), asking
+    /// first when the pane runs an agent or a full-screen program, since
+    /// closing kills it and loses its state.
+    fn request_pane_close(&mut self, session: String, pane_id: Option<u64>) {
+        let running = self
+            .active_session()
+            .and_then(|s| {
+                let pid = pane_id.or_else(|| s.tabs.get(s.active_tab).map(|t| t.focus))?;
+                find_pane_in_session(s, pid)
+            })
+            .and_then(pane_close_warning);
+        match running {
+            Some(running) => self.confirm = Some(ConfirmAction::ClosePane { session, pane_id, running }),
+            None => {
+                let _ = self.send(&Command::PaneClose { session, pane_id });
+            }
+        }
+        self.mark_dirty();
     }
 
     fn commit_name(&mut self) {
@@ -2982,11 +3005,7 @@ impl View {
             self.notice = Some(("only a registered linked worktree can be removed".to_string(), Instant::now()));
             return;
         }
-        self.session_close_confirm.open = true;
-        self.session_close_confirm.session_idx = idx;
-        self.session_close_confirm.session_name = session_name;
-        self.session_close_confirm.path = workspace;
-        self.session_close_confirm.mode = mode;
+        self.confirm = Some(ConfirmAction::RemoveWorktree { session: session_name, path: workspace, mode });
     }
 
     fn open_ctx_menu(&mut self, x: u16, y: u16, target: CtxTarget) {
@@ -3086,7 +3105,7 @@ impl View {
                 CtxTarget::Pane(pid) => {
                     let session = self.active_session().map(|s| s.name.clone());
                     if let Some(session) = session {
-                        let _ = self.send(&Command::PaneClose { session, pane_id: Some(pid) });
+                        self.request_pane_close(session, Some(pid));
                     }
                 }
                 CtxTarget::Session(idx) => {
@@ -3338,6 +3357,19 @@ fn pane_count(s: &SessionLayout) -> usize {
         }
         n
     }).sum()
+}
+
+/// What closing `pane` would kill that is worth a confirmation, if anything.
+/// The alternate screen stands in for a foreground full-screen program
+/// (editor, pager, TUI); a plain shell prompt closes without asking.
+fn pane_close_warning(pane: &kumo_protocol::LayoutPane) -> Option<String> {
+    if let Some(agent) = &pane.agent {
+        Some(agent.name.clone())
+    } else if pane.alt_screen {
+        Some("a full-screen program".to_string())
+    } else {
+        None
+    }
 }
 
 fn find_pane_in_session(s: &SessionLayout, pid: u64) -> Option<&kumo_protocol::LayoutPane> {
@@ -3703,7 +3735,7 @@ mod tests {
             },
             worktree_picker: WorktreePicker { open: false, session: 0, items: Vec::new(), selected: 0, scroll: 0, error: None },
             worktree_create: WorktreeCreateDialog { open: false, session: 0, tab: WorktreeCreateTab::Smart, create_from: String::new(), cursor: 0, branch_override: String::new(), branch_cursor: 0, note: String::new(), note_cursor: 0, agent: String::new(), agent_cursor: 0, advanced: false, focus: WorktreeCreateFocus::CreateFrom, error: None },
-            session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
+            confirm: None,
             pane_numbers: None,
             status_msg: None,
             notice: None,
@@ -4547,15 +4579,59 @@ mod tests {
     }
 
     #[test]
-    fn worktree_removal_buttons_match_rendered_labels() {
+    fn confirm_buttons_match_rendered_labels() {
         let mut view = test_view();
-        view.session_close_confirm.open = true;
-        let remove = view.session_close_confirm_button_rect(true).unwrap();
-        let cancel = view.session_close_confirm_button_rect(false).unwrap();
+        let path = PathBuf::from("/tmp/wt");
+        view.confirm = Some(ConfirmAction::RemoveWorktree { session: "sess".into(), path, mode: WorktreeRemovalMode::Safe });
+        let remove = view.confirm_button_rect(true).unwrap();
+        let cancel = view.confirm_button_rect(false).unwrap();
         assert_eq!(remove.width, " Remove (y) ".chars().count() as u16 + 2);
         assert_eq!(cancel.width, " Cancel (n) ".chars().count() as u16 + 2);
         assert_eq!(remove.y, cancel.y);
         assert!(remove.right() < cancel.x);
+
+        view.confirm = Some(ConfirmAction::ClosePane { session: "sess".into(), pane_id: None, running: "claude".into() });
+        assert_eq!(view.confirm_button_rect(true).unwrap().width, " Close (y) ".chars().count() as u16 + 2);
+    }
+
+    #[test]
+    fn closing_an_agent_pane_asks_first_and_cancel_keeps_it() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+
+        view.run_action(Action::ClosePane).unwrap();
+        assert!(matches!(
+            &view.confirm,
+            Some(ConfirmAction::ClosePane { pane_id: None, running, .. }) if running == "agent1"
+        ));
+        view.on_key(key(KeyCode::Char('n'))).unwrap();
+        assert!(view.confirm.is_none());
+
+        view.ctx_menu.target = CtxTarget::Pane(2);
+        let close = view.ctx_items().iter().position(|item| *item == "close").unwrap();
+        view.ctx_menu_select(close).unwrap();
+        assert!(matches!(&view.confirm, Some(ConfirmAction::ClosePane { pane_id: Some(2), .. })));
+        view.on_key(key(KeyCode::Esc)).unwrap();
+        assert!(view.confirm.is_none());
+    }
+
+    #[test]
+    fn closing_a_shell_pane_asks_only_on_the_alternate_screen() {
+        let mut view = test_view();
+        let mut layout = render_bench_layout(&[1]);
+        view.layout = Some(layout.clone());
+        view.run_action(Action::ClosePane).unwrap();
+        assert!(view.confirm.is_none(), "an idle shell closes without asking");
+
+        if let Some(LayoutNode::Pane(pane)) = layout.sessions[0].tabs[0].root.as_deref_mut() {
+            pane.alt_screen = true;
+        }
+        view.layout = Some(layout);
+        view.run_action(Action::ClosePane).unwrap();
+        assert!(matches!(
+            &view.confirm,
+            Some(ConfirmAction::ClosePane { running, .. }) if running == "a full-screen program"
+        ));
     }
 
     #[test]
