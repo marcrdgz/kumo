@@ -103,7 +103,7 @@ impl View {
         self.render_settings(f);
         self.render_worktree_picker(f);
         self.render_worktree_create(f);
-        self.render_session_close_confirm(f);
+        self.render_confirm(f);
         self.render_finder(f);
         self.render_agent_inbox(f);
     }

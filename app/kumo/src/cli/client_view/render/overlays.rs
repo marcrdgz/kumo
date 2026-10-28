@@ -260,37 +260,41 @@ impl View {
         text(f, dd.x + 2, dd.bottom() - 2, "↑/↓ select · enter run · esc close", footer, inner_w);
     }
 
-    pub(super) fn render_session_close_confirm(&self, f: &mut Frame) {
-        if !self.session_close_confirm.open {
-            return;
-        }
+    pub(super) fn render_confirm(&self, f: &mut Frame) {
+        let Some(action) = &self.confirm else { return };
         let theme = self.current_theme();
-        let Some(dd) = self.session_close_confirm_rect() else { return };
+        let Some(dd) = self.confirm_rect() else { return };
         draw_modal(f, dd, &theme, self.shadow_floor());
         let inner_w = dd.width.saturating_sub(4);
+        let (title_text, msg, detail, hint_text) = match action {
+            ConfirmAction::RemoveWorktree { path, mode: WorktreeRemovalMode::Force, .. } => (
+                "force remove worktree",
+                "This permanently removes local changes and the worktree branch. Continue?".to_string(),
+                path.display().to_string(),
+                "Force bypasses dirty checks and deletes the branch · No cancels",
+            ),
+            ConfirmAction::RemoveWorktree { path, mode: WorktreeRemovalMode::Safe, .. } => (
+                "remove worktree",
+                "Remove this worktree after closing its session?".to_string(),
+                path.display().to_string(),
+                "Safe removal refuses dirty or untracked files · No cancels",
+            ),
+            ConfirmAction::ClosePane { running, .. } => (
+                "close pane",
+                format!("{running} is still running in this pane."),
+                "Closing the pane kills it.".to_string(),
+                "Close anyway? · No cancels",
+            ),
+        };
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-        let force = self.session_close_confirm.mode == WorktreeRemovalMode::Force;
-        let title_text = if force { "force remove worktree" } else { "remove worktree" };
         text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
-        let msg = if force {
-            "This permanently removes local changes and the worktree branch. Continue?"
-        } else {
-            "Remove this worktree after closing its session?"
-        };
         let msg_style = Style::default().fg(theme.fg).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.y + 2, msg, msg_style, inner_w);
-        let path = self.session_close_confirm.path.display().to_string();
-        let path_style = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        text(f, dd.x + 2, dd.y + 3, &path, path_style, inner_w);
-        let hint = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
-        let hint_text = if force {
-            "Force bypasses dirty checks and deletes the branch · No cancels"
-        } else {
-            "Safe removal refuses dirty or untracked files · No cancels"
-        };
-        text(f, dd.x + 2, dd.y + 4, hint_text, hint, inner_w);
-        for (is_yes, label) in [(true, " Remove (y) "), (false, " Cancel (n) ")] {
-            if let Some(rect) = self.session_close_confirm_button_rect(is_yes) {
+        text(f, dd.x + 2, dd.y + 2, &msg, msg_style, inner_w);
+        let muted = Style::default().fg(theme.panel_muted).bg(theme.panel_sep);
+        text(f, dd.x + 2, dd.y + 3, &detail, muted, inner_w);
+        text(f, dd.x + 2, dd.y + 4, hint_text, muted, inner_w);
+        for (is_yes, label) in [(true, action.yes_label()), (false, " Cancel (n) ")] {
+            if let Some(rect) = self.confirm_button_rect(is_yes) {
                 let st = if is_yes {
                     Style::default().fg(contrast_fg(&theme, theme.green)).bg(theme.green).add_modifier(Modifier::BOLD)
                 } else {
