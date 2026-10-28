@@ -88,27 +88,27 @@ releases, driven by real reports.
 - ✅ **Additive-compatible wire protocol** (#27): a major/minor split
   (`PROTOCOL_VERSION` / `PROTOCOL_MINOR`); daemons answer unknown commands
   with `unsupported` and clients ignore unknown events.
-- **Readiness-gated chained launch** (#28): `worktree create --agent` replies
+- ✅ **Readiness-gated chained launch** (#28): `worktree create --agent` replies
   through the same server-owned, occupant-pinned wait as `agent start`, with
   deterministic success, `agent_not_ready`, `agent_replaced` and `timeout`.
-- **Frozen control CLI** (#30): golden tests pin every `--json` reply shape,
+- ✅ **Frozen control CLI** (#30): golden tests pin every `--json` reply shape,
   the error codes and the exit codes (`app/kumo/tests/cli_json.rs`),
   documented as the machine API. Fixes the success-shaped errors it exposed
   (`session kill <missing>`, `pane focus <missing>`).
-- **Keymap stability** (#29): conflicting spellings of one chord resolve
+- ✅ **Keymap stability** (#29): conflicting spellings of one chord resolve
   deterministically and warn; invalid bindings and leader warn in the TUI
   instead of being dropped silently.
-- **0.x → 1.0 upgrade path** (#31): a genuine 0.7.6 `resume.json` fixture is
+- ✅ **0.x → 1.0 upgrade path** (#31): a genuine 0.7.6 `resume.json` fixture is
   loaded and its snapshots decoded on every test run, plus an opt-in live
   upgrade test from a released binary
   (`KUMO_PREV_BIN=… cargo test -p kumo --test upgrade -- --ignored`), run
   before each release.
-- **Reboot recovery** (#32): the daemon autosaves `state.json` (layout within
+- ✅ **Reboot recovery** (#32): the daemon autosaves `state.json` (layout within
   seconds, screen contents at most every `[persistence] autosave-interval`,
   final save on SIGTERM) and a cold start restores sessions, cwd, screens,
   aliases, and agents via their manifest `resume` command. Covers the
   `kill -9` restore check of gate 3.
-- **Compatibility policy** (`docs/compatibility`): what semver covers per
+- ✅ **Compatibility policy** (`docs/compatibility`): what semver covers per
   surface and the deprecation window.
 - ✅ **Performance baseline**: typing latency, attach latency and memory per
   pane are measured by ignored benchmarks in `app/kumo/tests/runtime.rs` and
@@ -117,17 +117,16 @@ releases, driven by real reports.
 
 **P1 — release:**
 
-- **Homebrew tap**: prebuilt binaries already ship through the cargo-dist
-  installer, so nobody needs zig to install kumo. A tap adds `brew install`;
-  it needs a `homebrew-tap` repository and a `HOMEBREW_TAP_TOKEN` secret
-  before `installers` can include `"homebrew"`.
-- Run the live upgrade test against the last 0.x release, then publish.
+- ✅ Live upgrade test against the last 0.x release (0.7.6) passes.
 
 **Moved to 1.x** (no contract depends on them; each ships when a report or a
 measured need asks for it): `kumo config check` / `kumo doctor`, CI-tracked
 benchmarks, `cargo fuzz` targets, the terminal compatibility audit
 (vttest/esctest), the scripted multi-agent soak, socket trust-model tests,
-shell completions and a man page, sessions in the command palette, and the
+shell completions and a man page, sessions in the command palette, the
+Homebrew tap (prebuilt binaries already ship through the cargo-dist
+installer; a tap needs a `homebrew-tap` repository and a `HOMEBREW_TAP_TOKEN`
+secret before `installers` can include `"homebrew"`), and the
 configurable scrollback limit (`[terminal] scrollback-limit`, today
 hard-coded `10_000` in `app/kumo/src/daemon/pane.rs`).
 
