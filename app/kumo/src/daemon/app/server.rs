@@ -1619,9 +1619,14 @@ mod tests {
         // Subscribe a pane and resize it; the PaneFrame streams at that size.
         protocol::write_framed(&mut stream, &Command::SubscribePane { pane_id: two_pane }).unwrap();
         protocol::write_framed(&mut stream, &Command::PaneResize { pane_id: two_pane, cols: 60, rows: 20 }).unwrap();
+        // Subscribing streams the current screen at once, which can race
+        // ahead of the resize; wait for the frame at the requested size.
         let frame = loop {
-            match next_event(&mut stream, Duration::from_secs(10), "PaneFrame") {
-                DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane => break frame,
+            match next_event(&mut stream, Duration::from_secs(10), "PaneFrame at 60x20") {
+                DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane && (frame.cols, frame.rows) == (60, 20) => {
+                    break frame
+                }
+                DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane => continue,
                 // Config hot reload is asynchronous: tests that change the
                 // config env concurrently can trigger one at any point.
                 DaemonEvent::Layout { .. } | DaemonEvent::ConfigReloaded { .. } | DaemonEvent::Theme { .. } => continue,
