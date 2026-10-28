@@ -2,6 +2,7 @@ use super::*;
 
 impl View {
     pub(super) fn render_status(&self, f: &mut Frame) {
+        self.config_chip.set(None);
         if self.status_h() == 0 {
             return;
         }
@@ -124,15 +125,28 @@ impl View {
         let mut center_spans = status_bar::slot_spans(&center_cfg, &ctx);
         let mut right_spans = status_bar::slot_spans(&right_cfg, &ctx);
 
-        // Notice (⚠) is a left-side transient appended after the session widget,
-        // like the pre-widget bar. Keep it visible even when widgets were dropped.
-        // A config warning shows whenever no transient notice is up.
-        let notice = self.notice.as_ref().filter(|(_, t)| t.elapsed() < TOAST_TIMEOUT).map(|(msg, _)| msg);
-        if let Some(msg) = notice.or(self.config_warning.as_ref()) {
-            if !left_spans.is_empty() {
-                left_spans.push(ratatui::text::Span::styled(" · ", Style::default().fg(theme.panel_muted)));
+        // The config chip and the notice (⚠) are left-side additions after the
+        // session widget, like the pre-widget bar. Keep them visible even when
+        // widgets were dropped. The chip stays until the config is fixed, so
+        // it is kept short; the command palette lists the problems in full.
+        let separator = |spans: &mut Vec<ratatui::text::Span<'static>>| {
+            if !spans.is_empty() {
+                spans.push(ratatui::text::Span::styled(" · ", Style::default().fg(theme.panel_muted)));
             }
-            left_spans.push(ratatui::text::Span::styled(format!("⚠ {msg}"), Style::default().fg(theme.secondary)));
+        };
+        let mut chip = None;
+        if !self.config_warnings.is_empty() {
+            separator(&mut left_spans);
+            let label = format!("⚠ config ({})", self.config_warnings.len());
+            chip = Some((status_bar::spans_width(&left_spans), label.chars().count() as u16));
+            let style = Style::default().fg(theme.orange).add_modifier(Modifier::BOLD);
+            left_spans.push(ratatui::text::Span::styled(label, style));
+        }
+        if let Some((msg, t)) = &self.notice {
+            if t.elapsed() < TOAST_TIMEOUT {
+                separator(&mut left_spans);
+                left_spans.push(ratatui::text::Span::styled(format!("⚠ {msg}"), Style::default().fg(theme.secondary)));
+            }
         }
 
         let left_w = status_bar::spans_width(&left_spans);
@@ -166,6 +180,10 @@ impl View {
         let center_w = status_bar::spans_width(&center_spans);
         let right_w = status_bar::spans_width(&right_spans);
 
+        // Truncation may have cut the chip short or off entirely.
+        self.config_chip.set(chip.and_then(|(x, w)| {
+            (x < left_w).then(|| Rect::new(area.x + x, area.y, w.min(left_w - x), 1))
+        }));
         if left_w > 0 {
             f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from(left_spans)), Rect::new(area.x, area.y, left_w.min(area.width), 1));
         }
@@ -239,18 +257,19 @@ impl View {
         let theme = self.current_theme();
         for (i, rect) in self.agent_toast_rects() {
             let t = &self.agent_toasts[i];
-            let accent = match t.kind {
-                ToastKind::Blocked => theme.orange,
-                ToastKind::Finished => theme.green,
+            let accent = match t.source {
+                ToastSource::Agent { kind: ToastKind::Blocked, .. } | ToastSource::Config => theme.orange,
+                ToastSource::Agent { kind: ToastKind::Finished, .. } => theme.green,
             };
             draw_modal(f, rect, &theme, self.shadow_floor());
             // Re-color the modal's border with the kind accent so a blocked
             // toast reads as attention and a finished one as success.
             paint_border(f, rect, accent, theme.panel_sep);
             let glyph_style = Style::default().fg(accent).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
-            let glyph = match t.kind {
-                ToastKind::Blocked => "●",
-                ToastKind::Finished => "✓",
+            let glyph = match t.source {
+                ToastSource::Agent { kind: ToastKind::Blocked, .. } => "●",
+                ToastSource::Agent { kind: ToastKind::Finished, .. } => "✓",
+                ToastSource::Config => "⚠",
             };
             put(f, rect.x + 2, rect.y + 1, glyph, glyph_style);
             let title_w = rect.width.saturating_sub(5);

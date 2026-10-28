@@ -314,24 +314,30 @@ impl View {
                     }
                     self.ctx_menu.open = false;
                 }
-                // A corner toast click focuses the agent's pane and dismisses
-                // the toast (checked after the modals above so an open popup
-                // keeps priority over transient chrome).
+                // A corner toast click dismisses it and goes to what it
+                // announces: the agent's pane, or the config problem list
+                // (checked after the modals above so an open popup keeps
+                // priority over transient chrome).
                 if let Some(i) = self.agent_toast_at(x, y) {
                     let t = self.agent_toasts.remove(i);
-                    if let Some(session) = self
-                        .layout
-                        .as_ref()
-                        .and_then(|l| {
-                            l.sessions
-                                .iter()
-                                .find(|s| s.tabs.iter().any(|tab| Self::find_layout_pane_in_tab(tab, t.pane_id).is_some()))
-                                .map(|s| s.name.clone())
-                        })
-                    {
-                        let _ = self.send(&Command::PaneFocus { session, pane_id: t.pane_id });
+                    match t.source {
+                        ToastSource::Agent { pane_id, .. } => {
+                            if let Some(session) = self.layout.as_ref().and_then(|l| {
+                                l.sessions
+                                    .iter()
+                                    .find(|s| s.tabs.iter().any(|tab| Self::find_layout_pane_in_tab(tab, pane_id).is_some()))
+                                    .map(|s| s.name.clone())
+                            }) {
+                                let _ = self.send(&Command::PaneFocus { session, pane_id });
+                            }
+                        }
+                        ToastSource::Config => self.open_keybind_overlay(),
                     }
                     self.mark_dirty();
+                    return Ok(());
+                }
+                if self.config_chip.get().is_some_and(|r| r.contains(Position::new(x, y))) {
+                    self.open_keybind_overlay();
                     return Ok(());
                 }
                 if self.menu_btn_at(x, y) {
