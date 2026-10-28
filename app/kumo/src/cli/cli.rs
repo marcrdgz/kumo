@@ -338,10 +338,13 @@ fn run_inner(args: &[String]) -> Result<()> {
         CliCmd::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
             let sess = resolve_session(&mut stream, session)?;
             let br = branch.unwrap_or_default();
+            // A chained `--agent` replies only after the daemon's readiness
+            // wait (up to 30 s), like `agent start`.
+            let timeout = Duration::from_millis(if agent.is_some() { 35_000 } else { 5_000 });
             let cmd = Command::WorktreeCreate { session: sess.clone(), branch: br, from, note, agent, is_ai, name };
             kumo_core::protocol::write_framed(&mut stream, &cmd)?;
             if json {
-                stream.set_read_timeout(Some(Duration::from_millis(5000)))?;
+                stream.set_read_timeout(Some(timeout))?;
                 loop {
                     match kumo_core::protocol::read_event(&mut stream) {
                         Ok(DaemonEvent::Reply { message }) => {
@@ -360,7 +363,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                     }
                 }
             } else {
-                read_reply(&mut stream, false)?;
+                read_reply_with_timeout(&mut stream, timeout, false)?;
                 Ok(())
             }
         }

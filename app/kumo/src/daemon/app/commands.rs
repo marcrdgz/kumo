@@ -777,6 +777,8 @@ impl App {
     }
 
     /// Extended creator for isolated `--ai` worktrees (Orca-aligned, no `kumo/` prefix).
+    /// Returns the reply plus the pane a chained `--agent` was launched into,
+    /// whose readiness the caller still has to wait for before replying.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn worktree_create_full(
         &mut self,
@@ -787,9 +789,9 @@ impl App {
         agent: Option<&str>,
         is_ai: bool,
         name: Option<&str>,
-    ) -> Result<String> {
+    ) -> (String, Option<u64>) {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return (format!("no session {session:?}"), None);
         };
         let branch_override = if branch.trim().is_empty() { None } else { Some(branch.trim()) };
         let from = from.map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -802,11 +804,11 @@ impl App {
             self.new_worktree_session_ext(idx, branch_override, from, note, agent, is_ai, name)
         } else {
             let b = branch_override.unwrap().to_string();
-            self.new_worktree_session(idx, &b).map(|_| b)
+            self.new_worktree_session(idx, &b).map(|_| super::CreatedWorktree { branch: b, agent_pane: None })
         };
         match res {
-            Ok(b) => Ok(format!("created worktree {b:?}")),
-            Err(e) => Ok(format!("error: {e}")),
+            Ok(created) => (format!("created worktree {:?}", created.branch), created.agent_pane),
+            Err(e) => (format!("error: {e}"), None),
         }
     }
 

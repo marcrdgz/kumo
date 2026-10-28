@@ -337,12 +337,26 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                     }
                 }
                 Command::WorktreeCreate { session, branch, from, note, agent, is_ai, name } => {
-                    let reply = if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
-                        app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref()).unwrap_or_else(|e| format!("error: {e:#}"))
+                    let (reply, agent_pane) = if from.is_some() || note.is_some() || agent.is_some() || is_ai || name.is_some() {
+                        app.worktree_create_full(&session, &branch, from.as_deref(), note.as_deref(), agent.as_deref(), is_ai, name.as_deref())
                     } else {
-                        app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}"))
+                        (app.worktree_create(&session, &branch).unwrap_or_else(|e| format!("error: {e:#}")), None)
                     };
-                    let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                    match (agent_pane, agent.as_deref()) {
+                        // A chained `--agent` replies through the same
+                        // occupant-pinned readiness wait as `agent start`.
+                        (Some(pane_id), Some(kind)) => {
+                            let pinned = app.pane_os_pid(pane_id);
+                            let expected = crate::daemon::pane::normalize_agent_kind(kind);
+                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned, reply);
+                        }
+                        _ if reply.starts_with("error:") && reply.contains("agent_not_ready") => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Error { code: "agent_not_ready".into(), message: reply });
+                        }
+                        _ => {
+                            let _ = send_to(&mut clients, id, &DaemonEvent::Reply { message: reply });
+                        }
+                    }
                 }
                 Command::WorktreeOpen { session, path } => {
                     let reply = app.worktree_open(&session, &path).unwrap_or_else(|e| format!("error: {e:#}"));
@@ -593,7 +607,8 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
                         Ok(msg) if msg.starts_with("started ") => {
                             let pinned = app.pane_os_pid(pane_id);
                             let expected = crate::daemon::pane::normalize_agent_kind(&kind);
-                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned);
+                            let ready = format!("started {expected} in pane {pane_id}");
+                            waits.add_agent_start(id, pane_id, expected, AGENT_START_TIMEOUT_MS, pinned, ready);
                         }
                         Ok(msg) => {
                             let _ = send_to(&mut clients, id, &DaemonEvent::Error {
@@ -1604,9 +1619,14 @@ mod tests {
         // Subscribe a pane and resize it; the PaneFrame streams at that size.
         protocol::write_framed(&mut stream, &Command::SubscribePane { pane_id: two_pane }).unwrap();
         protocol::write_framed(&mut stream, &Command::PaneResize { pane_id: two_pane, cols: 60, rows: 20 }).unwrap();
+        // Subscribing streams the current screen at once, which can race
+        // ahead of the resize; wait for the frame at the requested size.
         let frame = loop {
-            match next_event(&mut stream, Duration::from_secs(10), "PaneFrame") {
-                DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane => break frame,
+            match next_event(&mut stream, Duration::from_secs(10), "PaneFrame at 60x20") {
+                DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane && (frame.cols, frame.rows) == (60, 20) => {
+                    break frame
+                }
+                DaemonEvent::PaneFrame { frame } if frame.pane_id == two_pane => continue,
                 // Config hot reload is asynchronous: tests that change the
                 // config env concurrently can trigger one at any point.
                 DaemonEvent::Layout { .. } | DaemonEvent::ConfigReloaded { .. } | DaemonEvent::Theme { .. } => continue,

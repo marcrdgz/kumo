@@ -48,6 +48,9 @@ struct AgentStartWaiter {
     kind: String,
     deadline: Instant,
     pinned_pid: Option<u32>,
+    /// Success reply once the agent is ready: `agent start` and a chained
+    /// `worktree create --agent` share the wait but keep their own reply.
+    ready_reply: String,
 }
 
 /// Registry of all pending server-owned waits.
@@ -69,6 +72,7 @@ impl WaitRegistry {
     }
 
     /// Add a readiness waiter for an agent launched in an existing pane.
+    /// `ready_reply` is the `Reply` sent once the agent is ready.
     pub fn add_agent_start(
         &mut self,
         client_id: usize,
@@ -76,6 +80,7 @@ impl WaitRegistry {
         kind: String,
         timeout_ms: u64,
         pinned_pid: Option<u32>,
+        ready_reply: String,
     ) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -87,6 +92,7 @@ impl WaitRegistry {
                 kind,
                 deadline: Instant::now() + Duration::from_millis(timeout_ms),
                 pinned_pid,
+                ready_reply,
             },
         );
         id
@@ -232,9 +238,7 @@ impl WaitRegistry {
             {
                 out.push((
                     w.client_id,
-                    DaemonEvent::Reply {
-                        message: format!("started {} in pane {pane_id}", w.kind),
-                    },
+                    DaemonEvent::Reply { message: w.ready_reply.clone() },
                 ));
                 done_ids.push(*id);
             }
@@ -539,7 +543,7 @@ mod tests {
         r.add_agent_wait(1, "s".into(), 1, AgentWaitKind::Blocked, None, None);
         r.add_output_wait(1, "s".into(), 1, "hi".into(), false, None, None).unwrap();
         r.add_agent_wait(2, "s".into(), 2, AgentWaitKind::Idle, None, None);
-        r.add_agent_start(2, 3, "claude".into(), 1000, None);
+        r.add_agent_start(2, 3, "claude".into(), 1000, None, "started claude in pane 3".into());
         r.cancel_client(1);
         assert_eq!(r.agent.len(), 1);
         assert_eq!(r.output.len(), 0);
@@ -549,7 +553,7 @@ mod tests {
     #[test]
     fn start_wait_requires_detected_kind_and_ready_status() {
         let mut r = WaitRegistry::new();
-        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100));
+        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100), "started claude in pane 42".into());
         assert!(r.poll_agent_starts(42, None, AgentStatus::Idle, Some(100)).is_empty());
         assert!(r.poll_agent_starts(42, Some("codex"), AgentStatus::Working, Some(100)).is_empty());
         let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Working, Some(100));
@@ -557,19 +561,28 @@ mod tests {
     }
 
     #[test]
+    fn start_wait_replies_with_the_callers_ready_reply() {
+        // `worktree create --agent` shares the wait but keeps its own reply.
+        let mut r = WaitRegistry::new();
+        r.add_agent_start(1, 42, "codex".into(), 10_000, Some(100), "created worktree \"feat/x\"".into());
+        let out = r.poll_agent_starts(42, Some("codex"), AgentStatus::Idle, Some(100));
+        assert!(matches!(&out[0].1, DaemonEvent::Reply { message } if message == "created worktree \"feat/x\""));
+    }
+
+    #[test]
     fn start_wait_reports_blocked_replacement_and_timeout() {
         let mut r = WaitRegistry::new();
-        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100));
+        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100), "started claude in pane 42".into());
         let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Blocked, Some(100));
         assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "agent_not_ready"));
 
         let mut r = WaitRegistry::new();
-        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100));
+        r.add_agent_start(1, 42, "claude".into(), 10_000, Some(100), "started claude in pane 42".into());
         let out = r.poll_agent_starts(42, Some("claude"), AgentStatus::Working, Some(101));
         assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "agent_replaced"));
 
         let mut r = WaitRegistry::new();
-        r.add_agent_start(1, 42, "claude".into(), 0, None);
+        r.add_agent_start(1, 42, "claude".into(), 0, None, "started claude in pane 42".into());
         std::thread::sleep(Duration::from_millis(1));
         let out = r.poll_timeouts();
         assert!(matches!(&out[0].1, DaemonEvent::Error { code, .. } if code == "timeout"));
