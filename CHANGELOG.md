@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.8.0
+
+### 🚀 Features
+
+- *(protocol)* Make the wire protocol additive-compatible (#27)
+- *(keymap)* Warn on conflicting and invalid bindings (#29)
+- *(daemon)* Restore sessions after a reboot (#32)
+
+### 🐛 Bug Fixes
+
+- *(daemon)* Remove worktrees off the daemon loop (#26)
+- *(daemon)* Gate chained worktree agent launch on readiness (#28)
+
+### 🧪 Testing
+
+- *(state)* Pin the 0.7.6 upgrade path with released fixtures (#31)
+- *(cli)* Freeze the --json machine api with golden tests (#30)
+- *(runtime)* Add attach latency and memory per pane benchmarks
 ## v0.7.6
 
 ### 🐛 Bug Fixes
@@ -21,6 +39,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(ci)* Gate on build, test and clippy; versioned render fixtures (#21)
+- Release 0.7.6
 ## v0.7.5
 
 ### 🐛 Bug Fixes
