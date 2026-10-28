@@ -149,6 +149,124 @@ fn benchmark_pane_write_to_incremental_frame() {
     daemon.wait_exit();
 }
 
+/// Lines written into a pane to overflow the hard-coded `10_000`-line
+/// scrollback, so a "full" pane holds its maximum history.
+const SCROLLBACK_FILL_LINES: usize = 12_000;
+
+/// Fills `pane_id`'s scrollback and waits for the trailing marker in that
+/// pane's frames (the stream may carry other subscribed panes). The marker is
+/// split by quotes in the typed command so only the output matches it.
+fn fill_scrollback(stream: &mut UnixStream, pane_id: u64) {
+    let command = format!("seq 1 {SCROLLBACK_FILL_LINES}; printf 'FIL''LED\\n'\n");
+    send(stream, Command::PaneWrite { pane_id, bytes: command.into_bytes() });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "pane {pane_id} never printed its fill marker");
+        if let DaemonEvent::PaneFrame { frame } = read_event(stream).unwrap() {
+            let text: String = frame.rows_dirty.iter().flat_map(|r| r.cells.iter().map(|c| c.text.as_str())).collect();
+            if frame.pane_id == pane_id && text.contains("FILLED") { return; }
+        }
+    }
+}
+
+/// Resident set size of `pid` in KiB (`ps` reports KiB on macOS and Linux).
+fn rss_kib(pid: u32) -> u64 {
+    let out = ProcessCommand::new("ps").args(["-o", "rss=", "-p", &pid.to_string()]).output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().parse().unwrap()
+}
+
+#[test]
+#[ignore = "local end-to-end latency benchmark; run with --ignored --nocapture"]
+fn benchmark_attach_to_first_full_frame() {
+    const SAMPLES: usize = 32;
+
+    let mut daemon = Daemon::start();
+    let mut setup = daemon.connect();
+    let pane_id = daemon.pane(&mut setup);
+    send(&mut setup, Command::SubscribePane { pane_id });
+    await_frame(&mut setup, true, "");
+    // Attach to a pane with full history: the worst case a reattach serves.
+    fill_scrollback(&mut setup, pane_id);
+
+    let mut welcome = Vec::with_capacity(SAMPLES);
+    let mut first_frame = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        // Each sample is a fresh client: socket connect, handshake, then the
+        // subscription a TUI sends for its focused pane.
+        let started = Instant::now();
+        let mut stream = UnixStream::connect(daemon.root.join("kumo/kumo.sock")).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        send(&mut stream, Command::Attach { protocol: PROTOCOL_VERSION, kind: ClientKind::Terminal, cols: 80, rows: 24 });
+        assert!(matches!(read_event(&mut stream), Ok(DaemonEvent::Welcome { .. })));
+        welcome.push(started.elapsed());
+        send(&mut stream, Command::SubscribePane { pane_id });
+        await_frame(&mut stream, true, "");
+        first_frame.push(started.elapsed());
+    }
+
+    for (label, samples) in [("connect -> welcome", &mut welcome), ("connect -> first full frame", &mut first_frame)] {
+        samples.sort_unstable();
+        eprintln!(
+            "attach {label} latency (microseconds): p50={} p95={} max={}",
+            samples[SAMPLES / 2].as_micros(),
+            samples[SAMPLES * 95 / 100].as_micros(),
+            samples.last().unwrap().as_micros(),
+        );
+    }
+
+    send(&mut setup, Command::KillServer);
+    daemon.wait_exit();
+}
+
+#[test]
+#[ignore = "local end-to-end memory benchmark; run with --ignored --nocapture"]
+fn benchmark_daemon_memory_per_pane() {
+    const PANES: usize = 16;
+
+    let mut daemon = Daemon::start();
+    let mut stream = daemon.connect();
+    let first = daemon.pane(&mut stream);
+    send(&mut stream, Command::SubscribePane { pane_id: first });
+    await_frame(&mut stream, true, "");
+    // Let allocator and shell startup settle before each RSS sample.
+    let settle = || std::thread::sleep(Duration::from_millis(500));
+    settle();
+    let baseline = rss_kib(daemon.child.id());
+
+    for index in 0..PANES {
+        send(&mut stream, Command::SessionNew { name: Some(format!("bench-{index}")), workspace: None });
+        while !matches!(read_event(&mut stream).unwrap(), DaemonEvent::Reply { .. }) {}
+    }
+    send(&mut stream, Command::SessionList);
+    let panes: Vec<u64> = loop {
+        if let DaemonEvent::SessionList { sessions } = read_event(&mut stream).unwrap() {
+            break sessions.iter().filter(|s| s.name.starts_with("bench-")).map(|s| s.tabs[0].panes[0].id).collect();
+        }
+    };
+    assert_eq!(panes.len(), PANES);
+    for &pane_id in &panes {
+        send(&mut stream, Command::SubscribePane { pane_id });
+        await_frame(&mut stream, true, "");
+    }
+    settle();
+    let empty = rss_kib(daemon.child.id());
+
+    for &pane_id in &panes {
+        fill_scrollback(&mut stream, pane_id);
+    }
+    settle();
+    let full = rss_kib(daemon.child.id());
+
+    eprintln!(
+        "daemon RSS per pane (KiB, {PANES} panes, baseline {baseline}): empty={} full scrollback={}",
+        empty.saturating_sub(baseline) / PANES as u64,
+        full.saturating_sub(baseline) / PANES as u64,
+    );
+
+    send(&mut stream, Command::KillServer);
+    daemon.wait_exit();
+}
+
 #[test]
 fn real_exec_restart_reaps_exited_shell() {
     let mut daemon = Daemon::start();
