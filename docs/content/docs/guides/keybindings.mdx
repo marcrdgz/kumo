@@ -64,7 +64,11 @@ s = "split-vertical"   # now leader+s splits vertically
 x = "close-pane"
 ```
 
-Invalid chords/actions are ignored with a warning. The dispatch table feeds
+Invalid chords/actions are ignored. A toast announces new problems, a short
+`⚠ config (n)` chip stays in the status bar until the config is fixed, and
+<kbd>leader+?</kbd> (or clicking the chip) lists each problem in full. `H` and `shift+h` spell the same chord: when two entries
+resolve to one chord with different actions, neither applies (the key keeps
+its default) and kumo warns about the conflict. The dispatch table feeds
 the leader-mode status-bar hint and the <kbd>leader+?</kbd> showcase from the
 same source, so they never drift.
 

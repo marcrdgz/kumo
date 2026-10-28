@@ -328,12 +328,12 @@ mod tests {
             });
         }
         assert_eq!(view.agent_toasts.len(), MAX_AGENT_TOASTS, "oldest toasts dropped");
-        assert_eq!(view.agent_toasts[0].pane_id, 2, "the two oldest were dropped");
+        assert_eq!(view.agent_toasts[0].title, "agent 2", "the two oldest were dropped");
         let rects = view.agent_toast_rects();
         assert_eq!(rects.len(), MAX_AGENT_TOASTS);
         // Each rect pair carries its toast index; the newest hugs the anchor
         // edge, the older ones sit below it.
-        let expected: Vec<String> = view.agent_toasts.iter().map(|t| format!("agent {}", t.pane_id)).collect();
+        let expected: Vec<String> = (2..2 + MAX_AGENT_TOASTS).map(|i| format!("agent {i}")).collect();
         for (i, _) in &rects {
             assert_eq!(&view.agent_toasts[*i].title, &expected[*i], "rect aligns with its toast");
         }

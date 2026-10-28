@@ -506,11 +506,19 @@ enum WorktreeRemovalMode {
 /// One agent-lifecycle corner toast pushed by the daemon (blocked / finished).
 #[derive(Clone)]
 struct AgentToast {
-    pane_id: u64,
-    kind: ToastKind,
+    source: ToastSource,
     title: String,
     body: String,
     born: Instant,
+}
+
+/// What a corner toast announces, which decides what clicking it does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ToastSource {
+    /// An agent transition pushed by the daemon; a click focuses its pane.
+    Agent { pane_id: u64, kind: ToastKind },
+    /// New config problems; a click opens the list in the command palette.
+    Config,
 }
 
 /// One pane's client-side grid, rebuilt from `PaneFrame`s.
@@ -693,6 +701,13 @@ pub struct View {
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
+    /// Problems in the keymap config. A status-bar chip counts them until a
+    /// reload fixes them, so a bad binding can't go unnoticed; the command
+    /// palette lists them in full.
+    config_warnings: Vec<String>,
+    /// Where the last frame drew the config chip, for click hit-testing: its
+    /// position depends on which status widgets fit.
+    config_chip: std::cell::Cell<Option<Rect>>,
     /// Agent-lifecycle toasts, newest last (stacking order depends on the
     /// configured anchor corner).
     agent_toasts: Vec<AgentToast>,
@@ -778,16 +793,7 @@ fn node_has_working(node: Option<&LayoutNode>) -> bool {
 
 impl View {
     pub fn new(out: UnixStream, cols: u16, rows: u16) -> Self {
-        let leader = match kumo_core::config::leader() {            Some(raw) => match bindings::parse_chord(&raw) {
-                Some(chord) => chord,
-                None => {
-                    log::warn!("kumo: invalid leader key {:?}; falling back to ctrl+b", raw);
-                    bindings::LEADER
-                }
-            },
-            None => bindings::LEADER,
-        };
-        let keymap = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+        let (leader, keymap, config_warnings) = keymap_from_config();
         let status_bar = kumo_core::config::status_bar();
         let toast_pos = kumo_core::config::toast_position();
         let hostname = status_bar::cached_hostname();
@@ -840,6 +846,8 @@ impl View {
             pane_numbers: None,
             status_msg: None,
             notice: None,
+            config_warnings: Vec::new(),
+            config_chip: std::cell::Cell::new(None),
             agent_toasts: Vec::new(),
             toast_pos,
             update_notice: None,
@@ -888,6 +896,7 @@ impl View {
             spinner_frame: 0,
             spinner_next: Instant::now(),
         };
+        view.set_config_warnings(config_warnings);
         let _ = view.send(&Command::SubscribeLayout);
         view
     }
@@ -1045,6 +1054,30 @@ impl View {
     }
 
     /// Show a transient notice line (e.g. after the client reconnected).
+    fn push_toast(&mut self, toast: AgentToast) {
+        self.agent_toasts.push(toast);
+        if self.agent_toasts.len() > MAX_AGENT_TOASTS {
+            self.agent_toasts.remove(0);
+        }
+        self.mark_dirty();
+    }
+
+    /// Replace the config problems; a change that leaves problems behind
+    /// also raises a toast, so a reload that breaks a binding is announced
+    /// once rather than on every reload.
+    fn set_config_warnings(&mut self, warnings: Vec<String>) {
+        if warnings != self.config_warnings && !warnings.is_empty() && self.toast_pos != ToastPosition::Off {
+            let title = match warnings.len() {
+                1 => "1 config problem".to_string(),
+                n => format!("{n} config problems"),
+            };
+            let body = "click or leader+? for details".to_string();
+            self.push_toast(AgentToast { source: ToastSource::Config, title, body, born: Instant::now() });
+        }
+        self.config_warnings = warnings;
+        self.mark_dirty();
+    }
+
     pub fn show_notice(&mut self, message: impl Into<String>) {
         self.notice = Some((message.into(), Instant::now()));
         self.mark_dirty();
@@ -1138,11 +1171,7 @@ impl View {
                 if self.toast_pos == ToastPosition::Off {
                     return;
                 }
-                self.agent_toasts.push(AgentToast { pane_id, kind, title, body, born: Instant::now() });
-                if self.agent_toasts.len() > MAX_AGENT_TOASTS {
-                    self.agent_toasts.remove(0);
-                }
-                self.mark_dirty();
+                self.push_toast(AgentToast { source: ToastSource::Agent { pane_id, kind }, title, body, born: Instant::now() });
             }
             DaemonEvent::Worktrees { items } => {
                 self.worktree_picker.items = items;
@@ -1156,14 +1185,20 @@ impl View {
                 self.mark_dirty();
             }
             DaemonEvent::ConfigReloaded { notice } => {
-                self.notice = Some((notice, Instant::now()));
                 self.ensure_sidebar_tab_visible();
-                // Status bar is client-local but reloaded from the same config.
+                // Status bar and keymap are client-local but reloaded from
+                // the same config.
                 kumo_core::config::invalidate_cache();
+                // The leader is only read at startup; reloading still reports
+                // an invalid one.
+                let (_, keymap, warnings) = keymap_from_config();
+                self.keymap = keymap;
+                self.notice = Some((notice, Instant::now()));
                 let new_bar = kumo_core::config::status_bar();
                 let enabled_changed = new_bar.enabled != self.status_bar.enabled;
                 self.status_bar = new_bar;
                 self.toast_pos = kumo_core::config::toast_position();
+                self.set_config_warnings(warnings);
                 self.hostname = status_bar::cached_hostname();
                 self.is_ssh = status_bar::is_ssh_session();
                 self.clock_str = status_bar::format_clock(&self.status_bar.widgets.clock.format);
@@ -3134,11 +3169,21 @@ impl View {
         let Some(dd) = self.keybind_overlay_rect() else { return };
         let len = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
         self.keybind_overlay.selected = self.keybind_overlay.selected.min(len.saturating_sub(1));
-        let visible = dd.height.saturating_sub(5) as usize;
+        let visible = dd.height.saturating_sub(5 + self.config_problem_rows()) as usize;
         if self.keybind_overlay.selected < self.keybind_overlay.scroll {
             self.keybind_overlay.scroll = self.keybind_overlay.selected;
         } else if self.keybind_overlay.selected >= self.keybind_overlay.scroll + visible.max(1) {
             self.keybind_overlay.scroll = self.keybind_overlay.selected + 1 - visible.max(1);
+        }
+    }
+
+    /// Rows the command palette spends on config problems above its command
+    /// list: a heading, one line per problem, and a spacer.
+    pub(super) fn config_problem_rows(&self) -> u16 {
+        if self.config_warnings.is_empty() {
+            0
+        } else {
+            self.config_warnings.len() as u16 + 2
         }
     }
 
@@ -3150,15 +3195,17 @@ impl View {
             .map(|entry| palette_action_desc(entry.action).chars().count())
             .max()
             .unwrap_or(10) as u16;
-        let inner = (max_keys + 2 + max_desc).max(20);
+        let max_problem = self.config_warnings.iter().map(|p| p.chars().count()).max().unwrap_or(0) as u16;
+        let inner = (max_keys + 2 + max_desc).max(max_problem + 2).max(20);
         let width = (inner + 6).min(w.saturating_sub(4));
         let lines = command_palette_matches(&self.keymap, &self.keybind_overlay.input).len();
+        let problems = self.config_problem_rows();
         let available = h.saturating_sub(4);
-        if available < 7 {
+        if available < 7 + problems {
             return None;
         }
-        let height_cap = (((h as u32 * 3) / 5) as u16).max(7).min(available);
-        let height = ((lines + 5) as u16).min(height_cap).max(7);
+        let height_cap = (((h as u32 * 3) / 5) as u16).max(7 + problems).min(available);
+        let height = ((lines + 5) as u16 + problems).min(height_cap).max(7 + problems);
         if w < width || h < height {
             return None;
         }
@@ -3167,10 +3214,11 @@ impl View {
 
     fn command_palette_item_at(&self, x: u16, y: u16) -> Option<usize> {
         let rect = self.keybind_overlay_rect()?;
-        if x <= rect.x || x >= rect.right().saturating_sub(1) || y < rect.y + 3 || y >= rect.bottom().saturating_sub(2) {
+        let body_top = rect.y + 3 + self.config_problem_rows();
+        if x <= rect.x || x >= rect.right().saturating_sub(1) || y < body_top || y >= rect.bottom().saturating_sub(2) {
             return None;
         }
-        let item = self.keybind_overlay.scroll + (y - (rect.y + 3)) as usize;
+        let item = self.keybind_overlay.scroll + (y - body_top) as usize;
         (item < command_palette_matches(&self.keymap, &self.keybind_overlay.input).len()).then_some(item)
     }
 
@@ -3522,6 +3570,22 @@ fn palette_action_desc(action: Action) -> &'static str {
     }
 }
 
+/// The leader chord and keymap from the config, plus the problems found in
+/// them; an invalid leader falls back to the default.
+fn keymap_from_config() -> (Chord, Vec<Binding>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let leader = match kumo_core::config::leader() {
+        Some(raw) => bindings::parse_chord(&raw).unwrap_or_else(|| {
+            warnings.push(format!("keymap: invalid leader key {raw:?}; using ctrl+b"));
+            bindings::LEADER
+        }),
+        None => bindings::LEADER,
+    };
+    let (keymap, keymap_warnings) = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+    warnings.extend(keymap_warnings);
+    (leader, keymap, warnings)
+}
+
 fn command_palette_matches<'a>(keymap: &'a [Binding], query: &str) -> Vec<bindings::PaletteEntry<'a>> {
     let needles: Vec<String> = query.split_whitespace().map(str::to_ascii_lowercase).collect();
     bindings::palette_entries(keymap)
@@ -3613,7 +3677,7 @@ mod tests {
             rows: 24,
             mode: Mode::Normal,
             leader: bindings::LEADER,
-            keymap: bindings::build_keymap(&Default::default()),
+            keymap: bindings::build_keymap(&Default::default()).0,
             layout: None,
             grids: HashMap::new(),
             rects: Vec::new(),
@@ -3643,6 +3707,8 @@ mod tests {
             pane_numbers: None,
             status_msg: None,
             notice: None,
+            config_warnings: Vec::new(),
+            config_chip: std::cell::Cell::new(None),
             agent_toasts: Vec::new(),
             toast_pos: ToastPosition::default(),
             update_notice: None,
@@ -4278,7 +4344,7 @@ mod tests {
             body: "~/dev/kumo".into(),
         });
         assert_eq!(view.agent_toasts.len(), 1);
-        assert!(view.agent_toasts[0].pane_id == 7 && view.agent_toasts[0].kind == ToastKind::Blocked);
+        assert_eq!(view.agent_toasts[0].source, ToastSource::Agent { pane_id: 7, kind: ToastKind::Blocked });
         assert!(!view.agent_toast_rects().is_empty(), "visible toasts have screen rects");
         assert!(view.has_transient(), "a live toast keeps the render loop hot");
         // Past the lifetime the toast no longer drives repaints; the next
@@ -4356,6 +4422,82 @@ mod tests {
                 }))),
             }],
         }
+    }
+
+    #[test]
+    fn config_problems_show_a_chip_a_toast_and_the_palette_list() {
+        let cfg = std::env::temp_dir().join(format!("kumo-tui-keymap-{}", std::process::id()));
+        std::fs::create_dir_all(&cfg).unwrap();
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("KUMO_CONFIG_DIR").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        let reload = |view: &mut View, toml: &str| {
+            std::fs::write(cfg.join("config.toml"), toml).unwrap();
+            view.on_event(DaemonEvent::ConfigReloaded { notice: "config reloaded".into() });
+            // Let the transient reload notice expire.
+            view.notice.as_mut().unwrap().1 -= TOAST_TIMEOUT + Duration::from_millis(1);
+        };
+        let screen = |view: &mut View| {
+            let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.draw(frame)).unwrap();
+            let buf = term.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| (0..buf.area.width).map(|x| buf.cell((x, y)).unwrap().symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let click = |view: &mut View, rect: Rect| {
+            view.on_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            .unwrap();
+        };
+        let conflict = "[keymap.bindings]\nH = \"close-pane\"\n\"shift+h\" = \"zoom\"\n";
+
+        let mut view = test_view();
+        reload(&mut view, conflict);
+        let chord = bindings::parse_chord("H").unwrap();
+        assert_eq!(
+            view.keymap.iter().find(|b| b.key == chord).unwrap().action,
+            Action::Resize(kumo_core::layout::ResizeDir::Left),
+            "neither conflicting binding applies"
+        );
+        let bar = screen(&mut view);
+        assert!(bar.lines().last().unwrap().contains("⚠ config (1)"), "the chip outlives the reload notice: {bar}");
+        assert!(!bar.contains("conflicting bindings"), "the status bar carries only the short chip");
+        assert_eq!(view.agent_toasts.len(), 1, "new problems raise a toast");
+        assert_eq!(view.agent_toasts[0].source, ToastSource::Config);
+        reload(&mut view, conflict);
+        assert_eq!(view.agent_toasts.len(), 1, "an unchanged problem is not announced again");
+
+        // The toast and the chip both open the palette, which lists the problem.
+        let toast = view.agent_toast_rects()[0].1;
+        click(&mut view, Rect::new(toast.x + 2, toast.y + 1, 1, 1));
+        assert!(view.keybind_overlay.open && view.agent_toasts.is_empty(), "the toast opens the palette");
+        let palette = screen(&mut view);
+        assert!(palette.contains("1 config problem") && palette.contains("conflicting bindings for H"), "{palette}");
+        view.keybind_overlay.open = false;
+        let _ = screen(&mut view);
+        let chip = view.config_chip.get().expect("chip drawn");
+        click(&mut view, chip);
+        assert!(view.keybind_overlay.open, "the chip opens the palette");
+        view.keybind_overlay.open = false;
+
+        reload(&mut view, "[keymap.bindings]\nH = \"zoom\"\n");
+        let bar = screen(&mut view);
+        assert!(!bar.contains("config ("), "fixing the config clears the chip: {bar}");
+        assert!(view.config_chip.get().is_none());
+
+        match prev {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        kumo_core::config::invalidate_cache();
+        let _ = std::fs::remove_dir_all(&cfg);
     }
 
     #[test]

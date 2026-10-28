@@ -790,8 +790,8 @@ mod tests {
             view.pane_numbers = Some(Instant::now());
             view.update_notice = Some(("key".into(), "nightly".into()));
             view.agent_toasts = vec![
-                AgentToast { pane_id: 2, kind: ToastKind::Blocked, title: "opencode is blocked".into(), body: "/tmp".into(), born: Instant::now() },
-                AgentToast { pane_id: 1, kind: ToastKind::Finished, title: "claude finished".into(), body: String::new(), born: Instant::now() },
+                AgentToast { source: ToastSource::Agent { pane_id: 2, kind: ToastKind::Blocked }, title: "opencode is blocked".into(), body: "/tmp".into(), born: Instant::now() },
+                AgentToast { source: ToastSource::Agent { pane_id: 1, kind: ToastKind::Finished }, title: "claude finished".into(), body: String::new(), born: Instant::now() },
             ];
             view.sel = Some(Sel { pane_id: 1, start: (0, 0), end: (1, 0) });
             view.link_mods = true;

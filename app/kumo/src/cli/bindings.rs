@@ -35,7 +35,7 @@ pub(crate) fn link_modifiers() -> KeyModifiers {
 pub(crate) const LEADER: Chord = Chord::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
 
 /// The keys a user presses: a [`KeyCode`] plus its modifiers.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Chord {
     pub(crate) code: KeyCode,
     pub(crate) modifiers: KeyModifiers,
@@ -273,19 +273,46 @@ fn stock_bindings() -> Vec<Binding> {
 }
 
 /// Build the effective keymap: the stock bindings with `[keymap.bindings]`
-/// overrides applied. An override rebinds an existing chord or adds a new one;
-/// chords that fail to parse and unknown action ids are ignored with a warning.
-pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> {
+/// overrides applied. An override rebinds an existing chord or adds a new one.
+/// Returns the problems found alongside it, so the caller can show them:
+/// chords that fail to parse and unknown action ids are ignored, and when two
+/// spellings resolve to the same chord (`H` and `shift+h`) with different
+/// actions, both are ignored and the chord keeps its stock binding.
+pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> (Vec<Binding>, Vec<String>) {
     let mut out = stock_bindings();
-    for (key_str, action_str) in overrides {
+    let mut warnings = Vec::new();
+    // Sorted so the warnings and the keymap come out the same on every
+    // launch, whatever the map's iteration order.
+    let mut entries: Vec<_> = overrides.iter().collect();
+    entries.sort();
+    let mut by_chord: Vec<(Chord, Vec<(&str, Action)>)> = Vec::new();
+    for (key_str, action_str) in entries {
         let Some(chord) = parse_chord(key_str) else {
-            log::warn!("kumo: ignoring keymap binding with invalid key {:?}", key_str);
+            warnings.push(format!("keymap: ignoring binding with invalid key {key_str:?}"));
             continue;
         };
         let Some(action) = action_from_id(action_str) else {
-            log::warn!("kumo: ignoring keymap binding with unknown action {:?}", action_str);
+            warnings.push(format!("keymap: ignoring binding with unknown action {action_str:?}"));
             continue;
         };
+        match by_chord.iter_mut().find(|(c, _)| *c == chord) {
+            Some((_, spellings)) => spellings.push((key_str, action)),
+            None => by_chord.push((chord, vec![(key_str, action)])),
+        }
+    }
+    for (chord, spellings) in by_chord {
+        let action = spellings[0].1;
+        // Guessing which spelling was meant would hide the mistake, so an
+        // ambiguous chord applies neither.
+        if spellings.iter().any(|&(_, a)| a != action) {
+            let keys: Vec<String> = spellings.iter().map(|(k, a)| format!("{k:?} = {:?}", action_id(*a))).collect();
+            warnings.push(format!(
+                "keymap: ignoring conflicting bindings for {}: {}",
+                chord_display(chord),
+                keys.join(", "),
+            ));
+            continue;
+        }
         out.retain(|b| b.key != chord);
         out.push(Binding {
             key: chord,
@@ -295,7 +322,7 @@ pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> Vec<Binding> 
             action,
         });
     }
-    out
+    (out, warnings)
 }
 
 /// Parse a key or chord string from the config, e.g. `v`, `tab`, `f12`,
@@ -333,7 +360,13 @@ pub(crate) fn parse_chord(raw: &str) -> Option<Chord> {
             if ch.is_ascii_uppercase() {
                 modifiers |= KeyModifiers::SHIFT;
             }
-            KeyCode::Char(ch)
+            // Terminals report Shift+h as an uppercase `H`, so `shift+h`
+            // must parse to that chord or the binding could never fire.
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                KeyCode::Char(ch.to_ascii_uppercase())
+            } else {
+                KeyCode::Char(ch)
+            }
         }
         f if f.starts_with('f') && f.len() > 1 && f[1..].chars().all(|c| c.is_ascii_digit()) => {
             let n: u8 = f[1..].parse().unwrap_or(0);
@@ -686,6 +719,7 @@ mod tests {
         assert_eq!(parse_chord("x"), Some(Chord::new(KeyCode::Char('x'), KeyModifiers::NONE)));
         // Uppercase implies Shift, matching the chord a terminal reports.
         assert_eq!(parse_chord("H"), Some(Chord::new(KeyCode::Char('H'), KeyModifiers::SHIFT)));
+        assert_eq!(parse_chord("shift+h"), parse_chord("H"), "explicit shift spells the same chord");
         assert_eq!(parse_chord("ctrl+banana"), None, "unknown key rejected");
         assert_eq!(parse_chord("nonsense+ctrl"), None, "unknown modifier rejected");
         assert_eq!(parse_chord(""), None, "empty string rejected");
@@ -719,7 +753,8 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("s".to_string(), "split-vertical".to_string());
         overrides.insert("v".to_string(), "close-pane".to_string()); // rebind v
-        let keymap = build_keymap(&overrides);
+        let (keymap, warnings) = build_keymap(&overrides);
+        assert!(warnings.is_empty());
         assert!(keymap.iter().any(|b| b.action == Action::ClosePane && b.key.code == KeyCode::Char('v')));
         assert!(keymap.iter().any(|b| b.action == Action::SplitVertical && b.key.code == KeyCode::Char('s')));
         // A config-added binding gets a showcase row with the parsed chord.
@@ -740,7 +775,7 @@ mod tests {
         }
 
         // Binding one in the config shows its chord instead of a duplicate row.
-        let keymap = build_keymap(&HashMap::from([("ctrl+s".to_string(), "settings".to_string())]));
+        let (keymap, _) = build_keymap(&HashMap::from([("ctrl+s".to_string(), "settings".to_string())]));
         let settings: Vec<_> = palette_entries(&keymap).into_iter().filter(|e| e.action == Action::OpenSettings).collect();
         assert_eq!(settings.len(), 1);
         assert_eq!(settings[0].chord_label(), "ctrl+s");
@@ -751,8 +786,42 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("ctrl+banana".to_string(), "zoom".to_string());
         overrides.insert("s".to_string(), "no-such-action".to_string());
-        let keymap = build_keymap(&overrides);
+        let (keymap, warnings) = build_keymap(&overrides);
         let stock = stock_bindings();
         assert_eq!(keymap.len(), stock.len(), "invalid entries must be ignored");
+        assert_eq!(warnings.len(), 2, "each ignored entry is reported: {warnings:?}");
+    }
+
+    #[test]
+    fn build_keymap_ignores_conflicting_spellings_of_one_chord() {
+        // `H` and `shift+h` are the same chord: bound to different actions,
+        // neither applies, the stock binding stays, and both are reported.
+        let overrides = HashMap::from([
+            ("H".to_string(), "zoom".to_string()),
+            ("shift+h".to_string(), "close-pane".to_string()),
+        ]);
+        let (keymap, warnings) = build_keymap(&overrides);
+        let chord = parse_chord("H").unwrap();
+        let bound: Vec<_> = keymap.iter().filter(|b| b.key == chord).collect();
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].action, Action::Resize(ResizeDir::Left), "the stock binding is kept");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("\"H\"") && warnings[0].contains("\"shift+h\""), "{warnings:?}");
+
+        // Spelling one chord twice with the same action is not a conflict.
+        let overrides = HashMap::from([("H".to_string(), "zoom".to_string()), ("shift+h".to_string(), "zoom".to_string())]);
+        let (keymap, warnings) = build_keymap(&overrides);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(keymap.iter().find(|b| b.key == chord).unwrap().action, Action::Zoom);
+    }
+
+    #[test]
+    fn build_keymap_accepts_duplicate_spellings_of_one_action() {
+        let overrides = HashMap::from([
+            ("H".to_string(), "zoom".to_string()),
+            ("shift+h".to_string(), "zoom".to_string()),
+        ]);
+        let (_, warnings) = build_keymap(&overrides);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

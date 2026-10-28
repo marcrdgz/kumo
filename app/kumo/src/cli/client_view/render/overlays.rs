@@ -221,8 +221,20 @@ impl View {
             put(f, cursor_x, input.y, &symbol, query_style.add_modifier(Modifier::REVERSED));
         }
 
+        if !self.config_warnings.is_empty() {
+            let warn = Style::default().fg(theme.orange).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
+            let heading = match self.config_warnings.len() {
+                1 => "⚠ 1 config problem".to_string(),
+                n => format!("⚠ {n} config problems"),
+            };
+            text(f, dd.x + 2, dd.y + 3, &heading, warn, inner_w);
+            let problem = Style::default().fg(theme.fg).bg(theme.panel_sep);
+            for (i, warning) in self.config_warnings.iter().enumerate() {
+                text(f, dd.x + 4, dd.y + 4 + i as u16, warning, problem, inner_w.saturating_sub(2));
+            }
+        }
         let max_keys = self.keymap.iter().map(|b| bindings::chord_display(b.key).chars().count()).max().unwrap_or(4) as u16;
-        let body_top = dd.y + 3;
+        let body_top = dd.y + 3 + self.config_problem_rows();
         let body_bottom = dd.bottom() - 2;
         if matches.is_empty() {
             text(f, dd.x + 2, body_top, "no matching commands", Style::default().fg(theme.panel_muted).bg(theme.panel_sep), inner_w);
