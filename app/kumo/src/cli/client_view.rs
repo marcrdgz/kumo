@@ -495,13 +495,15 @@ enum ConfirmAction {
     RemoveWorktree { session: String, path: PathBuf, mode: WorktreeRemovalMode },
     /// `pane_id: None` closes the session's focused pane, as `leader+x` does.
     ClosePane { session: String, pane_id: Option<u64>, running: String },
+    /// `running` lists what each busy pane of the session runs.
+    CloseSession { session: String, running: Vec<String> },
 }
 
 impl ConfirmAction {
     fn yes_label(&self) -> &'static str {
         match self {
             ConfirmAction::RemoveWorktree { .. } => " Remove (y) ",
-            ConfirmAction::ClosePane { .. } => " Close (y) ",
+            ConfirmAction::ClosePane { .. } | ConfirmAction::CloseSession { .. } => " Close (y) ",
         }
     }
 }
@@ -2054,9 +2056,7 @@ impl View {
                     self.open_rename_session_popup(idx);
                 }
             }
-            Action::CloseSession => {
-                let _ = self.send(&Command::SessionKill { name: session });
-            }
+            Action::CloseSession => self.request_session_close(session),
         }
         self.mark_dirty();
         Ok(())
@@ -2839,6 +2839,7 @@ impl View {
                 Command::WorktreeRemove { session, path, force: mode == WorktreeRemovalMode::Force }
             }
             Some(ConfirmAction::ClosePane { session, pane_id, .. }) => Command::PaneClose { session, pane_id },
+            Some(ConfirmAction::CloseSession { session, .. }) => Command::SessionKill { name: session },
             None => return,
         };
         let _ = self.send(&cmd);
@@ -2860,6 +2861,23 @@ impl View {
             None => {
                 let _ = self.send(&Command::PaneClose { session, pane_id });
             }
+        }
+        self.mark_dirty();
+    }
+
+    /// Kills a session, asking first when any of its panes would ask on its
+    /// own close (see [`Self::request_pane_close`]).
+    fn request_session_close(&mut self, session: String) {
+        let running: Vec<String> = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.sessions.iter().find(|s| s.name == session))
+            .map(|s| session_panes_all(s).iter().filter_map(|(_, pane)| pane_close_warning(pane)).collect())
+            .unwrap_or_default();
+        if running.is_empty() {
+            let _ = self.send(&Command::SessionKill { name: session });
+        } else {
+            self.confirm = Some(ConfirmAction::CloseSession { session, running });
         }
         self.mark_dirty();
     }
@@ -3109,10 +3127,9 @@ impl View {
                     }
                 }
                 CtxTarget::Session(idx) => {
-                    let sess = self.layout.as_ref().and_then(|l| l.sessions.get(idx));
-                    if let Some(s) = sess {
-                        let name = s.name.clone();
-                        let _ = self.send(&Command::SessionKill { name });
+                    let name = self.layout.as_ref().and_then(|l| l.sessions.get(idx)).map(|s| s.name.clone());
+                    if let Some(name) = name {
+                        self.request_session_close(name);
                     }
                 }
                 CtxTarget::Tab(s_idx, t_idx) => {
@@ -4613,6 +4630,32 @@ mod tests {
         assert!(matches!(&view.confirm, Some(ConfirmAction::ClosePane { pane_id: Some(2), .. })));
         view.on_key(key(KeyCode::Esc)).unwrap();
         assert!(view.confirm.is_none());
+    }
+
+    #[test]
+    fn closing_a_session_asks_only_when_a_pane_is_busy() {
+        let mut view = test_view();
+        view.layout = Some(panes_layout(&[(1, AgentStatus::Working), (2, AgentStatus::Idle)]));
+        view.run_action(Action::CloseSession).unwrap();
+        let Some(ConfirmAction::CloseSession { session, running }) = &view.confirm else {
+            panic!("expected a session close confirm");
+        };
+        assert_eq!(session, "sess");
+        let mut running = running.clone();
+        running.sort();
+        assert_eq!(running, ["agent1", "agent2"]);
+        view.on_key(key(KeyCode::Char('n'))).unwrap();
+        assert!(view.confirm.is_none());
+
+        view.ctx_menu.target = CtxTarget::Session(0);
+        let close = view.ctx_items().iter().position(|item| *item == "close session").unwrap();
+        view.ctx_menu_select(close).unwrap();
+        assert!(matches!(&view.confirm, Some(ConfirmAction::CloseSession { .. })));
+        view.on_key(key(KeyCode::Esc)).unwrap();
+
+        view.layout = Some(render_bench_layout(&[1, 2]));
+        view.run_action(Action::CloseSession).unwrap();
+        assert!(view.confirm.is_none(), "a session of idle shells closes without asking");
     }
 
     #[test]
