@@ -1,0 +1,12 @@
+{
+  "agents": [
+    {
+      "name": "<string>",
+      "pane_id": "<number>",
+      "pane_index": "<number>",
+      "session": "<string>",
+      "status": "<string>",
+      "tab_index": "<number>"
+    }
+  ]
+}

@@ -1676,9 +1676,9 @@ mod tests {
         let pane = app.sessions[0].active_tab().tree.focus;
 
         let rename = app.agent_rename(&session, pane, "worker").unwrap();
-        assert!(rename.contains("not an agent pane"));
+        assert!(rename.starts_with("error: not_an_agent: "), "{rename}");
         let start = app.agent_start(&session, pane, "not-a-loaded-agent", &[]).unwrap();
-        assert!(start.starts_with("error: unknown agent kind"));
+        assert!(start.starts_with("error: invalid_argument: unknown agent kind"), "{start}");
 
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&home);

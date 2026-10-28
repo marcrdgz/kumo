@@ -226,7 +226,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                             let tabs = sessions
                                 .iter()
                                 .find(|session| session.name == target)
-                                .ok_or_else(|| anyhow::anyhow!("no session {target:?}"))?
+                                .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {target:?}"))?
                                 .tabs
                                 .as_slice();
                             print_json(&serde_json::json!({"session": target, "tabs": tabs}))?;
@@ -269,7 +269,7 @@ fn run_inner(args: &[String]) -> Result<()> {
                 let tabs = sessions
                     .iter()
                     .find(|session| session.name == target)
-                    .ok_or_else(|| anyhow::anyhow!("no session {target:?}"))?
+                    .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {target:?}"))?
                     .tabs
                     .iter()
                     .filter(|item| tab_id.is_none() || tab_id == Some(item.id))
@@ -388,7 +388,7 @@ fn run_inner(args: &[String]) -> Result<()> {
             } else {
                 // Default to session workspace
                 let sessions = fetch_session_list(&mut stream)?;
-                let s = sessions.iter().find(|s| s.name == sess).ok_or_else(|| anyhow::anyhow!("no session {sess:?}"))?;
+                let s = sessions.iter().find(|s| s.name == sess).ok_or_else(|| anyhow::anyhow!("session_not_found: no session {sess:?}"))?;
                 s.workspace.clone()
             };
             let cmd = Command::WorktreeSet { session: sess.clone(), path: pbuf.clone(), comment: comment.clone(), status: status.clone() };
@@ -478,6 +478,10 @@ fn run_inner(args: &[String]) -> Result<()> {
                 CliCmd::PaneFocus { session, pane } => {
                     let session = resolve_session(&mut stream, session)?;
                     let pane_id = resolve_pane_ref(&mut stream, &session, &pane)?;
+                    // The daemon doesn't reply to focus (mouse clicks stream
+                    // it), so check the pane here or a typo reports success.
+                    let sessions = fetch_session_list(&mut stream)?;
+                    ensure_pane_in_session(&sessions, &session, pane_id)?;
                     Command::PaneFocus { session, pane_id }
                 }
                 CliCmd::PaneSendKeys { session, pane, keys } => {
@@ -1615,6 +1619,17 @@ fn resolve_pane_ref(stream: &mut UnixStream, session: &str, pane: &PaneRef) -> R
     }
 }
 
+fn ensure_pane_in_session(sessions: &[kumo_protocol::SessionInfo], session: &str, pane_id: u64) -> Result<()> {
+    let target = sessions
+        .iter()
+        .find(|candidate| candidate.name == session)
+        .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {session:?}"))?;
+    if !target.tabs.iter().any(|tab| tab.panes.iter().any(|pane| pane.id == pane_id)) {
+        anyhow::bail!("pane_not_found: no pane {pane_id} in {session:?}");
+    }
+    Ok(())
+}
+
 /// Resolve a persisted/displayed agent alias within one session. Keeping this
 /// pure makes the not-found and ambiguity contract deterministic and testable
 /// without opening a daemon socket.
@@ -1626,7 +1641,7 @@ fn resolve_agent_alias(
     let target = sessions
         .iter()
         .find(|candidate| candidate.name == session)
-        .ok_or_else(|| anyhow::anyhow!("no session {session:?}"))?;
+        .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {session:?}"))?;
     let matches: Vec<u64> = target
         .agents
         .iter()
@@ -1635,8 +1650,8 @@ fn resolve_agent_alias(
         .collect();
     match matches.as_slice() {
         [pane_id] => Ok(*pane_id),
-        [] => anyhow::bail!("no agent alias {alias:?} in session {session:?}"),
-        _ => anyhow::bail!("agent alias {alias:?} is ambiguous in session {session:?}"),
+        [] => anyhow::bail!("pane_not_found: no agent alias {alias:?} in session {session:?}"),
+        _ => anyhow::bail!("invalid_argument: agent alias {alias:?} is ambiguous in session {session:?}"),
     }
 }
 
@@ -1651,16 +1666,16 @@ fn find_spec_session<'a>(
         sessions
             .iter()
             .find(|s| &s.name == name)
-            .ok_or_else(|| anyhow::anyhow!("no session {name:?}"))
+            .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {name:?}"))
     } else if let Some(n) = spec.session_index {
         sessions
             .get(n - 1)
-            .ok_or_else(|| anyhow::anyhow!("no session {n} of {}", sessions.len()))
+            .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {n} of {}", sessions.len()))
     } else {
         sessions
             .iter()
             .find(|s| s.name == default_session)
-            .ok_or_else(|| anyhow::anyhow!("no session {default_session:?}"))
+            .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {default_session:?}"))
     }
 }
 

@@ -1,0 +1,22 @@
+{
+  "report": {
+    "cli": "<string>",
+    "cpu": "<number>",
+    "dead": "<bool>",
+    "focused": "<bool>",
+    "idle_reason": "<string>",
+    "is_ai_cli": "<bool>",
+    "last_output_age_ms": "<number>",
+    "markers": [],
+    "mem_kb": "<number>",
+    "os_pid": "<number>",
+    "pane_id": "<number>",
+    "pane_index": "<number>",
+    "precedence": "<string>",
+    "prev_status": null,
+    "raw_status": "<string>",
+    "session": "<string>",
+    "status": "<string>",
+    "tab_index": "<number>"
+  }
+}

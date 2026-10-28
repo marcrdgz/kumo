@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "<string>",
+    "message": "<string>"
+  },
+  "ok": "<bool>"
+}

@@ -77,10 +77,38 @@ create→start→ready→prompt flow, is planned for 0.7.1.
 | `kumo agent broadcast "TEXT" [-s SESSION] [--filter STATUS]` | Fan one prompt out to every AI pane (optionally filtered by status) |
 | `kumo agent skill [--output PATH]` | Print the bundled Kumo orchestration skill, or install it at PATH; does not require a daemon |
 
-Add `--json` to any control command for machine-readable output. Successful
-mutations use an `{ "ok": true }` envelope; failures use
-`{ "ok": false, "error": { "code", "message" } }`. Lists and reads retain
-their typed fields (`sessions`, `tabs`, `agents`, `worktrees`, `text`, and so on).
+### Machine API (`--json`)
+
+Add `--json` to any control command for machine-readable output on stdout.
+This output, the error codes and the exit codes are a **stable contract**
+covered by golden tests (`app/kumo/tests/cli_json.rs`). Fields may be
+*added* in a minor release; renaming or removing a field, changing its type,
+or changing an error code is a breaking change (see the
+[compatibility policy](/docs/compatibility)).
+
+- **Success**: mutations reply `{ "ok": true, "message": "..." }`; lists and
+  reads reply with their typed fields (`sessions`, `tabs`, `agents`,
+  `worktrees`, `worktree`, `report`, `text`, `matched`, and so on).
+- **Failure**: `{ "ok": false, "error": { "code": "...", "message": "..." } }`.
+  Match on `code`; `message` is for humans and may change.
+- **Exit codes**: `0` on success, `1` on any failure (the JSON error is still
+  printed). `kumo update --check` alone uses `1` for "update available".
+
+| Error code | Meaning |
+| --- | --- |
+| `session_not_found` | The session (`-s`, or a composite's `sN`) does not exist |
+| `pane_not_found` | The pane id, composite position or agent alias does not exist |
+| `not_an_agent` | The command needs an agent pane, but the pane runs a plain shell |
+| `invalid_argument` | A value was rejected (empty name, unknown agent kind, ambiguous alias, …) |
+| `timeout` | A wait (`agent wait`, `pane wait-output`, `agent start`) ran out of time |
+| `agent_blocked` | `agent wait`/`agent prompt` found the agent blocked on input |
+| `agent_not_ready` | `agent start` / `worktree create --agent`: the agent was blocked during startup |
+| `agent_replaced` | The pane's process changed while waiting for it |
+| `agent_start_failed` | The agent could not be launched in the pane |
+| `bad_regex` | `pane wait-output --regex` got an invalid pattern |
+| `worktree_list_failed` / `worktree_current_failed` | Git could not list the session's worktrees |
+| `unsupported` | The running daemon does not know this command (older daemon) |
+| `error` | Anything else, including command-line usage errors and a missing daemon |
 
 **PANE addressing** — a stable numeric pane id, or a composite position
 (`1-based` indexes, session may be a name):
