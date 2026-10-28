@@ -277,15 +277,15 @@ fn stock_bindings() -> Vec<Binding> {
 /// Returns the problems found alongside it, so the caller can show them:
 /// chords that fail to parse and unknown action ids are ignored, and when two
 /// spellings resolve to the same chord (`H` and `shift+h`) with different
-/// actions, the spelling that sorts last wins.
+/// actions, both are ignored and the chord keeps its stock binding.
 pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> (Vec<Binding>, Vec<String>) {
     let mut out = stock_bindings();
     let mut warnings = Vec::new();
-    // Sorted so a conflict always resolves the same way; the map's own
-    // iteration order would pick a different winner on every launch.
+    // Sorted so the warnings and the keymap come out the same on every
+    // launch, whatever the map's iteration order.
     let mut entries: Vec<_> = overrides.iter().collect();
     entries.sort();
-    let mut bound: HashMap<Chord, (&str, Action)> = HashMap::new();
+    let mut by_chord: Vec<(Chord, Vec<(&str, Action)>)> = Vec::new();
     for (key_str, action_str) in entries {
         let Some(chord) = parse_chord(key_str) else {
             warnings.push(format!("keymap: ignoring binding with invalid key {key_str:?}"));
@@ -295,14 +295,23 @@ pub(crate) fn build_keymap(overrides: &HashMap<String, String>) -> (Vec<Binding>
             warnings.push(format!("keymap: ignoring binding with unknown action {action_str:?}"));
             continue;
         };
-        if let Some((prev, prev_action)) = bound.insert(chord, (key_str, action)) {
-            if prev_action != action {
-                warnings.push(format!(
-                    "keymap: {prev:?} and {key_str:?} both bind {}; using {key_str:?} ({})",
-                    chord_display(chord),
-                    action_id(action),
-                ));
-            }
+        match by_chord.iter_mut().find(|(c, _)| *c == chord) {
+            Some((_, spellings)) => spellings.push((key_str, action)),
+            None => by_chord.push((chord, vec![(key_str, action)])),
+        }
+    }
+    for (chord, spellings) in by_chord {
+        let action = spellings[0].1;
+        // Guessing which spelling was meant would hide the mistake, so an
+        // ambiguous chord applies neither.
+        if spellings.iter().any(|&(_, a)| a != action) {
+            let keys: Vec<String> = spellings.iter().map(|(k, a)| format!("{k:?} = {:?}", action_id(*a))).collect();
+            warnings.push(format!(
+                "keymap: ignoring conflicting bindings for {}: {}",
+                chord_display(chord),
+                keys.join(", "),
+            ));
+            continue;
         }
         out.retain(|b| b.key != chord);
         out.push(Binding {
@@ -784,9 +793,9 @@ mod tests {
     }
 
     #[test]
-    fn build_keymap_resolves_duplicate_chords_deterministically() {
-        // `H` and `shift+h` are the same chord: the spelling that sorts last
-        // wins on every launch, and the shadowed one is reported.
+    fn build_keymap_ignores_conflicting_spellings_of_one_chord() {
+        // `H` and `shift+h` are the same chord: bound to different actions,
+        // neither applies, the stock binding stays, and both are reported.
         let overrides = HashMap::from([
             ("H".to_string(), "zoom".to_string()),
             ("shift+h".to_string(), "close-pane".to_string()),
@@ -795,9 +804,15 @@ mod tests {
         let chord = parse_chord("H").unwrap();
         let bound: Vec<_> = keymap.iter().filter(|b| b.key == chord).collect();
         assert_eq!(bound.len(), 1);
-        assert_eq!(bound[0].action, Action::ClosePane);
+        assert_eq!(bound[0].action, Action::Resize(ResizeDir::Left), "the stock binding is kept");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("\"H\"") && warnings[0].contains("\"shift+h\""), "{warnings:?}");
+
+        // Spelling one chord twice with the same action is not a conflict.
+        let overrides = HashMap::from([("H".to_string(), "zoom".to_string()), ("shift+h".to_string(), "zoom".to_string())]);
+        let (keymap, warnings) = build_keymap(&overrides);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(keymap.iter().find(|b| b.key == chord).unwrap().action, Action::Zoom);
     }
 
     #[test]

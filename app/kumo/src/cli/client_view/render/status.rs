@@ -126,13 +126,13 @@ impl View {
 
         // Notice (⚠) is a left-side transient appended after the session widget,
         // like the pre-widget bar. Keep it visible even when widgets were dropped.
-        if let Some((msg, t)) = &self.notice {
-            if t.elapsed() < TOAST_TIMEOUT {
-                if !left_spans.is_empty() {
-                    left_spans.push(ratatui::text::Span::styled(" · ", Style::default().fg(theme.panel_muted)));
-                }
-                left_spans.push(ratatui::text::Span::styled(format!("⚠ {msg}"), Style::default().fg(theme.secondary)));
+        // A config warning shows whenever no transient notice is up.
+        let notice = self.notice.as_ref().filter(|(_, t)| t.elapsed() < TOAST_TIMEOUT).map(|(msg, _)| msg);
+        if let Some(msg) = notice.or(self.config_warning.as_ref()) {
+            if !left_spans.is_empty() {
+                left_spans.push(ratatui::text::Span::styled(" · ", Style::default().fg(theme.panel_muted)));
             }
+            left_spans.push(ratatui::text::Span::styled(format!("⚠ {msg}"), Style::default().fg(theme.secondary)));
         }
 
         let left_w = status_bar::spans_width(&left_spans);

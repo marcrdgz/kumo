@@ -693,6 +693,9 @@ pub struct View {
     pane_numbers: Option<Instant>,
     status_msg: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
+    /// Problems in the keymap config. Unlike `notice` it stays in the status
+    /// bar until a reload fixes them, so a bad binding can't go unnoticed.
+    config_warning: Option<String>,
     /// Agent-lifecycle toasts, newest last (stacking order depends on the
     /// configured anchor corner).
     agent_toasts: Vec<AgentToast>,
@@ -778,19 +781,7 @@ fn node_has_working(node: Option<&LayoutNode>) -> bool {
 
 impl View {
     pub fn new(out: UnixStream, cols: u16, rows: u16) -> Self {
-        let mut config_warnings = Vec::new();
-        let leader = match kumo_core::config::leader() {
-            Some(raw) => match bindings::parse_chord(&raw) {
-                Some(chord) => chord,
-                None => {
-                    config_warnings.push(format!("keymap: invalid leader key {raw:?}; using ctrl+b"));
-                    bindings::LEADER
-                }
-            },
-            None => bindings::LEADER,
-        };
-        let (keymap, keymap_warnings) = bindings::build_keymap(&kumo_core::config::keymap_bindings());
-        config_warnings.extend(keymap_warnings);
+        let (leader, keymap, config_warnings) = keymap_from_config();
         let status_bar = kumo_core::config::status_bar();
         let toast_pos = kumo_core::config::toast_position();
         let hostname = status_bar::cached_hostname();
@@ -842,7 +833,8 @@ impl View {
             session_close_confirm: SessionCloseConfirm { open: false, session_idx: 0, session_name: String::new(), path: PathBuf::new(), mode: WorktreeRemovalMode::Safe },
             pane_numbers: None,
             status_msg: None,
-            notice: config_notice(&config_warnings).map(|n| (n, Instant::now())),
+            notice: None,
+            config_warning: config_notice(&config_warnings),
             agent_toasts: Vec::new(),
             toast_pos,
             update_notice: None,
@@ -1163,9 +1155,12 @@ impl View {
                 // Status bar and keymap are client-local but reloaded from
                 // the same config.
                 kumo_core::config::invalidate_cache();
-                let (keymap, warnings) = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+                // The leader is only read at startup; reloading still reports
+                // an invalid one.
+                let (_, keymap, warnings) = keymap_from_config();
                 self.keymap = keymap;
-                self.notice = Some((config_notice(&warnings).unwrap_or(notice), Instant::now()));
+                self.config_warning = config_notice(&warnings);
+                self.notice = Some((notice, Instant::now()));
                 let new_bar = kumo_core::config::status_bar();
                 let enabled_changed = new_bar.enabled != self.status_bar.enabled;
                 self.status_bar = new_bar;
@@ -3528,6 +3523,22 @@ fn palette_action_desc(action: Action) -> &'static str {
     }
 }
 
+/// The leader chord and keymap from the config, plus the problems found in
+/// them; an invalid leader falls back to the default.
+fn keymap_from_config() -> (Chord, Vec<Binding>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let leader = match kumo_core::config::leader() {
+        Some(raw) => bindings::parse_chord(&raw).unwrap_or_else(|| {
+            warnings.push(format!("keymap: invalid leader key {raw:?}; using ctrl+b"));
+            bindings::LEADER
+        }),
+        None => bindings::LEADER,
+    };
+    let (keymap, keymap_warnings) = bindings::build_keymap(&kumo_core::config::keymap_bindings());
+    warnings.extend(keymap_warnings);
+    (leader, keymap, warnings)
+}
+
 /// One notice line for the config problems found while building the
 /// keymap: the first problem, plus a count of the rest.
 fn config_notice(warnings: &[String]) -> Option<String> {
@@ -3659,6 +3670,7 @@ mod tests {
             pane_numbers: None,
             status_msg: None,
             notice: None,
+            config_warning: None,
             agent_toasts: Vec::new(),
             toast_pos: ToastPosition::default(),
             update_notice: None,
@@ -4372,6 +4384,49 @@ mod tests {
                 }))),
             }],
         }
+    }
+
+    #[test]
+    fn config_warning_outlives_the_reload_notice_until_fixed() {
+        let cfg = std::env::temp_dir().join(format!("kumo-tui-keymap-{}", std::process::id()));
+        std::fs::create_dir_all(&cfg).unwrap();
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("KUMO_CONFIG_DIR").ok();
+        std::env::set_var("KUMO_CONFIG_DIR", &cfg);
+        let reload = |view: &mut View, toml: &str| {
+            std::fs::write(cfg.join("config.toml"), toml).unwrap();
+            view.on_event(DaemonEvent::ConfigReloaded { notice: "config reloaded".into() });
+            // Let the transient reload notice expire.
+            view.notice.as_mut().unwrap().1 -= TOAST_TIMEOUT + Duration::from_millis(1);
+            let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.draw(frame)).unwrap();
+            let buf = term.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| (0..buf.area.width).map(|x| buf.cell((x, y)).unwrap().symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut view = test_view();
+        let screen = reload(&mut view, "[keymap.bindings]\nH = \"close-pane\"\n\"shift+h\" = \"zoom\"\n");
+        assert!(screen.contains("conflicting bindings for H"), "{screen}");
+        let chord = bindings::parse_chord("H").unwrap();
+        assert_eq!(
+            view.keymap.iter().find(|b| b.key == chord).unwrap().action,
+            Action::Resize(kumo_core::layout::ResizeDir::Left),
+            "neither conflicting binding applies"
+        );
+
+        let screen = reload(&mut view, "[keymap.bindings]\nH = \"zoom\"\n");
+        assert!(!screen.contains("keymap:"), "fixing the config clears the warning: {screen}");
+
+        match prev {
+            Some(v) => std::env::set_var("KUMO_CONFIG_DIR", v),
+            None => std::env::remove_var("KUMO_CONFIG_DIR"),
+        }
+        kumo_core::config::invalidate_cache();
+        let _ = std::fs::remove_dir_all(&cfg);
     }
 
     #[test]
