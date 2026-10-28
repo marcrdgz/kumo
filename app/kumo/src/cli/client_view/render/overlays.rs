@@ -285,6 +285,15 @@ impl View {
                 "Closing the pane kills it.".to_string(),
                 "Close anyway? · No cancels",
             ),
+            ConfirmAction::CloseSession { session, running } => (
+                "close session",
+                match running.len() {
+                    1 => format!("1 pane is still running in session {session}:"),
+                    n => format!("{n} panes are still running in session {session}:"),
+                },
+                running.join(", "),
+                "Closing the session kills them. Close anyway? · No cancels",
+            ),
         };
         let title = Style::default().fg(theme.fg).bg(theme.panel_sep).add_modifier(Modifier::BOLD);
         text(f, dd.x + 2, dd.y + 1, title_text, title, inner_w);
