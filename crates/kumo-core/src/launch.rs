@@ -14,4 +14,9 @@ pub enum Launch {
     /// Daemon restarted by `kumo update` (`daemon --resume <file>`): adopt the
     /// inherited PTY masters recorded in the resume file.
     Resume(PathBuf),
+    /// Cold daemon start (after a reboot, logout or crash): restore the
+    /// sessions saved in the state file, then open a fresh session in the
+    /// workspace when one was given (`kumo new DIR`), or when nothing was
+    /// restored.
+    Restore(PathBuf, Option<PathBuf>),
 }

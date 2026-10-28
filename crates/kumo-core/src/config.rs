@@ -481,6 +481,27 @@ impl Default for WorktreeConfig {
     }
 }
 
+/// Session persistence across daemon restarts and reboots (`[persistence]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistenceConfig {
+    /// Restore the saved sessions when the daemon starts cold (after a
+    /// reboot, logout or crash).
+    pub restore: bool,
+    /// Upper bound, in seconds, on how stale the saved screen contents may
+    /// be; layout changes are saved within seconds regardless. `0` saves
+    /// only on shutdown.
+    pub autosave_interval: u64,
+    /// Relaunch restored agent panes with their manifest's `resume` command
+    /// (e.g. `claude --continue`) instead of leaving a plain shell.
+    pub resume_agents: bool,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self { restore: true, autosave_interval: 120, resume_agents: true }
+    }
+}
+
 /// Parsed user configuration. Mirrors the flat `key = value` config file;
 /// future knobs (theme, leader, keymaps, status bar) will extend this struct.
 #[derive(Clone)]
@@ -516,6 +537,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     /// Worktree isolation (`[worktree]`).
     pub worktree: WorktreeConfig,
+    /// Session persistence across reboots (`[persistence]`).
+    pub persistence: PersistenceConfig,
 }
 
 impl Default for Config {
@@ -534,6 +557,7 @@ impl Default for Config {
             status_bar: StatusBarConfig::default(),
             notifications: NotificationsConfig::default(),
             worktree: WorktreeConfig::default(),
+            persistence: PersistenceConfig::default(),
         }
     }
 }
@@ -985,6 +1009,17 @@ impl Config {
                 self.notifications.sound = v;
             }
         }
+        if let Some(p) = toml.persistence {
+            if let Some(v) = p.restore {
+                self.persistence.restore = v;
+            }
+            if let Some(v) = p.autosave_interval {
+                self.persistence.autosave_interval = v;
+            }
+            if let Some(v) = p.resume_agents {
+                self.persistence.resume_agents = v;
+            }
+        }
         if let Some(wt) = toml.worktree {
             if let Some(dirs) = wt.shared_dirs.or(wt._shared_dirs_camel) {
                 let mut out = Vec::new();
@@ -1179,6 +1214,16 @@ pub struct WorktreeRaw {
     pub expose_socket: Option<bool>,
 }
 
+/// Raw TOML for `[persistence]`.
+#[derive(Default, serde::Deserialize, Debug)]
+struct PersistenceRaw {
+    restore: Option<bool>,
+    #[serde(rename = "autosave-interval", alias = "autosave_interval")]
+    autosave_interval: Option<u64>,
+    #[serde(rename = "resume-agents", alias = "resume_agents")]
+    resume_agents: Option<bool>,
+}
+
 /// Typed view of the canonical `config.toml`. Unknown keys are ignored (serde
 /// default), and `ai_cmd` stays accepted as an alias of `ai-cmd`.
 #[derive(Default, serde::Deserialize)]
@@ -1208,6 +1253,8 @@ struct TomlConfig {
     notifications: Option<NotificationsRaw>,
     #[serde(rename = "worktree")]
     worktree: Option<WorktreeRaw>,
+    #[serde(rename = "persistence")]
+    persistence: Option<PersistenceRaw>,
 }
 
 /// Load and merge the configuration. Precedence: `config.toml` wins over the
@@ -1759,6 +1806,11 @@ pub fn worktree_shared_dirs() -> Vec<PathBuf> {
 /// Whether spawned panes receive `KUMO_SOCKET_PATH`/`KUMO_BIN_PATH`.
 pub fn worktree_expose_socket() -> bool {
     cached_config().worktree.expose_socket
+}
+
+/// Session persistence settings (`[persistence]`).
+pub fn persistence() -> PersistenceConfig {
+    cached_config().persistence.clone()
 }
 
 /// Split a command line string into program + args (space separated).
@@ -2521,6 +2573,29 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
         assert!(keymap_bindings().is_empty(), "no bindings table means the stock keymap");
+    }
+
+    #[test]
+    fn persistence_reads_from_toml_and_defaults_on() {
+        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let cfg_dir = scratch_dir("cfg-persistence");
+        let home = scratch_dir("home-persistence");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
+            EnvGuard::set("HOME", &home.to_string_lossy()),
+        );
+        invalidate_cache();
+        assert_eq!(persistence(), PersistenceConfig::default());
+        assert!(persistence().restore && persistence().resume_agents);
+        write(
+            &cfg_dir.join("config.toml"),
+            "[persistence]\nrestore = false\nautosave-interval = 30\nresume-agents = false\n",
+        );
+        invalidate_cache();
+        assert_eq!(
+            persistence(),
+            PersistenceConfig { restore: false, autosave_interval: 30, resume_agents: false }
+        );
     }
 
     #[test]

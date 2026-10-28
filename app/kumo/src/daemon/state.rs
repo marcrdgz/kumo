@@ -1,14 +1,9 @@
-//! Session state contract: the `state.json` schema plus atomic save / tolerant
-//! load and the pane-id remap needed when restoring in a new process.
+//! Session state contract: the schema shared by `state.json` (autosaved, and
+//! restored when the daemon starts cold after a reboot) and `resume.json`
+//! (`kumo update`), plus atomic save / tolerant load and the pane-id remap
+//! needed when restoring in a new process.
 //!
 //! This module is deliberately pure data — no `App`, no TUI, no PTY handles.
-//! That is what makes it daemon-ready: 0.4.0's daemon reuses these exact types
-//! as its wire format and this same save/load path without a rewrite.
-//!
-//! Some helpers are dormant right now: the light-restore client path was
-//! superseded by the daemon, and 0.5.0's persistence (grid re-encode) will
-//! revive `save`/`remap`/`from_layout_node` on the daemon side.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -131,6 +126,10 @@ pub struct SavedPane {
     /// base64-encoded in JSON. `None` for old state or when encode failed.
     #[serde(default, with = "base64_serde")]
     pub snapshot: Option<Vec<u8>>,
+    /// Detected agent (manifest id) running in the pane when it was saved, so
+    /// a reboot restore can relaunch it with the manifest's `resume` command.
+    #[serde(default)]
+    pub agent_kind: Option<String>,
 }
 
 /// Write `state` to `path` atomically (temp file + rename) so a crash mid-write
@@ -202,7 +201,7 @@ pub fn load(path: &Path) -> Result<Option<SavedState>> {
 
 /// v1 types for migration.
 #[derive(Deserialize)]
-struct SavedStateV1 { version: u32, active: usize, sessions: Vec<SavedSessionV1> }
+struct SavedStateV1 { active: usize, sessions: Vec<SavedSessionV1> }
 #[derive(Deserialize, Clone)]
 struct SavedSessionV1 { name: String, workspace: PathBuf, zoom: bool, focus: u64, tree: SavedNode, panes: Vec<SavedPane> }
 impl SavedStateV1 {
@@ -323,6 +322,7 @@ mod tests {
                         rows: 24,
                         mouse_tracking: false,
                         snapshot: None,
+                        agent_kind: None,
                     },
                     SavedPane {
                         id: 12,
@@ -338,6 +338,7 @@ mod tests {
                         rows: 24,
                         mouse_tracking: true,
                         snapshot: None,
+                        agent_kind: Some("opencode".into()),
                     },
                 ],
             }],
@@ -359,6 +360,7 @@ mod tests {
         assert_eq!(s.panes.len(), 2);
         assert_eq!(s.panes[1].program, Some(("opencode".into(), Vec::new())));
         assert_eq!(s.panes[1].agent_alias.as_deref(), Some("worker"));
+        assert_eq!(s.panes[1].agent_kind.as_deref(), Some("opencode"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

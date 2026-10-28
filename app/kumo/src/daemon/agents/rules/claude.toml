@@ -8,6 +8,8 @@
 
 [agent]
 id = "claude"
+# Reopens the last conversation when kumo restores the pane after a reboot.
+resume = ["claude", "--continue"]
 
 # Live form / select prompt: "esc to cancel" plus a confirm action; a select
 # list also needs a navigation hint.

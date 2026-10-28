@@ -21,6 +21,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ratatui::buffer::Buffer;
 
+use super::autosave::Autosave;
 use super::{App, Launch};
 use crate::daemon::frames;
 use kumo_core::protocol::{AgentWaitKind, ClientKind, Command, DaemonEvent, Layout, PROTOCOL_MINOR, PROTOCOL_VERSION};
@@ -93,12 +94,19 @@ impl Client {
 }
 
 pub fn run_daemon(launch: Launch) -> Result<()> {
-    run_daemon_at(kumo_core::config::ipc_socket_path(), launch)
+    let persistence = kumo_core::config::persistence();
+    let autosave = if persistence.restore {
+        Some(Autosave::new(kumo_core::config::state_file(), persistence.autosave_interval)?)
+    } else {
+        None
+    };
+    run_daemon_at(kumo_core::config::ipc_socket_path(), launch, autosave)
 }
 
-/// Run the daemon serving `path` (the socket). Split out so tests can drive a
-/// daemon on a scratch socket without spawning a subprocess.
-fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
+/// Run the daemon serving `path` (the socket), keeping `autosave`'s state file
+/// current. Split out so tests can drive a daemon on a scratch socket without
+/// spawning a subprocess (and without touching the user's saved sessions).
+fn run_daemon_at(path: std::path::PathBuf, launch: Launch, mut autosave: Option<Autosave>) -> Result<()> {
     #[cfg(unix)]
     {
         // Graceful SIGTERM/SIGINT: set a flag and let the main loop exit
@@ -884,6 +892,10 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
             clients.remove(&id);
         }
 
+        if let Some(autosave) = autosave.as_mut() {
+            autosave.tick(&app);
+        }
+
         // Every session closed (explicit `kill`, or auto-stop when the last
         // session closes): stop the daemon.
         if app.quit || kill {
@@ -900,6 +912,13 @@ fn run_daemon_at(path: std::path::PathBuf, launch: Launch) -> Result<()> {
         std::thread::park_timeout(Duration::from_millis(if idle { 50 } else { 2 }));
     }
 
+    // A signal means the OS is stopping the daemon (reboot, logout): save the
+    // sessions for the next cold start while their processes still run.
+    // `kumo kill` or closing the last session ends them for good.
+    if let Some(autosave) = autosave {
+        let stopped_by_os = TERM_FLAG.load(Ordering::Relaxed);
+        autosave.finish(stopped_by_os.then_some(&app));
+    }
     // Never cut a checkout deletion short; nobody is left to reply to.
     app.join_worktree_removals();
     // Start every cleanup together, then wait while all children are reaped.
@@ -1293,7 +1312,7 @@ mod tests {
         let sock = rt.join("kumo").join("kumo.sock");
         let s = sock.clone();
         std::thread::spawn(move || {
-            let _ = run_daemon_at(s, Launch::New(None));
+            let _ = run_daemon_at(s, Launch::New(None), None);
         });
         let _ = wait_for_socket(&sock, Duration::from_secs(10));
         match prev_cfg {
@@ -1415,7 +1434,7 @@ mod tests {
         let s = sock.clone();
         let launch_dir = repo.clone();
         std::thread::spawn(move || {
-            let _ = run_daemon_at(s, Launch::New(Some(launch_dir)));
+            let _ = run_daemon_at(s, Launch::New(Some(launch_dir)), None);
         });
         let mut stream = wait_for_socket(&sock, Duration::from_secs(10));
         match prev_cfg {
@@ -1519,7 +1538,7 @@ mod tests {
         let sock = rt.join("kumo").join("kumo.sock");
         let s = sock.clone();
         std::thread::spawn(move || {
-            let _ = run_daemon_at(s, Launch::New(None));
+            let _ = run_daemon_at(s, Launch::New(None), None);
         });
         let _ = wait_for_socket(&sock, Duration::from_secs(10));
         match prev_cfg {
@@ -1728,7 +1747,7 @@ mod tests {
         let sock = rt.join("kumo").join("kumo.sock");
         let s = sock.clone();
         std::thread::spawn(move || {
-            let _ = run_daemon_at(s, Launch::New(None));
+            let _ = run_daemon_at(s, Launch::New(None), None);
         });
         let _ = wait_for_socket(&sock, Duration::from_secs(10));
         match prev_cfg {

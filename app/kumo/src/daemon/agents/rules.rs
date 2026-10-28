@@ -13,6 +13,9 @@
 //! [agent]
 //! id = "example"            # [a-z0-9-]+, must match the filename stem
 //! name = "Example Agent"    # optional display label
+//! resume = ["example", "--continue"]  # optional: relaunches the agent's last
+//!                           # conversation when kumo restores the pane after
+//!                           # a reboot (`[persistence] resume-agents`)
 //!
 //! # Each signal is an OR of `[[signal]]` groups; a group is an AND of its
 //! # `tests`. `blocked > working > idle` precedence is applied by the
@@ -63,6 +66,8 @@ struct Manifest {
 #[derive(Deserialize)]
 struct Header {
     id: String,
+    #[serde(default)]
+    resume: Option<Vec<String>>,
 }
 
 /// A signal group: an AND over `tests`.
@@ -168,6 +173,8 @@ enum SpinnerKind {
 #[derive(Debug, Clone)]
 pub(crate) struct AgentRules {
     pub(crate) id: String,
+    /// Command (program + args) that reopens the agent's last conversation.
+    pub(crate) resume: Option<Vec<String>>,
     blocked: Vec<Group>,
     working: Vec<Group>,
     idle: Vec<Group>,
@@ -388,10 +395,11 @@ fn compile(man: Manifest, stem: Option<&str>) -> Result<AgentRules, ManifestErro
             )));
         }
     }
+    let resume = man.agent.resume.filter(|cmd| !cmd.is_empty());
     let blocked = compile_groups(man.blocked)?;
     let working = compile_groups(man.working)?;
     let idle = compile_groups(man.idle)?;
-    Ok(AgentRules { id, blocked, working, idle })
+    Ok(AgentRules { id, resume, blocked, working, idle })
 }
 
 fn compile_groups(groups: Vec<GroupDef>) -> Result<Vec<Group>, ManifestError> {
