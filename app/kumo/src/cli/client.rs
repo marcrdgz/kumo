@@ -27,6 +27,7 @@ use crossterm::terminal::{
 
 use kumo_core::Launch;
 use crate::cli::client_view::View;
+use crate::cli::host_backend::HostBackend;
 use kumo_core::protocol::{self, ClientKind, Command, DaemonEvent};
 
 /// Bound daemon-event memory while keeping the socket reader independent from
@@ -201,7 +202,7 @@ fn client_once(stream: &mut UnixStream, pre: &[Command], notice: Option<&str>) -
     // This keeps an initialization error from orphaning a producer that is
     // already blocked on the socket or terminal input.
     let setup = (|| -> Result<_> {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
+        let mut terminal = ratatui::Terminal::new(HostBackend::new(ratatui::backend::CrosstermBackend::new(io::stdout())))?;
         terminal.clear()?;
         let mut view = View::new(stream.try_clone()?, cols, rows);
         if let Some(notice) = notice {

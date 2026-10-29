@@ -7,6 +7,8 @@ pub mod client;
 #[cfg(unix)]
 pub mod client_view;
 #[cfg(unix)]
+pub mod host_backend;
+#[cfg(unix)]
 pub mod status_bar;
 #[cfg(unix)]
 pub mod text_input;

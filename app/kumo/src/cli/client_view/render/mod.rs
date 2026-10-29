@@ -59,10 +59,9 @@ impl View {
 
     /// Redraw the whole frame into `terminal`. Uses ratatui's diffing, so the
     /// host terminal only receives the changed cells.
-    pub fn render_now(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    pub fn render_now(&mut self, terminal: &mut Terminal<StdoutBackend>) -> Result<()> {
         self.expire_timers();
         terminal.draw(|f| self.draw(f))?;
-        self.place_cursor(terminal)?;
         self.dirty = false;
         Ok(())
     }
@@ -106,6 +105,12 @@ impl View {
         self.render_confirm(f);
         self.render_finder(f);
         self.render_agent_inbox(f);
+        // Set through the frame so ratatui emits only "show + move" per draw;
+        // hiding it in `draw` and re-showing it afterwards toggled DECTCEM on
+        // every frame, which restarts the host terminal's blink cycle.
+        if let Some(pos) = self.cursor_position() {
+            f.set_cursor_position(pos);
+        }
     }
 
     pub(super) fn pane_label(&self, pid: u64) -> String {
@@ -259,50 +264,30 @@ impl View {
         }
     }
 
-    /// Place the host-terminal cursor: the popup's input field when open, else
-    /// the focused pane's terminal cursor.
-    fn place_cursor<B: ratatui::backend::Backend>(&self, terminal: &mut Terminal<B>) -> Result<()>
-    where
-        B::Error: Send + Sync + 'static,
-    {
+    /// Where the host-terminal cursor goes: the popup's input field when open,
+    /// else the focused pane's terminal cursor. `None` hides it.
+    fn cursor_position(&self) -> Option<(u16, u16)> {
         if self.keybind_overlay.open {
             if let Some(rect) = self.keybind_overlay_rect() {
                 let field_w = rect.width.saturating_sub(4) as usize;
                 let start = (self.keybind_overlay.cursor + 1).saturating_sub(field_w.saturating_sub(2));
                 let x = rect.x + 4 + self.keybind_overlay.cursor.saturating_sub(start) as u16;
                 if x < rect.right().saturating_sub(2) {
-                    terminal.set_cursor_position((x, rect.y + 2))?;
-                    terminal.show_cursor()?;
-                    return Ok(());
+                    return Some((x, rect.y + 2));
                 }
             }
         }
         if self.popup.open {
-            if let Some((x, y)) = self.name_popup_input_cursor() {
-                terminal.set_cursor_position((x, y))?;
-                terminal.show_cursor()?;
-                return Ok(());
+            if let Some(pos) = self.name_popup_input_cursor() {
+                return Some(pos);
             }
         }
-        let focus = self.active_tab().map(|t| t.focus);
-        if let Some(focus) = focus {
-            if let Some((_, rect)) = self.rects.iter().find(|(pid, _)| *pid == focus) {
-                let inner = PaneGeom { pane_id: focus, rect: *rect }.inner();
-                if let Some(grid) = self.grids.get(&focus) {
-                    if let Some((cx, cy)) = grid.cursor {
-                        let x = inner.x + cx;
-                        let y = inner.y + cy;
-                        if x < inner.x + inner.width && y < inner.y + inner.height {
-                            terminal.set_cursor_position((x, y))?;
-                            terminal.show_cursor()?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-        terminal.hide_cursor()?;
-        Ok(())
+        let focus = self.active_tab()?.focus;
+        let (_, rect) = self.rects.iter().find(|(pid, _)| *pid == focus)?;
+        let inner = PaneGeom { pane_id: focus, rect: *rect }.inner();
+        let (cx, cy) = self.grids.get(&focus)?.cursor?;
+        let (x, y) = (inner.x + cx, inner.y + cy);
+        (x < inner.x + inner.width && y < inner.y + inner.height).then_some((x, y))
     }
 }
 
@@ -533,6 +518,35 @@ mod tests {
         assert!(!at(2).modifier.contains(Modifier::UNDERLINED));
         assert!(at(3).modifier.contains(Modifier::UNDERLINED) && at(4).modifier.contains(Modifier::UNDERLINED));
         assert!(!at(3).modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn draw_places_host_cursor_at_focused_pane_cursor() {
+        use ratatui::backend::Backend;
+        let mut view = test_view();
+        view.cols = 40;
+        view.rows = 10;
+        view.sidebar_open = false;
+        view.status_bar.enabled = false;
+        view.layout = Some(render_bench_layout(&[1]));
+        view.recompute_geometry();
+        let inner = PaneGeom { pane_id: 1, rect: view.rects[0].1 }.inner();
+        view.on_pane_frame(PaneFrame {
+            pane_id: 1,
+            cols: inner.width,
+            rows: inner.height,
+            full: true,
+            rows_dirty: Vec::new(),
+            cursor: Some((3, 2)),
+            scroll: None,
+        });
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 10)).unwrap();
+        term.draw(|f| view.draw(f)).unwrap();
+
+        // The frame owns the cursor, so ratatui shows it instead of hiding it
+        // at the end of every draw.
+        let pos = term.backend_mut().get_cursor_position().unwrap();
+        assert_eq!((pos.x, pos.y), (inner.x + 3, inner.y + 2));
     }
 
     #[test]

@@ -4,7 +4,6 @@
 //! semantic layout and per-pane content.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -12,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::Frame;
@@ -27,6 +25,7 @@ use kumo_protocol::{
 };
 
 use crate::cli::agent_skill::{self, AGENT_SKILL_TARGETS, AgentSkillStatus, AgentSkillTarget};
+use crate::cli::host_backend::StdoutBackend;
 use crate::cli::bindings::{self, Action, Binding, Chord, Dir, link_modifiers};
 use crate::cli::chrome::{fill, put, text};
 use crate::cli::mouse::sgr_mouse;
