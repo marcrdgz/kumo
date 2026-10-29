@@ -215,6 +215,12 @@ conversation, not just a fresh shell):
   when a healthy integration is active, screen rules do not compete with it.
   Screen manifests remain the zero-setup fallback. This avoids classifier
   drift.
+- **OSC 7501 status reports**: parse the Program Status Protocol (working,
+  done, blocked, error) from the pane's output as the first integration of the
+  contract above, so any agent that emits it gets exact status in the sidebar,
+  AGENTS tab and Inbox without a manifest. Herdr's `herdr-core` relies on it
+  exclusively; kumo keeps screen manifests for agents that do not emit it.
+  Verify the spec is published and stable before freezing the mapping.
 - **Reliable long transcript reads**: add `agent read --source recent-unwrapped
   --lines N`, collecting alternate-screen history only while the agent is idle
   and restoring its viewport afterwards. `visible`, `detection`, output waits,
@@ -227,6 +233,14 @@ conversation, not just a fresh shell):
   checkpoint set/current/list → remove`, including startup timeout/replacement,
   branch/path collisions, dirty or unmerged removal, daemon restart, shared
   dirs, and `.worktreeinclude`.
+- **Child → parent reporting**: an agent started from inside a kumo pane
+  (`agent start`, `worktree create --agent`) records the launching pane as its
+  parent; panes need an identity for this (e.g. a `KUMO_PANE_ID` env var
+  beside `KUMO_SOCKET_PATH`). A child reports back with `kumo agent report
+  <text>`, delivered to the parent's input, and the parent waits with `kumo
+  agent wait --children` on blocked/done/exit. The parent is also notified
+  when a child blocks or exits, and the AGENTS tab groups workers under
+  their parent. Parent links persist in `state.json` across reboot recovery.
 - **Structured command boundaries** (deferred from 0.7.0): OSC 133 prompt/command
   marks, structured tracebacks, the OSC 7/133 shell snippet installer, and the
   `leader+r` verify loop on top of `pane wait-output`.
