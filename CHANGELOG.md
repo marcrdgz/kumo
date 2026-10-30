@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.8.1
+
+### 🚀 Features
+
+- *(cli)* Confirm before closing a pane running an agent or full-screen program (#34)
+- *(cli)* Confirm before closing a session with busy panes (#35)
+- Derive tab names from the focused pane and address tabs by id or position
+
+### 🐛 Bug Fixes
+
+- *(cli)* Skip redundant cursor writes so the host cursor blinks normally
+- *(cli)* Make tab close button visible and hover-revealed
+- *(cli)* Report missing tabs and reserved tab names as errors
+
+### 🧪 Testing
+
+- *(state)* Pin the 0.8.0 upgrade path with released fixtures
 ## v0.8.0
 
 ### 🚀 Features
@@ -18,6 +35,10 @@
 - *(state)* Pin the 0.7.6 upgrade path with released fixtures (#31)
 - *(cli)* Freeze the --json machine api with golden tests (#30)
 - *(runtime)* Add attach latency and memory per pane benchmarks
+
+### ⚙️ Miscellaneous Tasks
+
+- Release 0.8.0
 ## v0.7.6
 
 ### 🐛 Bug Fixes
