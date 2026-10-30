@@ -37,6 +37,8 @@ pub struct Pane {
     /// Explicit agent kind supplied by `kumo agent start`. This scopes state
     /// detection before the periodic process scan observes the new process.
     pub agent_kind: Option<String>,
+    /// The foreground job as of the last process scan; names the tab.
+    pub foreground: ForegroundJob,
     pub pty: Pty,
     pub vt: vt::Terminal,
     pub dead: bool,
@@ -404,6 +406,7 @@ impl Pane {
             detected_ai: false,
             detected_ai_name: None,
             agent_kind: None,
+            foreground: ForegroundJob::default(),
             pty,
             vt,
             dead: false,
@@ -539,6 +542,18 @@ impl Pane {
         let snap = ProcessSnapshot::capture()?;
         let leaf = snap.deepest_descendant(root).unwrap_or(root);
         process_cwd(leaf)
+    }
+
+    /// The process group currently in the foreground of this pane's PTY.
+    pub fn foreground_pgid(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            foreground_pgid(self.pty.raw_fd(), self.pty.process_id())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// The cwd of the process group currently controlling this pane's PTY —
@@ -1026,6 +1041,34 @@ fn rgb(c: ColorRgb) -> RColor {
 const AI_CLI_NAMES: &[&str] = &[
     "opencode", "claude", "codex", "gemini", "qwen", "aider", "cody", "swe", "coco",
 ];
+
+/// What runs in the foreground of a pane's PTY, sampled off the main loop by
+/// the periodic process scan (`process_cwd` may spawn `lsof` on macOS).
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct ForegroundJob {
+    /// Executable name of the foreground job, unless it is the pane's shell.
+    pub command: Option<String>,
+    /// Working directory of the foreground job.
+    pub cwd: Option<PathBuf>,
+}
+
+impl ForegroundJob {
+    /// Probe the foreground process group `pgid` of a pane whose shell is
+    /// `root`. Blocking: call from a background thread.
+    pub fn probe(snapshot: Option<&ProcessSnapshot>, root: Option<u32>, pgid: Option<u32>) -> ForegroundJob {
+        let Some(pgid) = pgid else { return ForegroundJob::default() };
+        let command = (Some(pgid) != root)
+            .then(|| snapshot.and_then(|snap| snap.names.get(&pgid)))
+            .flatten()
+            .map(|name| {
+                let base = name.rsplit('/').next().unwrap_or(name);
+                // Login shells report `-zsh`.
+                base.trim_start_matches('-').to_string()
+            })
+            .filter(|name| !name.is_empty());
+        ForegroundJob { command, cwd: process_cwd(pgid) }
+    }
+}
 
 /// Snapshot of the process table (parent/child map + executable names), used
 /// to detect whether an AI CLI process runs inside a pane's process tree.
@@ -2278,6 +2321,21 @@ assert_eq!(p.agent_status(), AgentStatus::Working);
         assert_eq!(got, vec![1, 2, 3, 4, 5]);
         assert_eq!(snap.descendants(3), vec![3], "a leaf is just itself");
         assert_eq!(snap.descendants(7), vec![7], "an unknown pid is a single-pid tree");
+    }
+
+    #[test]
+    fn foreground_job_names_commands_but_not_the_shell() {
+        let own = std::process::id();
+        let snapshot = ProcessSnapshot {
+            children: HashMap::new(),
+            names: HashMap::from([(own, "/usr/bin/-nvim".to_string())]),
+        };
+        let job = ForegroundJob::probe(Some(&snapshot), Some(own + 1), Some(own));
+        assert_eq!(job.command.as_deref(), Some("nvim"));
+        assert_eq!(job.cwd, Some(std::env::current_dir().unwrap()));
+        let at_prompt = ForegroundJob::probe(Some(&snapshot), Some(own), Some(own));
+        assert_eq!(at_prompt.command, None, "the pane's own shell is not a command");
+        assert_eq!(ForegroundJob::probe(Some(&snapshot), Some(own), None), ForegroundJob::default());
     }
 
     #[test]

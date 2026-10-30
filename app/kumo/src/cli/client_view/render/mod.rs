@@ -649,13 +649,16 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| view.draw(f)).unwrap();
         let buf = term.backend().buffer();
-        // Tab bar at top — active tab uses the primary accent, followed by one
-        // spacer cell and the persistent close action.
+        // Tab bar at top — active tab "1 1" (position, then name) uses the
+        // primary accent, followed by one spacer cell and the persistent close
+        // action.
         assert_eq!(buf.cell((26, 0)).unwrap().symbol(), "1");
         assert_eq!(buf.cell((26, 0)).unwrap().fg, contrast_fg(&view.current_theme(), view.current_theme().accent));
         assert_eq!(buf.cell((26, 0)).unwrap().bg, view.current_theme().accent);
         assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "x");
+        assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "1");
+        assert_eq!(buf.cell((29, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((30, 0)).unwrap().symbol(), "x");
         // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).

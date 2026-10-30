@@ -363,11 +363,11 @@ impl App {
                     pane_count: s.pane_count(),
                     zoomed,
                     active: i == self.active,
-                    active_tab: Some(s.active_tab().name.clone()),
+                    active_tab: Some(self.tab_label(s.active_tab())),
                     focus,
                     tabs: s.tabs.iter().enumerate().map(|(ti, t)| kumo_protocol::TabInfo {
                         id: t.id,
-                        name: t.name.clone(),
+                        name: self.tab_label(t),
                         pane_count: t.tree.pane_count(),
                         zoomed: t.zoom,
                         active: ti == s.active_tab,

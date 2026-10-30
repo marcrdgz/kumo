@@ -50,7 +50,9 @@ pub(crate) type SnapshotCache = HashMap<u64, (u64, Vec<u8>)>;
 
 struct Tab {
     id: u64,
-    name: String,
+    /// Name set by the user; `None` derives the label from the focused pane
+    /// (see `App::tab_label`).
+    custom_name: Option<String>,
     tree: LayoutTree,
     zoom: bool,
 }
@@ -71,24 +73,6 @@ impl Session {
     /// in the first tab, independent of the active tab and focused pane.
     fn project_anchor_pane(&self) -> Option<u64> {
         self.tabs.first()?.tree.pane_ids().first().copied()
-    }
-    fn tab_index_by_spec(&self, spec: &str) -> Option<usize> {
-        // by name, then id, then 1-based index — name takes precedence so a
-        // tab named "2" (id 4) is not shadowed by the tab whose id is 2
-        if let Some(idx) = self.tabs.iter().position(|t| t.name == spec) {
-            return Some(idx);
-        }
-        if let Ok(id) = spec.parse::<u64>() {
-            if let Some(idx) = self.tabs.iter().position(|t| t.id == id) {
-                return Some(idx);
-            }
-        }
-        if let Ok(n) = spec.parse::<usize>() {
-            if n >= 1 && n <= self.tabs.len() {
-                return Some(n - 1);
-            }
-        }
-        None
     }
     fn pane_count(&self) -> usize {
         self.tabs.iter().map(|t| t.tree.pane_count()).sum()
@@ -113,7 +97,33 @@ impl Session {
     }
 }
 
-type AiScanResult = (Option<crate::daemon::pane::ProcessSnapshot>, Vec<(u64, Option<u32>)>);
+/// The 1-based tab position in a `t<N>` selector (the number in the tab bar).
+fn tab_position(spec: &str) -> Option<usize> {
+    let digits = spec.strip_prefix('t')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Whether `name` would be read as a tab id or position by
+/// `App::tab_index_by_spec`, so a tab carrying it could not be addressed by
+/// name.
+fn is_tab_selector(name: &str) -> bool {
+    tab_position(name).is_some() || name.parse::<u64>().is_ok()
+}
+
+/// A restored custom tab name. Saved states up to 0.8 carry the old numeric
+/// default names, which would now read as tab ids: those (and empty names)
+/// become derived labels again.
+fn restored_tab_name(saved: Option<String>) -> Option<String> {
+    saved.filter(|name| !name.trim().is_empty() && !is_tab_selector(name))
+}
+
+type AiScanResult = (
+    Option<crate::daemon::pane::ProcessSnapshot>,
+    Vec<(u64, Option<u32>, crate::daemon::pane::ForegroundJob)>,
+);
 
 #[allow(dead_code)]
 pub struct App {
@@ -438,7 +448,7 @@ impl App {
                         tree.focus = first;
                     }
                 }
-                tabs.push(Tab { id: saved_tab.id, name: saved_tab.name, tree, zoom: saved_tab.zoom });
+                tabs.push(Tab { id: saved_tab.id, custom_name: restored_tab_name(saved_tab.name), tree, zoom: saved_tab.zoom });
             }
             if tabs.is_empty() {
                 continue;
@@ -525,7 +535,7 @@ impl App {
                 if tree.pane_count() == 0 {
                     continue;
                 }
-                tabs.push(Tab { id: saved_tab.id, name: saved_tab.name, tree, zoom: saved_tab.zoom });
+                tabs.push(Tab { id: saved_tab.id, custom_name: restored_tab_name(saved_tab.name), tree, zoom: saved_tab.zoom });
             }
             if tabs.is_empty() && !self.panes.is_empty() {
                 // Should not happen, but keep daemon alive
@@ -630,7 +640,7 @@ impl App {
                 let root = tab.tree.root.as_ref()?;
                 Some(state::SavedTab {
                     id: tab.id,
-                    name: tab.name.clone(),
+                    name: tab.custom_name.clone(),
                     zoom: tab.zoom,
                     focus: tab.tree.focus,
                     tree: state::from_layout_node(root),
@@ -722,7 +732,7 @@ impl App {
             &self.theme,
         )?;
         self.panes.insert(pid, pane);
-        let tab = Tab { id: self.next_tab_id(), name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false };
+        let tab = Tab { id: self.next_tab_id(), custom_name: None, tree: LayoutTree::new(pid), zoom: false };
         self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace });
         self.active = self.sessions.len() - 1;
         self.bump_layout_version();
@@ -750,7 +760,7 @@ impl App {
             &self.theme,
         )?;
         self.panes.insert(pid, pane);
-        let tab = Tab { id: self.next_tab_id(), name: "1".to_string(), tree: LayoutTree::new(pid), zoom: false };
+        let tab = Tab { id: self.next_tab_id(), custom_name: None, tree: LayoutTree::new(pid), zoom: false };
         self.sessions.push(Session { id: sid, name, tabs: vec![tab], active_tab: 0, workspace });
         self.active = self.sessions.len() - 1;
         self.bump_layout_version();
@@ -988,53 +998,59 @@ impl App {
 
     fn unique_tab_name(&self, session_idx: usize, base: &str) -> String {
         let session = &self.sessions[session_idx];
-        if !session.tabs.iter().any(|t| t.name == base) {
+        let taken = |name: &str| session.tabs.iter().any(|t| t.custom_name.as_deref() == Some(name));
+        if !taken(base) {
             return base.to_string();
         }
         let mut n = 2;
         loop {
             let cand = format!("{base}-{n}");
-            if !session.tabs.iter().any(|t| t.name == cand) {
+            if !taken(&cand) {
                 return cand;
             }
             n += 1;
         }
     }
 
-    fn default_tab_name(&self, session_idx: usize) -> String {
-        // absolute numbering: next id beyond any existing id or numeric name,
-        // so renaming "2" → "doraemon" does not recycle "2" — the 4th tab stays "4"
-        let sess = &self.sessions[session_idx];
-        let max_id = sess.tabs.iter().map(|t| t.id).max().unwrap_or(0);
-        let max_num = sess.tabs.iter().filter_map(|t| t.name.parse::<u64>().ok()).max().unwrap_or(0);
-        let mut n = max_id.max(max_num) + 1;
-        if n == 0 { n = 1; }
-        loop {
-            let cand = n.to_string();
-            if !sess.tabs.iter().any(|t| t.name == cand) {
-                return cand;
-            }
-            n += 1;
+    /// Resolve a tab selector within session `s_idx`, like pane selectors:
+    /// all digits is the stable tab id, `t<N>` the 1-based position shown in
+    /// the tab bar, anything else a name (a custom name first, then a derived
+    /// label; the first match wins).
+    fn tab_index_by_spec(&self, s_idx: usize, spec: &str) -> Option<usize> {
+        let tabs = &self.sessions[s_idx].tabs;
+        if let Ok(id) = spec.parse::<u64>() {
+            return tabs.iter().position(|t| t.id == id);
         }
+        if let Some(n) = tab_position(spec) {
+            return (1..=tabs.len()).contains(&n).then(|| n - 1);
+        }
+        tabs.iter()
+            .position(|t| t.custom_name.as_deref() == Some(spec))
+            .or_else(|| tabs.iter().position(|t| self.tab_label(t) == spec))
     }
 
     pub(crate) fn new_tab_in_session(&mut self, session_name: &str, name: Option<&str>, workspace: Option<PathBuf>) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session_name) else {
             return Ok(format!("no session {session_name:?}"));
         };
+        let name = name.map(str::trim).filter(|n| !n.is_empty());
+        if let Some(name) = name.filter(|n| is_tab_selector(n)) {
+            return Ok(format!("tab name {name:?} looks like a tab id or position"));
+        }
         let ws = workspace.unwrap_or_else(|| self.sessions[idx].workspace.clone());
-        let tab_name = name.map(|n| self.unique_tab_name(idx, n)).unwrap_or_else(|| self.default_tab_name(idx));
+        let custom_name = name.map(|n| self.unique_tab_name(idx, n));
         let sid = self.sessions[idx].id;
         let pid = Pty::next_pane_id();
         let (cols, rows) = DEFAULT_PANE_DIMS;
         let pane = Pane::spawn(sid, pid, self.shell.clone(), None, Some(ws), cols, rows, false, self.events_tx.clone(), &self.theme)?;
         self.panes.insert(pid, pane);
         let tab_id = self.next_tab_id();
-        let tab = Tab { id: tab_id, name: tab_name.clone(), tree: LayoutTree::new(pid), zoom: false };
+        let tab = Tab { id: tab_id, custom_name, tree: LayoutTree::new(pid), zoom: false };
+        let label = self.tab_label(&tab);
         self.sessions[idx].tabs.push(tab);
         self.sessions[idx].active_tab = self.sessions[idx].tabs.len() - 1;
         self.bump_layout_version();
-        Ok(format!("created tab {tab_name:?} in {session_name:?}"))
+        Ok(format!("created tab {label:?} in {session_name:?}"))
     }
 
     pub(crate) fn close_tab_in_session(&mut self, session_name: &str, tab_spec: Option<&str>) -> Result<String> {
@@ -1042,7 +1058,7 @@ impl App {
             return Ok(format!("no session {session_name:?}"));
         };
         let t_idx = match tab_spec {
-            Some(spec) => match self.sessions[s_idx].tab_index_by_spec(spec) {
+            Some(spec) => match self.tab_index_by_spec(s_idx, spec) {
                 Some(i) => i,
                 None => return Ok(format!("no tab {spec:?} in {session_name:?}")),
             },
@@ -1054,6 +1070,7 @@ impl App {
             return Ok(format!("closed tab and session {session_name:?}"));
         }
         let tab = self.sessions[s_idx].tabs.remove(t_idx);
+        let label = self.tab_label(&tab);
         for pid in tab.tree.pane_ids() {
             let os_pid = self.panes.get(&pid).and_then(|p| p.pty.process_id());
             if let Some(mut pane) = self.panes.remove(&pid) { pane.pty.kill(); }
@@ -1073,12 +1090,12 @@ impl App {
             self.sessions[s_idx].active_tab = self.sessions[s_idx].active_tab.min(self.sessions[s_idx].tabs.len() - 1);
         }
         self.bump_layout_version();
-        Ok(format!("closed tab {:?} in {:?}", tab.name, session_name))
+        Ok(format!("closed tab {label:?} in {session_name:?}"))
     }
 
     pub(crate) fn focus_tab_in_session_named(&mut self, session_name: &str, tab_spec: &str) -> bool {
         let Some(s_idx) = self.sessions.iter().position(|s| s.name == session_name) else { return false };
-        if let Some(t_idx) = self.sessions[s_idx].tab_index_by_spec(tab_spec) {
+        if let Some(t_idx) = self.tab_index_by_spec(s_idx, tab_spec) {
             self.sessions[s_idx].active_tab = t_idx;
             self.bump_layout_version();
             return true;
@@ -1090,15 +1107,23 @@ impl App {
         let Some(s_idx) = self.sessions.iter().position(|s| s.name == session) else {
             return Ok(format!("no session {session:?}"));
         };
-        let Some(t_idx) = self.sessions[s_idx].tab_index_by_spec(tab) else {
+        let Some(t_idx) = self.tab_index_by_spec(s_idx, tab) else {
             return Ok(format!("no tab {tab:?} in {session:?}"));
         };
         let name = new_name.trim().to_string();
-        if name.is_empty() { return Ok("name cannot be empty".to_string()); }
-        if self.sessions[s_idx].tabs.iter().enumerate().any(|(i,t)| i!=t_idx && t.name==name) {
+        // An empty name hands the tab back to its derived label.
+        if name.is_empty() {
+            self.sessions[s_idx].tabs[t_idx].custom_name = None;
+            self.bump_layout_version();
+            return Ok("tab name reset".to_string());
+        }
+        if is_tab_selector(&name) {
+            return Ok(format!("tab name {name:?} looks like a tab id or position"));
+        }
+        if self.sessions[s_idx].tabs.iter().enumerate().any(|(i,t)| i!=t_idx && t.custom_name.as_deref()==Some(name.as_str())) {
             return Ok(format!("a tab named '{name}' already exists"));
         }
-        self.sessions[s_idx].tabs[t_idx].name = name.clone();
+        self.sessions[s_idx].tabs[t_idx].custom_name = Some(name.clone());
         self.bump_layout_version();
         Ok(format!("renamed tab to {name:?}"))
     }
@@ -1123,7 +1148,7 @@ impl App {
         let next = ((cur + delta).rem_euclid(len as isize)) as usize;
         self.sessions[s_idx].active_tab = next;
         self.bump_layout_version();
-        Ok(format!("focused tab {}", self.sessions[s_idx].tabs[next].name))
+        Ok(format!("focused tab {}", self.tab_label(&self.sessions[s_idx].tabs[next])))
     }
 
     pub(crate) fn jump_tab_in_session(&mut self, session: &str, n: usize) -> Result<String> {
@@ -1135,7 +1160,7 @@ impl App {
         }
         self.sessions[s_idx].active_tab = n - 1;
         self.bump_layout_version();
-        Ok(format!("focused tab {}", self.sessions[s_idx].tabs[n-1].name))
+        Ok(format!("focused tab {}", self.tab_label(&self.sessions[s_idx].tabs[n-1])))
     }
 
     fn bump_layout_version(&mut self) {
@@ -1575,8 +1600,8 @@ mod tests {
             id: 1,
             name: "session".into(),
             tabs: vec![
-                Tab { id: 1, name: "1".into(), tree: first_tree, zoom: false },
-                Tab { id: 2, name: "2".into(), tree: LayoutTree::new(21), zoom: false },
+                Tab { id: 1, custom_name: None, tree: first_tree, zoom: false },
+                Tab { id: 2, custom_name: None, tree: LayoutTree::new(21), zoom: false },
             ],
             active_tab: 1,
             workspace: PathBuf::from("/tmp/project"),
@@ -1591,9 +1616,9 @@ mod tests {
             id: 1,
             name: "session".into(),
             tabs: vec![
-                Tab { id: 1, name: "one".into(), tree: LayoutTree::new(11), zoom: false },
-                Tab { id: 2, name: "two".into(), tree: LayoutTree::new(21), zoom: false },
-                Tab { id: 3, name: "three".into(), tree: LayoutTree::new(31), zoom: false },
+                Tab { id: 1, custom_name: Some("one".into()), tree: LayoutTree::new(11), zoom: false },
+                Tab { id: 2, custom_name: Some("two".into()), tree: LayoutTree::new(21), zoom: false },
+                Tab { id: 3, custom_name: Some("three".into()), tree: LayoutTree::new(31), zoom: false },
             ],
             active_tab: 1,
             workspace: PathBuf::from("/tmp/project"),
@@ -1714,6 +1739,55 @@ mod tests {
         assert_eq!(app.layout_version, version, "unchanged focus must not rebuild the layout");
         drop(app);
         let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    #[test]
+    fn tabs_take_their_pane_name_until_renamed_and_resolve_selectors() {
+        let _lock = kumo_core::config::TEST_ENV_LOCK.lock().unwrap();
+        let cfg = scratch("tabname-cfg");
+        let _guards = (
+            EnvGuard::set("KUMO_CONFIG_DIR", &cfg.to_string_lossy()),
+            EnvGuard::set("KUMO_NO_UPDATE", "1"),
+        );
+        std::fs::write(cfg.join("config"), "shell = /bin/sh\n").unwrap();
+        let work = scratch("tabname-work");
+        let dir = work.file_name().unwrap().to_string_lossy().into_owned();
+        let mut app = App::new(Launch::New(Some(work.clone()))).unwrap();
+        let session = app.sessions[0].name.clone();
+        app.new_tab_in_session(&session, None, Some(work.clone())).unwrap();
+        let labels = |app: &App| app.sessions[0].tabs.iter().map(|t| app.tab_label(t)).collect::<Vec<_>>();
+        assert_eq!(labels(&app), [dir.clone(), dir.clone()], "unnamed tabs follow their pane's directory");
+
+        let second = app.sessions[0].tabs[1].id;
+        app.rename_tab_in_session(&session, "t2", "build").unwrap();
+        assert_eq!(labels(&app), [dir.clone(), "build".to_string()]);
+        for selector in ["3", "t1"] {
+            app.rename_tab_in_session(&session, "build", selector).unwrap();
+            assert_eq!(app.tab_label(&app.sessions[0].tabs[1]), "build", "{selector:?} would shadow a tab selector");
+        }
+
+        assert!(app.focus_tab_in_session_named(&session, "t1"));
+        assert_eq!(app.sessions[0].active_tab, 0);
+        assert!(app.focus_tab_in_session_named(&session, &second.to_string()));
+        assert_eq!(app.sessions[0].active_tab, 1);
+        assert!(app.focus_tab_in_session_named(&session, &dir));
+        assert_eq!(app.sessions[0].active_tab, 0, "a derived name resolves to the first match");
+        assert!(!app.focus_tab_in_session_named(&session, "t3"));
+
+        app.rename_tab_in_session(&session, &second.to_string(), " ").unwrap();
+        assert_eq!(labels(&app), [dir.clone(), dir], "an empty name restores the derived one");
+        drop(app);
+        for dir in [cfg, work] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn restore_maps_legacy_numeric_tab_names_to_derived_ones() {
+        assert_eq!(restored_tab_name(Some("2".into())), None);
+        assert_eq!(restored_tab_name(Some(String::new())), None);
+        assert_eq!(restored_tab_name(None), None);
+        assert_eq!(restored_tab_name(Some("api".into())).as_deref(), Some("api"));
     }
 
     #[test]
@@ -1879,7 +1953,7 @@ mod tests {
                 active_tab: 0,
                 tabs: vec![state::SavedTab {
                     id: 1,
-                    name: "1".into(),
+                    name: None,
                     zoom: false,
                     focus: 2,
                     tree: state::SavedNode::Split {

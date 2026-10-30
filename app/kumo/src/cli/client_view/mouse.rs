@@ -376,8 +376,9 @@ impl View {
                 if let Some((idx, is_close)) = self.tab_hit(x, y) {
                     if is_close {
                         if let Some(sess) = self.active_session().cloned() {
-                            let tab_name = sess.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
-                            let _ = self.send(&Command::TabClose { session: sess.name, tab: Some(tab_name) });
+                            if let Some(tab) = sess.tabs.get(idx) {
+                                let _ = self.send(&Command::TabClose { session: sess.name, tab: Some(tab.id.to_string()) });
+                            }
                         }
                     } else {
                         self.begin_tab_reorder(idx);

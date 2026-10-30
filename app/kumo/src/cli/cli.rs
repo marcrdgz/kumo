@@ -1074,11 +1074,11 @@ fn parse_tab(args: &[String]) -> Result<CliCmd> {
             Ok(CliCmd::TabNew { session, name, workspace })
         }
         "close" | "kill" => {
-            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab close needs TAB name/id"))?;
+            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab close needs TAB (id, t<N> or name)"))?;
             Ok(CliCmd::TabClose { session, tab })
         }
         "focus" => {
-            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab focus needs TAB name/id"))?;
+            let tab = filtered.first().cloned().ok_or_else(|| anyhow::anyhow!("tab focus needs TAB (id, t<N> or name)"))?;
             Ok(CliCmd::TabFocus { session, tab })
         }
         "rename" => {
@@ -1488,9 +1488,13 @@ USAGE:
     kumo tab kill TAB [-s SESSION]
     kumo tab rename TAB NEW_NAME [-s SESSION]
 
+TAB is the stable tab id (as in `kumo tab list`), `t<N>` for the N-th tab in
+the tab bar, or a tab name. Unnamed tabs are named after their focused pane
+(agent, running command, or directory); `rename TAB \"\"` restores that.
+
 OPTIONS:
     -s, --session SESSION   target session (defaults to the active one)
-    --name NAME             name the new tab (defaults to the workspace name)
+    --name NAME             name the new tab (defaults to a derived name)
     --json                  machine-readable JSON output
 ";
 

@@ -30,7 +30,7 @@ impl View {
             };
             // Draw the name, optional aggregate agent state, then the
             // persistent close action. The geometry reserves these cells too.
-            let name = &tab.name;
+            let name = &tab_title(*idx + 1, &tab.name);
             let max_w = pill.width.saturating_sub(1);
             let name_w = (name.chars().count() as u16).min(max_w);
             text(f, pill.x, pill.y, name, base_style, name_w);

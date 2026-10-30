@@ -172,6 +172,7 @@ fn print_help() {
     println!("    kumo tab focus TAB [-s SESSION]");
     println!("    kumo tab kill TAB [-s SESSION]");
     println!("    kumo tab rename TAB NEW_NAME [-s SESSION]");
+    println!("            TAB = tab id, t2 (position) or name; NEW_NAME \"\" resets it");
     println!();
     println!("AGENTS:");
     println!("    kumo agent spawn [-s SESSION] [PROGRAM]");

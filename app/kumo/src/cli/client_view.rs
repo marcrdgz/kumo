@@ -82,8 +82,22 @@ const SESSION_POPUP_H: u16 = 7;
 const COPY_SEARCH_W: u16 = 50;
 const COPY_SEARCH_H: u16 = 5;
 
-fn tab_width(name: &str, has_agent_indicator: bool) -> u16 {
-    let n = name.chars().count() as u16;
+/// Longest tab name a pill shows. Derived names follow the focused pane's
+/// cwd and command, so the cap keeps the bar from reflowing on every `cd`.
+const TAB_NAME_MAX: usize = 20;
+
+/// A tab pill's text: its 1-based position (the `t<N>` selector) and its
+/// name, cut to `TAB_NAME_MAX` characters.
+fn tab_title(position: usize, name: &str) -> String {
+    if name.chars().count() <= TAB_NAME_MAX {
+        return format!("{position} {name}");
+    }
+    let head: String = name.chars().take(TAB_NAME_MAX - 1).collect();
+    format!("{position} {head}…")
+}
+
+fn tab_width(position: usize, name: &str, has_agent_indicator: bool) -> u16 {
+    let n = tab_title(position, name).chars().count() as u16;
     n.saturating_add(2).saturating_add(if has_agent_indicator { 2 } else { 0 })
 }
 fn lighten(c: RColor, amt: u8) -> RColor {
@@ -250,7 +264,6 @@ struct SidebarReorderDrag {
 struct TabReorderDrag {
     session: String,
     tab_id: u64,
-    tab_name: String,
     source_idx: usize,
     target_idx: usize,
     after: bool,
@@ -262,7 +275,7 @@ struct TabReorderDrag {
 #[allow(dead_code)]
 enum FinderItem {
     Session { idx: usize, name: String },
-    Tab { session_idx: usize, tab_idx: usize, session_name: String, tab_name: String },
+    Tab { session_idx: usize, tab_idx: usize, session_name: String, tab_id: u64, tab_name: String },
 }
 
 struct WorkspaceFinder {
@@ -1493,12 +1506,12 @@ impl View {
         if sess.tabs.is_empty() { return None; }
         let cur = sess.active_tab as isize;
         let next = ((cur + delta).rem_euclid(sess.tabs.len() as isize)) as usize;
-        Some(sess.tabs[next].name.clone())
+        Some(sess.tabs[next].id.to_string())
     }
 
     fn tab_at_index(&self, n: usize) -> Option<String> {
         let sess = self.active_session()?;
-        sess.tabs.get(n.saturating_sub(1)).map(|t| t.name.clone())
+        sess.tabs.get(n.saturating_sub(1)).map(|t| t.id.to_string())
     }
 
     /// Aggregate the AI state for a tab. The first value records whether the
@@ -1587,7 +1600,7 @@ impl View {
         let mut visible_end = self.tab_scroll;
         let avail_no_arrow = base_avail.saturating_sub(plus_reserve);
         for idx in self.tab_scroll..sess.tabs.len() {
-            let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
+            let w = tab_width(idx + 1, &sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
             if cur + w - 1 > avail_no_arrow { break; }
             cur += w;
             visible_end = idx + 1;
@@ -1615,7 +1628,7 @@ impl View {
             let mut cur: u16 = 0;
             let mut visible_end = scroll;
             for idx in scroll..sess.tabs.len() {
-                let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
+                let w = tab_width(idx + 1, &sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
                 if cur + w - 1 > avail { break; }
                 cur += w;
                 visible_end = idx + 1;
@@ -1627,7 +1640,7 @@ impl View {
                     let mut c: u16 = 0;
                     let mut e = s;
                     for idx in s..sess.tabs.len() {
-                        let w = tab_width(&sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
+                        let w = tab_width(idx + 1, &sess.tabs[idx].name, self.tab_has_agent(&sess.tabs[idx])) + 1;
                         if c + w - 1 > av { break; }
                         c += w;
                         e = idx + 1;
@@ -1671,7 +1684,7 @@ impl View {
         let right_bound = (area.x as i32 + area.width as i32 - if has_right {1} else {0} - plus_w as i32 - 1).max(area.x as i32) as u16;
         for idx in self.tab_scroll..sess.tabs.len() {
             let tab = &sess.tabs[idx];
-            let w = tab_width(&tab.name, self.tab_has_agent(tab));
+            let w = tab_width(idx + 1, &tab.name, self.tab_has_agent(tab));
             if cur_x + w > right_bound { break; }
             let pill = Rect::new(cur_x, area.y, w, 1);
             let close = Rect::new(cur_x + w - 1, area.y, 1, 1);
@@ -1711,18 +1724,17 @@ impl View {
     }
 
     fn begin_tab_reorder(&mut self, tab_idx: usize) -> bool {
-        let Some((session, tab_id, tab_name)) = self.active_session().and_then(|session| {
+        let Some((session, tab_id)) = self.active_session().and_then(|session| {
             session
                 .tabs
                 .get(tab_idx)
-                .map(|tab| (session.name.clone(), tab.id, tab.name.clone()))
+                .map(|tab| (session.name.clone(), tab.id))
         }) else {
             return false;
         };
         self.tab_reorder_drag = Some(TabReorderDrag {
             session,
             tab_id,
-            tab_name,
             source_idx: tab_idx,
             target_idx: tab_idx,
             after: false,
@@ -1765,7 +1777,7 @@ impl View {
                 });
             }
         } else {
-            let _ = self.send(&Command::TabFocus { session: drag.session, tab: drag.tab_name });
+            let _ = self.send(&Command::TabFocus { session: drag.session, tab: drag.tab_id.to_string() });
         }
         self.update_tab_rects();
         self.mark_dirty();
@@ -1981,18 +1993,18 @@ impl View {
                 self.mark_dirty();
             }
             Action::NextTab => {
-                if let Some(name) = self.cycle_tab(1) {
-                    let _ = self.send(&Command::TabFocus { session, tab: name });
+                if let Some(tab) = self.cycle_tab(1) {
+                    let _ = self.send(&Command::TabFocus { session, tab });
                 }
             }
             Action::PrevTab => {
-                if let Some(name) = self.cycle_tab(-1) {
-                    let _ = self.send(&Command::TabFocus { session, tab: name });
+                if let Some(tab) = self.cycle_tab(-1) {
+                    let _ = self.send(&Command::TabFocus { session, tab });
                 }
             }
             Action::JumpTab(n) => {
-                if let Some(name) = self.tab_at_index(n as usize) {
-                    let _ = self.send(&Command::TabFocus { session, tab: name });
+                if let Some(tab) = self.tab_at_index(n as usize) {
+                    let _ = self.send(&Command::TabFocus { session, tab });
                 }
             }
             Action::NewTab => {
@@ -2002,7 +2014,7 @@ impl View {
                 if let Some(idx) = self.tab_hover {
                     if let Some(sess) = self.active_session() {
                         if let Some(tab) = sess.tabs.get(idx) {
-                            let _ = self.send(&Command::TabClose { session: session.clone(), tab: Some(tab.name.clone()) });
+                            let _ = self.send(&Command::TabClose { session: session.clone(), tab: Some(tab.id.to_string()) });
                             self.mark_dirty();
                             return Ok(());
                         }
@@ -2202,7 +2214,7 @@ impl View {
             for (i, s) in layout.sessions.iter().enumerate() {
                 items.push(FinderItem::Session { idx: i, name: s.name.clone() });
                 for (ti, tab) in s.tabs.iter().enumerate() {
-                    items.push(FinderItem::Tab { session_idx: i, tab_idx: ti, session_name: s.name.clone(), tab_name: tab.name.clone() });
+                    items.push(FinderItem::Tab { session_idx: i, tab_idx: ti, session_name: s.name.clone(), tab_id: tab.id, tab_name: tab.name.clone() });
                 }
             }
         }
@@ -2258,7 +2270,7 @@ impl View {
         self.close_finder();
         match fi {
             FinderItem::Session { name, .. } => { let _ = self.send(&Command::SessionFocus { name }); }
-            FinderItem::Tab { session_name, tab_name, .. } => { let _ = self.send(&Command::TabFocus { session: session_name, tab: tab_name }); }
+            FinderItem::Tab { session_name, tab_id, .. } => { let _ = self.send(&Command::TabFocus { session: session_name, tab: tab_id.to_string() }); }
         }
     }
 
@@ -2883,7 +2895,9 @@ impl View {
 
     fn commit_name(&mut self) {
         let name = self.popup.name.trim().to_string();
-        if name.is_empty() {
+        // An empty tab name hands the tab back to its derived name.
+        let resets_tab = matches!(self.popup.target, Some(PopupTarget::RenameTab { .. }));
+        if name.is_empty() && !resets_tab {
             self.popup.error = Some("name cannot be empty".to_string());
             self.mark_dirty();
             return;
@@ -2927,10 +2941,10 @@ impl View {
                 }
             }
             Some(PopupTarget::RenameTab { session, tab }) => {
-                let (sname, tname) = self.layout.as_ref().and_then(|l| l.sessions.get(session)).and_then(|s| s.tabs.get(tab).map(|t| (s.name.clone(), t.name.clone()))).unwrap_or_default();
-                if !sname.is_empty() {
+                let target = self.layout.as_ref().and_then(|l| l.sessions.get(session)).and_then(|s| s.tabs.get(tab).map(|t| (s.name.clone(), t.id)));
+                if let Some((sname, tab_id)) = target {
                     self.popup.open = false;
-                    let _ = self.send(&Command::TabRename { session: sname, tab: tname, new_name: name });
+                    let _ = self.send(&Command::TabRename { session: sname, tab: tab_id.to_string(), new_name: name });
                 }
             }
             None => {}
@@ -3133,8 +3147,9 @@ impl View {
                 }
                 CtxTarget::Tab(s_idx, t_idx) => {
                     if let Some(sess) = self.layout.as_ref().and_then(|l| l.sessions.get(s_idx)) {
-                        let tname = sess.tabs.get(t_idx).map(|t| t.name.clone()).unwrap_or_default();
-                        let _ = self.send(&Command::TabClose { session: sess.name.clone(), tab: Some(tname) });
+                        if let Some(tab) = sess.tabs.get(t_idx) {
+                            let _ = self.send(&Command::TabClose { session: sess.name.clone(), tab: Some(tab.id.to_string()) });
+                        }
                     }
                 }
             },
@@ -4148,7 +4163,7 @@ mod tests {
         assert!(view.tab_has_agent(tab));
         assert_eq!(view.tab_agent_indicator(tab), None);
         view.update_tab_rects();
-        assert_eq!(view.tab_rects[0].1.width, 5);
+        assert_eq!(view.tab_rects[0].1.width, 7);
     }
 
     #[test]
@@ -4158,14 +4173,14 @@ mod tests {
         view.spinner_frame = 3;
         view.update_tab_rects();
         let (_, pill, close) = view.tab_rects[0];
-        assert_eq!(pill.width, 5);
-        assert_eq!(close.x, pill.x + 4);
+        assert_eq!(pill.width, 7);
+        assert_eq!(close.x, pill.x + 6);
 
         let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|frame| view.render_tab_bar(frame)).unwrap();
         let buffer = term.backend().buffer();
-        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), SPINNER_FRAMES[3]);
+        assert_eq!(buffer.cell((pill.x + 4, pill.y)).unwrap().symbol(), SPINNER_FRAMES[3]);
         assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
     }
 
@@ -4183,15 +4198,15 @@ mod tests {
 
         view.update_tab_rects();
         let (_, pill, close) = view.tab_rects[0];
-        assert_eq!(pill.width, 5);
-        assert_eq!(close.x, pill.x + 4);
+        assert_eq!(pill.width, 7);
+        assert_eq!(close.x, pill.x + 6);
         assert!(view.tab_right_arrow_rect().is_some(), "the second tab should overflow");
 
         let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|frame| view.render_tab_bar(frame)).unwrap();
         let buffer = term.backend().buffer();
-        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 4, pill.y)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
     }
 
@@ -4677,6 +4692,14 @@ mod tests {
     }
 
     #[test]
+    fn tab_titles_show_the_position_and_cap_long_names() {
+        assert_eq!(tab_title(2, "kumo"), "2 kumo");
+        let long = "a-very-long-directory-name";
+        assert_eq!(tab_title(10, long), format!("10 {}…", &long[..TAB_NAME_MAX - 1]));
+        assert_eq!(tab_width(10, long, false), (3 + TAB_NAME_MAX + 2) as u16);
+    }
+
+    #[test]
     fn tab_reorder_calculates_final_index_after_removal() {
         assert_eq!(tab_reorder_index(0, 2, true), Some(2));
         assert_eq!(tab_reorder_index(2, 0, false), Some(0));
@@ -4691,8 +4714,8 @@ mod tests {
         view.layout = Some(panes_layout(&[(1, AgentStatus::Idle)]));
         view.update_tab_rects();
         let (_, pill, close) = view.tab_rects[0];
-        assert_eq!(pill.width, 5);
-        assert_eq!(close.x, pill.x + 4, "agent tabs reserve a stable status cell before close");
+        assert_eq!(pill.width, 7);
+        assert_eq!(close.x, pill.x + 6, "agent tabs reserve a stable status cell before close");
 
         let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
         let mut term = ratatui::Terminal::new(backend).unwrap();
@@ -4701,8 +4724,10 @@ mod tests {
         let theme = view.current_theme();
         assert_eq!(buffer.cell((pill.x, pill.y)).unwrap().bg, theme.accent);
         assert_eq!(buffer.cell((pill.x + 1, pill.y)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 2, pill.y)).unwrap().symbol(), "1");
         assert_eq!(buffer.cell((pill.x + 3, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 4, pill.y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((pill.x + 5, pill.y)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
     }
 

@@ -71,7 +71,11 @@ pub struct SavedSession {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SavedTab {
     pub id: u64,
-    pub name: String,
+    /// The user's custom name; `None` derives the label at runtime. States up
+    /// to 0.8 stored the old numeric default (`"1"`, `"2"`, …) here, which
+    /// restore maps back to `None`.
+    #[serde(default)]
+    pub name: Option<String>,
     pub zoom: bool,
     pub focus: u64,
     pub tree: SavedNode,
@@ -210,7 +214,7 @@ impl SavedStateV1 {
             name: s.name,
             workspace: s.workspace,
             active_tab: 0,
-            tabs: vec![SavedTab { id: 1, name: "1".to_string(), zoom: s.zoom, focus: s.focus, tree: s.tree }],
+            tabs: vec![SavedTab { id: 1, name: None, zoom: s.zoom, focus: s.focus, tree: s.tree }],
             panes: s.panes,
         }).collect();
         SavedState { version: STATE_VERSION, active: self.active, sessions }
@@ -296,7 +300,7 @@ mod tests {
                 active_tab: 0,
                 tabs: vec![SavedTab {
                     id: 1,
-                    name: "1".into(),
+                    name: None,
                     zoom: false,
                     focus: 11,
                     tree: SavedNode::Split {
@@ -513,7 +517,7 @@ mod tests {
                     tree_pane_ids(&tab.tree, &mut ids);
                     for id in ids {
                         let pane = session.panes.iter().find(|p| p.id == id);
-                        let pane = pane.unwrap_or_else(|| panic!("{name}: tab {} shows unknown pane {id}", tab.name));
+                        let pane = pane.unwrap_or_else(|| panic!("{name}: tab {} shows unknown pane {id}", tab.id));
                         assert!(pane.master_fd.is_some(), "{name}: pane {id} lost its PTY descriptor");
                         assert!(pane.cols > 0 && pane.rows > 0, "{name}: pane {id} lost its size");
                     }
@@ -553,7 +557,7 @@ mod tests {
         let loaded = load(&path).unwrap().expect("migrated");
         assert_eq!(loaded.version, 2);
         assert_eq!(loaded.sessions[0].tabs.len(), 1);
-        assert_eq!(loaded.sessions[0].tabs[0].name, "1");
+        assert_eq!(loaded.sessions[0].tabs[0].name, None);
         assert_eq!(loaded.sessions[0].tabs[0].focus, 42);
         assert!(loaded.sessions[0].tabs[0].zoom);
         let _ = std::fs::remove_dir_all(&dir);

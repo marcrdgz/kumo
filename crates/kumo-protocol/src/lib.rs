@@ -61,7 +61,10 @@ mod crossterm;
 /// linked worktrees under one project. v14 adds `TabMove`. v15 makes the
 /// protocol additive-compatible: `Welcome` carries [`PROTOCOL_MINOR`], daemons
 /// answer undecodable commands with `Error { code: "unsupported" }`, and
-/// clients skip undecodable events (see [`read_event`]).
+/// clients skip undecodable events (see [`read_event`]). v16 derives tab
+/// names from their focused pane unless the user named the tab, so tab
+/// selectors resolve all digits as the stable tab id and `t<N>` as the
+/// 1-based position instead of matching the old numeric default names.
 ///
 /// This is the protocol **major**: the daemon rejects clients whose major
 /// differs. Additive changes bump [`PROTOCOL_MINOR`] instead, and must only
@@ -69,7 +72,7 @@ mod crossterm;
 /// enum variants by index and structs positionally, so adding a field,
 /// reordering variants, or adding a variant to a nested enum (e.g.
 /// `AgentStatus`) breaks older peers and needs a major bump.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 /// Protocol minor: bumped for every additive change (a variant appended to
 /// [`Command`] or [`DaemonEvent`]); reset to 0 on a major bump. Clients read
 /// the daemon's minor from `Welcome` to feature-detect newer commands.
@@ -399,6 +402,8 @@ pub enum LayoutNode {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct TabLayout {
     pub id: u64,
+    /// Display name: the user's custom name, else derived from the focused
+    /// pane (agent, foreground command, cwd basename).
     pub name: String,
     /// The focused pane in this tab.
     pub focus: u64,
@@ -908,17 +913,19 @@ pub enum Command {
         name: Option<String>,
         workspace: Option<std::path::PathBuf>,
     },
-    /// Close a tab in `session` (default: active tab).
+    /// Close a tab in `session` (default: active tab). Tab selectors: all
+    /// digits is the stable tab id, `t<N>` the 1-based position, anything
+    /// else a tab name.
     TabClose {
         session: String,
         tab: Option<String>,
     },
-    /// Focus a tab in `session` (by id, name or 1-based index).
+    /// Focus a tab in `session` (by tab selector, see `TabClose`).
     TabFocus {
         session: String,
         tab: String,
     },
-    /// Rename a tab.
+    /// Rename a tab; an empty `new_name` restores its derived name.
     TabRename {
         session: String,
         tab: String,

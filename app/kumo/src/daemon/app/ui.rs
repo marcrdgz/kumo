@@ -84,6 +84,28 @@ impl App {
         }
     }
 
+    /// A tab's display name: the user's custom name, else derived from its
+    /// focused pane — the pane's custom name, the agent, the foreground
+    /// command, then the working directory's basename.
+    pub(super) fn tab_label(&self, tab: &super::Tab) -> String {
+        if let Some(name) = &tab.custom_name {
+            return name.clone();
+        }
+        let pid = tab.tree.focus;
+        let Some(pane) = self.panes.get(&pid) else { return "shell".to_string() };
+        if let Some(name) = &pane.custom_name {
+            return name.clone();
+        }
+        if pane.is_ai_cli() {
+            return self.agent_label(pid);
+        }
+        if let Some(command) = &pane.foreground.command {
+            return command.clone();
+        }
+        let cwd = pane.foreground.cwd.clone().or_else(|| pane.vt.pwd()).unwrap_or_else(|| pane.cwd.clone());
+        dir_label(&cwd)
+    }
+
     /// Export the full semantic layout tree: sessions → splits (ratios) →
     /// panes (title, cwd, agent status, terminal flags). Pushed to layout
     /// subscribers; clients derive geometry and draw all chrome. Cached via
@@ -103,7 +125,7 @@ impl App {
             .map(|(i, s)| {
                 let tabs: Vec<kumo_protocol::TabLayout> = s.tabs.iter().map(|t| kumo_protocol::TabLayout {
                     id: t.id,
-                    name: t.name.clone(),
+                    name: self.tab_label(t),
                     focus: t.tree.focus,
                     zoom: t.zoom,
                     root: t.tree.root.as_ref().map(|r| Box::new(self.layout_node(r))),
@@ -184,6 +206,14 @@ impl App {
             alt_screen: pane.map(|p| p.in_alt_screen()).unwrap_or(false),
         }
     }
+}
+
+/// `~` for the home directory, else the last path component (`/` for root).
+fn dir_label(path: &std::path::Path) -> String {
+    if std::env::var_os("HOME").is_some_and(|home| path == std::path::Path::new(&home)) {
+        return "~".to_string();
+    }
+    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
 
 /// Default terminal size for a pane until a client resizes it via `PaneResize`.

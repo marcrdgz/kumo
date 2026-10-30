@@ -137,15 +137,16 @@ impl App {
     }
 
     /// Mark plain shell panes as AI CLI panes when opencode/claude is running
-    /// inside them, and clear the flag once the process exits. Runs at most
+    /// inside them, and clear the flag once the process exits. The same scan
+    /// samples each pane's foreground job, which names its tab. Runs at most
     /// every `AI_SCAN_INTERVAL`. Spawns a background thread for the process
     /// scan to avoid blocking the main loop.
     pub(super) fn refresh_ai_cli(&mut self) {
         // Drain completed background AI scans
-        let mut ai_changed = false;
+        let mut layout_changed = false;
         while let Ok((snapshot, pane_pids)) = self.ai_rx.try_recv() {
             let snapshot_ref = snapshot.as_ref();
-            for (pane_id, pid) in pane_pids {
+            for (pane_id, pid, foreground) in pane_pids {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     // A scan may finish after the pane's shell has exited or
                     // been replaced. Never apply the old process tree to a
@@ -158,11 +159,16 @@ impl App {
                         _ => None,
                     };
                     if pane.detected_ai_name != name {
-                        ai_changed = true;
+                        layout_changed = true;
                     }
                     let new_detected = name.is_some();
                     if !pane.is_ai && pane.detected_ai != new_detected {
-                        ai_changed = true;
+                        layout_changed = true;
+                    }
+                    if pane.foreground != foreground {
+                        // The foreground job names the tab.
+                        layout_changed = true;
+                        pane.foreground = foreground;
                     }
                     pane.detected_ai_name = name.clone();
                     if !pane.is_ai {
@@ -173,7 +179,7 @@ impl App {
             self.agent_process_snapshot = snapshot;
             self.ai_scan_in_progress = false;
         }
-        if ai_changed {
+        if layout_changed {
             self.bump_layout_version();
         }
 
@@ -185,18 +191,24 @@ impl App {
         if !self.ai_scan_in_progress {
             self.last_ai_scan = Instant::now();
             self.ai_scan_in_progress = true;
-            // Capture pane IDs and their process IDs before spawning the thread
-            let pane_pids: Vec<(u64, Option<u32>)> = self
+            // Capture pane IDs, their process IDs and foreground process
+            // groups (a cheap `tcgetpgrp`) before spawning the thread
+            let pane_pids: Vec<(u64, Option<u32>, Option<u32>)> = self
                 .panes
                 .iter()
-                .map(|(&id, pane)| (id, pane.pty.process_id()))
+                .map(|(&id, pane)| (id, pane.pty.process_id(), pane.foreground_pgid()))
                 .collect();
             let tx = self.ai_tx.clone();
             if std::thread::Builder::new()
                 .name("kumo-ai-scan".into())
                 .spawn(move || {
-                    let snapshot = crate::daemon::pane::ProcessSnapshot::capture();
-                    let _ = tx.send((snapshot, pane_pids));
+                    use crate::daemon::pane::{ForegroundJob, ProcessSnapshot};
+                    let snapshot = ProcessSnapshot::capture();
+                    let probes = pane_pids
+                        .into_iter()
+                        .map(|(id, root, pgid)| (id, root, ForegroundJob::probe(snapshot.as_ref(), root, pgid)))
+                        .collect();
+                    let _ = tx.send((snapshot, probes));
                 })
                 .is_err()
             {
