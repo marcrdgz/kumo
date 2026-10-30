@@ -693,6 +693,30 @@ pub struct PaneInfo {
     pub active: bool,
 }
 
+/// How a tab selector string (the `tab` of `TabClose`/`TabFocus`/`TabRename`)
+/// is read: all digits is the stable tab id, `t<N>` the 1-based position in
+/// the tab bar, anything else a tab name. Shared by the daemon and the CLI so
+/// both resolve a selector the same way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabSelector<'a> {
+    Id(u64),
+    Position(usize),
+    Name(&'a str),
+}
+
+impl<'a> TabSelector<'a> {
+    pub fn parse(spec: &'a str) -> Self {
+        if let Ok(id) = spec.parse() {
+            return Self::Id(id);
+        }
+        let position = spec
+            .strip_prefix('t')
+            .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse().ok());
+        position.map_or(Self::Name(spec), Self::Position)
+    }
+}
+
 /// Minimal info about one tab, for `kumo tab list`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct TabInfo {

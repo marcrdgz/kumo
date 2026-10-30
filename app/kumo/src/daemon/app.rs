@@ -9,6 +9,7 @@ use ratatui::buffer::Buffer;
 use kumo_core::layout::{LayoutTree, SplitDir};
 use kumo_core::theme::OwnedTheme;
 use kumo_core::Launch;
+use kumo_protocol::TabSelector;
 use crate::daemon::agents::{self, AgentStatus};
 use crate::daemon::alert::AgentToast;
 use crate::daemon::pane::{Pane, PtyEvent};
@@ -97,20 +98,11 @@ impl Session {
     }
 }
 
-/// The 1-based tab position in a `t<N>` selector (the number in the tab bar).
-fn tab_position(spec: &str) -> Option<usize> {
-    let digits = spec.strip_prefix('t')?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse().ok()
-}
-
 /// Whether `name` would be read as a tab id or position by
 /// `App::tab_index_by_spec`, so a tab carrying it could not be addressed by
 /// name.
 fn is_tab_selector(name: &str) -> bool {
-    tab_position(name).is_some() || name.parse::<u64>().is_ok()
+    !matches!(TabSelector::parse(name), TabSelector::Name(_))
 }
 
 /// A restored custom tab name. Saved states up to 0.8 carry the old numeric
@@ -1018,24 +1010,23 @@ impl App {
     /// label; the first match wins).
     fn tab_index_by_spec(&self, s_idx: usize, spec: &str) -> Option<usize> {
         let tabs = &self.sessions[s_idx].tabs;
-        if let Ok(id) = spec.parse::<u64>() {
-            return tabs.iter().position(|t| t.id == id);
+        match TabSelector::parse(spec) {
+            TabSelector::Id(id) => tabs.iter().position(|t| t.id == id),
+            TabSelector::Position(n) => (1..=tabs.len()).contains(&n).then(|| n - 1),
+            TabSelector::Name(name) => tabs
+                .iter()
+                .position(|t| t.custom_name.as_deref() == Some(name))
+                .or_else(|| tabs.iter().position(|t| self.tab_label(t) == name)),
         }
-        if let Some(n) = tab_position(spec) {
-            return (1..=tabs.len()).contains(&n).then(|| n - 1);
-        }
-        tabs.iter()
-            .position(|t| t.custom_name.as_deref() == Some(spec))
-            .or_else(|| tabs.iter().position(|t| self.tab_label(t) == spec))
     }
 
     pub(crate) fn new_tab_in_session(&mut self, session_name: &str, name: Option<&str>, workspace: Option<PathBuf>) -> Result<String> {
         let Some(idx) = self.sessions.iter().position(|s| s.name == session_name) else {
-            return Ok(format!("no session {session_name:?}"));
+            return Ok(format!("error: session_not_found: no session {session_name:?}"));
         };
         let name = name.map(str::trim).filter(|n| !n.is_empty());
         if let Some(name) = name.filter(|n| is_tab_selector(n)) {
-            return Ok(format!("tab name {name:?} looks like a tab id or position"));
+            return Ok(format!("error: invalid_argument: tab name {name:?} looks like a tab id or position"));
         }
         let ws = workspace.unwrap_or_else(|| self.sessions[idx].workspace.clone());
         let custom_name = name.map(|n| self.unique_tab_name(idx, n));
@@ -1055,12 +1046,12 @@ impl App {
 
     pub(crate) fn close_tab_in_session(&mut self, session_name: &str, tab_spec: Option<&str>) -> Result<String> {
         let Some(s_idx) = self.sessions.iter().position(|s| s.name == session_name) else {
-            return Ok(format!("no session {session_name:?}"));
+            return Ok(format!("error: session_not_found: no session {session_name:?}"));
         };
         let t_idx = match tab_spec {
             Some(spec) => match self.tab_index_by_spec(s_idx, spec) {
                 Some(i) => i,
-                None => return Ok(format!("no tab {spec:?} in {session_name:?}")),
+                None => return Ok(format!("error: tab_not_found: no tab {spec:?} in {session_name:?}")),
             },
             None => self.sessions[s_idx].active_tab,
         };
@@ -1105,10 +1096,10 @@ impl App {
 
     pub(crate) fn rename_tab_in_session(&mut self, session: &str, tab: &str, new_name: &str) -> Result<String> {
         let Some(s_idx) = self.sessions.iter().position(|s| s.name == session) else {
-            return Ok(format!("no session {session:?}"));
+            return Ok(format!("error: session_not_found: no session {session:?}"));
         };
         let Some(t_idx) = self.tab_index_by_spec(s_idx, tab) else {
-            return Ok(format!("no tab {tab:?} in {session:?}"));
+            return Ok(format!("error: tab_not_found: no tab {tab:?} in {session:?}"));
         };
         let name = new_name.trim().to_string();
         // An empty name hands the tab back to its derived label.
@@ -1118,10 +1109,10 @@ impl App {
             return Ok("tab name reset".to_string());
         }
         if is_tab_selector(&name) {
-            return Ok(format!("tab name {name:?} looks like a tab id or position"));
+            return Ok(format!("error: invalid_argument: tab name {name:?} looks like a tab id or position"));
         }
         if self.sessions[s_idx].tabs.iter().enumerate().any(|(i,t)| i!=t_idx && t.custom_name.as_deref()==Some(name.as_str())) {
-            return Ok(format!("a tab named '{name}' already exists"));
+            return Ok(format!("error: invalid_argument: a tab named '{name}' already exists"));
         }
         self.sessions[s_idx].tabs[t_idx].custom_name = Some(name.clone());
         self.bump_layout_version();
@@ -1762,7 +1753,8 @@ mod tests {
         app.rename_tab_in_session(&session, "t2", "build").unwrap();
         assert_eq!(labels(&app), [dir.clone(), "build".to_string()]);
         for selector in ["3", "t1"] {
-            app.rename_tab_in_session(&session, "build", selector).unwrap();
+            let reply = app.rename_tab_in_session(&session, "build", selector).unwrap();
+            assert!(reply.starts_with("error: invalid_argument:"), "{reply}");
             assert_eq!(app.tab_label(&app.sessions[0].tabs[1]), "build", "{selector:?} would shadow a tab selector");
         }
 

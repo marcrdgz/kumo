@@ -98,8 +98,9 @@ or changing an error code is a breaking change (see the
 | --- | --- |
 | `session_not_found` | The session (`-s`, or a composite's `sN`) does not exist |
 | `pane_not_found` | The pane id, composite position or agent alias does not exist |
+| `tab_not_found` | The tab id, `t<N>` position or tab name does not exist |
 | `not_an_agent` | The command needs an agent pane, but the pane runs a plain shell |
-| `invalid_argument` | A value was rejected (empty name, unknown agent kind, ambiguous alias, …) |
+| `invalid_argument` | A value was rejected (empty name, a tab name that reads as a tab selector, unknown agent kind, ambiguous alias, …) |
 | `timeout` | A wait (`agent wait`, `pane wait-output`, `agent start`) ran out of time |
 | `agent_blocked` | `agent wait`/`agent prompt` found the agent blocked on input |
 | `agent_not_ready` | `agent start` / `worktree create --agent`: the agent was blocked during startup |

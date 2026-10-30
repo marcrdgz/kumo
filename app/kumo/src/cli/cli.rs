@@ -453,10 +453,13 @@ fn run_inner(args: &[String]) -> Result<()> {
                     session: resolve_session(&mut stream, session)?,
                     tab: Some(tab),
                 },
-                CliCmd::TabFocus { session, tab } => Command::TabFocus {
-                    session: resolve_session(&mut stream, session)?,
-                    tab,
-                },
+                CliCmd::TabFocus { session, tab } => {
+                    let session = resolve_session(&mut stream, session)?;
+                    // Like pane focus, the daemon doesn't reply to tab focus.
+                    let sessions = fetch_session_list(&mut stream)?;
+                    ensure_tab_in_session(&sessions, &session, &tab)?;
+                    Command::TabFocus { session, tab }
+                }
                 CliCmd::TabRename { session, tab, new_name } => Command::TabRename {
                     session: resolve_session(&mut stream, session)?,
                     tab,
@@ -1630,6 +1633,24 @@ fn ensure_pane_in_session(sessions: &[kumo_protocol::SessionInfo], session: &str
         .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {session:?}"))?;
     if !target.tabs.iter().any(|tab| tab.panes.iter().any(|pane| pane.id == pane_id)) {
         anyhow::bail!("pane_not_found: no pane {pane_id} in {session:?}");
+    }
+    Ok(())
+}
+
+/// Mirrors the daemon's tab selector resolution; a tab's listed `name` is
+/// its custom name or derived label, the two names the daemon matches.
+fn ensure_tab_in_session(sessions: &[kumo_protocol::SessionInfo], session: &str, tab: &str) -> Result<()> {
+    let target = sessions
+        .iter()
+        .find(|candidate| candidate.name == session)
+        .ok_or_else(|| anyhow::anyhow!("session_not_found: no session {session:?}"))?;
+    let found = match kumo_protocol::TabSelector::parse(tab) {
+        kumo_protocol::TabSelector::Id(id) => target.tabs.iter().any(|t| t.id == id),
+        kumo_protocol::TabSelector::Position(n) => (1..=target.tabs.len()).contains(&n),
+        kumo_protocol::TabSelector::Name(name) => target.tabs.iter().any(|t| t.name == name),
+    };
+    if !found {
+        anyhow::bail!("tab_not_found: no tab {tab:?} in {session:?}");
     }
     Ok(())
 }

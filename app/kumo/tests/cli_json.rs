@@ -179,3 +179,66 @@ fn errors_have_stable_codes_and_exit_status() {
 
     daemon.ok(&["kill"]);
 }
+
+/// `(id, name, active)` of every tab in the default session, in tab-bar order.
+fn tabs(daemon: &Daemon) -> Vec<(u64, String, bool)> {
+    daemon.ok(&["tab", "list"])["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["id"].as_u64().unwrap(), t["name"].as_str().unwrap().to_string(), t["active"].as_bool().unwrap()))
+        .collect()
+}
+
+fn active_tab(daemon: &Daemon) -> u64 {
+    tabs(daemon).into_iter().find(|(_, _, active)| *active).unwrap().0
+}
+
+/// Tab selectors are part of the machine API: all digits is the stable tab
+/// id, `t<N>` the 1-based tab-bar position, anything else a name (custom or
+/// derived). Names that would read as a selector are rejected.
+#[test]
+fn tab_selectors_resolve_by_id_position_and_name() {
+    let daemon = Daemon::start();
+    let ws = daemon.root.join("ws");
+    let ws = ws.to_str().unwrap();
+    daemon.ok(&["tab", "new", ws]);
+    daemon.ok(&["tab", "new", ws, "--name", "api"]);
+    let ids: Vec<u64> = tabs(&daemon).iter().map(|(id, ..)| *id).collect();
+    let names: Vec<String> = tabs(&daemon).into_iter().map(|(_, name, _)| name).collect();
+    assert_eq!(names, ["ws", "ws", "api"], "unnamed tabs derive their name from the focused pane");
+
+    daemon.ok(&["tab", "focus", "t1"]);
+    assert_eq!(active_tab(&daemon), ids[0], "t1 is the first tab");
+    daemon.ok(&["tab", "focus", &ids[1].to_string()]);
+    assert_eq!(active_tab(&daemon), ids[1], "digits are the tab id");
+    daemon.ok(&["tab", "focus", "api"]);
+    assert_eq!(active_tab(&daemon), ids[2], "a custom name");
+    daemon.ok(&["tab", "focus", "ws"]);
+    assert_eq!(active_tab(&daemon), ids[0], "a derived name resolves to its first match");
+
+    // A digit selector is never read as a position or name.
+    let missing_id = (ids.iter().max().unwrap() + 1).to_string();
+    for missing in [missing_id.as_str(), "t4", "t0", "nope"] {
+        daemon.fails_with(&["tab", "focus", missing], "tab_not_found");
+        daemon.fails_with(&["tab", "close", missing], "tab_not_found");
+        daemon.fails_with(&["tab", "rename", missing, "x"], "tab_not_found");
+    }
+    for reserved in ["7", "t1"] {
+        daemon.fails_with(&["tab", "rename", "api", reserved], "invalid_argument");
+        daemon.fails_with(&["tab", "new", ws, "--name", reserved], "invalid_argument");
+    }
+    daemon.fails_with(&["tab", "rename", "t1", "api"], "invalid_argument");
+
+    daemon.ok(&["tab", "rename", "t2", "build"]);
+    daemon.ok(&["tab", "rename", "build", ""]);
+    assert_eq!(tabs(&daemon)[1].1, "ws", "an empty name restores the derived one");
+
+    daemon.ok(&["tab", "close", &ids[1].to_string()]);
+    let left: Vec<u64> = tabs(&daemon).iter().map(|(id, ..)| *id).collect();
+    assert_eq!(left, [ids[0], ids[2]], "closing by id keeps the other ids stable");
+    daemon.ok(&["tab", "focus", "t2"]);
+    assert_eq!(active_tab(&daemon), ids[2], "positions follow the tab bar after a close");
+
+    daemon.ok(&["kill"]);
+}
