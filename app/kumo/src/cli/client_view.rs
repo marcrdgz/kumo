@@ -106,6 +106,12 @@ fn lighten(c: RColor, amt: u8) -> RColor {
         _ => c,
     }
 }
+fn darken(c: RColor, amt: u8) -> RColor {
+    match c {
+        RColor::Rgb(r, g, b) => RColor::Rgb(r.saturating_sub(amt), g.saturating_sub(amt), b.saturating_sub(amt)),
+        _ => c,
+    }
+}
 
 /// Foreground with readable contrast against a theme's input surface. Built-in
 /// themes use a light neutral surface; custom themes may choose a dark one.
@@ -709,6 +715,8 @@ pub struct View {
     sidebar_tab: SidebarTab,
     sidebar_scroll: (u16, u16),
     tab_hover: Option<usize>,
+    /// Pointer is on the hovered tab's close cell (danger highlight).
+    tab_close_hover: bool,
     tab_rects: Vec<(usize, Rect, Rect)>, // (tab_idx, pill rect, close rect)
     tab_scroll: usize,
     tab_reorder_drag: Option<TabReorderDrag>,
@@ -896,6 +904,7 @@ impl View {
             sidebar_filter: String::new(),
             sidebar_filter_active: false,
             tab_hover: None,
+            tab_close_hover: false,
             tab_rects: Vec::new(),
             tab_scroll: 0,
             tab_reorder_drag: None,
@@ -1714,9 +1723,12 @@ impl View {
         }
         for (idx, pill, close) in &self.tab_rects {
             if pill.contains(Position::new(x, y)) {
-                // The close cell is always drawn, so it is clickable without a
-                // prior hover.
-                let is_close = close.contains(Position::new(x, y));
+                // Only a visible close cell is clickable: the active tab's, or
+                // a hovered one. Inactive tabs leave the cell blank at rest so a
+                // click there (e.g. without motion reporting) never closes.
+                let visible = self.active_session().is_some_and(|s| s.active_tab == *idx)
+                    || self.tab_hover == Some(*idx);
+                let is_close = visible && close.contains(Position::new(x, y));
                 return Some((*idx, is_close));
             }
         }
@@ -3797,6 +3809,7 @@ mod tests {
             sidebar_filter: String::new(),
             sidebar_filter_active: false,
             tab_hover: None,
+            tab_close_hover: false,
             tab_rects: Vec::new(),
             tab_scroll: 0,
             tab_reorder_drag: None,
@@ -4181,7 +4194,35 @@ mod tests {
         term.draw(|frame| view.render_tab_bar(frame)).unwrap();
         let buffer = term.backend().buffer();
         assert_eq!(buffer.cell((pill.x + 4, pill.y)).unwrap().symbol(), SPINNER_FRAMES[3]);
-        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "×");
+    }
+
+    #[test]
+    fn inactive_tab_close_is_hidden_and_inert_until_hovered() {
+        let mut view = test_view();
+        view.cols = 120;
+        let mut layout = panes_layout(&[(1, AgentStatus::Idle)]);
+        let mut second = layout.sessions[0].tabs[0].clone();
+        second.id = 2;
+        second.name = "second".into();
+        layout.sessions[0].tabs.push(second);
+        view.layout = Some(layout);
+        view.update_tab_rects();
+        let (idx, _, close) = view.tab_rects[1];
+        assert_eq!(idx, 1);
+
+        let draw_close = |view: &View| {
+            let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.render_tab_bar(frame)).unwrap();
+            term.backend().buffer().cell((close.x, close.y)).unwrap().symbol().to_string()
+        };
+        assert_eq!(draw_close(&view), " ");
+        assert_eq!(view.tab_hit(close.x, close.y), Some((1, false)), "a hidden close cell must not close");
+
+        view.tab_hover = Some(1);
+        assert_eq!(draw_close(&view), "×");
+        assert_eq!(view.tab_hit(close.x, close.y), Some((1, true)));
     }
 
     #[test]
@@ -4207,7 +4248,7 @@ mod tests {
         term.draw(|frame| view.render_tab_bar(frame)).unwrap();
         let buffer = term.backend().buffer();
         assert_eq!(buffer.cell((pill.x + 4, pill.y)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "×");
     }
 
     #[test]
@@ -4728,7 +4769,7 @@ mod tests {
         assert_eq!(buffer.cell((pill.x + 3, pill.y)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((pill.x + 4, pill.y)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((pill.x + 5, pill.y)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "x");
+        assert_eq!(buffer.cell((close.x, close.y)).unwrap().symbol(), "×");
     }
 
     #[test]

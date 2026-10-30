@@ -29,8 +29,13 @@ impl View {
         // Tab bar hover tracking (y==0) — update before click handling so close "x" appears
         if m.kind == MouseEventKind::Moved {
             let new_hover = self.tab_hit(x, y).map(|(idx, _)| idx);
-            if new_hover != self.tab_hover {
-                self.tab_hover = new_hover;
+            let hover_changed = new_hover != self.tab_hover;
+            self.tab_hover = new_hover;
+            // Re-hit after updating the hover: the close cell is only live once
+            // its tab is hovered or active.
+            let close_hover = self.tab_hit(x, y).is_some_and(|(_, is_close)| is_close);
+            if hover_changed || close_hover != self.tab_close_hover {
+                self.tab_close_hover = close_hover;
                 self.update_tab_rects();
                 self.mark_dirty();
             }

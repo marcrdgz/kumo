@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(buf.cell((27, 0)).unwrap().symbol(), " ");
         assert_eq!(buf.cell((28, 0)).unwrap().symbol(), "1");
         assert_eq!(buf.cell((29, 0)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((30, 0)).unwrap().symbol(), "x");
+        assert_eq!(buf.cell((30, 0)).unwrap().symbol(), "×");
         // Pane border at the top-left of the pane area (below tab bar) — now rounded by default.
         assert_eq!(buf.cell((26, 1)).unwrap().symbol(), "╭");
         // The title chip carries the pane label (pane frame at y=1).

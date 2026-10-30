@@ -50,14 +50,19 @@ impl View {
                     Style::default().fg(marker_fg).bg(pill_bg).add_modifier(Modifier::BOLD),
                 );
             }
-            if is_hover {
-                let x_fg = if active { fg } else { theme.red };
-                put(f, close.x, close.y, "x", Style::default().fg(x_fg).bg(pill_bg).add_modifier(Modifier::BOLD));
-            } else {
-                // Persistent ghost close hint: always visible (clickable without
-                // a prior hover), brightening to red on hover.
-                let ghost = lighten(pill_bg, if active { 26 } else { 16 });
-                put(f, close.x, close.y, "x", Style::default().fg(ghost).bg(pill_bg));
+            // Close affordance: always on the active tab, on hover elsewhere.
+            // Colors keep >= 3:1 against the pill (WCAG 1.4.11). The pointer on
+            // the cell itself gets a slightly darker button-like background,
+            // plus a red danger cue where red stays readable (not on the accent).
+            if active || is_hover {
+                let on_close = is_hover && self.tab_close_hover;
+                let style = if on_close {
+                    let x_fg = if active { fg } else { theme.red };
+                    Style::default().fg(x_fg).bg(darken(pill_bg, 24)).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(fg).bg(pill_bg)
+                };
+                put(f, close.x, close.y, "×", style);
             }
         }
         // Plus button
