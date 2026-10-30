@@ -109,7 +109,7 @@ impl OwnedTheme {
 
 /// All selectable built-in themes, in Settings-popup order. Custom (if defined
 /// in `~/.config/kumo/config.toml`) appears last as an extra entry.
-pub const THEMES: [Theme; 8] = [
+pub const THEMES: [Theme; 10] = [
     Theme {
         name: "Catppuccin Mocha",
         palette: [
@@ -210,40 +210,6 @@ pub const THEMES: [Theme; 8] = [
         green: RColor::Rgb(0x4a, 0xde, 0x80),
         orange: RColor::Rgb(0xf9, 0x73, 0x16),
         red: RColor::Rgb(0xff, 0x54, 0x70),
-        input_bg: INPUT_SURFACE,
-    },
-    Theme {
-        name: "Toxic Arachnid",
-        palette: [
-            ColorRgb::new(0x09, 0x0a, 0x0f), // Black      (carbon)
-            ColorRgb::new(0xff, 0x38, 0x60), // Red        (neon red)
-            ColorRgb::new(0x00, 0xff, 0x88), // Green      (matrix)
-            ColorRgb::new(0xff, 0xd1, 0x66), // Yellow     (amber)
-            ColorRgb::new(0x3b, 0x82, 0xf6), // Blue       (blue)
-            ColorRgb::new(0x9d, 0x4e, 0xdd), // Magenta    (neon purple)
-            ColorRgb::new(0x00, 0xe5, 0xff), // Cyan       (cyan)
-            ColorRgb::new(0xd1, 0xd5, 0xdb), // White      (light gray)
-            ColorRgb::new(0x12, 0x15, 0x1e), // BrightBlack (slate)
-            ColorRgb::new(0xff, 0x66, 0x80), // BrightRed
-            ColorRgb::new(0x66, 0xff, 0xb8), // BrightGreen
-            ColorRgb::new(0xff, 0xe0, 0x8a), // BrightYellow
-            ColorRgb::new(0x7f, 0xb8, 0xff), // BrightBlue
-            ColorRgb::new(0xb0, 0x6f, 0xe8), // BrightMagenta
-            ColorRgb::new(0x66, 0xf0, 0xff), // BrightCyan
-            ColorRgb::new(0xff, 0xff, 0xff), // BrightWhite
-        ],
-        term_fg: ColorRgb::new(0xd1, 0xd5, 0xdb),
-        term_bg: ColorRgb::new(0x09, 0x0a, 0x0f),
-        term_cursor: ColorRgb::new(0x00, 0xff, 0x88),
-        fg: RColor::Rgb(0xd1, 0xd5, 0xdb),
-        accent: RColor::Rgb(0x00, 0xff, 0x88),
-        secondary: RColor::Rgb(0x9d, 0x4e, 0xdd),
-        panel_sep: RColor::Rgb(0x12, 0x15, 0x1e),
-        panel_muted: RColor::Rgb(0x71, 0x71, 0x7a),
-        border_idle: RColor::Rgb(0x71, 0x71, 0x7a),
-        green: RColor::Rgb(0x00, 0xff, 0x88),
-        orange: RColor::Rgb(0xff, 0xb8, 0x4d),
-        red: RColor::Rgb(0xff, 0x38, 0x60),
         input_bg: INPUT_SURFACE,
     },
     Theme {
@@ -382,6 +348,108 @@ pub const THEMES: [Theme; 8] = [
         red: RColor::Rgb(0xf7, 0x76, 0x8e),
         input_bg: INPUT_SURFACE,
     },
+    Theme {
+        name: "Nord",
+        palette: [
+            ColorRgb::new(0x3b, 0x42, 0x52), // Black
+            ColorRgb::new(0xbf, 0x61, 0x6a), // Red
+            ColorRgb::new(0xa3, 0xbe, 0x8c), // Green
+            ColorRgb::new(0xeb, 0xcb, 0x8b), // Yellow
+            ColorRgb::new(0x81, 0xa1, 0xc1), // Blue
+            ColorRgb::new(0xb4, 0x8e, 0xad), // Magenta
+            ColorRgb::new(0x88, 0xc0, 0xd0), // Cyan
+            ColorRgb::new(0xe5, 0xe9, 0xf0), // White
+            ColorRgb::new(0x4c, 0x56, 0x6a), // BrightBlack
+            ColorRgb::new(0xbf, 0x61, 0x6a), // BrightRed
+            ColorRgb::new(0xa3, 0xbe, 0x8c), // BrightGreen
+            ColorRgb::new(0xeb, 0xcb, 0x8b), // BrightYellow
+            ColorRgb::new(0x81, 0xa1, 0xc1), // BrightBlue
+            ColorRgb::new(0xb4, 0x8e, 0xad), // BrightMagenta
+            ColorRgb::new(0x8f, 0xbc, 0xbb), // BrightCyan
+            ColorRgb::new(0xec, 0xef, 0xf4), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0xd8, 0xde, 0xe9),
+        term_bg: ColorRgb::new(0x2e, 0x34, 0x40),
+        term_cursor: ColorRgb::new(0xd8, 0xde, 0xe9),
+        fg: RColor::Rgb(0xd8, 0xde, 0xe9),
+        accent: RColor::Rgb(0x88, 0xc0, 0xd0),
+        secondary: RColor::Rgb(0x81, 0xa1, 0xc1),
+        panel_sep: RColor::Rgb(0x24, 0x29, 0x33),
+        panel_muted: RColor::Rgb(0x61, 0x6e, 0x88),
+        border_idle: RColor::Rgb(0x61, 0x6e, 0x88),
+        green: RColor::Rgb(0xa3, 0xbe, 0x8c),
+        orange: RColor::Rgb(0xd0, 0x87, 0x70),
+        red: RColor::Rgb(0xbf, 0x61, 0x6a),
+        input_bg: INPUT_SURFACE,
+    },
+    Theme {
+        name: "One Dark",
+        palette: [
+            ColorRgb::new(0x3f, 0x44, 0x51), // Black
+            ColorRgb::new(0xe0, 0x6c, 0x75), // Red
+            ColorRgb::new(0x98, 0xc3, 0x79), // Green
+            ColorRgb::new(0xe5, 0xc0, 0x7b), // Yellow
+            ColorRgb::new(0x61, 0xaf, 0xef), // Blue
+            ColorRgb::new(0xc6, 0x78, 0xdd), // Magenta
+            ColorRgb::new(0x56, 0xb6, 0xc2), // Cyan
+            ColorRgb::new(0xab, 0xb2, 0xbf), // White
+            ColorRgb::new(0x5c, 0x63, 0x70), // BrightBlack
+            ColorRgb::new(0xe0, 0x6c, 0x75), // BrightRed
+            ColorRgb::new(0x98, 0xc3, 0x79), // BrightGreen
+            ColorRgb::new(0xe5, 0xc0, 0x7b), // BrightYellow
+            ColorRgb::new(0x61, 0xaf, 0xef), // BrightBlue
+            ColorRgb::new(0xc6, 0x78, 0xdd), // BrightMagenta
+            ColorRgb::new(0x56, 0xb6, 0xc2), // BrightCyan
+            ColorRgb::new(0xd7, 0xda, 0xe0), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0xab, 0xb2, 0xbf),
+        term_bg: ColorRgb::new(0x28, 0x2c, 0x34),
+        term_cursor: ColorRgb::new(0x52, 0x8b, 0xff),
+        fg: RColor::Rgb(0xab, 0xb2, 0xbf),
+        accent: RColor::Rgb(0x61, 0xaf, 0xef),
+        secondary: RColor::Rgb(0xc6, 0x78, 0xdd),
+        panel_sep: RColor::Rgb(0x21, 0x25, 0x2b),
+        panel_muted: RColor::Rgb(0x5c, 0x63, 0x70),
+        border_idle: RColor::Rgb(0x5c, 0x63, 0x70),
+        green: RColor::Rgb(0x98, 0xc3, 0x79),
+        orange: RColor::Rgb(0xd1, 0x9a, 0x66),
+        red: RColor::Rgb(0xe0, 0x6c, 0x75),
+        input_bg: INPUT_SURFACE,
+    },
+    Theme {
+        name: "Rose Pine",
+        palette: [
+            ColorRgb::new(0x26, 0x23, 0x3a), // Black
+            ColorRgb::new(0xeb, 0x6f, 0x92), // Red
+            ColorRgb::new(0x31, 0x74, 0x8f), // Green
+            ColorRgb::new(0xf6, 0xc1, 0x77), // Yellow
+            ColorRgb::new(0x9c, 0xcf, 0xd8), // Blue
+            ColorRgb::new(0xc4, 0xa7, 0xe7), // Magenta
+            ColorRgb::new(0xeb, 0xbc, 0xba), // Cyan
+            ColorRgb::new(0xe0, 0xde, 0xf4), // White
+            ColorRgb::new(0x6e, 0x6a, 0x86), // BrightBlack
+            ColorRgb::new(0xeb, 0x6f, 0x92), // BrightRed
+            ColorRgb::new(0x31, 0x74, 0x8f), // BrightGreen
+            ColorRgb::new(0xf6, 0xc1, 0x77), // BrightYellow
+            ColorRgb::new(0x9c, 0xcf, 0xd8), // BrightBlue
+            ColorRgb::new(0xc4, 0xa7, 0xe7), // BrightMagenta
+            ColorRgb::new(0xeb, 0xbc, 0xba), // BrightCyan
+            ColorRgb::new(0xe0, 0xde, 0xf4), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0xe0, 0xde, 0xf4),
+        term_bg: ColorRgb::new(0x19, 0x17, 0x24),
+        term_cursor: ColorRgb::new(0xe0, 0xde, 0xf4),
+        fg: RColor::Rgb(0xe0, 0xde, 0xf4),
+        accent: RColor::Rgb(0xc4, 0xa7, 0xe7),
+        secondary: RColor::Rgb(0xeb, 0xbc, 0xba),
+        panel_sep: RColor::Rgb(0x1f, 0x1d, 0x2e),
+        panel_muted: RColor::Rgb(0x6e, 0x6a, 0x86),
+        border_idle: RColor::Rgb(0x6e, 0x6a, 0x86),
+        green: RColor::Rgb(0x9c, 0xcf, 0xd8),
+        orange: RColor::Rgb(0xf6, 0xc1, 0x77),
+        red: RColor::Rgb(0xeb, 0x6f, 0x92),
+        input_bg: INPUT_SURFACE,
+    },
 ];
 
 /// Index of the theme applied on a fresh start.
@@ -422,11 +490,19 @@ pub fn normalize_name(s: &str) -> String {
     s.trim().to_ascii_lowercase().replace([' ', '_'], "-")
 }
 
+/// Retired built-in themes (normalized names) and their closest successor, so
+/// configs that still select them keep a similar look instead of the default.
+const RETIRED_THEMES: [(&str, &str); 1] = [("toxic-arachnid", "cyber-spider")];
+
 /// Find the index of a built-in theme by name (case-insensitive, hyphen/space tolerant).
 /// Supports short aliases: "gruvbox" matches "Gruvbox Dark", "catppuccin" matches
 /// "Catppuccin Mocha", etc. via prefix matching.
 pub fn builtin_index_by_name(name: &str) -> Option<usize> {
     let needle = normalize_name(name);
+    let needle = RETIRED_THEMES
+        .iter()
+        .find(|(retired, _)| *retired == needle)
+        .map_or(needle, |(_, successor)| successor.to_string());
     // Exact match first
     if let Some(idx) = THEMES.iter().position(|t| normalize_name(t.name) == needle) {
         return Some(idx);
@@ -519,6 +595,15 @@ mod tests {
         let (fallback_idx, fallback) = selected_theme(usize::MAX, None);
         assert_eq!(fallback_idx, THEMES.len() - 1);
         assert_eq!(fallback.name, THEMES[THEMES.len() - 1].name);
+    }
+
+    #[test]
+    fn theme_names_resolve_including_retired_ones() {
+        let name_of = |query: &str| builtin_index_by_name(query).map(|idx| THEMES[idx].name);
+        assert_eq!(name_of("nord"), Some("Nord"));
+        assert_eq!(name_of("One Dark"), Some("One Dark"));
+        assert_eq!(name_of("rose_pine"), Some("Rose Pine"));
+        assert_eq!(name_of("Toxic Arachnid"), Some("Cyber Spider"));
     }
 }
 

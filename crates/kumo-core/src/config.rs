@@ -2750,7 +2750,7 @@ mod tests {
         assert!(saved.contains("# Keep the custom palette."));
         assert!(saved.contains("name = \"Personal\""));
         assert_eq!(theme_name().as_deref(), Some("Tokyo Night"));
-        assert_eq!(theme_index(), 7);
+        assert_eq!(crate::theme::THEMES[theme_index()].name, "Tokyo Night");
     }
 
     #[test]
@@ -2860,7 +2860,7 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
         assert_eq!(theme_name().as_deref(), Some("dracula"));
-        assert_eq!(theme_index(), 6, "dracula should be index 6");
+        assert_eq!(crate::theme::THEMES[theme_index()].name, "Dracula");
     }
 
     #[test]
@@ -2873,7 +2873,7 @@ mod tests {
             EnvGuard::set("KUMO_CONFIG_DIR", &cfg_dir.to_string_lossy()),
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
-        assert_eq!(theme_index(), 7);
+        assert_eq!(crate::theme::THEMES[theme_index()].name, "Tokyo Night");
     }
 
     #[test]
@@ -2930,7 +2930,7 @@ mod tests {
             EnvGuard::set("HOME", &home.to_string_lossy()),
         );
         assert_eq!(theme_name().as_deref(), Some("gruvbox"));
-        assert_eq!(theme_index(), 5);
+        assert_eq!(crate::theme::THEMES[theme_index()].name, "Gruvbox Dark");
     }
 
     #[test]
