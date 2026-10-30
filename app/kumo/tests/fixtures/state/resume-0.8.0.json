@@ -1,0 +1,164 @@
+{
+  "version": 2,
+  "active": 1,
+  "sessions": [
+    {
+      "name": "session-1",
+      "workspace": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+      "active_tab": 1,
+      "tabs": [
+        {
+          "id": 1,
+          "name": "1",
+          "zoom": false,
+          "focus": 1,
+          "tree": {
+            "Split": {
+              "id": 1,
+              "dir": "H",
+              "ratio": 0.5,
+              "a": {
+                "Split": {
+                  "id": 2,
+                  "dir": "V",
+                  "ratio": 0.5,
+                  "a": {
+                    "Pane": {
+                      "id": 1
+                    }
+                  },
+                  "b": {
+                    "Pane": {
+                      "id": 5
+                    }
+                  }
+                }
+              },
+              "b": {
+                "Pane": {
+                  "id": 3
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "second",
+          "zoom": false,
+          "focus": 7,
+          "tree": {
+            "Pane": {
+              "id": 7
+            }
+          }
+        }
+      ],
+      "panes": [
+        {
+          "id": 1,
+          "is_ai": false,
+          "shell": "/bin/sh",
+          "program": null,
+          "cwd": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+          "custom_name": null,
+          "agent_alias": null,
+          "master_fd": 3,
+          "child_pid": 18671,
+          "cols": 80,
+          "rows": 24,
+          "mouse_tracking": false,
+          "snapshot": "R0hPU1RTTlABAAEAmQMAAA5uZDlQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAIAAAAAEBAQEAAAAACAAEIgBkQAAAAAQiAGQAAAAABCIAZAAAAAABDQ0XAAAAAAHt7fMAAAAAAQq6/wAAAAAQJwAAAAAAABAnAAAAAAAAAAEBAQEBAQEBARYWIu85RS7ga//RZkp7//VHqgq6/+3t8ygoQPNocVvwoP/gin6m//h3wD3I/////wAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAACgW5x2AAABAAAAAAAAAAAACAACAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwCZAAAAxplCj1AAGAAAAAAAgADAAAAgAAAACAAAAB8Ac2gtMy4yJCBlY2hvIEZJWFRVUkVfU0NST0xMQkFDSwASAEZJWFRVUkVfU0NST0xMQkFDSwAIAHNoLTMuMiQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAACeAY9EFAAAAAADkIO8KBAAGAAAAoRGKXgAAAAAAAAYAAAAAAD7rUz4=",
+          "agent_kind": null
+        },
+        {
+          "id": 5,
+          "is_ai": true,
+          "shell": "cat",
+          "program": [
+            "cat",
+            []
+          ],
+          "cwd": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+          "custom_name": null,
+          "agent_alias": "worker",
+          "master_fd": 12,
+          "child_pid": 18714,
+          "cols": 80,
+          "rows": 24,
+          "mouse_tracking": false,
+          "snapshot": "R0hPU1RTTlABAAEAmQMAAIV4a+tQABgAAAAAAAAAAAAAABcAAABPAAAAAAEA/////wEBAQEAAAAACAAEIgBkQAAAAAQiAGQAAAAABCIAZAAAAAABDQ0XAAAAAAHt7fMAAAAAAQq6/wAAAAAQJwAAAAAAABAnAAAAAAAAAAEBAQEBAQEBARYWIu85RS7ga//RZkp7//VHqgq6/+3t8ygoQPNocVvwoP/gin6m//h3wD3I/////wAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAABQc8lPAAABAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBgAAAAU2gJqlAAGAAAAAAAgADAAAAgAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAACeAY9EFAAAAAADkIO8KBAAGAAAAoRGKXgAAAAAAAAYAAAAAAD7rUz4=",
+          "agent_kind": null
+        },
+        {
+          "id": 3,
+          "is_ai": false,
+          "shell": "/bin/sh",
+          "program": null,
+          "cwd": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+          "custom_name": null,
+          "agent_alias": null,
+          "master_fd": 9,
+          "child_pid": 18712,
+          "cols": 80,
+          "rows": 24,
+          "mouse_tracking": false,
+          "snapshot": "R0hPU1RTTlABAAEAmQMAAA5uZDlQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAIAAAAAEBAQEAAAAACAAEIgBkQAAAAAQiAGQAAAAABCIAZAAAAAABDQ0XAAAAAAHt7fMAAAAAAQq6/wAAAAAQJwAAAAAAABAnAAAAAAAAAAEBAQEBAQEBARYWIu85RS7ga//RZkp7//VHqgq6/+3t8ygoQPNocVvwoP/gin6m//h3wD3I/////wAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAAHB/DIAAABAAAAAAAAAAAACAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBoAAAAQSA9PVAAGAAAAAAAgADAAAAgAAAACAAAAAgAc2gtMy4yJCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAJ4Bj0QUAAAAAAOQg7woEAAYAAAChEYpeAAAAAAAABgAAAAAAPutTPg==",
+          "agent_kind": null
+        },
+        {
+          "id": 7,
+          "is_ai": false,
+          "shell": "/bin/sh",
+          "program": null,
+          "cwd": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+          "custom_name": null,
+          "agent_alias": null,
+          "master_fd": 15,
+          "child_pid": 18721,
+          "cols": 80,
+          "rows": 24,
+          "mouse_tracking": false,
+          "snapshot": "R0hPU1RTTlABAAEAmQMAAA5uZDlQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAIAAAAAEBAQEAAAAACAAEIgBkQAAAAAQiAGQAAAAABCIAZAAAAAABDQ0XAAAAAAHt7fMAAAAAAQq6/wAAAAAQJwAAAAAAABAnAAAAAAAAAAEBAQEBAQEBARYWIu85RS7ga//RZkp7//VHqgq6/+3t8ygoQPNocVvwoP/gin6m//h3wD3I/////wAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAAHB/DIAAABAAAAAAAAAAAACAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBoAAAAQSA9PVAAGAAAAAAAgADAAAAgAAAACAAAAAgAc2gtMy4yJCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAJ4Bj0QUAAAAAAOQg7woEAAYAAAChEYpeAAAAAAAABgAAAAAAPutTPg==",
+          "agent_kind": null
+        }
+      ]
+    },
+    {
+      "name": "other",
+      "workspace": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+      "active_tab": 0,
+      "tabs": [
+        {
+          "id": 3,
+          "name": "1",
+          "zoom": false,
+          "focus": 9,
+          "tree": {
+            "Pane": {
+              "id": 9
+            }
+          }
+        }
+      ],
+      "panes": [
+        {
+          "id": 9,
+          "is_ai": false,
+          "shell": "/bin/sh",
+          "program": null,
+          "cwd": "/var/folders/kj/9wvlwnyn7qqgs98d4kkp3_nr0000gn/T/tmp.vej92lTHuS/ws",
+          "custom_name": null,
+          "agent_alias": null,
+          "master_fd": 18,
+          "child_pid": 18723,
+          "cols": 80,
+          "rows": 24,
+          "mouse_tracking": false,
+          "snapshot": "R0hPU1RTTlABAAEAmQMAAA5uZDlQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAIAAAAAEBAQEAAAAACAAEIgBkQAAAAAQiAGQAAAAABCIAZAAAAAABDQ0XAAAAAAHt7fMAAAAAAQq6/wAAAAAQJwAAAAAAABAnAAAAAAAAAAEBAQEBAQEBARYWIu85RS7ga//RZkp7//VHqgq6/+3t8ygoQPNocVvwoP/gin6m//h3wD3I/////wAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAAHB/DIAAABAAAAAAAAAAAACAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBoAAAAQSA9PVAAGAAAAAAAgADAAAAgAAAACAAAAAgAc2gtMy4yJCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAJ4Bj0QUAAAAAAOQg7woEAAYAAAChEYpeAAAAAAAABgAAAAAAPutTPg==",
+          "agent_kind": null
+        }
+      ]
+    }
+  ]
+}

@@ -287,7 +287,7 @@ pub fn to_layout_node(node: &SavedNode) -> layout::Node {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn sample_state() -> SavedState {
@@ -487,7 +487,7 @@ mod tests {
     /// Resume files written by released daemons (`tests/fixtures/state`).
     /// `kumo update` from that release execs this binary on them, so every
     /// one must still load with its layout, aliases and terminal snapshots.
-    fn released_resume_fixtures() -> Vec<(String, SavedState)> {
+    pub(crate) fn released_resume_fixtures() -> Vec<(String, SavedState)> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/state");
         let mut fixtures: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -524,11 +524,15 @@ mod tests {
                 }
             }
         }
-        let (_, v076) = released_resume_fixtures().into_iter().find(|(name, _)| name == "resume-0.7.6.json").unwrap();
-        let tabs: Vec<_> = v076.sessions.iter().map(|s| (s.name.as_str(), s.tabs.len())).collect();
-        assert_eq!(tabs, [("session-1", 2), ("other", 1)]);
-        let aliases: Vec<_> = v076.sessions.iter().flat_map(|s| &s.panes).filter_map(|p| p.agent_alias.as_deref()).collect();
-        assert_eq!(aliases, ["worker"]);
+        // Every fixture is captured with the same `capture.sh` layout.
+        let fixtures = released_resume_fixtures();
+        for release in ["resume-0.7.6.json", "resume-0.8.0.json"] {
+            let (_, state) = fixtures.iter().find(|(name, _)| name == release).unwrap_or_else(|| panic!("missing {release}"));
+            let tabs: Vec<_> = state.sessions.iter().map(|s| (s.name.as_str(), s.tabs.len())).collect();
+            assert_eq!(tabs, [("session-1", 2), ("other", 1)], "{release}");
+            let aliases: Vec<_> = state.sessions.iter().flat_map(|s| &s.panes).filter_map(|p| p.agent_alias.as_deref()).collect();
+            assert_eq!(aliases, ["worker"], "{release}");
+        }
     }
 
     #[test]

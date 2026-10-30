@@ -1780,6 +1780,13 @@ mod tests {
         assert_eq!(restored_tab_name(Some(String::new())), None);
         assert_eq!(restored_tab_name(None), None);
         assert_eq!(restored_tab_name(Some("api".into())).as_deref(), Some("api"));
+
+        // The released files really carry those defaults: their default tabs
+        // derive their names again, the explicitly named one keeps it.
+        for (release, state) in crate::daemon::state::tests::released_resume_fixtures() {
+            let names: Vec<_> = state.sessions.into_iter().flat_map(|s| s.tabs).map(|t| restored_tab_name(t.name)).collect();
+            assert_eq!(names, [None, Some("second".to_string()), None], "{release}");
+        }
     }
 
     #[test]

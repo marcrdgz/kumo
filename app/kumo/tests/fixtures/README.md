@@ -30,11 +30,17 @@ fixture and decode its snapshots, so a schema or snapshot-format change that
 would lose sessions on upgrade fails CI.
 
 Capture one per release with the released binary (only the last 0.x release
-needs to be kept once 1.0 ships):
+needs to be kept once 1.0 ships). Use the binary from the GitHub release, not
+a locally installed `kumo`: a local build of `main` reports the same version
+until the next bump, but writes the newer format.
 
 ```sh
-sh state/capture.sh "$(command -v kumo)" state/resume-0.7.6.json
+gh release download v0.8.0 -p 'kumo-aarch64-apple-darwin.tar.xz' -D "$dir"
+tar xf "$dir/kumo-aarch64-apple-darwin.tar.xz" -C "$dir"
+sh state/capture.sh "$dir"/kumo-*/kumo state/resume-0.8.0.json
 ```
 
 The 0.7.6 fixture was captured from the 0.7.6 release (its `echo` marker reads
-`FIXTURE_SCROLLBACK_0_7_6`); paths are throwaway `mktemp` directories.
+`FIXTURE_SCROLLBACK_0_7_6`), the 0.8.0 one from the 0.8.0 release asset; paths
+are throwaway `mktemp` directories. The same released binary drives the live
+upgrade test (`KUMO_PREV_BIN`).

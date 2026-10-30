@@ -114,6 +114,11 @@ fn update_from_previous_release_keeps_live_sessions() {
     assert_eq!(shape(&after), shape(&before), "sessions changed across the upgrade");
     let alias = ok(&root_dir, &new, &["agent", "status"])["agents"][0]["name"].clone();
     assert_eq!(alias, Value::String("worker".into()), "the agent alias was lost");
+    // Releases up to 0.8 named default tabs "1", "2", …; those now read as tab
+    // ids, so the upgraded tab derives its name while a user's name is kept.
+    let tab_names: Vec<Value> = ok(&root_dir, &new, &["tab", "list"])["tabs"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect();
+    assert_ne!(tab_names[0], Value::String("1".into()), "the legacy default tab name survived the upgrade");
+    assert_eq!(tab_names[1], Value::String("second".into()), "the custom tab name was lost");
 
     // The adopted shell is the same live process: it still runs commands.
     ok(&root_dir, &new, &["pane", "send-keys", "-p", &pane, "echo", "Space", "AFTER_UPGRADE", "Enter"]);
