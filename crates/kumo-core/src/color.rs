@@ -21,6 +21,15 @@ impl ColorRgb {
     pub fn hex(self) -> u32 {
         ((self.r as u32) << 16) | ((self.g as u32) << 8) | self.b as u32
     }
+
+    /// WCAG relative luminance in `0.0..=1.0`.
+    pub fn relative_luminance(self) -> f32 {
+        let linear = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * linear(self.r) + 0.7152 * linear(self.g) + 0.0722 * linear(self.b)
+    }
 }
 
 /// Parse a hex color string into `ColorRgb`.

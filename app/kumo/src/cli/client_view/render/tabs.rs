@@ -20,7 +20,7 @@ impl View {
             let Some(tab) = sess.tabs.get(*idx) else { continue };
             let active = sess.active_tab == *idx;
             let is_hover = self.tab_hover == Some(*idx);
-            let pill_bg = if active { theme.accent } else { lighten(bar_bg, 14) };
+            let pill_bg = if active { theme.accent } else { raise(&theme, bar_bg, 14) };
             let fg = if active { contrast_fg(&theme, pill_bg) } else { theme.fg };
             fill(f, *pill, pill_bg);
             let base_style = if active {
@@ -67,7 +67,7 @@ impl View {
         }
         // Plus button
         if let Some(pr) = self.plus_rect {
-            let plus_bg = lighten(bar_bg, 10);
+            let plus_bg = raise(&theme, bar_bg, 10);
             fill(f, pr, plus_bg);
             let style = Style::default().fg(theme.panel_muted).bg(plus_bg).add_modifier(Modifier::BOLD);
             // Center "+" in the 3-wide pill

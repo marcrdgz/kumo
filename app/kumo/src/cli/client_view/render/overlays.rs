@@ -246,7 +246,7 @@ impl View {
                 break;
             }
             let selected = i == self.keybind_overlay.selected;
-            let bg = if selected { lighten(theme.panel_sep, 28) } else { theme.panel_sep };
+            let bg = if selected { raise(&theme, theme.panel_sep, 28) } else { theme.panel_sep };
             fill(f, Rect::new(dd.x + 1, y, dd.width.saturating_sub(2), 1), bg);
             if selected {
                 put(f, dd.x + 1, y, "▸", Style::default().fg(theme.accent).bg(bg).add_modifier(Modifier::BOLD));

@@ -105,6 +105,9 @@ impl View {
         self.render_confirm(f);
         self.render_finder(f);
         self.render_agent_inbox(f);
+        if theme.is_light() {
+            paint_light_chrome_background(f, &theme);
+        }
         // Set through the frame so ratatui emits only "show + move" per draw;
         // hiding it in `draw` and re-showing it afterwards toggled DECTCEM on
         // every frame, which restarts the host terminal's blink cycle.
@@ -417,6 +420,22 @@ fn draw_modal(f: &mut Frame, dd: Rect, theme: &OwnedTheme, floor: u16) {    fill
 /// Overpaint a modal's border with `color` (same rounded frame draw_modal
 /// draws, in an accent color). Used by corner toasts so the kind reads at a
 /// glance without changing the shared modal look.
+/// Resolve the chrome's `Reset` colors to the theme's own for light themes,
+/// so the chrome does not inherit the host terminal's (typically dark)
+/// default background. Pane cells already carry explicit colors.
+fn paint_light_chrome_background(f: &mut Frame, theme: &OwnedTheme) {
+    let bg = RColor::Rgb(theme.term_bg.r, theme.term_bg.g, theme.term_bg.b);
+    let fg = RColor::Rgb(theme.term_fg.r, theme.term_fg.g, theme.term_fg.b);
+    for cell in f.buffer_mut().content.iter_mut() {
+        if cell.bg == RColor::Reset {
+            cell.bg = bg;
+        }
+        if cell.fg == RColor::Reset {
+            cell.fg = fg;
+        }
+    }
+}
+
 fn paint_border(f: &mut Frame, dd: Rect, color: RColor, bg: RColor) {
     let border = Style::default().fg(color).bg(bg);
     let Some(x1) = dd.right().checked_sub(1) else { return };

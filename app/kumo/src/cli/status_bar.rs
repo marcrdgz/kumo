@@ -18,6 +18,8 @@ use kumo_core::config::{
     SessionWidgetConfig, StatusWidget,
 };
 use kumo_core::theme::OwnedTheme;
+
+use super::client_view::contrast_fg;
 use kumo_protocol::{SessionLayout, WireBranch};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -507,16 +509,16 @@ pub fn clock_spans(clock_str: &str, theme: &OwnedTheme) -> Vec<Span<'static>> {
 
 pub fn mode_spans(is_leader: bool, theme: &OwnedTheme) -> Vec<Span<'static>> {
     let (label, style) = if is_leader {
-        (" LEADER ", Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD))
+        (" LEADER ", Style::default().fg(contrast_fg(theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD))
     } else {
-        (" NORMAL ", Style::default().fg(RColor::Black).bg(theme.accent))
+        (" NORMAL ", Style::default().fg(contrast_fg(theme, theme.accent)).bg(theme.accent))
     };
     vec![Span::styled(label.to_string(), style)]
 }
 
 pub fn menu_spans(is_open: bool, theme: &OwnedTheme) -> Vec<Span<'static>> {
     let style = if is_open {
-        Style::default().fg(RColor::Black).bg(theme.secondary).add_modifier(Modifier::BOLD)
+        Style::default().fg(contrast_fg(theme, theme.secondary)).bg(theme.secondary).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.fg).bg(RColor::Reset).add_modifier(Modifier::BOLD)
     };

@@ -100,6 +100,12 @@ fn tab_width(position: usize, name: &str, has_agent_indicator: bool) -> u16 {
     let n = tab_title(position, name).chars().count() as u16;
     n.saturating_add(2).saturating_add(if has_agent_indicator { 2 } else { 0 })
 }
+/// Shift a chrome surface away from the background so selections and hovers
+/// stand out: lighter on dark themes, darker on light ones.
+fn raise(theme: &OwnedTheme, c: RColor, amt: u8) -> RColor {
+    if theme.is_light() { darken(c, amt) } else { lighten(c, amt) }
+}
+
 fn lighten(c: RColor, amt: u8) -> RColor {
     match c {
         RColor::Rgb(r, g, b) => RColor::Rgb(r.saturating_add(amt), g.saturating_add(amt), b.saturating_add(amt)),
@@ -121,8 +127,8 @@ fn input_fg(theme: &OwnedTheme) -> RColor {
 
 /// Text color for chrome drawn on a filled theme color (selected rows, badges,
 /// focused fields). Dark text is kept while it meets WCAG AA (4.5:1), which
-/// holds for every built-in accent; dark custom fills get light text.
-fn contrast_fg(theme: &OwnedTheme, bg: RColor) -> RColor {
+/// holds for every built-in dark-theme accent; darker fills get light text.
+pub(super) fn contrast_fg(theme: &OwnedTheme, bg: RColor) -> RColor {
     let rgb = match bg {
         RColor::Rgb(r, g, b) => Some((r, g, b)),
         RColor::Indexed(i) => theme.palette.get(i as usize).map(|c| (c.r, c.g, c.b)),
@@ -130,11 +136,7 @@ fn contrast_fg(theme: &OwnedTheme, bg: RColor) -> RColor {
         _ => return RColor::Black,
     };
     let Some((r, g, b)) = rgb else { return RColor::Black };
-    let linear = |c: u8| {
-        let c = c as f32 / 255.0;
-        if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-    };
-    let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    let luminance = ColorRgb::new(r, g, b).relative_luminance();
     // Black reaches 4.5:1 at (L + 0.05) / 0.05 >= 4.5, i.e. L >= 0.175.
     if luminance >= 0.175 { RColor::Black } else { RColor::White }
 }
@@ -149,12 +151,12 @@ fn input_hint_style(theme: &OwnedTheme) -> Style {
 
 fn sidebar_active_bg(theme: &OwnedTheme) -> RColor {
     // worktree selection — subtle but visible, a touch darker than before
-    lighten(theme.panel_sep, 28)
+    raise(theme, theme.panel_sep, 28)
 }
 
 fn agent_active_bg(theme: &OwnedTheme) -> RColor {
     // agent focused — slightly brighter than the worktree block so the cursor pops
-    lighten(theme.panel_sep, 40)
+    raise(theme, theme.panel_sep, 40)
 }
 
 /// Blend an RGB color toward `bg` by `num/den` (indexed colors resolve through
@@ -4347,7 +4349,7 @@ mod tests {
     /// themes whose accents are dark, without changing the built-in look.
     #[test]
     fn filled_chrome_text_contrasts_with_its_fill() {
-        for theme in theme::all_themes(None) {
+        for theme in theme::all_themes(None).into_iter().filter(|t| !t.is_light()) {
             for fill in [theme.accent, theme.secondary, theme.green] {
                 assert_eq!(contrast_fg(&theme, fill), RColor::Black, "{}: built-in fills keep dark text", theme.name);
             }
@@ -4358,6 +4360,24 @@ mod tests {
         light.accent = RColor::Indexed(4);
         light.palette[4] = kumo_core::color::ColorRgb::new(0x10, 0x10, 0x40);
         assert_eq!(contrast_fg(&light, light.accent), RColor::White, "indexed fills resolve through the palette");
+    }
+
+    /// Light themes paint the chrome with their own background; dark themes
+    /// keep the host terminal's default so the chrome blends with it.
+    #[test]
+    fn light_themes_own_the_chrome_background() {
+        let host_bg_cells = |view: &mut View| {
+            let backend = ratatui::backend::TestBackend::new(view.cols, view.rows);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| view.draw(frame)).unwrap();
+            term.backend().buffer().content.iter().filter(|cell| cell.bg == RColor::Reset).count()
+        };
+        let mut view = test_view();
+        view.theme_idx = theme::builtin_index_by_name("Catppuccin Latte").unwrap();
+        assert_eq!(host_bg_cells(&mut view), 0, "no chrome cell inherits the host background");
+
+        view.theme_idx = theme::DEFAULT_THEME_IDX;
+        assert!(host_bg_cells(&mut view) > 0, "dark themes blend with the host terminal");
     }
 
     #[test]

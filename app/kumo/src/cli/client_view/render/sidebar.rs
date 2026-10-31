@@ -97,7 +97,7 @@ impl View {
                     let bg = if active {
                         sidebar_active_bg(&theme)
                     } else if is_hover {
-                        lighten(theme.panel_sep, 18)
+                        raise(&theme, theme.panel_sep, 18)
                     } else {
                         RColor::Reset
                     };
@@ -413,7 +413,7 @@ impl View {
                 SidebarRow::Worktree(i) => {
                     let active = self.layout.as_ref().map(|l| l.active.as_deref() == Some(&self.session_name(i))).unwrap_or(false);
                     let is_hover = self.sidebar_hover == Some(i);
-                    let bg = if active { sidebar_active_bg(&theme) } else if is_hover { lighten(theme.panel_sep, 18) } else { RColor::Reset };
+                    let bg = if active { sidebar_active_bg(&theme) } else if is_hover { raise(&theme, theme.panel_sep, 18) } else { RColor::Reset };
                     let fg = if active || is_hover { theme.fg } else { theme.panel_muted };
                     if bg != RColor::Reset {
                         fill(f, Rect::new(x, y, w, 1), bg);

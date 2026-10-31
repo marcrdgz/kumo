@@ -83,6 +83,12 @@ impl From<Theme> for OwnedTheme {
 }
 
 impl OwnedTheme {
+    /// Light themes paint their own chrome background: the host terminal's
+    /// default (`Reset`) is usually dark and would swallow their dark text.
+    pub fn is_light(&self) -> bool {
+        self.term_bg.relative_luminance() >= 0.5
+    }
+
     /// Convert to a `Theme` with a leaked name. Leaks the string once per custom
     /// theme — negligible for the daemon's lifetime and keeps the existing
     /// `Theme`-based FFI unchanged.
@@ -109,7 +115,7 @@ impl OwnedTheme {
 
 /// All selectable built-in themes, in Settings-popup order. Custom (if defined
 /// in `~/.config/kumo/config.toml`) appears last as an extra entry.
-pub const THEMES: [Theme; 10] = [
+pub const THEMES: [Theme; 11] = [
     Theme {
         name: "Catppuccin Mocha",
         palette: [
@@ -450,6 +456,40 @@ pub const THEMES: [Theme; 10] = [
         red: RColor::Rgb(0xeb, 0x6f, 0x92),
         input_bg: INPUT_SURFACE,
     },
+    Theme {
+        name: "Catppuccin Latte",
+        palette: [
+            ColorRgb::new(0x5c, 0x5f, 0x77), // Black
+            ColorRgb::new(0xd2, 0x0f, 0x39), // Red
+            ColorRgb::new(0x40, 0xa0, 0x2b), // Green
+            ColorRgb::new(0xdf, 0x8e, 0x1d), // Yellow
+            ColorRgb::new(0x1e, 0x66, 0xf5), // Blue
+            ColorRgb::new(0xea, 0x76, 0xcb), // Magenta
+            ColorRgb::new(0x17, 0x92, 0x99), // Cyan
+            ColorRgb::new(0xac, 0xb0, 0xbe), // White
+            ColorRgb::new(0x6c, 0x6f, 0x85), // BrightBlack
+            ColorRgb::new(0xd2, 0x0f, 0x39), // BrightRed
+            ColorRgb::new(0x40, 0xa0, 0x2b), // BrightGreen
+            ColorRgb::new(0xdf, 0x8e, 0x1d), // BrightYellow
+            ColorRgb::new(0x1e, 0x66, 0xf5), // BrightBlue
+            ColorRgb::new(0xea, 0x76, 0xcb), // BrightMagenta
+            ColorRgb::new(0x17, 0x92, 0x99), // BrightCyan
+            ColorRgb::new(0xbc, 0xc0, 0xcc), // BrightWhite
+        ],
+        term_fg: ColorRgb::new(0x4c, 0x4f, 0x69),
+        term_bg: ColorRgb::new(0xef, 0xf1, 0xf5),
+        term_cursor: ColorRgb::new(0xdc, 0x8a, 0x78),
+        fg: RColor::Rgb(0x4c, 0x4f, 0x69),
+        accent: RColor::Rgb(0x1e, 0x66, 0xf5),
+        secondary: RColor::Rgb(0x72, 0x87, 0xfd),
+        panel_sep: RColor::Rgb(0xe6, 0xe9, 0xef),
+        panel_muted: RColor::Rgb(0x6c, 0x6f, 0x85),
+        border_idle: RColor::Rgb(0x8c, 0x8f, 0xa1),
+        green: RColor::Rgb(0x40, 0xa0, 0x2b),
+        orange: RColor::Rgb(0xfe, 0x64, 0x0b),
+        red: RColor::Rgb(0xd2, 0x0f, 0x39),
+        input_bg: RColor::Rgb(0xcc, 0xd0, 0xda),
+    },
 ];
 
 /// Index of the theme applied on a fresh start.
@@ -604,6 +644,14 @@ mod tests {
         assert_eq!(name_of("One Dark"), Some("One Dark"));
         assert_eq!(name_of("rose_pine"), Some("Rose Pine"));
         assert_eq!(name_of("Toxic Arachnid"), Some("Cyber Spider"));
+        assert_eq!(name_of("catppuccin-latte"), Some("Catppuccin Latte"));
+        assert_eq!(name_of("catppuccin"), Some("Catppuccin Mocha"), "the bare family name keeps the dark default");
+    }
+
+    #[test]
+    fn only_latte_is_a_light_builtin() {
+        let light: Vec<_> = all_themes(None).into_iter().filter(OwnedTheme::is_light).map(|t| t.name).collect();
+        assert_eq!(light, ["Catppuccin Latte"]);
     }
 }
 

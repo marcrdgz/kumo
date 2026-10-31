@@ -111,7 +111,7 @@ impl View {
                 break;
             }
             let selected = i == self.settings.selected;
-            let bg = if selected { lighten(theme.panel_sep, 28) } else { theme.panel_sep };
+            let bg = if selected { raise(&theme, theme.panel_sep, 28) } else { theme.panel_sep };
             fill(f, Rect::new(content.x, y, content.width, 2), bg);
             let active_action = self
                 .settings
