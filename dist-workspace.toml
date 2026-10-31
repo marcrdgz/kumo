@@ -29,3 +29,7 @@ cache-builds = true
 github-build-setup = "../dist-build-setup.yml"
 # Build only the required packages, and individually
 precise-builds = true
+
+# Pin runners instead of dist's defaults (macos-14 is being retired)
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

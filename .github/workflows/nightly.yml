@@ -99,9 +99,9 @@ jobs:
       - id: set
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full-matrix }}" = "true" ]; then
-            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"x86_64-apple-darwin","runner":"macos-14"},{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2022"}]}'
+            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-15"},{"target":"x86_64-apple-darwin","runner":"macos-15"},{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2022"}]}'
           else
-            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"}]}'
+            MATRIX='{"include":[{"target":"aarch64-apple-darwin","runner":"macos-15"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"}]}'
           fi
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
