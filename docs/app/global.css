@@ -1,14 +1,22 @@
 @import 'tailwindcss';
-@import './spider-verse.css';
+@import './theme.css';
 @import 'fumadocs-ui/css/preset.css';
 
+/* System fonts first so Apple platforms render SF Pro / SF Mono. */
 @theme inline {
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', var(--font-inter),
+    ui-sans-serif, system-ui, sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', var(--font-jetbrains-mono), Menlo, monospace;
+  --font-display: var(--font-martian-mono), ui-monospace, monospace;
 }
 
 html {
   scrollbar-gutter: stable;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 html > body[data-scroll-locked] {
@@ -16,28 +24,89 @@ html > body[data-scroll-locked] {
   --removed-body-scroll-bar-size: 0px !important;
 }
 
-.spider-halftone {
-  background-image: radial-gradient(
-    circle,
-    hsl(326 90% 60% / 0.16) 1px,
-    transparent 1.6px
-  );
-  background-size: 14px 14px;
-  mask-image: radial-gradient(
-    ellipse 70% 65% at 50% 35%,
-    black 30%,
-    transparent 75%
-  );
+/* Translucent material for the top bars, like a native toolbar. */
+#nd-nav,
+#nd-subnav {
+  background-color: color-mix(in oklab, var(--color-fd-background) 72%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
 }
 
-.spider-gradient-text {
-  background-image: linear-gradient(
-    100deg,
-    hsl(356 85% 58%),
-    hsl(326 90% 62%) 45%,
-    hsl(197 100% 55%)
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+/* Docs typography: tighter display headings, calmer body. */
+#nd-page h1,
+.prose :is(h2, h3) {
+  letter-spacing: -0.022em;
+}
+
+.prose {
+  --tw-prose-body: color-mix(in oklab, var(--color-fd-foreground) 86%, transparent);
+}
+
+.prose :where(kbd):not(:where(.not-prose *)) {
+  display: inline-flex;
+  align-items: center;
+  min-width: 1.6em;
+  justify-content: center;
+  padding: 0.05em 0.45em;
+  border: 1px solid var(--color-fd-border);
+  border-bottom-width: 2px;
+  border-radius: 0.4em;
+  background: var(--color-fd-card);
+  color: var(--color-fd-foreground);
+  font-family: var(--font-sans);
+  font-size: 0.82em;
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.prose :where(figure.shiki):not(:where(.not-prose *)) {
+  border-radius: 0.875rem;
+}
+
+/* Landing page */
+
+.window-shadow {
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.06),
+    0 30px 60px -20px rgb(0 0 0 / 0.35),
+    0 60px 120px -40px rgb(0 0 0 / 0.3);
+}
+
+.dark .window-shadow {
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.1),
+    0 30px 80px -20px rgb(0 0 0 / 0.9);
+}
+
+/* Fades the end of a horizontally scrolling line instead of clipping it. */
+.fade-x {
+  mask-image: linear-gradient(to right, black calc(100% - 3rem), transparent);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+}
+
+.toast-in {
+  animation: toast-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes pulse-dot {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-in,
+  .pulse-dot {
+    animation: none;
+  }
 }
