@@ -1,11 +1,15 @@
 {
   "title": "Documentation",
   "pages": [
+    "---Get Started---",
     "index",
-    "getting-started",
-    "guides",
+    "...getting-started",
+    "---Guides---",
+    "...guides",
+    "---Reference---",
     "configuration",
     "cli",
+    "---Project---",
     "compatibility",
     "performance",
     "roadmap"

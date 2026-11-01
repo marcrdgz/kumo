@@ -1,6 +1,5 @@
 {
   "title": "Guides",
-  "defaultOpen": true,
   "pages": [
     "sessions-and-panes",
     "keybindings",

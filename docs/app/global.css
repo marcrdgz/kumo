@@ -110,3 +110,36 @@ html > body[data-scroll-locked] {
     animation: none;
   }
 }
+
+/* Docs: Mintlify-style chrome */
+
+/* Cards: accent icon without a tile, accent border on hover. */
+.docs-card {
+  padding: 1.25rem;
+  border-radius: 1rem;
+  transition: border-color 150ms ease;
+}
+
+a.docs-card:hover {
+  background-color: var(--color-fd-card);
+  border-color: color-mix(in oklab, var(--color-fd-primary) 60%, transparent);
+}
+
+.docs-card > .not-prose:has(> svg) {
+  margin-bottom: 0.875rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--color-fd-primary);
+}
+
+.docs-card > .not-prose:has(> svg) svg {
+  width: 1.375rem;
+  height: 1.375rem;
+}
+
+.docs-card h3 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
