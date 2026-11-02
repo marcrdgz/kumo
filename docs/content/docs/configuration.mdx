@@ -17,8 +17,11 @@ still reads as a fallback, but `config.toml` wins when both exist.
 ai-cmd = "claude --model sonnet"
 update-check = true
 
+theme = "tokyo-night"
+
 [terminal]
 shell = "/bin/zsh"
+new-cwd = "follow"      # follow | current | home | fixed
 
 [keymap]
 leader = "ctrl+b"
@@ -50,25 +53,83 @@ The generator writes only what differs from the defaults, in canonical form.
 Paste the result into `~/.config/kumo/config.toml`; the daemon reloads it
 automatically. `kumo reload` remains available for an explicit refresh.
 
-## Install the agent skill
+## Agent skill
 
-`ai-cmd` chooses which AI CLI Kumo starts. Install Kumo's bundled skill in that
-agent as a separate, one-time step so it can discover panes, wait without
-polling, read terminal output, and coordinate other agents. Choose your agent
-and run the generated command:
+`ai-cmd` chooses which AI CLI Kumo starts. Installing Kumo's bundled skill in
+that agent is a separate, one-time step — see
+[Orchestration → Bundled agent skill](/docs/guides/orchestration#bundled-agent-skill).
 
-<AgentSkillInstaller />
+## Terminal
 
-The skill is embedded in the `kumo` binary, so the installed instructions match
-your CLI version. Re-run the same command after updating Kumo to refresh it.
-`kumo agent skill` without `--output` prints the skill instead.
+| Key | Description |
+| --- | --- |
+| `shell` | Login shell used to spawn panes. Defaults to `$SHELL`, then `/bin/zsh`. |
+| `new-cwd` | Where new panes and sessions start: `follow` (default) follows the focused pane's working directory live; `current` freezes the directory kumo was launched from; `home` uses `$HOME`; `fixed` uses `fixed-cwd`. |
+| `fixed-cwd` | Directory used when `new-cwd = "fixed"`. |
 
-You can manage the same targets from **MENU → settings → agents**. Select an
-agent and press Enter (or click it) to install the skill; selecting an installed
-skill removes its `SKILL.md`. **Update available** means the file exists but its
-contents differ from the skill bundled with the running Kumo version—usually
-because Kumo was upgraded, but also possibly because the file was edited. The
-update action replaces that file with the bundled version.
+## Theme
+
+Pick a built-in theme with `theme = "<name>"` (or `[theme] name = "<name>"`).
+Names are case-insensitive and prefix-matched, so `gruvbox` selects
+*Gruvbox Dark*. The theme picker (MENU → `settings`) writes the same key. See
+[Themes](/docs/guides/themes) for the list and for `[theme.custom]`.
+
+## Sidebar
+
+```toml
+[sidebar]
+layout = "project"        # project | divided | tabs
+width = 28                # project layout only; 20..50, also draggable
+order = ["sessions", "agents"]  # divided/tabs: section order
+
+[sidebar.sections]
+sessions = true
+agents = true
+
+[sidebar.borders]
+style = "rounded"         # single | rounded | double | heavy | hidden
+```
+
+`project` (aliases `explorer`, `navigator`) lists worktrees with inline
+agents; `divided` (alias `stacked`) stacks the SESSIONS and AGENTS panels;
+`tabs` toggles between them. `[sidebar.borders] style` also styles pane
+borders. At least one section always stays visible.
+
+## Status bar
+
+```toml
+[status_bar]
+enabled = true
+left   = ["mode", "menu", "session"]
+center = ["branch", "github"]
+right  = ["agent_status", "clock"]
+
+[status_bar.widgets.clock]
+format = "%H:%M"
+
+[status_bar.widgets.branch]
+show_ahead_behind = true
+max_len = 20
+
+[status_bar.widgets.agent]
+style = "counts"          # counts | dots | list
+only_blocked = false
+
+[status_bar.widgets.hostname]
+style = "short"           # short | fqdn
+show_user = false
+only_ssh = false
+
+[status_bar.widgets.session]
+show_tabs = true
+show_panes = true
+show_zoom = true
+```
+
+The values above are the defaults. Available widgets: `mode`, `menu`,
+`session`, `branch`, `github` (the current branch's pull request, via `gh`),
+`agent_status`, `hostname`, `clock`. `[status-bar]` is accepted as an alias of
+`[status_bar]`.
 
 ## Worktree isolation
 
@@ -95,9 +156,9 @@ app/**/.env
 
 These paths are copied when `kumo worktree create --ai` creates a checkout.
 
-The current 0.7 flow starts an agent when `--agent` is supplied, but does not
-send a task automatically. After the agent is ready, submit work explicitly
-with `kumo agent prompt`; automatic task submission is planned for 0.7.1.
+`--agent` starts the agent and replies once it is ready, but does not send a
+task: submit work with `kumo agent prompt` (see
+[Orchestration](/docs/guides/orchestration#isolated-worktrees-and-checkpoints)).
 
 ## Reference
 
@@ -105,7 +166,7 @@ with `kumo agent prompt`; automatic task submission is planned for 0.7.1.
   type={{
     'keymap.leader': {
       description:
-        'Leader chord that enters leader mode (`ctrl+b`, `ctrl+space`, `f12`, …). A top-level `leader` also reads as a deprecated alias.',
+        'Leader chord that enters leader mode (`ctrl+b`, `ctrl+space`, `f12`, …). Read when a client starts (re-attach to apply). A top-level `leader` also reads as a deprecated alias.',
       default: '`ctrl+b`',
     },
     'keymap.bindings': {
@@ -118,15 +179,37 @@ with `kumo agent prompt`; automatic task submission is planned for 0.7.1.
         'AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat.',
       default: '`opencode`',
     },
-    shell: {
+    'terminal.shell': {
       description:
-        'Login shell used to spawn panes. Canonical home is `[terminal] shell`; a top-level `shell` also reads as a deprecated alias.',
+        'Login shell used to spawn panes. A top-level `shell` also reads as a deprecated alias.',
       default: '`$SHELL` → `/bin/zsh`',
+    },
+    'terminal.new-cwd': {
+      description:
+        'Working directory for new panes and sessions: `follow`, `current`, `home` or `fixed`.',
+      default: '`follow`',
+    },
+    'terminal.fixed-cwd': {
+      description: 'Directory used when `new-cwd = "fixed"`.',
+      default: 'unset',
+    },
+    theme: {
+      description:
+        'Built-in theme name (also `[theme] name`); `[theme.custom]` defines your own.',
+      default: '`Spider-Verse`',
     },
     'sidebar.layout': {
       description:
         'Sidebar arrangement: `project` (default, grouped worktrees with inline agents), `divided` (stacked spaces + agents), or `tabs` (classic two-tab). `explorer`/`navigator` are aliases of `project`.',
       default: '`project`',
+    },
+    'sidebar.borders.style': {
+      description: 'Border style for panes and the sidebar: `single`, `rounded`, `double`, `heavy` or `hidden`.',
+      default: '`rounded`',
+    },
+    'status_bar.enabled': {
+      description: 'Show the status bar. `left` / `center` / `right` choose its widgets.',
+      default: '`true`',
     },
     'sidebar.width': {
       description:
@@ -198,14 +281,31 @@ Overrides follow the usual conventions:
 | --- | --- |
 | Config | `~/.config/kumo/config.toml` — override with `KUMO_CONFIG_DIR` or `XDG_CONFIG_HOME` |
 | Runtime state | `~/.local/state/kumo/` (including the saved sessions, `state.json`) — override with `KUMO_STATE_DIR` or `XDG_STATE_HOME` |
-| IPC socket | `$XDG_RUNTIME_DIR/kumo` |
+| IPC socket | `$XDG_RUNTIME_DIR/kumo`, else `$TMPDIR/kumo` (the usual case on macOS), else `/tmp/kumo` |
+| Agent detection rules | `<config dir>/agent-detection/<agent>.toml` |
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `KUMO_CONFIG_DIR` | Config directory (default `~/.config/kumo`, or `$XDG_CONFIG_HOME/kumo`) |
+| `KUMO_STATE_DIR` | State directory (default `~/.local/state/kumo`, or `$XDG_STATE_HOME/kumo`) |
+| `KUMO_NO_UPDATE=1` | Disable the startup update check |
+| `KUMO_NO_NOTIFY=1` | Disable agent toasts |
+| `KUMO_NO_SOUND=1` | Disable the agent chime |
+| `KUMO_BIN_PATH` | Set **inside panes**: the `kumo` binary that owns the pane |
+| `KUMO_SOCKET_PATH` | Set **inside panes**: the daemon's socket |
+
+`KUMO_BIN_PATH` and `KUMO_SOCKET_PATH` are only exported when
+`[worktree] expose-socket = true` (the default).
 
 ## Live reload
 
 The daemon watches the canonical, flat, and legacy config files plus
 `agent-detection/*.toml`, then applies the same reload path automatically.
-`kumo reload` (or MENU → `reload`) triggers it explicitly. Reload applies `shell`,
-`ai-cmd`, `leader`, and `keymap.bindings` live to panes spawned from then on.
-`new-cwd`, `[notifications] position`, and `[notifications] sound` apply
-instantly. MENU → `config` opens the config
+`kumo reload` (or MENU → `reload`) triggers it explicitly. `shell` and
+`ai-cmd` apply to panes spawned from then on; `keymap.bindings`, `new-cwd`, the
+theme, the status bar, the sidebar width and `[notifications]` apply
+instantly. The leader key is read when a client starts: detach and re-attach
+to pick up a new `[keymap] leader`. MENU → `config` opens the config
 file in an editor pane inside the session (`$VISUAL` → `$EDITOR` → `vi`).
