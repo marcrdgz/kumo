@@ -1,0 +1,47 @@
+---
+title: Copy-mode & Search
+description: Vi-style keyboard selection over a pane's scrollback, search, and yank.
+icon: TextCursor
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Copy-mode freezes the focused pane and gives you a vi-style cursor over its
+screen and scrollback, so you can search, select and copy without touching the
+mouse.
+
+- <kbd>leader+y</kbd> enters copy-mode (`copy-mode`).
+- <kbd>leader+/</kbd> enters copy-mode with the search prompt open
+  (`copy-mode-search`).
+
+<Callout type="info" title="Alternate screen">
+  Copy-mode is unavailable while the pane shows an alternate screen (vim,
+  less, a full-screen agent TUI). Use mouse drag-selection there — it works
+  even when the app owns the mouse.
+</Callout>
+
+## Keys
+
+| Keys | Action |
+| --- | --- |
+| <kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> / arrows | Move the cursor |
+| <kbd>w</kbd> / <kbd>b</kbd> | Next / previous word |
+| <kbd>0</kbd> / <kbd>$</kbd> (<kbd>Home</kbd> / <kbd>End</kbd>) | Start / end of line |
+| <kbd>g</kbd> / <kbd>G</kbd> | Top of scrollback / bottom |
+| <kbd>Ctrl+u</kbd> / <kbd>Ctrl+d</kbd> | Half page up / down |
+| <kbd>Ctrl+b</kbd> / <kbd>Ctrl+f</kbd> (<kbd>PageUp</kbd> / <kbd>PageDown</kbd>) | Full page up / down |
+| <kbd>v</kbd> | Start a character-wise selection |
+| <kbd>V</kbd> | Start a line-wise selection |
+| <kbd>y</kbd> / <kbd>Enter</kbd> | Copy the selection and leave copy-mode |
+| <kbd>/</kbd> / <kbd>?</kbd> | Search forward / backward |
+| <kbd>n</kbd> / <kbd>N</kbd> | Next / previous match |
+| <kbd>q</kbd> / <kbd>Esc</kbd> | Leave copy-mode |
+
+In the search prompt, <kbd>Enter</kbd> runs the search and <kbd>Esc</kbd>
+cancels it. Matches are highlighted in the pane.
+
+## Mouse selection
+
+Outside copy-mode, dragging in any pane selects text and copies it on release
+— including inside apps with mouse reporting (opencode, vim, less). Scrolling
+over a pane that doesn't report the mouse scrolls its scrollback.

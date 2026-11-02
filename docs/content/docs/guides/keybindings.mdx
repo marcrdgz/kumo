@@ -4,6 +4,11 @@ description: The leader key, every stock binding, and how to remap them.
 icon: Keyboard
 ---
 
+Press the leader (<kbd>Ctrl+B</kbd> by default), then a command key. The status
+bar shows a hint while leader mode is active, and <kbd>leader+?</kbd> opens a
+searchable command palette with every binding: filter by action, key or group
+and run the selection with <kbd>Enter</kbd>.
+
 All leader bindings are configurable — override a stock key or add a new one
 in `[keymap.bindings]` with `"chord" = "action-id"` (see
 [Configuration](/docs/configuration)). The `action-id` column below is exactly
@@ -11,33 +16,57 @@ what goes on the right-hand side.
 
 ## Stock bindings
 
-| Key | Action id (`[keymap.bindings]`) | Action |
+### Layout
+
+| Key | Action id | Action |
 | --- | --- | --- |
-| <kbd>Ctrl+B</kbd> | `leader` | Leader key (shows all bindings in the status bar) |
 | <kbd>v</kbd> | `split-vertical` | Split the focused pane vertically |
 | <kbd>-</kbd> | `split-horizontal` | Split the focused pane horizontally |
-| <kbd>a</kbd> | `split-ai` | Spawn an AI CLI pane (vertical split) |
 | <kbd>z</kbd> | `zoom` | Zoom the focused pane |
-| <kbd>h</kbd> | `focus-left` | Move focus left |
-| <kbd>j</kbd> | `focus-down` | Move focus down |
-| <kbd>k</kbd> | `focus-up` | Move focus up |
-| <kbd>l</kbd> | `focus-right` | Move focus right |
-| <kbd>H</kbd> | `resize-left` | Resize the focused pane left |
-| <kbd>J</kbd> | `resize-down` | Resize the focused pane down |
-| <kbd>K</kbd> | `resize-up` | Resize the focused pane up |
-| <kbd>L</kbd> | `resize-right` | Resize the focused pane right |
+| <kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> | `focus-left` · `focus-down` · `focus-up` · `focus-right` | Move focus |
+| <kbd>H</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> | `resize-left` · `resize-down` · `resize-up` · `resize-right` | Resize the focused pane |
+
+### Panes
+
+| Key | Action id | Action |
+| --- | --- | --- |
+| <kbd>a</kbd> | `split-ai` | Spawn an AI CLI pane (vertical split) |
+| <kbd>x</kbd> | `close-pane` | Close the focused pane (asks first if it runs an agent or a full-screen program) |
 | <kbd>Tab</kbd> | `cycle-pane` | Cycle focus between panes |
 | <kbd>s</kbd> | `swap-panes` | Swap the focused pane with its sibling |
 | <kbd>o</kbd> | `rotate-layout` | Rotate the pane layout |
 | <kbd>q</kbd> | `show-pane-numbers` | Show pane numbers — press a number to jump |
-| <kbd>c</kbd> | `new-session` | Create a new session |
-| <kbd>x</kbd> | `close-pane` | Close the focused pane |
-| <kbd>n</kbd> / <kbd>p</kbd> | `next-session` / `prev-session` | Cycle sessions |
-| <kbd>1</kbd>–<kbd>9</kbd> | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position |
+| <kbd>y</kbd> | `copy-mode` | Enter [copy-mode](/docs/guides/copy-mode) (vi scroll / search / yank) |
+| <kbd>/</kbd> | `copy-mode-search` | Search the scrollback (copy-mode) |
+
+### Tabs
+
+| Key | Action id | Action |
+| --- | --- | --- |
+| <kbd>t</kbd> | `new-tab` | Create a new tab |
+| <kbd>&</kbd> | `close-tab` | Close the active tab |
+| <kbd>,</kbd> | `rename-tab` | Rename the active tab |
+| <kbd>n</kbd> / <kbd>p</kbd> | `next-tab` / `prev-tab` | Next / previous tab |
+| <kbd>1</kbd>–<kbd>9</kbd> | `jump-tab-1` … `jump-tab-9` | Jump to the tab at that position |
+
+### Sessions
+
+| Key | Action id | Action |
+| --- | --- | --- |
+| <kbd>c</kbd> | `new-session` | Create a new session (name it in the popup) |
+| <kbd>w</kbd> | `new-worktree` | Create a git worktree in a new session |
+| <kbd>]</kbd> / <kbd>[</kbd> | `next-session` / `prev-session` | Next / previous session |
+| <kbd>Alt+1</kbd>–<kbd>Alt+9</kbd> | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position |
+
+### Chrome & general
+
+| Key | Action id | Action |
+| --- | --- | --- |
 | <kbd>b</kbd> | `toggle-sidebar` | Toggle the sidebar |
-| <kbd>i</kbd> | `agent-inbox` | Focus the agent inbox (blocked · done · running) |
-| <kbd>d</kbd> | `detach` | Detach (daemon keeps running) |
-| <kbd>?</kbd> | `show-keybinds` | Keybind showcase — every leader binding at a glance |
+| <kbd>f</kbd> | `sidebar-filter` | Filter worktrees in the project sidebar |
+| <kbd>i</kbd> | `agent-inbox` | Open the [agent inbox](/docs/guides/agents#agent-inbox) |
+| <kbd>d</kbd> | `detach` | Detach (the daemon keeps running) |
+| <kbd>?</kbd> | `show-keybinds` | Searchable command palette |
 | <kbd>Esc</kbd> | — | Exit leader mode |
 
 ## Palette-only actions
@@ -47,10 +76,10 @@ or bind them in `[keymap.bindings]`.
 
 | Action id | Action |
 | --- | --- |
-| `workspace-finder` | Open workspace finder (project layout — search sessions/tabs) |
+| `workspace-finder` | Open the workspace finder (search sessions and tabs) |
 | `settings` | Open settings (theme, agent skills) |
 | `rename-session` | Rename the active session |
-| `close-session` | Close the active session |
+| `close-session` | Close the active session (asks first if a pane is busy) |
 
 ## Remapping
 
@@ -61,24 +90,23 @@ leader = "ctrl+b"
 # Override a stock key or add a new one.
 [keymap.bindings]
 s = "split-vertical"   # now leader+s splits vertically
-x = "close-pane"
+F = "workspace-finder" # bind a palette-only action
 ```
 
-Invalid chords/actions are ignored. A toast announces new problems, a short
-`⚠ config (n)` chip stays in the status bar until the config is fixed, and
-<kbd>leader+?</kbd> (or clicking the chip) lists each problem in full. `H` and `shift+h` spell the same chord: when two entries
-resolve to one chord with different actions, neither applies (the key keeps
-its default) and kumo warns about the conflict. The dispatch table feeds
-the leader-mode status-bar hint and the <kbd>leader+?</kbd> showcase from the
-same source, so they never drift.
+Invalid chords and unknown actions are ignored. A toast announces new
+problems, a short `⚠ config (n)` chip stays in the status bar until the config
+is fixed, and <kbd>leader+?</kbd> (or clicking the chip) lists each problem in
+full.
+
+`H` and `shift+h` spell the same chord. When two entries resolve to one chord
+with different actions, neither applies — the key keeps its default — and kumo
+warns about the conflict. The status-bar hint and the <kbd>leader+?</kbd>
+palette always reflect the effective keymap.
 
 ## Not remappable
 
 - <kbd>Esc</kbd> and the leader chord itself.
-- Per-mode keymaps for **popups** (menu / context-menu / popup navigation) —
-  like tmux, only command bindings are remappable.
+- Keys inside **popups**, copy-mode and the inbox (menu, context menu, popup
+  navigation) — like tmux, only leader bindings are remappable.
 - **Mouse gestures** (drag-select, splitter resize, context menu) — they are
   positional hit-testing, not key sequences.
-
-Press <kbd>leader+?</kbd> at any time for the live showcase of your current
-bindings.

@@ -1,22 +1,83 @@
 ---
 title: Themes
-description: The built-in theme picker, and what the theme engine adds next.
+description: Built-in themes, the theme picker, and defining your own in config.toml.
 icon: Palette
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-Kumo ships a **theme picker**: a settings popup with tabs listing
-Catppuccin-style schemes with light/dark variants, per-scheme backgrounds,
-status-dot colors, and borders. Named colors (like `mauve`, `navy`) used by
-the chrome and the sidebar git-branch flow through each scheme's secondary
-accent instead of hardcoded constants.
+A theme colors both the terminal (the 16-color palette, default foreground,
+background and cursor) and kumo's chrome (sidebar, status bar, borders, status
+dots, popups).
 
-Open it from the MENU button in the status bar.
+## Picking a theme
 
-<Callout type="info" title="Theme engine">
-  Themes are user-editable in `config.toml`: define palette values for schemes,
-  accents, status dots, and borders. The config file watcher applies theme
-  changes without a restart; `kumo reload` remains available for an explicit
-  refresh. See [Configuration](/docs/configuration).
+Open **MENU → settings** and choose a theme: it applies immediately in every
+attached terminal and is saved to `config.toml`. Or set it yourself:
+
+```toml
+theme = "tokyo-night"   # or: [theme] name = "tokyo-night"
+```
+
+Names are case-insensitive, spaces and hyphens are interchangeable, and a
+prefix is enough (`gruvbox` → *Gruvbox Dark*, `catppuccin` → *Catppuccin
+Mocha*). Unknown names fall back to the default with a warning.
+
+## Built-in themes
+
+| Theme | Notes |
+| --- | --- |
+| Spider-Verse | Default |
+| Catppuccin Mocha | |
+| Cyber Spider | |
+| Silk & Steel | |
+| Gruvbox Dark | |
+| Dracula | |
+| Tokyo Night | |
+| Nord | |
+| One Dark | |
+| Rose Pine | |
+| Catppuccin Latte | Light |
+
+<Callout type="info" title="Light themes">
+  A theme whose terminal background is light paints its own chrome background
+  instead of using the host terminal's default, which is usually dark and would
+  swallow dark text.
 </Callout>
+
+## Custom theme
+
+Define your own under `[theme.custom]` and select it with `name = "custom"`.
+Every key is optional: missing values come from the default theme. Colors are
+hex strings (`#rrggbb`, `rrggbb` or `#rgb`).
+
+```toml
+[theme]
+name = "custom"
+
+[theme.custom]
+name = "Personal"          # shown in the picker (default "Custom")
+palette = [                # ANSI colors 0–15; fewer entries keep the rest
+  "#1d1f21", "#cc6666", "#b5bd68", "#f0c674",
+  "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+  "#666666", "#d54e53", "#b9ca4a", "#e7c547",
+  "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+]
+term-fg = "#c5c8c6"        # terminal default foreground
+term-bg = "#1d1f21"        # terminal default background
+term-cursor = "#c5c8c6"
+fg = "#c5c8c6"             # chrome text
+accent = "#81a2be"         # focused pane, selected session, MENU highlights
+secondary = "#b294bb"      # scrollbars, branch names and other structure
+panel-sep = "#282a2e"      # surface of chrome panels
+panel-muted = "#666666"    # muted text
+border-idle = "#373b41"    # unfocused borders
+green = "#b5bd68"          # status colors
+orange = "#f0c674"
+red = "#cc6666"
+input-bg = "#e0e0e0"       # background of popup text inputs
+```
+
+The custom theme is listed last in the picker. Theme changes in `config.toml`
+apply without a restart (the config file is watched; `kumo reload` forces a
+refresh).

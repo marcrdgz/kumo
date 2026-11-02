@@ -1,26 +1,23 @@
 ---
-title: Sessions & Panes
-description: Splits, focus, resize, zoom, swap, rotate, and pane numbers.
+title: Sessions, Tabs & Panes
+description: Splits, focus, resize, zoom, tabs, sessions, and the sidebar.
 icon: Columns2
 ---
 
-Kumo manages panes as a **binary split tree**: every split divides a pane into
-two, vertically or horizontally. Sessions are independent webs of panes, and
-the sidebar's **project** layout (default) lists every worktree flat —
-session name with its branch dimmed and every agent inline — the active
-worktree expanded with all agents sharing its block highlight, inactive
-minimized to one line. Drag the sidebar's right edge to resize (20–50 cols).
-The classic SESSIONS/AGENTS panels remain via `[sidebar] layout = "divided" |
-"tabs"`.
+Kumo has three levels: a **session** is a workspace (usually one repository or
+worktree), a session holds one or more **tabs**, and each tab is a **binary
+split tree** of panes — every split divides a pane into two, vertically or
+horizontally.
 
-## Pane operations
+All operations live behind the leader key (<kbd>Ctrl+B</kbd> by default). The
+full table, with action ids for remapping, is in
+[Keybindings](/docs/guides/keybindings).
 
-All operations live behind the leader key (<kbd>Ctrl+B</kbd> by default):
+## Panes
 
 | Keys | Action |
 | --- | --- |
-| <kbd>leader+v</kbd> | Split the focused pane vertically |
-| <kbd>leader+-</kbd> | Split the focused pane horizontally |
+| <kbd>leader+v</kbd> / <kbd>leader+-</kbd> | Split the focused pane vertically / horizontally |
 | <kbd>leader+h/j/k/l</kbd> | Move focus left/down/up/right |
 | <kbd>leader+Tab</kbd> | Cycle focus between panes |
 | <kbd>leader+H/J/K/L</kbd> | Resize the focused pane |
@@ -30,39 +27,69 @@ All operations live behind the leader key (<kbd>Ctrl+B</kbd> by default):
 | <kbd>leader+q</kbd> | Show pane numbers — press a number to jump |
 | <kbd>leader+x</kbd> | Close the focused pane |
 
-## Mouse gestures
+Closing a pane that runs an agent or a full-screen program asks for
+confirmation first (<kbd>y</kbd>/<kbd>Enter</kbd> to close, <kbd>n</kbd> or
+<kbd>Esc</kbd> to keep it).
 
-Mouse gestures are positional hit-testing, not key sequences — they are
-deliberately **not** remappable:
+## Tabs
 
-- 🖐️ **Drag** selects text (copied on release) — works even in apps with
-  mouse reporting.
-- 👆 **Click** is forwarded to the app when it owns the mouse.
-- 🎚️ **Scroll** is forwarded to reporting apps; otherwise it scrolls the
-  pane's scrollback.
-- ↔️ **Drag a splitter** to resize.
-- 🧭 The **MENU button** (right of the mode chip in the status bar) opens a
-  dropdown with `keybinds` (the same showcase as <kbd>leader+?</kbd>) and
-  `exit`.
+Tabs (windows) let one session hold several pane trees. The tab bar at the top
+shows each tab's position and name; an unnamed tab is named after its focused
+pane (the agent, the running command, or the directory), and renaming it to an
+empty name restores that.
+
+| Keys | Action |
+| --- | --- |
+| <kbd>leader+t</kbd> | New tab |
+| <kbd>leader+n</kbd> / <kbd>leader+p</kbd> | Next / previous tab |
+| <kbd>leader+1…9</kbd> | Jump to the tab at that position |
+| <kbd>leader+,</kbd> | Rename the active tab |
+| <kbd>leader+&</kbd> | Close the active tab |
+
+The tab bar is also clickable: `+` opens a tab, the hover-revealed `✕` closes
+one, and right-click opens a context menu. From scripts use `kumo tab list`,
+`new`, `focus`, `rename` and `kill`, where `TAB` is the tab id, `t2` for the
+second tab, or its name (see the [CLI reference](/docs/cli#sessions--tabs)).
 
 ## Sessions
 
 | Keys | Action |
 | --- | --- |
 | <kbd>leader+c</kbd> | Create a new session (name it in the popup) |
-| <kbd>leader+n</kbd> / <kbd>leader+p</kbd> | Next / previous session |
-| <kbd>leader+1…9</kbd> | Jump to the session at that sidebar position |
+| <kbd>leader+w</kbd> | Create a git worktree in a new session |
+| <kbd>leader+]</kbd> / <kbd>leader+[</kbd> | Next / previous session |
+| <kbd>leader+Alt+1…9</kbd> | Jump to the session at that sidebar position |
 | <kbd>leader+b</kbd> | Toggle the sidebar |
 
-From the sessions list you can also create and open **git worktrees**
-directly.
+Closing a session with busy panes (agents or running programs) lists what is
+running and asks for confirmation. `rename-session`, `close-session` and the
+`workspace-finder` (search across sessions and tabs) have no stock key: run
+them from the <kbd>leader+?</kbd> palette or bind them.
 
-<Callout type="info" title="Tabs">
-  Tabs (windows) let one session hold several pane trees. The tab bar shows
-  each tab's position and name; an unnamed tab is named after its focused
-  pane (the agent, the running command, or the directory), and renaming it to
-  an empty name restores that. Use `kumo tab list`, `kumo tab new`,
-  `kumo tab focus`, `kumo tab rename`, and `kumo tab kill` to manage them
-  (`TAB` is the tab id, `t2` for the second tab, or a name), or use the tab
-  bar in the TUI.
-</Callout>
+## Sidebar
+
+The default **project** layout lists every session/worktree flat: the session
+name with its AI status dot, its branch dimmed underneath, and every agent
+inline. The active worktree is expanded; inactive ones collapse to one line.
+<kbd>leader+f</kbd> (or `⌕ find` at the top) filters the list. Drag the
+sidebar's right edge to resize it (20–50 columns).
+
+The classic SESSIONS/AGENTS panels remain available with `[sidebar] layout =
+"divided"` (stacked) or `"tabs"` (two toggled tabs) — see
+[Configuration](/docs/configuration#sidebar).
+
+## Mouse
+
+Mouse gestures are positional hit-testing, not key sequences, so they are not
+remappable:
+
+- **Drag** selects text (copied on release) — works even in apps with mouse
+  reporting. For keyboard selection see [Copy-mode](/docs/guides/copy-mode).
+- **Click** is forwarded to the app when it owns the mouse.
+- **Scroll** is forwarded to reporting apps; otherwise it scrolls the pane's
+  scrollback.
+- **Drag a splitter** to resize.
+- The **MENU** button (right of the mode chip in the status bar) opens
+  `config` (edit `config.toml` in a pane), `settings` (theme and agent
+  skills), `reload`, `keybinds` (the <kbd>leader+?</kbd> palette) and
+  `detach`.
