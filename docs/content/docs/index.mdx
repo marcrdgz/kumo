@@ -16,6 +16,7 @@ import {
   Activity,
   TextCursor,
   Settings2,
+  Unplug,
 } from 'lucide-react';
 
 **Kumo** (蜘蛛 — *spider* in Japanese) is a terminal multiplexer that weaves
@@ -43,7 +44,7 @@ is whatever you run *inside* its panes, not the multiplexer.
     Use kumo as an ADE — wait, prompt, read, dev servers, parallel agents.
   </Card>
   <Card icon={<Settings2 />} title="Configuration" href="/docs/configuration">
-    `config.toml` reference: leader keys, shells, agents.
+    `config.toml` reference: keymaps, themes, sidebar, status bar, agents.
   </Card>
 </Cards>
 
@@ -55,31 +56,35 @@ is whatever you run *inside* its panes, not the multiplexer.
     and full-screen apps behave exactly like in a native terminal.
   </Card>
   <Card icon={<Columns2 />} title="Split panes & sessions">
-    Binary split tree, mouse-drag resizing, zoom, multiple independent
-    sessions and tab cycling.
+    Binary split tree, mouse-drag resizing, zoom, tabs per session, and
+    multiple independent sessions and worktrees.
   </Card>
   <Card icon={<Bot />} title="AI CLI panes">
     Spawn a pane running your AI CLI with one keystroke, or run any agent in a
     shell pane: kumo detects it and weaves it into the sidebar.
   </Card>
   <Card icon={<Activity />} title="Agent status at a glance">
-    A status dot per agent — green working, orange blocked, gray idle —
-    detected from the live terminal buffer, accurate while you scroll.
+    A status dot per agent — blue working, orange blocked, green done, gray
+    idle — detected from the live terminal buffer, accurate while you scroll.
   </Card>
   <Card icon={<Bell />} title="Audible alerts">
     A distinct chime when an agent blocks or finishes; blocked agents float to
     the top of the list and their pane glows orange.
   </Card>
-  <Card icon={<TextCursor />} title="Native text selection">
+  <Card icon={<TextCursor />} title="Selection & copy-mode" href="/docs/guides/copy-mode">
     Drag to select in any pane, even inside apps that own the mouse
-    (opencode's TUI, vim, less). Panes present as a plain `xterm-256color`.
+    (opencode's TUI, vim, less), or use vi-style copy-mode with search.
   </Card>
   <Card icon={<Network />} title="Orchestration" href="/docs/guides/orchestration">
     `kumo agent wait/prompt/read` and `kumo pane wait-output` drive any pane
     and wait without polling.
   </Card>
   <Card icon={<FolderOpen />} title="Workspace-aware">
-    kumo opens in the directory you launch it from; every new pane and
-    session starts there.
+    kumo opens in the directory you launch it from, and new panes follow the
+    focused pane's working directory.
+  </Card>
+  <Card icon={<Unplug />} title="Detach & survive reboots" href="/docs/guides/detach-and-reattach">
+    The daemon keeps your panes running while detached, restarts in place on
+    update, and restores sessions after a reboot.
   </Card>
 </Cards>

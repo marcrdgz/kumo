@@ -11,13 +11,14 @@ colors, keybindings, the leader key, the layout of the status bar and
 sidebar, the AI panes, and more. Every `0.x.0` is a feature release; 1.0.0 is
 the finish line for the configurable, persistent kumo.
 
-<Callout type="info" title="Current: v0.7 ADE — next: 0.8.0, the 1.0 release candidate">
-  0.7 provides server-owned agent waits, prompts, reads, output waits,
-  startup, aliases, broadcast, and isolated worktrees with lightweight
-  checkpoints. See the [Orchestration guide](/docs/guides/orchestration) and
+<Callout type="info" title="Current: v0.8 — the 1.0 release candidate">
+  0.8 freezes kumo's contracts: a stable wire protocol and `--json` machine
+  API, deterministic keymap conflicts, a tested upgrade path, and sessions
+  that survive a reboot. See
   [ROADMAP.md](https://github.com/marcrdgz/kumo/blob/main/ROADMAP.md) for the
-  full plan; [CHANGELOG](https://github.com/marcrdgz/kumo/blob/main/CHANGELOG.md)
-  for released history.
+  full plan and the
+  [CHANGELOG](https://github.com/marcrdgz/kumo/blob/main/CHANGELOG.md) for
+  released history.
 </Callout>
 
 ## Released
@@ -27,21 +28,15 @@ the finish line for the configurable, persistent kumo.
 | 0.2.0 | Polish & hygiene | CLI help output, context menu, per-agent lifecycle split + `claude` support, `leader+?` keybind showcase |
 | 0.3.0 | Daemon core | Daemon owning PTYs, tmux-style CLI (`attach`/`new`/`ls`/`kill`), detach, dirty-row cell-patch streaming, socket security, agents server-side, update without losing the web |
 | 0.4.0 | Config & keymaps | TOML config, custom leader keys, data-driven remappable bindings, keyboard resize/swap/rotate, `[terminal]` section with follow-workspace cwd, live reload |
-| 0.5.0 | Theme & chrome | Theme picker (Catppuccin-style schemes), sidebar SESSIONS/AGENTS tabs, git worktrees, clickable links, selection & copy feedback |
+| 0.5.0 | Theme & chrome | Theme picker, sidebar SESSIONS/AGENTS tabs, git worktrees, clickable links, selection & copy feedback |
 | 0.6.0 | Copy-mode, search & pane plumbing | User-editable theme engine, status-bar widgets + layout, tabs (windows) per session, vi-style copy-mode + `/` search, corner-toast agent notifications, control CLI, full screen+scrollback restore |
+| 0.7.0 | ADE: orchestration & isolated worktrees | [Orchestration primitives](/docs/guides/orchestration) (`agent wait/prompt/read/start/rename/broadcast`, `pane wait-output`), five-state agent model, agent inbox, project sidebar with inline agents, data-driven detection rules for `codex`, `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`, `kumo agent explain`, AI worktrees with checkpoints, bundled agent skill, config file watcher (patches through 0.7.6) |
+| 0.8.0 | Contracts, persistence & freeze (RC) | Additive-compatible wire protocol, frozen `--json` machine API with golden tests, deterministic keymap conflicts, readiness-gated `worktree create --agent`, upgrade path tested against 0.7.6, [sessions that survive a reboot](/docs/guides/detach-and-reattach#surviving-a-reboot), [compatibility policy](/docs/compatibility) |
 
 ## Next up
 
-- **0.7.0 — ADE & AI polish**: ✅ **agent orchestration primitives** (`kumo agent wait --until`, `agent prompt --wait`, `agent read --source`, `pane wait-output --regex`, `agent start/rename/broadcast` — server-owned, occupant-pinned, bracketed-paste-aware; see [Orchestration](/docs/guides/orchestration)) — the *wait* half of `send-keys`. Lifecycle detection for `codex`, `gemini`, `qwen`, `aider`, `cody`, `swe`, `coco`; **agent inbox view** — `leader+i` keyboard-routes to `blocked · done · running` agents, the sidebar defaults to stacked spaces + agent panels (grouped sections, draggable grey divider at the middle, `[sidebar] layout = "tabs"` restores the classic two-tab sidebar); **`kumo agent explain`** — live, daemon-side diagnostics of why a pane reads the state it does (matched markers, evidence region, verdict reason chain) with `kumo agent status`/`list` and `kumo pane list` for pane-id discovery; **isolated worktrees and lightweight checkpoints** — `worktree create --ai` supports `--from`, `--note`, and `--agent`, with `list/current/set/open/rm` for inspection and cleanup; config file-watcher hot-reload (deferred from 0.6.0). The current flow requires an explicit `kumo agent prompt` after an agent is ready; automatic task submission is planned for 0.7.1. A dedicated TUI broadcast popup and `leader+B` binding are not part of 0.7.0.
-- **0.8.0 — Contracts, persistence & freeze (RC)**: no new surface beyond
-  reboot recovery. Stable wire protocol, a frozen `--json` machine API (golden
-  tests, error codes, exit codes), deterministic keymap conflicts, a
-  readiness-gated `worktree create --agent`, an upgrade path tested against
-  the 0.7.6 release, sessions that survive a reboot (cwd, screens and agents
-  via `claude --continue` & co.), and a written
-  [compatibility policy](/docs/compatibility).
-- **1.0.0 — Full customization + solid persistence**: the 0.8.0 build with
-  the version bumped — frozen TOML schema v1, stable keymap and theme system,
+- **1.0.0 — Full customization + solid persistence**: the 0.8 build with the
+  version bumped — frozen TOML schema v1, stable keymap and theme system,
   crash-safe persistence, proven release pipeline.
 - **2.0.0 — Plugins**: plugins are a new public API surface, so they land
   after 1.0 freezes what kumo already ships.
