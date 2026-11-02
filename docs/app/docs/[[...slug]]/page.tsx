@@ -9,6 +9,7 @@ import {
 } from 'fumadocs-ui/layouts/notebook/page';
 import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
+import { PageContainer } from '@/components/page-container';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
 
@@ -28,6 +29,7 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
       toc={page.data.toc}
       full={page.data.full}
       breadcrumb={{ enabled: false }}
+      slots={{ container: PageContainer }}
     >
       <header className="flex flex-col gap-2 pb-6">
         {section && <p className="text-sm font-semibold text-fd-primary">{section}</p>}
