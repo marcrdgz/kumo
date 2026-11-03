@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { baseOptions } from '@/lib/layout.shared';
 import { CopyCommand } from '@/components/home/copy-command';
+import { HeroBackdrop, PeekingEyes } from '@/components/home/hero-backdrop';
 import { HeroDemo } from '@/components/home/terminal-preview';
 import { OG_IMAGE } from '@/lib/site';
 
@@ -41,7 +42,10 @@ export default function HomePage() {
         { text: 'Roadmap', url: '/docs/roadmap' },
       ]}
     >
-      <main className="relative flex flex-1 flex-col items-center overflow-x-clip px-5">
+      {/* isolate keeps the backdrop's negative z-index inside main. */}
+      <main className="relative isolate flex flex-1 flex-col items-center overflow-x-clip px-5">
+        <HeroBackdrop />
+
         {/* Hero */}
         {/* Headline left, supporting copy and the install command in the right
             column: the type keeps a left reading edge, the full width is used,
@@ -69,7 +73,8 @@ export default function HomePage() {
             </div>
           </div>
 
-          <div className="mt-12 sm:mt-14">
+          <div className="relative mt-12 sm:mt-14">
+            <PeekingEyes />
             <HeroDemo />
           </div>
         </section>
