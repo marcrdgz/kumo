@@ -1,5 +1,6 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import { Inter, JetBrains_Mono, Martian_Mono } from 'next/font/google';
+import { OG_IMAGE, SITE_URL } from '@/lib/site';
 import './global.css';
 
 const inter = Inter({
@@ -17,6 +18,12 @@ const mono = JetBrains_Mono({
   subsets: ['latin'],
   variable: '--font-jetbrains-mono',
 });
+
+export const metadata = {
+  metadataBase: new URL(SITE_URL),
+  openGraph: { siteName: 'kumo', type: 'website', images: [OG_IMAGE] },
+  twitter: { card: 'summary_large_image' },
+};
 
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (

@@ -4,15 +4,27 @@ import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { baseOptions } from '@/lib/layout.shared';
 import { CopyCommand } from '@/components/home/copy-command';
 import { HeroDemo } from '@/components/home/terminal-preview';
+import { OG_IMAGE } from '@/lib/site';
 
 const INSTALL = `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/marcrdgz/kumo/releases/latest/download/kumo-installer.sh | sh`;
 const GITHUB = 'https://github.com/marcrdgz/kumo';
 const RELEASES = `${GITHUB}/releases`;
 
+const TITLE = 'kumo — a terminal multiplexer for AI coding agents';
+const DESCRIPTION =
+  'kumo is a terminal multiplexer for AI coding agents. Every pane is a real Ghostty terminal, and the sidebar shows which agent is working, waiting on you, or done.';
+
 export const metadata = {
-  title: 'kumo — a terminal multiplexer for AI coding agents',
-  description:
-    'kumo is a terminal multiplexer for AI coding agents. Every pane is a real Ghostty terminal, and the sidebar shows which agent is working, waiting on you, or done.',
+  title: TITLE,
+  description: DESCRIPTION,
+  // Page-level openGraph replaces the layout's, so its fields repeat here.
+  openGraph: {
+    title: TITLE,
+    description: DESCRIPTION,
+    siteName: 'kumo',
+    type: 'website',
+    images: [OG_IMAGE],
+  },
 };
 
 const KBD =
