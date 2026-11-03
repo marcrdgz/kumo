@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- The kumo eyes, reduced for favicon sizes (posterior eyes dropped, the rest enlarged). -->
+  <style>
+    circle { fill: #1d1d1f; }
+    @media (prefers-color-scheme: dark) { circle { fill: #f5f5f7; } }
+  </style>
+  <circle cx="21" cy="38" r="9.5"/>
+  <circle cx="43" cy="38" r="9.5"/>
+  <circle cx="6" cy="40" r="5"/>
+  <circle cx="58" cy="40" r="5"/>
+</svg>
