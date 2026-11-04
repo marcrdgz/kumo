@@ -96,7 +96,7 @@ const ACTION_GROUPS: { label: string; actions: string[] }[] = [
       'close-session',
     ],
   },
-  { label: 'chrome', actions: ['toggle-sidebar'] },
+  { label: 'chrome', actions: ['toggle-sidebar', 'sidebar-filter'] },
   {
     label: 'general',
     actions: [
@@ -531,7 +531,7 @@ export function ConfigBuilder() {
             </div>
             <p className="text-xs text-fd-muted-foreground">
               project (default): worktrees with inline agents, collapses
-              inactive — branch dimmed, finder on <code>leader+f</code> · divided:
+              inactive — branch dimmed, filter on <code>leader+f</code> · divided:
               stacked spaces + agents · tabs: classic two-tab
             </p>
           </Field>

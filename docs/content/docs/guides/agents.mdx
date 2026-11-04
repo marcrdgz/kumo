@@ -1,17 +1,15 @@
 ---
 title: AI Agents
 description: AI CLI panes, status detection, toasts, and audible alerts.
-icon: 🤖
+icon: Bot
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
 Kumo auto-detects any AI CLI running inside a pane and lists it in the
-sidebar's AGENTS tab with its workspace and CLI name.
-
-<Callout title="New: orchestration primitives" type="info">
-Kumo 0.7.0 adds **server-owned waits** — `kumo agent wait`, `agent prompt --wait`, `agent read`, and `pane wait-output` — so agents (and you) can drive any pane and wait for the result without polling. See the full [Orchestration guide](/docs/guides/orchestration) for the ADE primitives, dev-server/test-suite patterns, and the AI skill prompt.
-</Callout>
+sidebar under its session, with its CLI name and a live status dot. To drive
+agents from scripts or from other agents, see
+[Orchestration](/docs/guides/orchestration).
 
 ## Spawning an agent
 
@@ -30,42 +28,31 @@ just the viewport), so it stays accurate even while you scroll:
 - 🟢 **Green** — done (finished while you weren't looking; focusing the pane marks it seen → idle)
 - ❓ **Dim** — unknown (recognized agent whose classification failed — idle was not proven)
 
-The full five-state model is `working · blocked · idle · done · unknown`. `done` is the same transition that fires the corner toast on working→idle while unfocused; `unknown` means the daemon saw the agent process but no idle/working/blocked signal matched. Both are first-class wait targets: `kumo agent wait -p 42 --until done`.
+`done` is set when an agent goes from working to idle while its pane is not
+focused — the same transition that fires the corner toast. `unknown` means
+the daemon saw the agent process but no idle, working or blocked signal
+matched. Both are valid wait targets: `kumo agent wait -p 42 --until done`.
 
 When an agent **blocks** or **finishes**, kumo raises a transient **toast** in
 the corner of every attached viewer (click it to jump to the agent's pane)
 and plays an audible chime — a distinct sound per event. Blocked agents also
-float to the top of the AGENTS list with a filled `◉` dot and a `· blocked`
+float to the top of the agent list with a filled `◉` dot and a `· blocked`
 hint, and their pane glows orange even without focus.
 
 ## Agent inbox
 
-<kbd>leader+i</kbd> moves the keyboard into the agent panel. `j`/`k` (or the
+<kbd>leader+i</kbd> moves the keyboard into the agent list. `j`/`k` (or the
 arrows) move between the agents that need attention — **blocked · done ·
-running** — and <kbd>Enter</kbd> jumps straight to the chosen pane (switching
-session and tab as needed). <kbd>Esc</kbd> or <kbd>q</kbd> leaves the inbox.
+running**, in that order, each with its session and tab — and
+<kbd>Enter</kbd> jumps straight to the chosen pane (switching session and tab
+as needed). <kbd>Esc</kbd> or <kbd>q</kbd> leaves the inbox.
 
-The sidebar defaults to the **project** layout: a single `projects` list with
-`⌕ find` at the top. Each worktree shows its session name with the AI status
-dot on the left (where `▸` used to be) and `branch` dimmed underneath. The
-active worktree is expanded — branch + every agent underneath, all sharing a
-subtle block highlight — while inactive worktrees stay minimized to one line.
-Hover a worktree for a faint highlight; the focused agent gets a slightly
-brighter agent block so you always know where the cursor is. Drag the
-right-edge separator to resize the sidebar (20–50 cols, live, `kumo reload`
-honors `width`).
+In the default **project** sidebar, each agent is listed inline under its
+worktree; the focused agent is highlighted so you always know where the
+cursor is. See [Sessions, Tabs & Panes](/docs/guides/sessions-and-panes#sidebar)
+for the sidebar layouts.
 
-Press **<kbd>leader+f</kbd>** (or click `⌕ find`) to open the workspace finder
-— a centered palette over sessions + tabs, `contains` filtered, `starts_with`
-ranked, `Enter` jumps (`SessionFocus`/`TabFocus`). The finder lives on the
-project layout; in other layouts `leader+f` is still bindable via
-`workspace-finder`. The classic layouts remain one config line away:
-
-```toml
-[sidebar]
-layout = "project" # project | divided | tabs  — explorer/navigator alias project
-width = 28         # only for project, draggable live 20..50
-```
+## Notifications
 
 ```toml
 [notifications]
@@ -74,6 +61,9 @@ sound = true            # audible chime on blocked/finished transitions
 blocked = true          # toast when an agent blocks
 finished = true         # toast when an agent finishes / goes idle
 ```
+
+`KUMO_NO_NOTIFY=1` disables toasts and `KUMO_NO_SOUND=1` the chime, regardless
+of the config.
 
 ## Lifecycle detection
 
@@ -92,8 +82,7 @@ CLI version whose terminal chrome has changed.
 
 ## Custom detection rules (`agent-detection/<agent>.toml`)
 
-The lifecycle classifiers are **data-driven** (`0.7.0`): kumo ships rule
-manifests for every supported agent above (built into the binary), and reads
+The lifecycle classifiers are **data-driven**: kumo ships rule manifests for every supported agent above (built into the binary), and reads
 per-agent overrides from your config dir:
 
 ```
@@ -151,8 +140,9 @@ tail), `form` (below the last rule), `footer` (pinned prompt footer), `title`
 
 **Adding a new agent:** run it in a pane, watch the markers via
 `kumo agent explain <pane>`, write the file, then `kumo reload` until the
-status is right — exactly what we did for the built-ins
-(`app/kumo/src/daemon/agents/rules/`).
+status is right — exactly how the
+[bundled rules](https://github.com/marcrdgz/kumo/tree/main/app/kumo/src/daemon/agents/rules)
+were written.
 
 <Callout title="Agents live in the daemon">
   Lifecycle detection, status, and audible alerts run server-side, so they are
@@ -160,17 +150,6 @@ status is right — exactly what we did for the built-ins
   (`list` / `ls`) surfaces each agent's status and pane id from outside the
   TUI, so a blocked agent is noticeable even when you are not attached.
 </Callout>
-
-## Orchestration: wait, prompt, read, broadcast
-
-Agents (and you) can drive any pane over the same socket the TUI uses — no polling, pinned to the pane's `OS pid`, with bracketed-paste-aware injection. The primitives are `agent wait --until`, `agent prompt [--wait]`, `agent read --source`, `pane wait-output --regex`, `agent start/rename/broadcast`. For the complete reference, recipes (dev server, verify loop, agent-to-agent handoff, parallel workers), error codes, and the copy-paste skill prompt for AIs running inside kumo, see the [Orchestration guide](/docs/guides/orchestration).
-
-```sh
-kumo agent wait -p 42 --until idle --timeout 30s
-kumo agent prompt -p 42 "fix the test" --wait idle
-kumo agent read -p 42 --source recent
-kumo pane wait-output -p 12 --regex "passed|failed"
-```
 
 ## Debugging status: `kumo agent explain`
 

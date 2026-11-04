@@ -1,10 +1,8 @@
 ---
 title: Quickstart
 description: From zero to a woven web of terminals and AI agents in two minutes.
-icon: 🚀
+icon: Rocket
 ---
-
-import { Card, Cards } from 'fumadocs-ui/components/card';
 
 ## Launch
 
@@ -13,14 +11,14 @@ kumo
 ```
 
 `kumo` attaches to the last session if one exists (else starts fresh) and
-starts the daemon behind it if needed. Every new pane opens in the directory
-you launched from.
+starts the daemon behind it if needed. New panes open in the focused pane's
+current directory (configurable with `[terminal] new-cwd`).
 
 ## Meet the leader key
 
-Press <kbd>Ctrl+B</kbd>, then a command key. The status bar shows the
-available bindings while you are in leader mode, and <kbd>leader+?</kbd>
-opens the full keybind showcase at any time.
+Press <kbd>Ctrl+B</kbd>, then a command key. The status bar shows a hint while
+you are in leader mode, and <kbd>leader+?</kbd> opens a searchable command
+palette with every binding.
 
 ## Split panes
 
@@ -36,43 +34,44 @@ Resize with <kbd>leader+H/J/K/L</kbd>, or just drag a splitter with the mouse.
 <kbd>leader+a</kbd> opens a dedicated pane running your AI CLI (default
 `opencode`, configurable via `ai-cmd`). You can also just run `opencode`,
 `claude`, or `codex` inside any shell pane — kumo auto-detects the agent
-process and weaves it into the sidebar's **AGENTS** tab with a live status
-dot: 🟢 working, 🟠 blocked (waiting for your approval), ⚪ idle. When an
-agent blocks or finishes, kumo chimes so you notice without watching.
+process and lists it in the sidebar with a live status dot: 🔵 working,
+🟠 blocked (waiting for your approval), 🟢 done, ⚪ idle. When an agent blocks
+or finishes, kumo shows a toast and chimes so you notice without watching;
+<kbd>leader+i</kbd> jumps through the agents that need you.
 
 ## Install the Kumo skill
 
 Give your agent Kumo's bundled orchestration instructions so it knows how to
 discover panes, read terminal output, prompt other agents, and wait without
-polling. Choose the AI CLI you use and run the generated command:
-
-<AgentSkillInstaller />
-
-You can also install it inside Kumo from **MENU → settings → agents**. Kumo
-detects whether each target is installed and lets you install, update, or
-remove it. See [Configuration](/docs/configuration#install-the-agent-skill)
-for details about paths and update detection.
+polling. Install it from **MENU → settings → agents**, or with the one-line
+command for your CLI in [Orchestration → Bundled agent
+skill](/docs/guides/orchestration#bundled-agent-skill).
 
 ## Sessions
 
 - <kbd>leader+c</kbd> — create a named session
-- <kbd>leader+n</kbd> / <kbd>leader+p</kbd> — cycle sessions
-- <kbd>leader+1…9</kbd> — jump to the session at that sidebar position
+- <kbd>leader+]</kbd> / <kbd>leader+[</kbd> — cycle sessions
+- <kbd>leader+Alt+1…9</kbd> — jump to the session at that sidebar position
+
+## Tabs
+
+- <kbd>leader+t</kbd> — new tab in the current session
+- <kbd>leader+n</kbd> / <kbd>leader+p</kbd> — cycle tabs
+- <kbd>leader+1…9</kbd> — jump to the tab at that position
 
 ## Give an agent an isolated worktree
 
-Create an ephemeral checkout and start an agent in its new session:
+Create an ephemeral checkout, start an agent in its new session, and hand it
+a task:
 
 ```sh
 kumo worktree create --ai fix-login --agent claude --note "Investigate auth tests"
-kumo agent status
-kumo agent wait -p 42 --until idle
+kumo agent status                     # find the new agent's pane id, e.g. 42
 kumo agent prompt -p 42 "Fix the failing auth tests" --wait idle
 ```
 
-In 0.7.0, `--agent` starts the agent but does not submit a task automatically;
-the explicit `agent prompt` is required. Automatic task submission in the
-create flow is planned for 0.7.1. See [Orchestration](/docs/guides/orchestration)
+`--agent` returns once the agent is ready, but it does not submit the task:
+send it with `agent prompt`. See [Orchestration](/docs/guides/orchestration#isolated-worktrees-and-checkpoints)
 for checkpoints, `--from`, shared directories, and cleanup.
 
 ## Orchestrate agents (and dev servers)
@@ -82,7 +81,7 @@ Every `kumo` command is an API an AI inside a pane can use — no SDK:
 ```sh
 kumo agent wait -p 42 --until idle            # server holds the socket, no polling
 kumo agent prompt -p 42 "fix the test" --wait idle
-kumo agent read -p 42 --source recent         # daemon owns the buffer, alt-screen intact
+kumo agent read -p 42 --source recent         # read straight from the daemon's buffer
 kumo pane wait-output -p 12 --regex "Ready|passed|failed"
 ```
 
@@ -102,6 +101,9 @@ kumo ls     # list sessions (* = active)
 <Cards>
   <Card title="Keybindings" href="/docs/guides/keybindings">
     Every leader binding, and how to remap them in `config.toml`.
+  </Card>
+  <Card title="Copy-mode" href="/docs/guides/copy-mode">
+    Vi-style selection, search and yank over the scrollback.
   </Card>
   <Card title="AI Agents" href="/docs/guides/agents">
     Status detection, alerts, and per-agent lifecycle support.

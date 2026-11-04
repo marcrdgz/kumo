@@ -16,36 +16,47 @@ And it's featherweight 🪶: while you work, kumo itself idles at **~0.7% CPU
 and ~6 MB of memory** — the real cost is whatever you run *inside* its panes,
 not the multiplexer.
 
+📖 **Documentation: [marcrdgz.github.io/kumo](https://marcrdgz.github.io/kumo/docs)**
+
 ## ✨ Features
 
 - 🖥️ **Real terminal emulation** — each pane is a genuine VT/xterm emulator
   (vendored Ghostty). Shells, TUIs, and full-screen apps behave exactly like in
   a native terminal: cursor, colors, scrollback, the works. 🎨
-- 🧩 **Split panes & sessions** — binary split tree (vertical/horizontal),
-  mouse-drag resizing, zoom 🔍, multiple independent sessions, tab cycling.
+- 🧩 **Split panes, tabs & sessions** — binary split tree
+  (vertical/horizontal), mouse-drag resizing, zoom 🔍, tabs per session,
+  multiple independent sessions and git worktrees.
 - 🤖 **AI CLI panes** — spawn a dedicated pane running your AI CLI with one
   keystroke, or just run `opencode` / `claude` / `codex` … in any shell pane:
   kumo auto-detects the agent process and weaves it into the sidebar. 🕸️
-- 🟢🟠⚪ **Agent status at a glance** — the sidebar shows each agent's workspace
-  and CLI name with a status dot: **green** = working, **orange** = blocked
-  (waiting for approval), **gray** = idle. Detected from the live terminal
+- 🔵🟠🟢⚪ **Agent status at a glance** — the sidebar shows each agent's
+  workspace and CLI name with a status dot: **blue** = working, **orange** =
+  blocked (waiting for approval), **green** = done (finished while you weren't
+  looking), **gray** = idle. Detected from the live terminal
   buffer (not the viewport), so it stays accurate even while you scroll.
   Lifecycle detection is per-agent — see [Agents](#agents). ⚡
 - 🔔 **Agent notifications** — when an agent **blocks** (waiting for approval)
   or **finishes**, kumo raises a transient toast in every attached viewer
   (click to jump to the pane) and plays a distinct chime per event. Blocked
-  agents float to the top of the AGENTS list (with a filled `◉` dot and
-  `· blocked` hint) and their pane glows orange, even without focus. Tune the
+  agents float to the top of the agent list (with a filled `◉` dot and
+  `· blocked` hint) and their pane glows orange, even without focus;
+  `leader+i` jumps through the agents that need you. Tune the
   corner with `[notifications] position`, mute with `[notifications] sound =
   false`. 🔔
-- 📋 **Native text selection** — drag to select in any pane, even inside apps
-  that own the mouse (opencode's TUI, vim, less). Clicks still reach the app,
-  and the highlight hugs the text like a normal terminal. ✂️
+- 📋 **Selection & copy-mode** — drag to select in any pane, even inside apps
+  that own the mouse (opencode's TUI, vim, less), or use vi-style copy-mode
+  with search (`leader+y`, `leader+/`). ✂️
+- 🕹️ **Orchestration** — `kumo agent wait/prompt/read` and
+  `kumo pane wait-output` let scripts and agents drive any pane and wait
+  without polling, with a stable `--json` API.
+- 💾 **Detach & survive reboots** — the daemon keeps panes running while
+  detached, restarts in place on `kumo update`, and restores sessions,
+  screens and agent conversations after a reboot.
 - 🐣 **Plain-tty identity** — panes present as a plain `xterm-256color` (no
   mouse capabilities advertised), so apps don't hijack the mouse and selection
   always works. 🧤
-- 📂 **Workspace-aware** — kumo opens in the directory you launch it from; every
-  new pane/session starts there. 🗂️
+- 📂 **Workspace-aware** — kumo opens in the directory you launch it from, and
+  new panes follow the focused pane's working directory. 🗂️
 
 ## 📦 Install
 
@@ -68,7 +79,8 @@ target matrix can be built on demand via a manual workflow dispatch):
 kumo update --nightly
 ```
 
-**From source** (development):
+**From source** (development) — needs Zig `0.16.x` on `PATH` (see
+Requirements below):
 
 ```sh
 cargo install --path app/kumo --locked
@@ -97,133 +109,77 @@ top-right with a red ✕ to dismiss it. Disable the check with
 
 ## ⚙️ Configuration
 
-Kumo reads a single config file at `~/.config/kumo/config.toml`. The old
-flat `key = value` file at `~/.config/kumo/config` (and the legacy `~/.kumo`)
-still reads as a fallback, but `config.toml` wins when both exist. The
-directory follows the XDG layout, so the config lives in `~/.config/kumo/`,
-runtime state in `~/.local/state/kumo/`, and the detach server's IPC socket in
-`$XDG_RUNTIME_DIR/kumo`.
+Kumo reads `~/.config/kumo/config.toml` and reloads it automatically when it
+changes:
 
 ```toml
 # ~/.config/kumo/config.toml
+ai-cmd = "claude --model sonnet"
+theme = "tokyo-night"
+
 [keymap]
 leader = "ctrl+b"
 
 # Leader bindings are remappable: override a stock key or add a new one.
 [keymap.bindings]
 s = "split-vertical"   # now leader+s splits vertically
-x = "close-pane"
-
-ai-cmd = "claude --model sonnet"
-shell  = "/bin/zsh"
-update-check = true
 ```
 
-Supported keys:
+Every key — terminal, theme, sidebar, status bar, notifications, worktrees,
+persistence — is in the [configuration reference](https://marcrdgz.github.io/kumo/docs/configuration),
+which also has an interactive config builder.
 
-| Key | Description | Default |
-| --- | --- | --- |
-| `keymap.leader` | Leader chord that enters leader mode (`ctrl+b`, `ctrl+space`, `f12`, …). A top-level `leader` also reads as a deprecated alias. | `ctrl+b` |
-| `keymap.bindings` | Overrides/additions to the leader bindings: `chord = "action-id"` (e.g. `s = "split-vertical"`). Invalid chords/actions are ignored with a warning. | stock keymap |
-| `ai-cmd` | AI CLI to run in the AI pane (program + args, space-separated). `ai_cmd` also works for back-compat. | `opencode` |
-| `shell` | Login shell used to spawn panes. | `$SHELL` → `/bin/zsh` |
-| `update-check` | Whether the startup update check runs (also `KUMO_NO_UPDATE=1`). | `true` |
-| `notifications.position` | Where agent toasts anchor: `top-right`, `top-left`, `bottom-right`, `bottom-left`, `center`; `off`/`never` silences toasts (also `KUMO_NO_NOTIFY=1`). | `top-right` |
-| `notifications.blocked` / `notifications.finished` | Toast when an agent blocks / finishes (`idle`, `done` are aliases of `finished`). | `true` |
-| `notifications.sound` | Whether blocked/finished agent transitions play an audible chime (`alert-sound` also works; also `KUMO_NO_SOUND=1`). A top-level `agent-sound` reads as a deprecated alias. | `true` |
-
-Overrides for the config/state **locations** (not keys) follow the usual
-conventions: `KUMO_CONFIG_DIR`, `KUMO_STATE_DIR`, `XDG_CONFIG_HOME`,
-`XDG_STATE_HOME`.
-
-## Agents
+## 🤖 Agents
 
 Kumo auto-detects supported AI CLIs running inside a pane and lists them in the
-sidebar. Lifecycle rules are bundled for every agent below and may be replaced
-or extended from `~/.config/kumo/agent-detection/*.toml`.
+sidebar. Lifecycle rules are bundled for `opencode`, `claude`, `codex`,
+`gemini`, `qwen`, `aider`, `cody`, `swe` and `coco`, and may be replaced or
+extended from `~/.config/kumo/agent-detection/*.toml`. When no explicit marker
+matches, a pane reads `unknown` instead of a guessed state;
+`kumo agent explain PANE` shows the evidence behind a state.
 
-### ✅ Implemented — bundled lifecycle detection
-
-- `opencode` — permission dialogs, question prompt, prompt-footer signals
-- `claude` — approval forms, permission prompts, OSC-title spinner
-- `codex` · `gemini` · `qwen` · `aider` · `cody` · `swe` · `coco`
-
-Rules are deliberately conservative: when no explicit live marker matches,
-the pane remains `unknown` instead of being guessed idle or blocked.
-
-Run `kumo agent explain PANE` to inspect the evidence behind a state. Run
-`kumo agent skill` to print the bundled orchestration skill, or install it with
-`kumo agent skill --output PATH`.
+Install the bundled orchestration skill in your agent with
+`kumo agent skill --output PATH` (or MENU → settings → agents) — see
+[Orchestration](https://marcrdgz.github.io/kumo/docs/guides/orchestration).
 
 ## 🛠️ Requirements
 
 - 🦀 Rust toolchain (`cargo`) — to build from source
-- ⚡ [Zig](https://ziglang.org) on `PATH` — `build.rs` compiles the vendored
-  `libghostty-vt` library at build time
+- ⚡ [Zig](https://ziglang.org) `0.16.x` on `PATH` — `build.rs` compiles the
+  vendored `libghostty-vt` library at build time
+- 🍎 macOS with Xcode ≥ 26.5: build with
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools` (the Makefile sets it)
 - 🐙 [GitHub CLI](https://cli.github.com) (`gh`, authenticated) — only for
-  maintainers publishing releases via the cargo-dist pipeline; **not** required
+  maintainers publishing releases, and for the status bar's `github` widget; **not** required
   to use or update kumo
 
 ## ⌨️ Keybindings
 
-All leader bindings are configurable — override a stock key or add a new one in
-`[keymap.bindings]` with `"chord" = "action-id"` (see [Configuration](#configuration)).
-The `action-id` column below is exactly what goes on the right-hand side.
+Press the leader (`Ctrl+B`), then a key. `leader+?` opens a searchable command
+palette with every binding.
 
-| Key | Action id (`[keymap.bindings]`) | Action |
-| --- | --- | --- |
-| `Ctrl+B` | `leader` | Leader key (configurable via `leader`; points to the command palette in the status bar) |
-| `v` | `split-vertical` | Split the focused pane vertically 🪓 |
-| `-` | `split-horizontal` | Split the focused pane horizontally 🪓 |
-| `a` | `split-ai` | Spawn an AI CLI pane (vertical split) 🤖 |
-| `z` | `zoom` | Zoom the focused pane 🔍 |
-| `h` | `focus-left` | Move focus left 🎯 |
-| `j` | `focus-down` | Move focus down 🎯 |
-| `k` | `focus-up` | Move focus up 🎯 |
-| `l` | `focus-right` | Move focus right 🎯 |
-| `H` | `resize-left` | Resize the focused pane left 📐 |
-| `J` | `resize-down` | Resize the focused pane down 📐 |
-| `K` | `resize-up` | Resize the focused pane up 📐 |
-| `L` | `resize-right` | Resize the focused pane right 📐 |
-| `Tab` | `cycle-pane` | Cycle focus between panes ↹ |
-| `s` | `swap-panes` | Swap the focused pane with its sibling 🔀 |
-| `o` | `rotate-layout` | Rotate the pane layout 🔄 |
-| `q` | `show-pane-numbers` | Show pane numbers — press a number to jump 🔢 |
-| `c` | `new-session` | Create a new session (name it in the popup; `enter` ok, `esc` cancel) 🆕 |
-| `x` | `close-pane` | Close the focused pane ❌ |
-| `n` / `p` | `next-session` / `prev-session` | Cycle to the next / previous session ⏭️ |
-| `1`–`9` | `jump-session-1` … `jump-session-9` | Jump to the session at that sidebar position 🎯 |
-| `b` | `toggle-sidebar` | Toggle the sidebar 📌 |
-| `d` | `detach` | Detach (daemon keeps running) 🚪 |
-| `?` | `show-keybinds` | Searchable command palette — filter by action, key, or group and run with Enter 🔎 |
-| `Esc` | — | Exit leader mode ↩️ |
+| Keys | Action |
+| --- | --- |
+| `v` / `-` | Split vertically / horizontally |
+| `h` `j` `k` `l` · `H` `J` `K` `L` | Move focus · resize |
+| `z` · `x` · `Tab` | Zoom · close pane · cycle panes |
+| `a` | Spawn an AI CLI pane |
+| `t` · `n` / `p` · `1`–`9` | New tab · next / previous tab · jump to tab |
+| `c` · `]` / `[` · `Alt+1`–`9` | New session · next / previous session · jump to session |
+| `y` · `/` | Copy-mode · search the scrollback |
+| `i` · `b` · `f` | Agent inbox · toggle sidebar · filter sidebar |
+| `d` | Detach (the daemon keeps running) |
 
-> The **leader key** and the leader **bindings** are configurable via
-> `[keymap]` in `config.toml` (see above). `Esc` and the leader chord are not
-> remappable actions; mouse gestures are deliberately **not** remappable — they
-> are positional hit-testing, not key sequences.
-
-**🖱️ Mouse**
-
-- 🖐️ **Drag** selects text (copied on release) — works even in apps with mouse
-  reporting.
-- 👆 **Click** is forwarded to the app when it owns the mouse.
-- 🎚️ **Scroll** is forwarded to reporting apps; otherwise it scrolls the pane's
-  scrollback.
-- ↔️ **Drag a splitter** to resize.
-- 🧭 **MENU button** (right of the mode chip in the status bar) opens a small
-  dropdown with `config` (coming soon), `keybinds` (the same command palette as
-  `leader+?`), and `exit`.
+Every binding is remappable in `[keymap.bindings]`; the full table with action
+ids is in [Keybindings](https://marcrdgz.github.io/kumo/docs/guides/keybindings). The **MENU** button in the
+status bar opens `config`, `settings`, `reload`, `keybinds` and `detach`.
 
 ## 🗺️ Roadmap
 
-Kumo is on a path to become fully customizable — TOML config, data-driven
-keybinding remapping (including the `LEADER+?` command palette), follow-workspace
-(your cwd follows the focused pane, PID-based), themes & status-bar widgets, and
-a thin plugin system. See [ROADMAP.md](ROADMAP.md) for the details.
-
-Until then, kumo stays opinionated: it picks good defaults for you so it just
-works, and you can follow the roadmap above as the knobs land. 🔧
+0.8 is the 1.0 release candidate: stable wire protocol and `--json` API,
+sessions that survive a reboot, and a written
+[compatibility policy](https://marcrdgz.github.io/kumo/docs/compatibility). 1.0 freezes it; plugins follow in
+2.0. See [ROADMAP.md](ROADMAP.md) for the details.
 
 ## ▶️ Run
 
@@ -234,7 +190,7 @@ kumo new ~/proyecto        # 🆕 start a fresh session in the daemon
 kumo ~/proyecto            # 🗂️ same as `kumo new ~/proyecto` (back-compat)
 kumo daemon ~/proyecto     # 🐞 run the headless daemon in the foreground
 kumo ls                    # 📋 list the daemon's sessions (* = active)
-kumo kill                  # 🛑 stop the daemon (kills its panes)
+kumo kill                  # 🛑 stop the daemon and end its sessions
 kumo --version             # ℹ️ prints the version and channel (stable / nightly / dev)
 ```
 
@@ -250,28 +206,34 @@ exactly where you left it.
 - The daemon **auto-stops** when the last session closes — no lingering process.
 - `kumo new` always starts a fresh session; it never attaches to an existing one.
 - The socket is owner-only and the daemon refuses connections from other users.
+- Sessions survive a reboot: layout, working directories, screens and agent
+  conversations come back (see
+  [Detach & re-attach](https://marcrdgz.github.io/kumo/docs/guides/detach-and-reattach)).
 
 ## 🗂️ Project layout
 
 ```
-Cargo.toml              📄 virtual workspace (kumo-protocol, kumo-core, kumo, kumo-desktop)
+Cargo.toml              📄 virtual workspace (kumo, kumo-core, kumo-protocol)
 app/kumo/               🕸️ the single `kumo` binary — daemon + TUI + control CLI + update
-  src/main.rs             dispatcher: `kumo daemon` | TUI | `kumo session|pane|agent` | `kumo update`
+  build.rs                🏗️ compiles the vendored libghostty-vt (Zig)
+  src/main.rs             dispatcher: `kumo daemon` | TUI | control CLI | `kumo update`
   src/daemon/             the headless daemon: PTYs, terminal emulators, layout tree, agents
-    build.rs              🏗️ compiles the vendored libghostty-vt (Zig)
-    src/daemon/app.rs     sessions/panes, layout tree, PTYs, agents
-    src/daemon/pane.rs    🪟 Pane = PTY + libghostty-vt terminal (agent status, dirty render)
-    src/daemon/vt.rs      🔌 FFI bindings to libghostty-vt (emulator + native selection)
-    src/daemon/pty.rs     🔧 portable-pty wrapper
-    src/daemon/agents/    🔍 per-agent lifecycle detection (opencode.rs, claude.rs)
-  src/cli/                the client — TUI (all chrome), control CLI, update
-    src/cli/client_view.rs geometry, input, mouse, and all chrome rendering
-app/desktop/            🖥️ native GPUI desktop client (draws its own chrome; distributed
-                          as a `.dmg` on macOS, manages kumo CLI + app updates)
+    app.rs                  sessions/panes, layout tree, PTYs, agents
+    pane.rs                 🪟 Pane = PTY + libghostty-vt terminal
+    vt.rs                   🔌 FFI bindings to libghostty-vt
+    pty.rs                  🔧 portable-pty wrapper
+    agents/                 🔍 per-agent lifecycle detection + bundled rules
+  src/cli/                the client — TUI (all chrome), control CLI
+    client_view.rs          geometry, input, mouse, overlays (rendering in client_view/)
 crates/kumo-core/       📦 shared logic — config, layout, themes, updates, worktrees
 crates/kumo-protocol/   🔌 the pure wire protocol (Command/DaemonEvent)
+docs/                   📖 documentation site (Next.js + Fumadocs)
 vendor/libghostty-vt/   📚 vendored Ghostty terminal emulator (Zig + C headers)
 ```
+
+The native desktop client (`kumo-desktop`) lives in a separate repository and
+depends only on `kumo-protocol`. Architecture notes are in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

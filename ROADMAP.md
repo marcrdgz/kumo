@@ -32,6 +32,8 @@ Plugins are deliberately **not** part of 1.0: they are a new public API surface 
 What each release shipped is in [CHANGELOG.md](CHANGELOG.md); the full
 pre-1.0 plans live in git history.
 
+- **0.8.0** — Contracts, persistence & freeze (RC) · `v0.8.0` 2026-10-28
+  (patches through `v0.8.1`)
 - **0.7.0** — ADE: orchestration & isolated worktrees · `v0.7.0` 2026-09-13
   (patches through `v0.7.6`)
 - **0.6.0** — Copy-mode, search & pane plumbing · `v0.6.0` 2026-08-22
@@ -75,6 +77,9 @@ reason:
   plugins.
 
 ## 🧊 0.8.0 — Contracts, persistence & freeze (RC)
+
+✅ **Released** as `v0.8.0` on 2026-10-28; kept here as the record of the
+1.0 gates.
 
 The last release before 1.0 and its release candidate. It freezes what kumo
 already ships as stable contracts, fixes the bugs that freezing exposed, and

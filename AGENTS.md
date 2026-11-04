@@ -106,5 +106,5 @@ variant to `Command`/`DaemonEvent` and bumps `PROTOCOL_MINOR`; anything else
 - **`crates/kumo-core/src/`**: shared config, layout, theme, update, worktrees.
 - **`crates/kumo-protocol/`**: the wire protocol.
 - **`vendor/libghostty-vt/`**: Vendored Ghostty terminal emulator (Zig + C headers).
-- **`PLAN.md`**: Contains the full high-level implementation roadmap and component breakdowns.
+- **`ARCHITECTURE.md`**: Daemon/client split, wire-protocol rules, persistence, agents, and key source files.
 - **`ROADMAP.md`**: User-facing roadmap of planned features (theme, keymaps, config, chrome, plugins).

@@ -1,9 +1,9 @@
 {
   "title": "Guides",
-  "defaultOpen": true,
   "pages": [
     "sessions-and-panes",
     "keybindings",
+    "copy-mode",
     "agents",
     "orchestration",
     "detach-and-reattach",

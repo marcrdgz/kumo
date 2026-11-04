@@ -1,7 +1,7 @@
 ---
 title: Detach & Re-attach
 description: The daemon model — leave, come back, and update without losing your panes.
-icon: 🔁
+icon: Unplug
 ---
 
 <kbd>leader+d</kbd> (or MENU → `detach`) detaches **this terminal**; the
@@ -23,8 +23,9 @@ and everything is exactly where you left it.
 
 ## Security
 
-The IPC socket lives in `$XDG_RUNTIME_DIR/kumo` with owner-only permissions
-(`0o600`), and every accepted connection is checked to belong to the same
+The IPC socket lives in `$XDG_RUNTIME_DIR/kumo` (falling back to
+`$TMPDIR/kumo`, the usual location on macOS, then `/tmp/kumo`) with owner-only
+permissions (`0o600`), and every accepted connection is checked to belong to the same
 user (`SO_PEERCRED` on Linux, `getpeereid()` on macOS/BSD) — a different
 user's client is rejected, fail closed.
 

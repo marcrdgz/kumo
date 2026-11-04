@@ -1,0 +1,57 @@
+@import 'fumadocs-ui/css/lib/default-colors.css';
+
+/*
+ * kumo docs palette: neutral, material-first surfaces with a single
+ * accent. Pure black in dark mode, Apple-style off-white in light mode;
+ * colour is reserved for the accent and agent status.
+ */
+
+@theme {
+  --color-fd-background: #fbfbfd;
+  --color-fd-foreground: #1d1d1f;
+  --color-fd-muted: #f2f2f5;
+  --color-fd-muted-foreground: #6e6e73;
+  --color-fd-popover: rgb(255 255 255 / 0.86);
+  --color-fd-popover-foreground: #1d1d1f;
+  --color-fd-card: #ffffff;
+  --color-fd-card-foreground: #1d1d1f;
+  --color-fd-border: rgb(0 0 0 / 0.08);
+  --color-fd-primary: #e0243a;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #f2f2f5;
+  --color-fd-secondary-foreground: #1d1d1f;
+  --color-fd-accent: rgb(224 36 58 / 0.08);
+  --color-fd-accent-foreground: #b81c2f;
+  --color-fd-ring: rgb(224 36 58 / 0.45);
+  --color-fd-overlay: rgb(0 0 0 / 0.2);
+
+  /* Agent status, matching the TUI's five-state model. */
+  --color-status-working: #0a84ff;
+  --color-status-blocked: #ff9f0a;
+  --color-status-done: #30d158;
+  --color-status-idle: #8e8e93;
+}
+
+.dark {
+  --color-fd-background: #000000;
+  --color-fd-foreground: #f5f5f7;
+  --color-fd-muted: #1c1c1e;
+  --color-fd-muted-foreground: #a1a1a6;
+  --color-fd-popover: rgb(28 28 30 / 0.86);
+  --color-fd-popover-foreground: #f5f5f7;
+  --color-fd-card: #111113;
+  --color-fd-card-foreground: #f5f5f7;
+  --color-fd-border: rgb(255 255 255 / 0.1);
+  --color-fd-primary: #ff3b4e;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #1c1c1e;
+  --color-fd-secondary-foreground: #f5f5f7;
+  --color-fd-accent: rgb(255 59 78 / 0.12);
+  --color-fd-accent-foreground: #ff8a96;
+  --color-fd-ring: rgb(255 59 78 / 0.5);
+  --color-fd-overlay: rgb(0 0 0 / 0.55);
+}
+
+::selection {
+  background: rgb(255 59 78 / 0.28);
+}

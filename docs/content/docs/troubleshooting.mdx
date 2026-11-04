@@ -1,0 +1,75 @@
+---
+title: Troubleshooting
+description: Common problems with the daemon, config, agent detection and building from source.
+icon: LifeBuoy
+---
+
+## The daemon doesn't start or keeps dying
+
+Run it in the foreground to see what happens:
+
+```sh
+kumo kill          # stop a stuck daemon (ends its sessions)
+kumo daemon        # headless daemon in the foreground
+```
+
+A crashing daemon appends a report with a backtrace to
+`~/.local/state/kumo/daemon.log` (or `$KUMO_STATE_DIR/daemon.log`). Include it
+when you open an issue, together with `kumo --version`.
+
+## A command fails with `unsupported`
+
+The running daemon is older than the `kumo` binary you are calling. Restart it
+on the new binary: `kumo update` does that in place, or detach and run
+`kumo kill` followed by `kumo` (this ends your sessions).
+
+## Scripts can't reach the daemon from inside a pane
+
+Use `"$KUMO_BIN_PATH"` instead of a bare `kumo`, so the command targets the
+binary that owns the pane. Both `KUMO_BIN_PATH` and `KUMO_SOCKET_PATH` are only
+exported when `[worktree] expose-socket = true` (the default). The socket lives
+in `$XDG_RUNTIME_DIR/kumo`, else `$TMPDIR/kumo`, else `/tmp/kumo`, and only
+accepts connections from the same user.
+
+## A config change has no effect
+
+- A `⚠ config (n)` chip in the status bar means kumo ignored part of the
+  config. Click it, or press <kbd>leader+?</kbd>, to see each problem.
+- Two spellings of the same chord bound to different actions (`H` and
+  `shift+h`) cancel each other; the key keeps its default.
+- The **leader key** is read when a client starts: detach
+  (<kbd>leader+d</kbd>) and re-attach with `kumo`.
+- `shell` and `ai-cmd` only affect panes spawned after the change.
+
+See [Live reload](/docs/configuration#live-reload) for what applies when.
+
+## An agent shows the wrong status (or `unknown`)
+
+Detection is heuristic and agent CLIs change their UIs. Ask the daemon why a
+pane reads the way it does:
+
+```sh
+kumo agent status        # find the pane id
+kumo agent explain 42    # matched markers, evidence region, reason chain
+```
+
+`unknown` means kumo saw the agent process but none of its markers matched —
+usually a new CLI version. Override its rules with
+`~/.config/kumo/agent-detection/<agent>.toml`; see
+[Custom detection rules](/docs/guides/agents#custom-detection-rules-agent-detectionagenttoml).
+
+## Copy-mode says "unavailable in alternate screen"
+
+The focused pane runs a full-screen program (vim, less, an agent TUI).
+Drag-select with the mouse instead — it works even when the app owns the
+mouse.
+
+## Building from source fails
+
+- `build.rs` needs [Zig](https://ziglang.org) `0.16.x` on `PATH` to compile
+  the vendored `libghostty-vt`.
+- On macOS with Xcode ≥ 26.5, native links fail with undefined libSystem
+  symbols: build with
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools` (the Makefile sets it).
+
+See [Installation](/docs/getting-started/installation#from-source).

@@ -1,7 +1,7 @@
 ---
 title: CLI Reference
 description: Every kumo command — sessions, tabs, panes, agents, and orchestration.
-icon: 🛠️
+icon: SquareTerminal
 ---
 
 ## Commands
@@ -37,29 +37,29 @@ icon: 🛠️
 The `--ai` form creates an ephemeral isolated checkout. `--from` accepts a
 local branch, remote branch, commit, `#1234`, or a GitHub/GitLab pull or merge
 request URL; Jira references are not supported yet. `--agent KIND` starts the
-selected agent in the new pane, but **does not submit a task automatically**.
-Wait for readiness and submit the task explicitly:
+selected agent in the new pane and replies once it is ready, but **does not
+submit a task**. Submit it explicitly:
 
 ```sh
 kumo worktree create --ai fix-login --agent claude --note "Investigate auth tests"
 kumo agent status
-kumo agent wait -p 42 --until idle --timeout 60s
 kumo agent prompt -p 42 "Fix the failing auth tests" --wait idle --timeout 10m
 kumo worktree set --status in-review --comment "Tests pass; ready for review"
 ```
-
-Automatic task submission after creation, including the fully chained
-create→start→ready→prompt flow, is planned for 0.7.1.
 
 ### Panes
 
 | Command | Description |
 | --- | --- |
-| `kumo pane split [-s SESSION] [--horizontal] [--ai]` | Split the focused pane (AI split = agent pane) |
+| `kumo pane split [-s SESSION] [--horizontal] [--ai]` | Split the focused pane (`--ai` runs `ai-cmd` in the new pane); focus stays on the original pane |
 | `kumo pane close [-s SESSION] [-p PANE]` / `kumo pane focus -p PANE` | Manage panes |
 | `kumo pane send-keys [-s SESSION] [-p PANE] KEYS...` | Type keys into a pane (tokens: `Enter`, `Tab`, `Esc`, `Left`, `Up`, `PageDown`, …) |
 | `kumo pane list [-s SESSION] [-t TAB_ID] [S1:T2]` | Every pane with its id + composite position (`*` = focused) |
 | `kumo pane wait-output [PANE] PATTERN [--regex] [--timeout 30s] [-s SESSION]` | Server-owned one-shot output waiter — returns when PATTERN appears in recent + visible buffer |
+
+`PANE` is passed positionally or with `-p`/`--pane`. `--timeout` accepts
+`500ms`, `30s`, `2m` or bare milliseconds; the defaults are 30s for
+`agent wait` and `pane wait-output`, and 120s for `agent prompt --wait`.
 
 ### Agents
 
@@ -70,14 +70,29 @@ create→start→ready→prompt flow, is planned for 0.7.1.
 | `kumo agent kill -p PANE [-s SESSION]` | Kill the agent in a pane (closes it) |
 | `kumo agent explain [PANE] [-s SESSION]` | Why a pane reads the state it does: matched markers, evidence region, verdict-reason chain — evaluated live by the daemon |
 | `kumo agent wait <PANE> --until blocked\|done\|idle\|working [--timeout 30s] [-s SESSION]` | Server-owned event-driven wait for an agent status (pinned to pane occupant) |
-| `kumo agent prompt <PANE> <TEXT> [--wait [STATUS]] [--timeout 60s] [-s SESSION]` | Bracketed-paste-aware submit; `--wait` atomically submits and waits in one RPC |
+| `kumo agent prompt <PANE> <TEXT> [--wait [STATUS]] [--timeout 120s] [-s SESSION]` | Bracketed-paste-aware submit; `--wait` atomically submits and waits in one RPC |
 | `kumo agent read <PANE> [--source visible\|recent\|detection\|traceback] [-s SESSION]` | Read the pane's buffer directly from the daemon (including alt-screen) |
 | `kumo agent start --kind <agent> --pane <PANE> [-- <args>] [-s SESSION]` | Launch an agent in an existing shell pane; returns once detection shows ready |
 | `kumo agent rename <PANE> <NAME> [-s SESSION]` | Live alias for a pane so scripts can reference agents by name |
 | `kumo agent broadcast "TEXT" [-s SESSION] [--filter STATUS]` | Fan one prompt out to every AI pane (optionally filtered by status) |
 | `kumo agent skill [--output PATH]` | Print the bundled Kumo orchestration skill, or install it at PATH; does not require a daemon |
 
-### Machine API (`--json`)
+### Daemon & maintenance
+
+| Command | Description |
+| --- | --- |
+| `kumo ls` | Legacy alias of `kumo session list` |
+| `kumo kill` | Stop the daemon and end every session (nothing is restored afterwards) |
+| `kumo reload` | Re-read the config and apply it live |
+| `kumo daemon [WORKSPACE]` | Run the headless daemon in the foreground |
+| `kumo update` | Update to the latest stable release |
+| `kumo update --nightly` | Update to the latest nightly build |
+| `kumo update --check` | Report availability (exit 0 = up to date, 1 = update available) |
+| `kumo --version` | Print the version and channel (stable / nightly / dev) |
+
+Every subcommand has its own `--help`.
+
+## Machine API (`--json`)
 
 Add `--json` to any control command for machine-readable output on stdout.
 This output, the error codes and the exit codes are a **stable contract**
@@ -111,51 +126,17 @@ or changing an error code is a breaking change (see the
 | `unsupported` | The running daemon does not know this command (older daemon) |
 | `error` | Anything else, including command-line usage errors and a missing daemon |
 
-**PANE addressing** — a stable numeric pane id, or a composite position
-(`1-based` indexes, session may be a name):
+## Pane addressing
+
+`PANE` is a stable numeric pane id, an agent alias (`kumo agent rename`), or a
+composite position (1-based indexes, the session may be a name):
 `s1:t2:p3` · `kumo:t2:p1` · `t2:p1` (session from `-s`). Composites are
-resolved client-side against the live session list; the daemon always gets
-the canonical id. Discover ids with `kumo pane list` and `kumo agent status`.
+resolved against the live session list; the daemon always gets the canonical
+id. Discover ids with `kumo pane list` and `kumo agent status`.
 
-| `kumo ls` | Legacy alias of `kumo session list` |
-| `kumo kill` | Stop the daemon (kills its panes) |
-| `kumo reload` | Re-read the config and apply it live |
-| `kumo daemon [WORKSPACE]` | Run the headless daemon in the foreground |
-| `kumo update` | Update to the latest stable release |
-| `kumo update --nightly` | Update to the latest nightly build |
-| `kumo update --check` | Report availability (exit 0 = up to date, 1 = update available) |
-| `kumo --version` | Print the version and channel (stable / nightly / dev) |
 
-## Orchestration quick refs
-
-These are the ADE primitives — see [Orchestration](/docs/guides/orchestration) for the full guide.
-
-```sh
-# wait for an agent to become idle (server holds the socket, no polling)
-kumo agent wait -p 42 --until idle --timeout 30s
-
-# prompt and wait atomically (one RPC, no race)
-kumo agent prompt -p 42 "fix the failing test" --wait idle --timeout 120s
-
-# read what the agent actually sees (daemon owns the alt-screen buffer)
-kumo agent read -p 42 --source visible
-kumo agent read -p 42 --source recent        # last ~16 KiB of output
-kumo agent read -p 42 --source traceback     # last prompt block (form / tail fallback)
-
-# wait for any pane's output (dev server, test suite, build)
-kumo pane wait-output -p 42 "Ready on" --timeout 30s
-kumo pane wait-output -p 42 --regex "passed|failed" --timeout 60s
-
-# fan a prompt to every idle agent in the session
-kumo agent broadcast "rebase onto main" --filter idle -s myproj
-
-# start an agent in an existing shell pane
-kumo agent start --kind claude --pane 42 -- --model sonnet
-```
-
-`--timeout` accepts `ms` / `s` / `m` suffixes (`500ms`, `30s`, `2m`) or bare milliseconds. Defaults: `agent wait` 30s, `agent prompt --wait` 120s, `pane wait-output` 30s.
-
-Error codes are `bad_regex`, `agent_blocked`, `agent_replaced` (pane occupant changed, wait pinned to `pane_os_pid`), and `timeout`.
+For waits, prompts, reads and recipes, see the
+[Orchestration guide](/docs/guides/orchestration).
 
 ## Examples
 
