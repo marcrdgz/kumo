@@ -25,6 +25,10 @@ export const metadata = {
   twitter: { card: 'summary_large_image' },
 };
 
+// Emits <meta name="color-scheme">, so native UI and the canvas match the
+// theme before the theme script runs.
+export const viewport = { colorScheme: 'light dark' };
+
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <html

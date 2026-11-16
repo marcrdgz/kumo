@@ -52,7 +52,7 @@ export default function HomePage() {
             and the demo starts above the fold at common laptop heights. */}
         <section className="w-full max-w-6xl pt-14 sm:pt-20">
           <div className="grid gap-x-12 gap-y-8 lg:grid-cols-12 lg:items-end">
-            <h1 className="font-display text-[clamp(2rem,5vw,4rem)] leading-[1.08] font-medium tracking-[-0.045em] text-balance lg:col-span-7">
+            <h1 className="font-display text-[clamp(2rem,1rem+4vw,4rem)] leading-[1.08] font-medium tracking-[-0.045em] text-balance lg:col-span-7">
               tmux, if it knew what your agents were doing.
             </h1>
 
@@ -66,7 +66,7 @@ export default function HomePage() {
               </div>
               <Link
                 href="/docs/getting-started/quickstart"
-                className={`mt-4 inline-block text-[15px] ${TEXT_LINK}`}
+                className={`mt-4 inline-block text-[0.9375rem] ${TEXT_LINK}`}
               >
                 Read the quickstart
               </Link>
@@ -106,7 +106,7 @@ export default function HomePage() {
               href="/docs/guides/orchestration"
               body="Agents can wait on, prompt and read other panes from the CLI. The daemon holds the wait, so nothing polls."
             >
-              <code className="mt-6 block overflow-x-auto rounded-xl bg-fd-muted px-3.5 py-2.5 font-mono text-[12.5px] whitespace-nowrap">
+              <code className="mt-6 block overflow-x-auto rounded-xl bg-fd-muted px-3.5 py-2.5 font-mono text-[0.78125rem] whitespace-nowrap">
                 kumo agent wait -p 42 --until done
               </code>
             </Tile>
@@ -121,7 +121,7 @@ export default function HomePage() {
               href="/docs/configuration"
               body="Leader key, bindings, shells and AI commands live in a single config.toml that reloads without a restart."
             >
-              <pre className="mt-6 overflow-x-auto rounded-xl bg-fd-muted px-4 py-3 font-mono text-[12.5px] leading-relaxed">
+              <pre className="mt-6 overflow-x-auto rounded-xl bg-fd-muted px-4 py-3 font-mono text-[0.78125rem] leading-relaxed">
                 <span className="text-fd-muted-foreground"># ~/.config/kumo/config.toml</span>
                 {'\n'}ai-cmd = <span className="text-fd-primary">&quot;claude&quot;</span>
                 {'\n'}

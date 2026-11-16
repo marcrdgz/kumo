@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { CopyAnnouncement, useCopy } from '@/components/use-copy';
 
 type Position =
   | 'top-left'
@@ -21,7 +22,7 @@ interface BuilderState {
   rows: Row[];
   aiCmd: string;
   shell: string;
-  sidebarLayout: 'project' | 'divided' | 'tabs';
+  sidebarLayout: (typeof SIDEBAR_LAYOUTS)[number];
   updateCheck: boolean;
   position: Position;
   sound: boolean;
@@ -124,6 +125,21 @@ const SPOT_CLASS: Record<Exclude<Position, 'off'>, string> = {
 
 const CHORD_RE =
   /^(?:(?:ctrl|alt|shift|cmd|super)\+)*(?:f(?:1[0-2]|[1-9])|[a-z0-9!-/:-@[-`{-~])$/i;
+const CHORD_HINT =
+  'Optional ctrl+, alt+, shift+, cmd+ or super+ modifiers, then one key: s, ctrl+a, f12.';
+
+const SIDEBAR_LAYOUTS = ['project', 'divided', 'tabs'] as const;
+
+const FOCUS_RING = 'outline-fd-primary focus-visible:outline-2 focus-visible:outline-offset-2';
+// Radios are visually hidden, so their label carries the focus ring.
+const LABEL_FOCUS_RING =
+  'outline-fd-primary has-focus-visible:outline-2 has-focus-visible:outline-offset-2';
+const FIELD =
+  'h-8 rounded-md border border-fd-border bg-transparent px-2 font-mono text-sm user-invalid:border-red-500 dark:user-invalid:border-red-400';
+const CHIP = 'cursor-pointer rounded-md border px-2 py-1 font-mono text-xs transition-colors';
+const CHIP_ON = 'border-transparent bg-fd-primary text-fd-primary-foreground';
+const CHIP_OFF =
+  'border-fd-border text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground';
 
 function initial(): BuilderState {
   return {
@@ -280,7 +296,7 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="inline-flex cursor-pointer items-center gap-2 text-sm"
+      className={`inline-flex cursor-pointer items-center gap-2 rounded-sm text-sm ${FOCUS_RING}`}
     >
       <span
         className={`relative inline-block h-5 w-9 shrink-0 rounded-full transition-colors ${
@@ -298,7 +314,8 @@ function Toggle({
   );
 }
 
-function Chip({
+/** A preset that fills a free-text field; pressed while the field holds it. */
+function Preset({
   active,
   onClick,
   children,
@@ -310,15 +327,101 @@ function Chip({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
-      className={`cursor-pointer rounded-md border px-2 py-1 font-mono text-xs transition-colors ${
-        active
-          ? 'border-transparent bg-fd-primary text-fd-primary-foreground'
-          : 'border-fd-border text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground'
-      }`}
+      className={`${CHIP} ${FOCUS_RING} ${active ? CHIP_ON : CHIP_OFF}`}
     >
       {children}
     </button>
+  );
+}
+
+/** Pick-one chips backed by native radios, so arrow keys and state come for free. */
+function Choice<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: readonly T[];
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  const name = useId();
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((option) => (
+        <label
+          key={option}
+          className={`${CHIP} ${LABEL_FOCUS_RING} ${value === option ? CHIP_ON : CHIP_OFF}`}
+        >
+          <input
+            type="radio"
+            name={name}
+            value={option}
+            checked={value === option}
+            onChange={() => onChange(option)}
+            className="sr-only"
+          />
+          {option}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Chord field validated through the constraint API: `:user-invalid` flags it
+ * only once the user commits a bad value (on blur), not mid-typing, and
+ * assistive tech reads the invalid state from the same source.
+ */
+function ChordInput({
+  value,
+  onValueChange,
+  label,
+  placeholder,
+  hintId,
+  className,
+}: {
+  value: string;
+  onValueChange: (value: string) => void;
+  label: string;
+  placeholder: string;
+  hintId: string;
+  className: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const chord = value.trim();
+  const invalid = chord !== '' && !CHORD_RE.test(chord);
+
+  useEffect(() => {
+    ref.current?.setCustomValidity(invalid ? CHORD_HINT : '');
+  }, [invalid]);
+
+  return (
+    <input
+      ref={ref}
+      value={value}
+      onChange={(e) => onValueChange(e.target.value)}
+      spellCheck={false}
+      autoComplete="off"
+      autoCapitalize="off"
+      aria-label={label}
+      aria-describedby={hintId}
+      placeholder={placeholder}
+      className={`${FIELD} ${FOCUS_RING} ${className}`}
+    />
+  );
+}
+
+/** Shown under a chord field once it is `:user-invalid`; needs a `group` ancestor. */
+function ChordHint({ id }: { id: string }) {
+  return (
+    <p
+      id={id}
+      className="hidden text-xs text-red-600 group-has-[:user-invalid]:block dark:text-red-400"
+    >
+      {CHORD_HINT}
+    </p>
   );
 }
 
@@ -350,9 +453,10 @@ const SEG_CLASS: Record<SegKind, string> = {
 
 export function ConfigBuilder() {
   const [st, setSt] = useState<BuilderState>(initial);
-  const [copied, setCopied] = useState(false);
+  const { state: copyState, copy } = useCopy();
   const nextId = useRef(2);
-  const timer = useRef<number | null>(null);
+  const ids = useId();
+  const toastName = `${ids}-toast`;
 
   const lines = useMemo(() => buildToml(st), [st]);
   const plain = useMemo(
@@ -380,48 +484,31 @@ export function ConfigBuilder() {
   const dropRow = (id: number) =>
     setSt((s) => ({ ...s, rows: s.rows.filter((r) => r.id !== id) }));
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(plain);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = plain;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    }
-    setCopied(true);
-    if (timer.current !== null) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  const leaderBad = st.leader.trim() !== '' && !CHORD_RE.test(st.leader.trim());
-
   return (
     <div className="not-prose my-6">
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-6">
           <Field title="leader chord">
-            <input
-              value={st.leader}
-              onChange={(e) => patch({ leader: e.target.value })}
-              spellCheck={false}
-              aria-label="Leader chord"
-              placeholder="ctrl+b"
-              className={`h-8 w-full rounded-md border bg-transparent px-2 font-mono text-sm outline-none focus-visible:border-fd-primary ${
-                leaderBad ? 'border-red-500 dark:border-red-400' : 'border-fd-border'
-              }`}
-            />
+            <div className="group space-y-1">
+              <ChordInput
+                value={st.leader}
+                onValueChange={(leader) => patch({ leader })}
+                label="Leader chord"
+                placeholder="ctrl+b"
+                hintId={`${ids}-leader-hint`}
+                className="w-full"
+              />
+              <ChordHint id={`${ids}-leader-hint`} />
+            </div>
             <div className="flex flex-wrap gap-1.5">
               {LEADER_PRESETS.map((p) => (
-                <Chip
+                <Preset
                   key={p}
                   active={st.leader === p}
                   onClick={() => patch({ leader: p })}
                 >
                   {p}
-                </Chip>
+                </Preset>
               ))}
             </div>
           </Field>
@@ -429,51 +516,50 @@ export function ConfigBuilder() {
           <Field title="key bindings">
             <div className="space-y-2">
               {st.rows.map((r) => (
-                <div key={r.id} className="flex items-center gap-2">
-                  <input
-                    value={r.chord}
-                    onChange={(e) => setRow(r.id, { chord: e.target.value })}
-                    spellCheck={false}
-                    aria-label="Binding chord"
-                    placeholder="s"
-                    className={`h-8 w-24 shrink-0 rounded-md border bg-transparent px-2 font-mono text-sm outline-none focus-visible:border-fd-primary ${
-                      r.chord.trim() !== '' && !CHORD_RE.test(r.chord.trim())
-                        ? 'border-red-500 dark:border-red-400'
-                        : 'border-fd-border'
-                    }`}
-                  />
-                  <select
-                    value={r.action}
-                    onChange={(e) => setRow(r.id, { action: e.target.value })}
-                    aria-label="Binding action"
-                    className="h-8 min-w-0 flex-1 rounded-md border border-fd-border bg-transparent px-2 text-sm"
-                  >
-                    <option value="">choose an action…</option>
-                    {ACTION_GROUPS.map((g) => (
-                      <optgroup key={g.label} label={g.label}>
-                        {g.actions.map((a) => (
-                          <option key={a} value={a}>
-                            {a}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    aria-label="Remove binding"
-                    onClick={() => dropRow(r.id)}
-                    className="h-8 w-8 shrink-0 cursor-pointer rounded-md border border-fd-border text-fd-muted-foreground transition-colors hover:bg-fd-muted hover:text-fd-foreground"
-                  >
-                    ×
-                  </button>
+                <div key={r.id} className="group space-y-1">
+                  <div className="flex items-center gap-2">
+                    <ChordInput
+                      value={r.chord}
+                      onValueChange={(chord) => setRow(r.id, { chord })}
+                      label="Binding chord"
+                      placeholder="s"
+                      hintId={`${ids}-chord-${r.id}-hint`}
+                      className="w-24 shrink-0"
+                    />
+                    <select
+                      value={r.action}
+                      onChange={(e) => setRow(r.id, { action: e.target.value })}
+                      aria-label="Binding action"
+                      className={`h-8 min-w-0 flex-1 rounded-md border border-fd-border bg-transparent px-2 text-sm ${FOCUS_RING}`}
+                    >
+                      <option value="">choose an action…</option>
+                      {ACTION_GROUPS.map((g) => (
+                        <optgroup key={g.label} label={g.label}>
+                          {g.actions.map((a) => (
+                            <option key={a} value={a}>
+                              {a}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      aria-label="Remove binding"
+                      onClick={() => dropRow(r.id)}
+                      className={`h-8 w-8 shrink-0 cursor-pointer rounded-md border border-fd-border text-fd-muted-foreground transition-colors hover:bg-fd-muted hover:text-fd-foreground ${FOCUS_RING}`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <ChordHint id={`${ids}-chord-${r.id}-hint`} />
                 </div>
               ))}
             </div>
             <button
               type="button"
               onClick={addRow}
-              className="cursor-pointer rounded-md border border-dashed border-fd-border px-2.5 py-1 text-xs text-fd-muted-foreground transition-colors hover:bg-fd-muted hover:text-fd-foreground"
+              className={`cursor-pointer rounded-md border border-dashed border-fd-border px-2.5 py-1 text-xs text-fd-muted-foreground transition-colors hover:bg-fd-muted hover:text-fd-foreground ${FOCUS_RING}`}
             >
               + add binding
             </button>
@@ -486,13 +572,13 @@ export function ConfigBuilder() {
               spellCheck={false}
               aria-label="AI command"
               placeholder="opencode"
-              className="h-8 w-full rounded-md border border-fd-border bg-transparent px-2 font-mono text-sm outline-none focus-visible:border-fd-primary"
+              className={`${FIELD} ${FOCUS_RING} w-full`}
             />
             <div className="flex flex-wrap gap-1.5">
               {AI_PRESETS.map((p) => (
-                <Chip key={p} active={st.aiCmd === p} onClick={() => patch({ aiCmd: p })}>
+                <Preset key={p} active={st.aiCmd === p} onClick={() => patch({ aiCmd: p })}>
                   {p}
-                </Chip>
+                </Preset>
               ))}
             </div>
           </Field>
@@ -504,31 +590,16 @@ export function ConfigBuilder() {
               spellCheck={false}
               aria-label="Login shell"
               placeholder="$SHELL → /bin/zsh"
-              className="h-8 w-full rounded-md border border-fd-border bg-transparent px-2 font-mono text-sm outline-none focus-visible:border-fd-primary"
+              className={`${FIELD} ${FOCUS_RING} w-full`}
             />
           </Field>
 
           <Field title="sidebar">
-            <div className="flex flex-wrap gap-1.5">
-              <Chip
-                active={st.sidebarLayout === 'project'}
-                onClick={() => patch({ sidebarLayout: 'project' })}
-              >
-                project
-              </Chip>
-              <Chip
-                active={st.sidebarLayout === 'divided'}
-                onClick={() => patch({ sidebarLayout: 'divided' })}
-              >
-                divided
-              </Chip>
-              <Chip
-                active={st.sidebarLayout === 'tabs'}
-                onClick={() => patch({ sidebarLayout: 'tabs' })}
-              >
-                tabs
-              </Chip>
-            </div>
+            <Choice
+              options={SIDEBAR_LAYOUTS}
+              value={st.sidebarLayout}
+              onChange={(sidebarLayout) => patch({ sidebarLayout })}
+            />
             <p className="text-xs text-fd-muted-foreground">
               project (default): worktrees with inline agents, collapses
               inactive — branch dimmed, filter on <code>leader+f</code> · divided:
@@ -545,68 +616,85 @@ export function ConfigBuilder() {
           </Field>
 
           <Field title="agent notifications">
-            <div className="relative aspect-[16/9] w-full overflow-hidden rounded-lg border border-fd-border bg-fd-background">
-              <div className="flex h-4 items-end gap-1 border-b border-fd-border bg-fd-muted px-1.5 pb-0.5">
-                <span className="h-2 w-8 rounded-t-sm bg-fd-border" />
-                <span className="h-2 w-8 rounded-t-sm bg-fd-background" />
-                <span className="h-2 w-8 rounded-t-sm bg-fd-border" />
-              </div>
-              <div className="absolute inset-x-0 bottom-0 flex h-4 items-center justify-center border-t border-fd-border bg-fd-muted font-mono text-[8px] text-fd-muted-foreground">
-                status bar
-              </div>
-              {(Object.keys(SPOT_CLASS) as Exclude<Position, 'off'>[]).map(
-                (pos) => (
-                  <button
-                    key={pos}
-                    type="button"
-                    aria-label={`Anchor toasts ${pos}`}
-                    onClick={() => patch({ position: pos })}
-                    className={`absolute h-6 w-6 rounded-md transition-colors ${SPOT_CLASS[pos]} ${
-                      st.position === pos
-                        ? 'border border-solid border-fd-primary bg-fd-primary/20'
-                        : 'border border-dashed border-fd-border hover:border-fd-primary hover:bg-fd-primary/10'
-                    }`}
-                  />
-                ),
-              )}
-              {st.position !== 'off' &&
-                (st.finished || st.blocked) &&
-                (() => {
-                  const dot = st.finished
-                    ? 'text-emerald-500'
-                    : 'text-amber-500';
-                  const text = st.finished
-                    ? 'agent finished'
-                    : 'agent blocked';
-                  return (
-                    <span
-                      className={`pointer-events-none absolute flex items-center gap-1 rounded-md border border-fd-border bg-fd-popover px-1.5 py-0.5 font-mono text-[9px] whitespace-nowrap shadow-sm ${SPOT_CLASS[st.position]} ${
-                        st.position === 'center'
-                          ? '-translate-x-1/2 -translate-y-[calc(50%+14px)]'
-                          : ''
+            <fieldset className="space-y-2">
+              <legend className="sr-only">Toast position</legend>
+              <div className="relative aspect-[16/9] w-full overflow-hidden rounded-lg border border-fd-border bg-fd-background">
+                <div className="flex h-4 items-end gap-1 border-b border-fd-border bg-fd-muted px-1.5 pb-0.5">
+                  <span className="h-2 w-8 rounded-t-sm bg-fd-border" />
+                  <span className="h-2 w-8 rounded-t-sm bg-fd-background" />
+                  <span className="h-2 w-8 rounded-t-sm bg-fd-border" />
+                </div>
+                <div className="absolute inset-x-0 bottom-0 flex h-4 items-center justify-center border-t border-fd-border bg-fd-muted font-mono text-[0.5rem] text-fd-muted-foreground">
+                  status bar
+                </div>
+                {(Object.keys(SPOT_CLASS) as Exclude<Position, 'off'>[]).map(
+                  (pos) => (
+                    <label
+                      key={pos}
+                      className={`absolute h-6 w-6 cursor-pointer rounded-md transition-colors ${LABEL_FOCUS_RING} ${SPOT_CLASS[pos]} ${
+                        st.position === pos
+                          ? 'border border-solid border-fd-primary bg-fd-primary/20'
+                          : 'border border-dashed border-fd-border hover:border-fd-primary hover:bg-fd-primary/10'
                       }`}
                     >
-                      <span className={dot}>●</span> {text}
-                    </span>
-                  );
-                })()}
-              {st.position === 'off' && (
-                <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-[10px] text-fd-muted-foreground">
-                  toasts off
+                      <input
+                        type="radio"
+                        name={toastName}
+                        value={pos}
+                        checked={st.position === pos}
+                        onChange={() => patch({ position: pos })}
+                        className="sr-only"
+                      />
+                      <span className="sr-only">{pos}</span>
+                    </label>
+                  ),
+                )}
+                {st.position !== 'off' &&
+                  (st.finished || st.blocked) &&
+                  (() => {
+                    const dot = st.finished
+                      ? 'text-emerald-500'
+                      : 'text-amber-500';
+                    const text = st.finished
+                      ? 'agent finished'
+                      : 'agent blocked';
+                    return (
+                      <span
+                        className={`pointer-events-none absolute flex items-center gap-1 rounded-md border border-fd-border bg-fd-popover px-1.5 py-0.5 font-mono text-[0.5625rem] whitespace-nowrap shadow-sm ${SPOT_CLASS[st.position]} ${
+                          st.position === 'center'
+                            ? '-translate-x-1/2 -translate-y-[calc(50%+14px)]'
+                            : ''
+                        }`}
+                      >
+                        <span className={dot}>●</span> {text}
+                      </span>
+                    );
+                  })()}
+                {st.position === 'off' && (
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-[0.625rem] text-fd-muted-foreground">
+                    toasts off
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <label
+                  className={`${CHIP} ${LABEL_FOCUS_RING} ${st.position === 'off' ? CHIP_ON : CHIP_OFF}`}
+                >
+                  <input
+                    type="radio"
+                    name={toastName}
+                    value="off"
+                    checked={st.position === 'off'}
+                    onChange={() => patch({ position: 'off' })}
+                    className="sr-only"
+                  />
+                  off
+                </label>
+                <span aria-hidden className="text-xs text-fd-muted-foreground">
+                  click a zone to anchor the toast there
                 </span>
-              )}
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Chip
-                active={st.position === 'off'}
-                onClick={() => patch({ position: 'off' })}
-              >
-                off
-              </Chip>
-              <span className="text-xs text-fd-muted-foreground">
-                click a zone to anchor the toast there
-              </span>
-            </div>
+              </div>
+            </fieldset>
             <div className="flex flex-wrap gap-x-5 gap-y-2 pt-1">
               <Toggle
                 checked={st.sound}
@@ -639,19 +727,22 @@ export function ConfigBuilder() {
               <span className="ml-auto flex shrink-0 gap-1.5">
                 <button
                   type="button"
-                  onClick={copy}
-                  className={`cursor-pointer rounded-md border px-2 py-0.5 transition-colors ${
-                    copied
+                  onClick={() => copy(plain)}
+                  className={`cursor-pointer rounded-md border px-2 py-0.5 transition-colors ${FOCUS_RING} ${
+                    copyState === 'copied'
                       ? 'border-transparent bg-emerald-600 text-white'
-                      : 'border-fd-border text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground'
+                      : copyState === 'failed'
+                        ? 'border-transparent bg-red-600 text-white'
+                        : 'border-fd-border text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground'
                   }`}
                 >
-                  {copied ? '✓ copied' : 'copy'}
+                  {copyState === 'copied' ? '✓ copied' : copyState === 'failed' ? 'copy failed' : 'copy'}
                 </button>
+                <CopyAnnouncement state={copyState} />
                 <button
                   type="button"
                   onClick={() => setSt(initial())}
-                  className="cursor-pointer rounded-md border border-fd-border px-2 py-0.5 text-fd-muted-foreground transition-colors hover:bg-fd-muted hover:text-fd-foreground"
+                  className={`cursor-pointer rounded-md border border-fd-border px-2 py-0.5 text-fd-muted-foreground transition-colors hover:bg-fd-muted hover:text-fd-foreground ${FOCUS_RING}`}
                 >
                   reset
                 </button>

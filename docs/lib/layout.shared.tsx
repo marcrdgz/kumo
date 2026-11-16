@@ -7,7 +7,7 @@ export function baseOptions(): BaseLayoutProps {
       title: (
         <span className="inline-flex items-center gap-2">
           <KumoMark className="size-5" />
-          <span className="font-display text-[15px] font-medium tracking-[-0.04em]">kumo</span>
+          <span className="font-display text-[0.9375rem] font-medium tracking-[-0.04em]">kumo</span>
         </span>
       ),
     },

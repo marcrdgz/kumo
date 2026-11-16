@@ -1,5 +1,6 @@
 'use client';
 
+import { Pause, Play } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 /**
@@ -57,17 +58,35 @@ const DOT: Record<Status, string> = {
 const BLOCKED_GLOW =
   'shadow-[inset_0_0_0_1px_rgb(255_159_10/0.6),inset_0_0_36px_rgb(255_159_10/0.1)]';
 
+/**
+ * Plays the loop unless motion is reduced (the viewer can still opt in) and
+ * holds it while the tab is hidden, so a background tab does no work.
+ */
 function useAgentTimeline() {
   const [index, setIndex] = useState(STILL);
+  const [playing, setPlaying] = useState(false);
+  const [hidden, setHidden] = useState(false);
 
   useEffect(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     setIndex(0);
-    const id = setInterval(() => setIndex((i) => (i + 1) % FRAMES.length), STEP_MS);
-    return () => clearInterval(id);
+    setPlaying(true);
   }, []);
 
-  return FRAMES[index];
+  useEffect(() => {
+    const sync = () => setHidden(document.hidden);
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => document.removeEventListener('visibilitychange', sync);
+  }, []);
+
+  useEffect(() => {
+    if (!playing || hidden) return;
+    const id = setInterval(() => setIndex((i) => (i + 1) % FRAMES.length), STEP_MS);
+    return () => clearInterval(id);
+  }, [playing, hidden]);
+
+  return { frame: FRAMES[index], playing, setPlaying };
 }
 
 function TerminalPreview({ frame }: { frame: Frame }) {
@@ -79,13 +98,14 @@ function TerminalPreview({ frame }: { frame: Frame }) {
     <div
       role="img"
       aria-label="kumo running four AI agents, with a sidebar of live status dots next to split terminal panes"
-      className="window-shadow overflow-hidden rounded-[14px] bg-[#0d0d0f] text-left font-mono text-[11.5px] leading-[1.6] text-[#d6d6db] sm:text-[12.5px]"
+      className="window-shadow overflow-hidden rounded-[14px] bg-[#0d0d0f] text-left font-mono text-[0.71875rem] leading-[1.6] text-[#d6d6db] sm:text-[0.78125rem]"
     >
       <div className="flex h-9 items-center gap-2 border-b border-white/[0.06] px-4">
         <span className="size-3 rounded-full bg-[#ff5f57]" />
         <span className="size-3 rounded-full bg-[#febc2e]" />
         <span className="size-3 rounded-full bg-[#28c840]" />
         <span className="flex-1 text-center font-sans text-xs text-white/40">kumo</span>
+        {/* Balances the traffic lights; the pause button overlays this slot. */}
         <span className="w-[52px]" />
       </div>
 
@@ -182,7 +202,7 @@ function TerminalPreview({ frame }: { frame: Frame }) {
         )}
       </div>
 
-      <div className="flex h-7 items-center gap-4 border-t border-white/[0.06] px-4 text-[11px] text-white/45">
+      <div className="flex h-7 items-center gap-4 border-t border-white/[0.06] px-4 text-[0.6875rem] text-white/45">
         <span className="text-white/80">1:api</span>
         <span>2:web</span>
         <span>3:docs</span>
@@ -196,12 +216,22 @@ const CAPTION_DOT = ['bg-status-working', 'bg-status-blocked', 'bg-status-done']
 
 /** The animated TUI with captions that follow whichever moment is on screen. */
 export function HeroDemo() {
-  const frame = useAgentTimeline();
+  const { frame, playing, setPlaying } = useAgentTimeline();
 
   return (
-    <figure>
+    // data-paused also stops the CSS pulses, so pausing freezes every motion.
+    <figure className="relative" data-paused={playing ? undefined : ''}>
       <TerminalPreview frame={frame} />
-      <figcaption className="mt-6 grid gap-x-10 gap-y-3 text-[15px] leading-snug sm:grid-cols-3">
+      {/* Outside the role="img" window, whose children are presentational. */}
+      <button
+        type="button"
+        onClick={() => setPlaying(!playing)}
+        aria-label={playing ? 'Pause demo animation' : 'Play demo animation'}
+        className="absolute top-1 right-2 inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-white/45 outline-white/70 transition-colors hover:bg-white/10 hover:text-white/80 focus-visible:outline-2"
+      >
+        {playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
+      </button>
+      <figcaption className="mt-6 grid gap-x-10 gap-y-3 text-[0.9375rem] leading-snug sm:grid-cols-3">
         {CAPTIONS.map((text, i) => (
           <p
             key={text}

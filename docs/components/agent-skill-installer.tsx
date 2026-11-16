@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useState } from 'react';
+import { CopyAnnouncement, useCopy } from '@/components/use-copy';
 
 type AgentId = 'codex' | 'claude' | 'gemini' | 'opencode';
 
@@ -41,55 +42,36 @@ const AGENTS: AgentTarget[] = [
 
 export function AgentSkillInstaller() {
   const [selected, setSelected] = useState<AgentId>('codex');
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<number | null>(null);
+  const { state, copy, reset } = useCopy();
   const agent = AGENTS.find((item) => item.id === selected) ?? AGENTS[0];
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(agent.command);
-    } catch {
-      const textarea = document.createElement('textarea');
-      textarea.value = agent.command;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      textarea.remove();
-    }
-    setCopied(true);
-    if (timer.current !== null) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 1600);
-  }
 
   return (
     <div className="not-prose my-6 overflow-hidden rounded-xl border border-fd-border bg-fd-card">
-      <div
-        className="flex flex-wrap gap-1 border-b border-fd-border bg-fd-muted/40 p-2"
-        role="tablist"
-        aria-label="Agent skill installation target"
-      >
+      {/* A native radio group: arrow keys, focus and the selected state come for free. */}
+      <fieldset className="flex flex-wrap gap-1 border-b border-fd-border bg-fd-muted/40 p-2">
+        <legend className="sr-only">Agent to install the skill for</legend>
         {AGENTS.map((item) => (
-          <button
+          <label
             key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={item.id === selected}
-            onClick={() => {
-              setSelected(item.id);
-              setCopied(false);
-            }}
-            className={`cursor-pointer rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-              item.id === selected
-                ? 'bg-fd-primary text-fd-primary-foreground'
-                : 'text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground'
-            }`}
+            className="cursor-pointer rounded-md px-3 py-1.5 text-sm font-medium text-fd-muted-foreground outline-fd-primary transition-colors hover:bg-fd-muted hover:text-fd-foreground has-checked:bg-fd-primary has-checked:text-fd-primary-foreground has-focus-visible:outline-2 has-focus-visible:outline-offset-2"
           >
+            <input
+              type="radio"
+              name="agent-skill-target"
+              value={item.id}
+              checked={item.id === selected}
+              onChange={() => {
+                setSelected(item.id);
+                reset();
+              }}
+              className="sr-only"
+            />
             {item.label}
-          </button>
+          </label>
         ))}
-      </div>
+      </fieldset>
 
-      <div role="tabpanel" className="space-y-3 p-4">
+      <div className="space-y-3 p-4">
         <div>
           <p className="text-sm font-medium text-fd-foreground">
             Install for {agent.label}
@@ -100,21 +82,24 @@ export function AgentSkillInstaller() {
         </div>
 
         <div className="flex items-center gap-2 rounded-lg border border-fd-border bg-fd-background p-2 pl-3">
-          <code className="min-w-0 flex-1 overflow-x-auto font-mono text-sm whitespace-nowrap text-fd-foreground">
+          <code className="min-w-0 flex-1 overflow-x-auto font-mono text-sm whitespace-nowrap text-fd-foreground [scrollbar-width:thin]">
             {agent.command}
           </code>
           <button
             type="button"
-            onClick={copy}
+            onClick={() => copy(agent.command)}
             aria-label={`Copy ${agent.label} installation command`}
-            className={`shrink-0 cursor-pointer rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-              copied
+            className={`shrink-0 cursor-pointer rounded-md border px-2.5 py-1 text-xs font-medium outline-fd-primary transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 ${
+              state === 'copied'
                 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                : 'border-fd-border text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground'
+                : state === 'failed'
+                  ? 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400'
+                  : 'border-fd-border text-fd-muted-foreground hover:bg-fd-muted hover:text-fd-foreground'
             }`}
           >
-            {copied ? '✓ copied' : 'copy'}
+            {state === 'copied' ? '✓ copied' : state === 'failed' ? 'copy failed' : 'copy'}
           </button>
+          <CopyAnnouncement state={state} />
         </div>
       </div>
     </div>

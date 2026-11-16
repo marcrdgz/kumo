@@ -78,9 +78,40 @@ html > body[data-scroll-locked] {
     0 30px 80px -20px rgb(0 0 0 / 0.9);
 }
 
-/* Fades the end of a horizontally scrolling line instead of clipping it. */
-.fade-x {
-  mask-image: linear-gradient(to right, black calc(100% - 3rem), transparent);
+/*
+ * Horizontally scrolling line: a fade at the end only while there is more to
+ * scroll to. The hint sits at the end of the content and sticks to the
+ * visible edge; a scroll-state query shows it. Browsers without scroll-state
+ * queries fade the end permanently instead.
+ */
+.scroll-fade {
+  container-type: scroll-state;
+}
+
+.scroll-fade-hint {
+  position: sticky;
+  inset-inline-end: 0;
+  display: inline-block;
+  width: 3rem;
+  height: 1lh;
+  margin-inline-start: -3rem;
+  vertical-align: top;
+  background: linear-gradient(to right, transparent, var(--color-fd-card));
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+@container scroll-state(scrollable: inline-end) {
+  .scroll-fade-hint {
+    opacity: 1;
+  }
+}
+
+@supports not (container-type: scroll-state) {
+  .scroll-fade {
+    mask-image: linear-gradient(to right, black calc(100% - 3rem), transparent);
+  }
 }
 
 @keyframes toast-in {
@@ -102,6 +133,10 @@ html > body[data-scroll-locked] {
 
 .pulse-dot {
   animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+[data-paused] .pulse-dot {
+  animation-play-state: paused;
 }
 
 @media (prefers-reduced-motion: reduce) {
